@@ -1,0 +1,20 @@
+name: enterprise-rag-m0-bm25
+
+services:
+  postgres-bm25:
+    image: paradedb/paradedb:0.25.0-pg17@sha256:6a334b612cadfeb92c416ecf3816dd9a277c10976e2e931e2c33f7289867c7c9
+    environment:
+      POSTGRES_DB: m0_bm25
+      POSTGRES_USER: m0
+      POSTGRES_PASSWORD: m0-local-only
+    ports:
+      - "127.0.0.1:15433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U m0 -d m0_bm25"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: "no"

@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-17T05:13:06.694825+00:00",
+  "status": "passed",
+  "summary": {
+    "passed": 10,
+    "failed": 0,
+    "blocked": 0
+  },
+  "results": [
+    {
+      "name": "embedding_text",
+      "status": "passed",
+      "provider": "SiliconFlow",
+      "model": "Qwen/Qwen3-VL-Embedding-8B",
+      "latency_ms": 240.17,
+      "details": {
+        "mode": "text",
+        "item_count": 1,
+        "dimension": 1024,
+        "request_id_present": true
+      },
+      "error_code": null
+    },
+    {
+      "name": "embedding_text_batch",
+      "status": "passed",
+      "provider": "SiliconFlow",
+      "model": "Qwen/Qwen3-VL-Embedding-8B",
+      "latency_ms": 341.24,
+      "details": {
+        "mode": "batch",
+        "item_count": 2,
+        "dimension": 1024,
+        "request_id_present": true
+      },
+      "error_code": null
+    },
+    {
+      "name": "embedding_image",
+      "status": "passed",
+      "provider": "SiliconFlow",
+      "model": "Qwen/Qwen3-VL-Embedding-8B",
+      "latency_ms": 203.71,
+      "details": {
+        "mode": "image",
+        "item_count": 1,
+        "dimension": 1024,
+        "request_id_present": true
+      },
+      "error_code": null
+    },
+    {
+      "name": "embedding_mixed_list",
+      "status": "passed",
+      "provider": "SiliconFlow",
+      "model": "Qwen/Qwen3-VL-Embedding-8B",
+      "latency_ms": 170.36,
+      "details": {
+        "mode": "mixed_batch",
+        "item_count": 2,
+        "dimension": 1024,
+        "request_id_present": true
+      },
+      "error_code": null
+    },
+    {
+      "name": "embedding_fused_object",
+      "status": "passed",
+      "provider": "SiliconFlow",
+      "model": "Qwen/Qwen3-VL-Embedding-8B",
+      "latency_ms": 202.13,
+      "details": {
+        "mode": "fused_object",
+        "item_count": 1,
+        "dimension": 1024,
+        "request_id_present": true
+      },
+      "error_code": null
+    },
+    {
+      "name": "rerank_text",
+      "status": "passed",
+      "provider": "SiliconFlow",
+      "model": "Qwen/Qwen3-VL-Reranker-8B",
+      "latency_ms": 127.2,
+      "details": {
+        "result_count": 2,
+        "indices_valid": true,
+        "expected_top_result": true,
+        "request_id_present": true
+      },
+      "error_code": null
+    },
+    {
+      "name": "rerank_multimodal",
+      "status": "passed",
+      "provider": "SiliconFlow",
+      "model": "Qwen/Qwen3-VL-Reranker-8B",
+      "latency_ms": 152.07,
+      "details": {
+        "result_count": 2,
+        "indices_valid": true,
+        "expected_top_result": true,
+        "request_id_present": true
+      },
+      "error_code": null
+    },
+    {
+      "name": "ocr_image_data_url",
+      "status": "passed",
+      "provider": "SiliconFlow",
+      "model": "deepseek-ai/DeepSeek-OCR",
+      "latency_ms": 212.71,
+      "details": {
+        "content_present": true,
+        "content_chars": 19,
+        "required_value_present": true,
+        "request_id_present": true
+      },
+      "error_code": null
+    },
+    {
+      "name": "llm_stream_thinking",
+      "status": "passed",
+      "provider": "Zhipu",
+      "model": "glm-5.2",
+      "latency_ms": 2372.92,
+      "details": {
+        "content_chars": 5,
+        "reasoning_field_observed": true,
+        "terminal_observed": true,
+        "request_id_present": true
+      },
+      "error_code": null
+    },
+    {
+      "name": "vision_image_data_url",
+      "status": "passed",
+      "provider": "Zhipu",
+      "model": "glm-5v-turbo",
+      "latency_ms": 1668.67,
+      "details": {
+        "content_present": true,
+        "content_chars": 151,
+        "required_value_present": true,
+        "request_id_present": true
+      },
+      "error_code": null
+    }
+  ]
+}

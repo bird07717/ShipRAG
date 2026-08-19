@@ -1,0 +1,88 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "enterprise-rag-backend"
+version = "1.0.0"
+description = "Enterprise knowledge-base RAG platform backend"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "alembic==1.16.5",
+  "asyncpg==0.30.0",
+  "cryptography==45.0.6",
+  "fastapi==0.116.1",
+  "httpx==0.28.1",
+  "mammoth==1.12.1",
+  "minio==7.2.16",
+  "pillow==12.3.0",
+  "pydantic-settings==2.10.1",
+  "python-multipart==0.0.20",
+  "redis==6.4.0",
+  "rq==2.5.0",
+  "sqlalchemy[asyncio]==2.0.43",
+  "structlog==25.4.0",
+  "uvicorn[standard]==0.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==1.17.1",
+  "pip-tools==7.5.0",
+  "pytest==8.4.1",
+  "pytest-asyncio==1.1.0",
+  "pytest-cov==6.2.1",
+  "python-docx==1.2.0",
+  "ruff==0.12.10",
+]
+
+[project.scripts]
+rag-worker = "app.worker:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+allowed-confusables = ["，", "：", "？"]
+
+[tool.ruff.lint.per-file-ignores]
+"alembic/versions/*.py" = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["docx", "docx.*", "mammoth", "mammoth.*", "minio", "minio.*", "PIL", "PIL.*", "rq", "rq.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=app --cov-report=term-missing --cov-fail-under=70"
+
+[tool.coverage.run]
+branch = true
+omit = [
+  "app/worker.py",
+  "app/*/cli.py",
+  "app/*/smoke.py",
+  "app/*/storage_probe.py",
+  "app/release/acceptance.py",
+]
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+]
