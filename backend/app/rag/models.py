@@ -10,6 +10,16 @@ class ModelSnapshot:
     provider: str
     model_name: str
     parameters: dict[str, Any]
+    base_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalConfig:
+    vector_top_k: int = 10
+    bm25_top_k: int = 10
+    fusion_top_k: int = 20
+    rerank_top_n: int = 10
+    context_max_chunks: int = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +35,9 @@ class Turn:
     llm: ModelSnapshot
     history: list[dict[str, str]]
     rerank: ModelSnapshot | None = None
+    focus_document_id: UUID | None = None
+    chat_context: dict[str, Any] = field(default_factory=dict)
+    retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,3 +148,4 @@ class PreparedRag:
     timings: dict[str, int]
     started_at: float
     answer_parts: list[str] = field(default_factory=list)
+    rerank_candidates: list[RetrievalCandidate] = field(default_factory=list)

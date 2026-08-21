@@ -104,11 +104,32 @@ export interface ModelConfig {
   name: string;
   model_type: string;
   provider: string;
+  base_url: string;
   model_name: string;
   enabled: boolean;
   api_key_configured: boolean;
   parameters: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
 }
+
+export interface RagConfig {
+  vector_top_k: number;
+  bm25_top_k: number;
+  fusion_top_k: number;
+  rerank_top_n: number;
+  context_max_chunks: number;
+  updated_at?: string | null;
+}
+
+export type ModelConfigUpdatePayload = {
+  model_name?: string;
+  base_url?: string;
+  enabled?: boolean;
+  parameters?: Record<string, unknown>;
+};
+
+export type RagConfigUpdatePayload = Partial<Omit<RagConfig, "updated_at">>;
 
 export interface PromptTemplate {
   id: string;

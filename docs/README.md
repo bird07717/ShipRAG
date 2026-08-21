@@ -11,6 +11,8 @@
 | [api-contract.md](api-contract.md) | REST、异步任务、错误格式与 SSE 事件协议 |
 | [ingestion-pipeline.md](ingestion-pipeline.md) | DOCX 上传、解析、图片处理、Chunk、Embedding 和构建发布 |
 | [rag-pipeline.md](rag-pipeline.md) | 在线检索、融合、Rerank、Prompt、流式回答与引用 |
+| [mvp1-chat-execution-plan.md](mvp1-chat-execution-plan.md) | MVP1 受控网站演示、四模式 Prompt、非流式 Chat API、DOCX 下载和验收计划 |
+| [post-mvp-roadmap.md](post-mvp-roadmap.md) | 业务后台、移动端、流式、多模态、PDF 与生产化的后续版本边界 |
 | [m0-review.md](m0-review.md) | M0 可执行验证、证据和验收结论 |
 | [m1-acceptance.md](m1-acceptance.md) | M1 基础平台的实现及实机验收证据 |
 | [m2-acceptance.md](m2-acceptance.md) | M2 Word 上传、解析、Element、Chunk 和 Embedding 验收证据 |

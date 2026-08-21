@@ -65,7 +65,9 @@ class SiliconFlowRerankProvider:
         self.model_name = snapshot.model_name
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
-            base_url=settings.siliconflow_base_url,
+            # DB model_config.base_url wins (admin-adjustable per turn);
+            # the env setting is the fallback for legacy rows.
+            base_url=snapshot.base_url or settings.siliconflow_base_url,
             headers={"Authorization": f"Bearer {settings.siliconflow_api_key.get_secret_value()}"},
             timeout=httpx.Timeout(settings.m5_provider_timeout_seconds),
             follow_redirects=False,

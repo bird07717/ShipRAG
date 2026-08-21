@@ -71,11 +71,26 @@ class Settings(BaseSettings):
     m3_history_token_budget: int = 2_000
     m3_question_max_chars: int = 4_000
     m3_prompt_max_chars: int = 60_000
+    m3_prompt_token_budget: int = 30_000
     m3_llm_max_tokens: int = 2_048
     m3_llm_temperature: float = 0.1
-    m3_llm_thinking_enabled: bool = True
     m3_trace_retain_prompt: bool = True
     m3_provider_timeout_seconds: float = 120.0
+
+    m3_doc_agg_t_high: float = 0.9
+    m3_doc_agg_t_low: float = 0.5
+    m3_doc_agg_ratio: float = 1.8
+    m3_doc_agg_min_hits: int = 2
+    m3_doc_agg_max_hits: int = 3
+    m3_doc_stay_score: float = 0.35
+    m3_doc_switch_gap: float = 0.25
+    m3_doc_lock_best_floor: float = 0.75
+    m3_doc_delivery_max_tokens: int = 8_000
+
+    m3_query_rewrite_enabled: bool = True
+    m3_query_rewrite_max_chars: int = 40
+    m3_query_rewrite_max_tokens: int = 192
+    m3_query_rewrite_timeout_seconds: float = 8.0
 
     m4_ocr_provider: Literal["auto", "siliconflow", "fake", "disabled"] = "auto"
     m4_vision_provider: Literal["auto", "zhipu", "fake", "disabled"] = "auto"
@@ -222,6 +237,13 @@ class Settings(BaseSettings):
             raise ValueError("M3 character limits must be between 100 and 1000000")
         return value
 
+    @field_validator("m3_prompt_token_budget")
+    @classmethod
+    def validate_m3_prompt_token_budget(cls, value: int) -> int:
+        if not 1_000 <= value <= 200_000:
+            raise ValueError("M3 prompt token budget must be between 1000 and 200000")
+        return value
+
     @field_validator("m3_llm_temperature")
     @classmethod
     def validate_m3_temperature(cls, value: float) -> float:
@@ -234,6 +256,61 @@ class Settings(BaseSettings):
     def validate_m3_timeout(cls, value: float) -> float:
         if not 5 <= value <= 600:
             raise ValueError("M3 provider timeout must be between 5 and 600 seconds")
+        return value
+
+    @field_validator(
+        "m3_doc_agg_t_high",
+        "m3_doc_agg_t_low",
+        "m3_doc_stay_score",
+        "m3_doc_switch_gap",
+        "m3_doc_lock_best_floor",
+    )
+    @classmethod
+    def validate_m3_doc_scores(cls, value: float) -> float:
+        if not 0 < value <= 1:
+            raise ValueError("M3 doc routing scores must be between 0 and 1")
+        return value
+
+    @field_validator("m3_doc_agg_ratio")
+    @classmethod
+    def validate_m3_doc_ratio(cls, value: float) -> float:
+        if not 1 <= value <= 10:
+            raise ValueError("M3 doc routing ratio must be between 1 and 10")
+        return value
+
+    @field_validator("m3_doc_agg_min_hits", "m3_doc_agg_max_hits")
+    @classmethod
+    def validate_m3_doc_hits(cls, value: int) -> int:
+        if not 1 <= value <= 10:
+            raise ValueError("M3 doc routing hit limits must be between 1 and 10")
+        return value
+
+    @field_validator("m3_doc_delivery_max_tokens")
+    @classmethod
+    def validate_m3_doc_delivery_tokens(cls, value: int) -> int:
+        if not 1_000 <= value <= 100_000:
+            raise ValueError("M3 doc delivery token limit must be between 1000 and 100000")
+        return value
+
+    @field_validator("m3_query_rewrite_max_chars")
+    @classmethod
+    def validate_query_rewrite_chars(cls, value: int) -> int:
+        if not 10 <= value <= 500:
+            raise ValueError("M3 query rewrite char limit must be between 10 and 500")
+        return value
+
+    @field_validator("m3_query_rewrite_max_tokens")
+    @classmethod
+    def validate_query_rewrite_tokens(cls, value: int) -> int:
+        if not 16 <= value <= 1_024:
+            raise ValueError("M3 query rewrite token limit must be between 16 and 1024")
+        return value
+
+    @field_validator("m3_query_rewrite_timeout_seconds")
+    @classmethod
+    def validate_query_rewrite_timeout(cls, value: float) -> float:
+        if not 1 <= value <= 60:
+            raise ValueError("M3 query rewrite timeout must be between 1 and 60 seconds")
         return value
 
     @field_validator("m4_image_concurrency")

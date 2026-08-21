@@ -564,8 +564,7 @@ class IngestionRepository:
                     {"index_id": prev_index_id},
                 )
                 prev_hashes = {
-                    row["document_id"]: row["source_hash"]
-                    for row in prev_docs_result.mappings()
+                    row["document_id"]: row["source_hash"] for row in prev_docs_result.mappings()
                 }
                 for document in documents:
                     doc_id = document["id"]
@@ -1033,9 +1032,7 @@ class IngestionRepository:
             row = result.mappings().one_or_none()
             return dict(row) if row is not None else None
 
-    async def list_image_assets_for_index(
-        self, index_id: UUID
-    ) -> list[dict[str, str]]:
+    async def list_image_assets_for_index(self, index_id: UUID) -> list[dict[str, str]]:
         """List MinIO bucket/object_key pairs for image assets belonging to an index."""
         async with self.engine.connect() as connection:
             result = await connection.execute(
@@ -1055,7 +1052,9 @@ class IngestionRepository:
         rag_trace references the index with ON DELETE RESTRICT, so those
         rows must be removed first. The index must be in DELETING status."""
         async with self.engine.begin() as connection:
-            await connection.execute(text("DELETE FROM rag_trace WHERE index_id = :index_id"), {"index_id": index_id})
+            await connection.execute(
+                text("DELETE FROM rag_trace WHERE index_id = :index_id"), {"index_id": index_id}
+            )
             result = await connection.execute(
                 text(
                     """

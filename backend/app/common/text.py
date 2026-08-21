@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import math
+import re
+
+# CJK Unified Ideographs + Extension A, common CJK punctuation and fullwidth forms
+_CJK_PATTERN = re.compile(
+    "[\u2e80-\u9fff\u3000-\u303f\uff00-\uffef\U00020000-\U0002a6df]"
+)
+
 _MOJIBAKE_MARKERS = (
     "锟斤拷",
     "鈥",
@@ -36,3 +44,18 @@ def repair_utf8_mojibake(value: str) -> str:
     except (UnicodeEncodeError, UnicodeDecodeError):
         return value
     return repaired if _mojibake_score(repaired) < original_score else value
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate LLM token usage with CJK-aware weighting.
+
+    CJK characters tokenize roughly 1:1 for mainstream bilingual models,
+    while ASCII text averages about 4 characters per token. The legacy
+    ``len(text) / 3`` heuristic underestimated pure-Chinese content by ~3x,
+    which silently inflated every token budget built on top of it.
+    """
+    if not text:
+        return 0
+    cjk_count = len(_CJK_PATTERN.findall(text))
+    other_count = len(text) - cjk_count
+    return max(1, math.ceil(cjk_count + other_count / 4))

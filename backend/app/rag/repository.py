@@ -5,11 +5,13 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.common.errors import ApiError
+from app.common.text import estimate_tokens
 from app.core.config import Settings
-from app.rag.models import ModelSnapshot, RetrievalCandidate, Turn
+from app.rag.models import ModelSnapshot, RetrievalCandidate, RetrievalConfig, Turn
 
 
 class RagRepository:
@@ -55,6 +57,8 @@ class RagRepository:
                 raise ApiError("INDEX_NOT_READY", "知识库 Active Index 状态异常", 409)
 
             resolved_conversation_id = conversation_id or uuid4()
+            chat_context: dict[str, Any] = {}
+            focus_document_id: UUID | None = None
             if conversation_id is None:
                 await connection.execute(
                     text(
@@ -69,17 +73,26 @@ class RagRepository:
                 conversation_result = await connection.execute(
                     text(
                         """
-                        SELECT knowledge_id FROM conversation
+                        SELECT knowledge_id, focus_document_id, chat_context
+                        FROM conversation
                         WHERE id = :id FOR UPDATE
                         """
                     ),
                     {"id": conversation_id},
                 )
-                conversation_kb = conversation_result.scalar_one_or_none()
-                if conversation_kb is None:
+                conversation_row = conversation_result.mappings().one_or_none()
+                if conversation_row is None:
                     raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
-                if conversation_kb != knowledge_id:
+                if conversation_row["knowledge_id"] != knowledge_id:
                     raise ApiError("CONVERSATION_KB_MISMATCH", "会话不属于指定知识库", 409)
+                focus_document_id = (
+                    UUID(str(conversation_row["focus_document_id"]))
+                    if conversation_row["focus_document_id"]
+                    else None
+                )
+                raw_context = conversation_row["chat_context"]
+                if isinstance(raw_context, dict):
+                    chat_context = dict(raw_context)
 
             history_result = await connection.execute(
                 text(
@@ -111,7 +124,7 @@ class RagRepository:
             llm_result = await connection.execute(
                 text(
                     """
-                    SELECT provider, model_name, parameters
+                    SELECT provider, model_name, parameters, base_url
                     FROM model_config WHERE model_type = 'LLM' AND enabled
                     """
                 )
@@ -123,7 +136,7 @@ class RagRepository:
             rerank_result = await connection.execute(
                 text(
                     """
-                    SELECT provider, model_name, parameters
+                    SELECT provider, model_name, parameters, base_url
                     FROM model_config WHERE model_type = 'RERANK' AND enabled
                     """
                 )
@@ -131,6 +144,33 @@ class RagRepository:
             rerank_row = rerank_result.mappings().one_or_none()
             if rerank_row is None:
                 raise ApiError("MODEL_NOT_CONFIGURED", "Rerank 模型未配置", 503)
+
+            config_result = await connection.execute(
+                text(
+                    """
+                    SELECT vector_top_k, bm25_top_k, fusion_top_k, rerank_top_n,
+                           context_max_chunks
+                    FROM rag_config WHERE id
+                    """
+                )
+            )
+            config_row = config_result.mappings().one_or_none()
+            if config_row is None:
+                retrieval = RetrievalConfig(
+                    vector_top_k=self.settings.m3_vector_top_k,
+                    bm25_top_k=self.settings.m5_bm25_top_k,
+                    fusion_top_k=self.settings.m5_fusion_top_k,
+                    rerank_top_n=self.settings.m5_rerank_top_n,
+                    context_max_chunks=self.settings.m3_context_max_chunks,
+                )
+            else:
+                retrieval = RetrievalConfig(
+                    vector_top_k=int(config_row["vector_top_k"]),
+                    bm25_top_k=int(config_row["bm25_top_k"]),
+                    fusion_top_k=int(config_row["fusion_top_k"]),
+                    rerank_top_n=int(config_row["rerank_top_n"]),
+                    context_max_chunks=int(config_row["context_max_chunks"]),
+                )
 
             sequence_result = await connection.execute(
                 text(
@@ -212,22 +252,36 @@ class RagRepository:
                 provider=str(llm_row["provider"]),
                 model_name=str(llm_row["model_name"]),
                 parameters=dict(parameters),
+                base_url=(str(llm_row["base_url"]) if llm_row["base_url"] is not None else None),
             ),
             history=history,
             rerank=ModelSnapshot(
                 provider=str(rerank_row["provider"]),
                 model_name=str(rerank_row["model_name"]),
                 parameters=dict(rerank_parameters),
+                base_url=(
+                    str(rerank_row["base_url"]) if rerank_row["base_url"] is not None else None
+                ),
             ),
+            focus_document_id=focus_document_id,
+            chat_context=chat_context,
+            retrieval=retrieval,
         )
 
     def _budget_history(self, messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+        # Take-then-stop: oversized leading messages (usually the newest, e.g. a
+        # very long assistant answer) are skipped, but once filling starts the
+        # first overflow stops selection. This keeps the retained window both
+        # as recent as possible and contiguous — a skipped middle message would
+        # break reference/ellipsis chains in the rendered history.
         selected: list[dict[str, str]] = []
         remaining = self.settings.m3_history_token_budget
         for item in reversed(messages):
             content = str(item["content"])
-            estimate = max(1, (len(content) + 1) // 2)
+            estimate = max(1, estimate_tokens(content))
             if estimate > remaining:
+                if selected:
+                    break
                 continue
             remaining -= estimate
             selected.append({"role": str(item["role"]), "content": content})
@@ -527,7 +581,21 @@ class RagRepository:
         usage: dict[str, Any],
         citation_result: dict[str, Any],
         timings: dict[str, int],
+        prompt: str | None = None,
+        doc_routing: dict[str, Any] | None = None,
     ) -> None:
+        routing_patch = ""
+        routing_params: dict[str, Any] = {}
+        if doc_routing is not None:
+            routing_patch = (
+                ", retrieval_result = jsonb_set(COALESCE(retrieval_result, '{}'::jsonb),"
+                " '{doc_routing}', CAST(:doc_routing AS jsonb))"
+            )
+            routing_params["doc_routing"] = json.dumps(doc_routing, ensure_ascii=False)
+        prompt_patch = ""
+        if prompt is not None:
+            prompt_patch = ", prompt = :prompt"
+            routing_params["prompt"] = prompt if self.settings.m3_trace_retain_prompt else None
         async with self.engine.begin() as connection:
             await connection.execute(
                 text(
@@ -550,6 +618,10 @@ class RagRepository:
                         model_usage = CAST(:usage AS jsonb), latency = CAST(:latency AS jsonb),
                         citation_result = CAST(:citation_result AS jsonb),
                         status = 'COMPLETED', finished_at = now()
+                    """
+                    + routing_patch
+                    + prompt_patch
+                    + """
                     WHERE trace_id = :trace_id AND status = 'RUNNING'
                     """
                 ),
@@ -560,6 +632,7 @@ class RagRepository:
                     "usage": json.dumps(usage),
                     "citation_result": json.dumps(citation_result, ensure_ascii=False),
                     "latency": json.dumps(timings),
+                    **routing_params,
                 },
             )
             await connection.execute(
@@ -609,6 +682,201 @@ class RagRepository:
                 },
             )
 
+    async def get_document_source(self, document_id: UUID) -> dict[str, Any]:
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT id, kb_id AS knowledge_id, filename, display_name,
+                           minio_bucket, minio_object_key, file_size, status
+                    FROM document_source
+                    WHERE id = :document_id AND status = :status
+                    """
+                ),
+                {"document_id": document_id, "status": "STORED"},
+            )
+            row = result.mappings().one_or_none()
+        if row is None:
+            raise ApiError("DOCUMENT_NOT_FOUND", "文档不存在或已删除", 404)
+        return dict(row)
+
+    async def set_conversation_focus(self, conversation_id: UUID, document_id: UUID) -> None:
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE conversation
+                    SET focus_document_id = :document_id,
+                        chat_context = '{}'::jsonb,
+                        updated_at = now()
+                    WHERE id = :conversation_id
+                    """
+                ),
+                {
+                    "conversation_id": conversation_id,
+                    "document_id": document_id,
+                },
+            )
+
+    async def clear_conversation_focus(self, conversation_id: UUID) -> None:
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE conversation
+                    SET focus_document_id = NULL,
+                        chat_context = '{}'::jsonb,
+                        updated_at = now()
+                    WHERE id = :conversation_id
+                    """
+                ),
+                {"conversation_id": conversation_id},
+            )
+
+    async def set_conversation_pending(
+        self,
+        conversation_id: UUID,
+        *,
+        pending_options: list[dict[str, Any]],
+        pending_query: str,
+    ) -> None:
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE conversation
+                    SET chat_context = CAST(:chat_context AS jsonb),
+                        updated_at = now()
+                    WHERE id = :conversation_id
+                    """
+                ),
+                {
+                    "conversation_id": conversation_id,
+                    "chat_context": json.dumps(
+                        {
+                            "pending_options": pending_options,
+                            "pending_query": pending_query,
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            )
+
+    async def clear_conversation_pending(self, conversation_id: UUID) -> None:
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE conversation
+                    SET chat_context = '{}'::jsonb, updated_at = now()
+                    WHERE id = :conversation_id
+                    """
+                ),
+                {"conversation_id": conversation_id},
+            )
+
+    async def get_knowledge_base_summary(self, knowledge_id: UUID) -> dict[str, Any]:
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT id, name, description, status, active_index_id
+                    FROM knowledge_base WHERE id = :kb_id
+                    """
+                ),
+                {"kb_id": knowledge_id},
+            )
+            row = result.mappings().one_or_none()
+        if row is None:
+            raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
+        return {
+            "id": str(row["id"]),
+            "name": str(row["name"]),
+            "description": row["description"],
+            "status": str(row["status"]),
+            "active_index_id": (
+                str(row["active_index_id"]) if row["active_index_id"] else None
+            ),
+        }
+
+    async def list_kb_documents(self, knowledge_id: UUID) -> list[dict[str, Any]]:
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT id, filename, display_name
+                    FROM document_source
+                    WHERE kb_id = :kb_id AND status = 'STORED'
+                    ORDER BY created_at
+                    """
+                ),
+                {"kb_id": knowledge_id},
+            )
+            rows = result.mappings().all()
+        return [
+            {
+                "document_id": str(row["id"]),
+                "title": str(row["display_name"] or row["filename"]),
+            }
+            for row in rows
+        ]
+
+    async def get_document_blocks(
+        self, *, knowledge_id: UUID, index_id: UUID, document_id: UUID
+    ) -> dict[str, Any]:
+        """Ordered document elements with image assets for delivery / doc-QA."""
+        async with self.engine.connect() as connection:
+            doc_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, filename, display_name
+                    FROM document_source
+                    WHERE id = :document_id AND kb_id = :kb_id AND status = 'STORED'
+                    """
+                ),
+                {
+                    "document_id": document_id,
+                    "kb_id": knowledge_id,
+                },
+            )
+            doc_row = doc_result.mappings().one_or_none()
+            if doc_row is None:
+                raise ApiError("DOCUMENT_NOT_FOUND", "文档不存在或已删除", 404)
+            element_result = await connection.execute(
+                text(
+                    """
+                    SELECT e.id, e.element_type, e.content, e.section_path,
+                           a.id AS asset_id, a.ocr_text, a.vision_caption
+                    FROM document_element e
+                    LEFT JOIN image_asset a ON a.element_id = e.id
+                    WHERE e.index_id = :index_id AND e.document_id = :document_id
+                    ORDER BY e.sequence_no
+                    """
+                ),
+                {"index_id": index_id, "document_id": document_id},
+            )
+            rows = element_result.mappings().all()
+        elements: list[dict[str, Any]] = []
+        for row in rows:
+            asset_id = UUID(str(row["asset_id"])) if row["asset_id"] else None
+            elements.append(
+                {
+                    "element_id": UUID(str(row["id"])),
+                    "element_type": str(row["element_type"]),
+                    "content": str(row["content"] or ""),
+                    "section_path": list(row["section_path"] or []),
+                    "image_asset_id": asset_id,
+                    "image_caption": (
+                        str(row["vision_caption"] or row["ocr_text"] or "") if asset_id else ""
+                    ),
+                }
+            )
+        return {
+            "document_id": str(doc_row["id"]),
+            "title": str(doc_row["display_name"] or doc_row["filename"]),
+            "elements": elements,
+        }
+
     async def get_trace(self, trace_id: UUID) -> dict[str, Any]:
         async with self.engine.connect() as connection:
             result = await connection.execute(
@@ -651,6 +919,21 @@ class RagRepository:
             result = await connection.execute(text(query), parameters)
             return [dict(row) for row in result.mappings()]
 
+    def _environment_key_for(self, model_type: str) -> Any:
+        return {
+            "LLM": self.settings.zhipu_api_key,
+            "VISION": self.settings.zhipu_api_key,
+            "EMBEDDING": self.settings.siliconflow_api_key,
+            "RERANK": self.settings.siliconflow_api_key,
+            "OCR": self.settings.siliconflow_api_key,
+        }.get(model_type)
+
+    def _api_key_configured(self, model_type: str, stored_key_configured: bool) -> bool:
+        environment_key = self._environment_key_for(model_type)
+        return stored_key_configured or (
+            environment_key is not None and bool(environment_key.get_secret_value().strip())
+        )
+
     async def list_models(self) -> list[dict[str, Any]]:
         async with self.engine.connect() as connection:
             result = await connection.execute(
@@ -668,19 +951,156 @@ class RagRepository:
             rows = []
             for raw in result.mappings():
                 row = dict(raw)
-                model_type = str(row["model_type"])
-                environment_key = {
-                    "LLM": self.settings.zhipu_api_key,
-                    "VISION": self.settings.zhipu_api_key,
-                    "EMBEDDING": self.settings.siliconflow_api_key,
-                    "RERANK": self.settings.siliconflow_api_key,
-                    "OCR": self.settings.siliconflow_api_key,
-                }.get(model_type)
-                row["api_key_configured"] = bool(row.pop("stored_key_configured")) or (
-                    environment_key is not None and bool(environment_key.get_secret_value().strip())
+                row["api_key_configured"] = self._api_key_configured(
+                    str(row["model_type"]), bool(row.pop("stored_key_configured"))
                 )
                 rows.append(row)
             return rows
+
+    async def update_model_config(
+        self,
+        model_id: UUID,
+        *,
+        model_name: str | None = None,
+        base_url: str | None = None,
+        parameters: dict[str, Any] | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        """Admin write path for runtime model settings (LLM / RERANK only).
+
+        begin_turn snapshots provider/model_name/parameters/base_url every
+        turn, so committed changes take effect on the next request without
+        restarts. Embedding/OCR/VISION stay env-managed: they are bound to
+        index builds, not to the chat turn.
+        """
+        async with self.engine.begin() as connection:
+            existing_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, model_type FROM model_config
+                    WHERE id = :id FOR UPDATE
+                    """
+                ),
+                {"id": model_id},
+            )
+            existing = existing_result.mappings().one_or_none()
+            if existing is None:
+                raise ApiError("MODEL_NOT_FOUND", "模型配置不存在", 404)
+            if str(existing["model_type"]) not in ("LLM", "RERANK"):
+                raise ApiError(
+                    "MODEL_UPDATE_FORBIDDEN",
+                    "该模型类型由环境配置管理，仅 LLM / Rerank 支持在线调整",
+                    409,
+                )
+            assignments: list[str] = []
+            params: dict[str, Any] = {"id": model_id}
+            if model_name is not None:
+                assignments.append("model_name = :model_name")
+                params["model_name"] = model_name
+            if base_url is not None:
+                assignments.append("base_url = :base_url")
+                params["base_url"] = base_url
+            if parameters is not None:
+                assignments.append("parameters = CAST(:parameters AS jsonb)")
+                params["parameters"] = json.dumps(parameters, ensure_ascii=False)
+            if enabled is not None:
+                assignments.append("enabled = :enabled")
+                params["enabled"] = enabled
+            assignments.append("updated_at = now()")
+            try:
+                updated_result = await connection.execute(
+                    text(
+                        "UPDATE model_config SET "
+                        + ", ".join(assignments)
+                        + " WHERE id = :id RETURNING id, name, model_type, provider,"
+                        " base_url, model_name, parameters, enabled,"
+                        " (api_key_ciphertext IS NOT NULL) AS stored_key_configured,"
+                        " created_at, updated_at"
+                    ),
+                    params,
+                )
+            except IntegrityError as exc:
+                raise ApiError(
+                    "MODEL_UPDATE_CONFLICT", "同一模型类型只能启用一个配置", 409
+                ) from exc
+            row = dict(updated_result.mappings().one())
+        row["api_key_configured"] = self._api_key_configured(
+            str(row["model_type"]), bool(row.pop("stored_key_configured"))
+        )
+        return row
+
+    _RAG_CONFIG_FIELDS = (
+        "vector_top_k",
+        "bm25_top_k",
+        "fusion_top_k",
+        "rerank_top_n",
+        "context_max_chunks",
+    )
+
+    def _rag_config_defaults(self) -> dict[str, Any]:
+        return {
+            "vector_top_k": self.settings.m3_vector_top_k,
+            "bm25_top_k": self.settings.m5_bm25_top_k,
+            "fusion_top_k": self.settings.m5_fusion_top_k,
+            "rerank_top_n": self.settings.m5_rerank_top_n,
+            "context_max_chunks": self.settings.m3_context_max_chunks,
+            "updated_at": None,
+        }
+
+    async def get_rag_config(self) -> dict[str, Any]:
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT vector_top_k, bm25_top_k, fusion_top_k, rerank_top_n,
+                           context_max_chunks, updated_at
+                    FROM rag_config WHERE id
+                    """
+                )
+            )
+            row = result.mappings().one_or_none()
+        return dict(row) if row is not None else self._rag_config_defaults()
+
+    async def update_rag_config(
+        self,
+        *,
+        vector_top_k: int | None = None,
+        bm25_top_k: int | None = None,
+        fusion_top_k: int | None = None,
+        rerank_top_n: int | None = None,
+        context_max_chunks: int | None = None,
+    ) -> dict[str, Any]:
+        values = {
+            "vector_top_k": vector_top_k,
+            "bm25_top_k": bm25_top_k,
+            "fusion_top_k": fusion_top_k,
+            "rerank_top_n": rerank_top_n,
+            "context_max_chunks": context_max_chunks,
+        }
+        assignments = [
+            f"{field} = :{field}" for field, value in values.items() if value is not None
+        ]
+        if not assignments:
+            raise ApiError("VALIDATION_ERROR", "没有需要更新的字段", 422)
+        params: dict[str, Any] = {
+            field: value for field, value in values.items() if value is not None
+        }
+        async with self.engine.begin() as connection:
+            # Seed the singleton row on first write in case it was removed.
+            await connection.execute(
+                text("INSERT INTO rag_config (id) VALUES (true) ON CONFLICT (id) DO NOTHING")
+            )
+            result = await connection.execute(
+                text(
+                    "UPDATE rag_config SET "
+                    + ", ".join(assignments)
+                    + ", updated_at = now() WHERE id RETURNING vector_top_k, bm25_top_k,"
+                    " fusion_top_k, rerank_top_n, context_max_chunks, updated_at"
+                ),
+                params,
+            )
+            row = result.mappings().one_or_none()
+        return dict(row) if row is not None else self._rag_config_defaults()
 
     async def list_prompts(self) -> list[dict[str, Any]]:
         async with self.engine.connect() as connection:

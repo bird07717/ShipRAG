@@ -6,7 +6,10 @@ import type {
   KnowledgeIndex,
   IndexTask,
   ModelConfig,
+  ModelConfigUpdatePayload,
   PromptTemplate,
+  RagConfig,
+  RagConfigUpdatePayload,
   RagTrace,
   TraceSummary,
 } from "@/types/admin";
@@ -101,5 +104,16 @@ export const adminApi = {
       body: JSON.stringify({ knowledge_id: knowledgeId, question, options }),
     }),
   listModels: () => apiRequest<ModelConfig[]>("/models"),
+  updateModel: (modelId: string, payload: ModelConfigUpdatePayload) =>
+    apiRequest<ModelConfig>(`/models/${modelId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  getRagConfig: () => apiRequest<RagConfig>("/rag-config"),
+  updateRagConfig: (payload: RagConfigUpdatePayload) =>
+    apiRequest<RagConfig>("/rag-config", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
   listPrompts: () => apiRequest<PromptTemplate[]>("/prompts"),
 };

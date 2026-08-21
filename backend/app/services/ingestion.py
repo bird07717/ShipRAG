@@ -192,9 +192,7 @@ class IngestionService:
         retention_days = self.settings.index_gc_retention_days
 
         stuck = await self.repository.find_deleting_indexes()
-        deletable = await self.repository.find_deletable_indexes(
-            retention_count, retention_days
-        )
+        deletable = await self.repository.find_deletable_indexes(retention_count, retention_days)
         if kb_id is not None:
             stuck = [item for item in stuck if item.kb_id == kb_id]
             deletable = [item for item in deletable if item.kb_id == kb_id]
@@ -209,9 +207,7 @@ class IngestionService:
             image_assets = await self.repository.list_image_assets_for_index(index_id)
             await self.repository.delete_index(index_id)
             for asset in image_assets:
-                await self._remove_minio_object(
-                    asset["minio_bucket"], asset["minio_object_key"]
-                )
+                await self._remove_minio_object(asset["minio_bucket"], asset["minio_object_key"])
             deleted_ids.append(str(index_id))
 
         return {"deleted_index_ids": deleted_ids, "deleted_count": len(deleted_ids)}
@@ -230,9 +226,7 @@ class IngestionService:
         image_assets = await self.repository.list_image_assets_for_index(index_id)
         await self.repository.delete_index(index_id)
         for asset in image_assets:
-            await self._remove_minio_object(
-                asset["minio_bucket"], asset["minio_object_key"]
-            )
+            await self._remove_minio_object(asset["minio_bucket"], asset["minio_object_key"])
         return {"deleted_index_ids": [str(index_id)], "deleted_count": 1}
 
     async def _enqueue_reference(self, build: BuildReference) -> None:
@@ -255,6 +249,4 @@ class IngestionService:
         )
 
     async def _remove_minio_object(self, bucket: str, object_key: str) -> None:
-        await asyncio.to_thread(
-            self.minio.remove_object, bucket, object_key
-        )
+        await asyncio.to_thread(self.minio.remove_object, bucket, object_key)

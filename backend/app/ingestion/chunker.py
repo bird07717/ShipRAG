@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import math
 import re
 
+from app.common.text import estimate_tokens
 from app.ingestion.models import ChunkDraft, ParentChunkDraft, ParsedElement
+
+__all__ = ["estimate_tokens"]
 
 _TERMINAL_PUNCTUATION = ("。", "\uff01", "？", "!", "?", ".", "\uff1b", ";", "：", ":")
 _SUSPENDED_END_PATTERN = re.compile(
@@ -20,10 +22,6 @@ _PROCEDURAL_PATTERN = re.compile(
     r"|(?:点击|选择|设置|输入|打开|进入|连接|调整|配置|按下|确认|保存|上传|下载|重启)",
     flags=re.IGNORECASE,
 )
-
-
-def estimate_tokens(text: str) -> int:
-    return max(1, math.ceil(len(text) / 3))
 
 
 def _section_prefix(section_path: list[str]) -> str:

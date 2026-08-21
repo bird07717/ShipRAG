@@ -1,0 +1,130 @@
+/*
+ * RAG Studio Design Tokens
+ * Enterprise AI Workspace - restrained, consistent, developer-grade.
+ * All colors / radius / shadows / motion must come from these variables.
+ */
+:root {
+  /* ---------- Background ---------- */
+  --bg-page: #f5f6f4;
+  --bg-surface: #ffffff;
+  --bg-subtle: #f4f6f4;
+  --bg-hover: #eef2ef;
+  --bg-active: #e6efe9;
+
+  /* ---------- Border ---------- */
+  --border-default: #dbe1dc;
+  --border-subtle: #e8eae7;
+  --border-strong: #c5cfc8;
+
+  /* ---------- Text ---------- */
+  --text-primary: #1c241f;
+  --text-secondary: #55625a;
+  --text-tertiary: #86928a;
+  --text-disabled: #b3bcb5;
+
+  /* ---------- Brand (systematized green) ---------- */
+  --brand-primary: #18664a;
+  --brand-hover: #13553d;
+  --brand-subtle: #e4efe8;
+  --brand-strong: #7ecfa8;
+
+  /* Sidebar (dark brand surface) */
+  --sidebar-bg: #12271f;
+  --sidebar-border: #21382e;
+  --sidebar-text: #a3b5aa;
+  --sidebar-text-hover: #d8e5dd;
+  --sidebar-item-hover: rgb(255 255 255 / 5%);
+  --sidebar-item-active: #234534;
+
+  /* ---------- Semantic status ---------- */
+  --success: #1e7f55;
+  --success-bg: #e2f3ea;
+  --warning: #96690c;
+  --warning-bg: #f8f0dc;
+  --error: #bd3d39;
+  --error-bg: #fbeae9;
+  --info: #4f6b8f;
+  --info-bg: #e9eff7;
+
+  /* ---------- Radius ---------- */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+
+  /* ---------- Shadow (dropdown / modal only; cards rely on borders) ---------- */
+  --shadow-popover: 0 4px 16px rgb(23 34 28 / 8%), 0 1px 4px rgb(23 34 28 / 6%);
+  --shadow-modal: 0 12px 40px rgb(23 34 28 / 16%), 0 4px 12px rgb(23 34 28 / 8%);
+
+  /* ---------- Typography ---------- */
+  --font-sans:
+    "Inter Variable", Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono:
+    "JetBrains Mono Variable", "JetBrains Mono", "SFMono-Regular", Consolas,
+    "Liberation Mono", Menlo, monospace;
+  --text-page-title: 600 22px/1.3 var(--font-sans);
+  --text-section-title: 600 16px/1.4 var(--font-sans);
+  --text-body: 400 14px/1.6 var(--font-sans);
+  --text-secondary-size: 13px;
+  --text-caption-size: 12px;
+
+  /* ---------- Spacing ---------- */
+  --space-page-x: 32px;
+  --space-page-top: 24px;
+  --space-content-gap: 16px;
+
+  /* ---------- Motion ---------- */
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --transition-fast: 150ms var(--ease-out);
+
+  /* ---------- Layout ---------- */
+  --sidebar-width: 248px;
+  --sidebar-width-collapsed: 64px;
+  --content-max-width: 1440px;
+
+  /* ---------- Element Plus theme bridge ---------- */
+  --el-color-primary: var(--brand-primary);
+  --el-color-primary-light-3: #569480;
+  --el-color-primary-light-5: #8bb7a6;
+  --el-color-primary-light-7: #bcd5ca;
+  --el-color-primary-light-8: #d3e3da;
+  --el-color-primary-light-9: var(--brand-subtle);
+  --el-color-primary-dark-2: var(--brand-hover);
+  --el-color-success: var(--success);
+  --el-color-success-light-8: #cdebd9;
+  --el-color-success-light-9: var(--success-bg);
+  --el-color-warning: var(--warning);
+  --el-color-warning-light-8: #efe0b8;
+  --el-color-warning-light-9: var(--warning-bg);
+  --el-color-danger: var(--error);
+  --el-color-danger-light-8: #f3cfcd;
+  --el-color-danger-light-9: var(--error-bg);
+  --el-color-error: var(--error);
+  --el-color-error-light-8: #f3cfcd;
+  --el-color-error-light-9: var(--error-bg);
+  --el-color-info: var(--text-tertiary);
+  --el-color-info-light-8: #e4e8e5;
+  --el-color-info-light-9: var(--bg-subtle);
+  --el-border-radius-base: var(--radius-sm);
+  --el-border-radius-small: 4px;
+  --el-text-color-primary: var(--text-primary);
+  --el-text-color-regular: #44514a;
+  --el-text-color-secondary: var(--text-secondary);
+  --el-text-color-placeholder: #9aa59d;
+  --el-border-color: var(--border-default);
+  --el-border-color-light: var(--border-subtle);
+  --el-border-color-lighter: #edefera;
+  --el-fill-color: var(--bg-subtle);
+  --el-fill-color-light: var(--bg-subtle);
+  --el-fill-color-lighter: #f8faf8;
+  --el-fill-color-blank: var(--bg-surface);
+  --el-bg-color: var(--bg-surface);
+  --el-bg-color-page: var(--bg-page);
+  --el-bg-color-overlay: var(--bg-surface);
+  --el-box-shadow-light: var(--shadow-popover);
+  --el-box-shadow: var(--shadow-modal);
+  --el-font-size-base: 14px;
+  --el-disabled-bg-color: var(--bg-subtle);
+  --el-component-size: 32px;
+}

@@ -2,7 +2,7 @@
 
 企业产品文档知识库与多模态 RAG 问答平台。仓库包含 M0–M7 的实现与 2026-08-17 的 V1.0.0 验收证据；当前代码、OpenAPI 和 Alembic 迁移头才是后续修改与发布的事实来源。
 
-> 当前迁移头为 `0008`。M7 记录中的 `0006` 是当次历史验收所使用的 Schema，不能替代对 `0007`、`0008` 之后代码的重新验收。
+> 当前迁移头为 `0010`。M7 记录中的 `0006` 是当次历史验收所使用的 Schema，不能替代对 `0007`–`0010` 之后代码的重新验收。
 
 ## 当前能力
 
@@ -20,6 +20,8 @@
 - Active Index 冻结、知识库隔离的 pgvector 文本向量检索和上下文预算
 - 全局 Prompt、有限多轮历史、GLM-5.2 流式生成、引用校验、会话与 RAG Trace
 - `POST /api/v1/chat/stream` 的 `trace/source/message/done/error` SSE 协议
+- Chat 文档路由状态机：文档聚合决策、零 LLM 整文档投递（`DOC_DELIVERED`）、
+  澄清选项解析、聚焦文档全文问答与切换（迁移 `0009`）
 - SiliconFlow DeepSeek-OCR、智谱 GLM-5V-Turbo、独立重试与单项降级
 - OCR/Caption 增强的 IMAGE/MIXED Chunk、图文 Embedding 与图片来源 API
 - `pg_search` 严格中文 BM25、pgvector、确定性 RRF Hybrid Fusion

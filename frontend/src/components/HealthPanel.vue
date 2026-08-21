@@ -38,89 +38,69 @@ onBeforeUnmount(() => controller?.abort());
 </script>
 
 <template>
-  <el-card class="health-card" shadow="never">
-    <template #header>
-      <div class="card-header">
-        <div>
-          <span class="eyebrow">SYSTEM STATUS</span>
-          <h2>运行环境</h2>
+  <section class="panel health-panel">
+    <header class="panel-header">
+      <div>
+        <h3>System Status</h3>
+        <span class="sub">运行环境依赖检查</span>
+      </div>
+      <el-button size="small" :loading="loading" @click="refresh">重新检查</el-button>
+    </header>
+    <div class="panel-body">
+      <el-alert
+        v-if="error"
+        :title="error"
+        type="error"
+        :closable="false"
+        show-icon
+      />
+      <template v-else-if="health">
+        <div class="overall">
+          <span :class="['pulse', health.status]" />
+          <strong>{{ overallLabel }}</strong>
         </div>
-        <el-button :loading="loading" @click="refresh">重新检查</el-button>
-      </div>
-    </template>
-
-    <el-alert
-      v-if="error"
-      :title="error"
-      type="error"
-      :closable="false"
-      show-icon
-    />
-    <template v-else-if="health">
-      <div class="overall">
-        <span :class="['pulse', health.status]" />
-        <strong>{{ overallLabel }}</strong>
-      </div>
-      <div class="dependency-grid">
-        <article v-for="(check, name) in health.checks" :key="name" class="dependency">
-          <div class="dependency-title">
-            <span>{{ labels[name] }}</span>
-            <el-tag :type="check.status === 'ok' ? 'success' : 'danger'" effect="plain">
-              {{ check.status === "ok" ? "正常" : "异常" }}
-            </el-tag>
-          </div>
-          <p>{{ check.version ? `v${check.version}` : (check.detail ?? "连接正常") }}</p>
-          <small>{{ check.latency_ms }} ms</small>
-        </article>
-      </div>
-    </template>
-    <el-skeleton v-else :rows="3" animated />
-  </el-card>
+        <div class="dependency-grid">
+          <article v-for="(check, name) in health.checks" :key="name" class="dependency">
+            <div class="dependency-title">
+              <span>{{ labels[name] }}</span>
+              <span class="status-badge" :class="check.status === 'ok' ? 'success' : 'danger'">
+                {{ check.status === "ok" ? "正常" : "异常" }}
+              </span>
+            </div>
+            <p>{{ check.version ? `v${check.version}` : (check.detail ?? "连接正常") }}</p>
+            <small>{{ check.latency_ms }} ms</small>
+          </article>
+        </div>
+      </template>
+      <el-skeleton v-else :rows="3" animated />
+    </div>
+  </section>
 </template>
 
 <style scoped>
-.health-card {
-  border: 1px solid var(--border);
-  border-radius: 18px;
-}
-
-.card-header,
-.dependency-title,
 .overall {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-}
-
-.card-header h2 {
-  margin: 3px 0 0;
-  font-size: 20px;
-}
-
-.eyebrow {
-  color: var(--accent);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-}
-
-.overall {
-  justify-content: flex-start;
   gap: 10px;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
+}
+
+.overall strong {
+  color: var(--text-primary);
+  font-size: 14px;
 }
 
 .pulse {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  background: #e05260;
-  box-shadow: 0 0 0 5px rgb(224 82 96 / 12%);
+  background: var(--error);
+  box-shadow: 0 0 0 4px var(--error-bg);
 }
 
 .pulse.ready {
-  background: #28a879;
-  box-shadow: 0 0 0 5px rgb(40 168 121 / 12%);
+  background: var(--success);
+  box-shadow: 0 0 0 4px var(--success-bg);
 }
 
 .dependency-grid {
@@ -130,21 +110,38 @@ onBeforeUnmount(() => controller?.abort());
 }
 
 .dependency {
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: #fbfcfa;
+  display: grid;
+  gap: 4px;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+
+.dependency-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dependency-title > span:first-child {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .dependency p {
-  min-height: 36px;
-  margin: 16px 0 4px;
-  color: var(--muted);
-  font-size: 13px;
+  min-height: 34px;
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .dependency small {
-  color: #8a928c;
+  color: var(--text-tertiary);
+  font-size: 11px;
 }
 
 @media (max-width: 760px) {

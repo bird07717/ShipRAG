@@ -374,6 +374,15 @@ data: {"conversation_id":"uuid","message_id":"uuid","answer":"数据库默认端
 
 `done.sources` 只包含答案中出现且通过服务端校验的来源编号。
 
+文档路由是 Chat 的固定行为（无开关），`done` 额外携带
+`response_type` / `answer_mode` / `disclaimer` / `content` / `references`：
+
+- `response_type` 取值 `ANSWERED` / `UNCONFIRMED` / `OUT_OF_SCOPE` / `DOC_DELIVERED`。
+- `DOC_DELIVERED` 表示按文档路由命中并整份投递了文档：没有 `message` 事件，
+  `content` 为按阅读顺序排列的 text/image 内容块，`references` 含原文档下载链接，
+  `usage` 为空对象（零 LLM 路径）。
+- 文档投递消息落库为摘要文本，不包含完整内容块，避免经会话历史回灌。
+
 #### `error`
 
 ```text
@@ -390,7 +399,27 @@ data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务暂时不可用","trace_
 - Assistant Message 在流开始前创建为 `STREAMING`，完成后写入完整答案和最终 sources。
 - 失败时可保存已生成的部分文本用于 Trace，但普通会话 API 不把失败的部分答案当作已完成回答。
 
-`POST` + JSON 不适用于原生 `EventSource`。任何实现 Chat 的浏览器客户端都必须使用 `fetch`、`ReadableStream` 和能处理跨网络分片 SSE 帧的解析器。当前仓库内的 RAG Studio 是管理/Playground 界面，不包含面向用户的 Chat SSE 客户端；Playground 由服务端消费同一 RAG 流并返回完整 Trace。
+`POST` + JSON 不适用于原生 `EventSource`。任何实现 Chat 的浏览器客户端都必须使用 `fetch`、`ReadableStream` 和能处理跨网络分片 SSE 帧的解析器。RAG Studio 的 DemoChat 页面是面向用户的 Chat SSE 客户端；Playground 由服务端消费同一 RAG 流并返回完整 Trace。
+
+### 非流式 Chat 与文档路由状态机
+
+```http
+POST /api/v1/chat
+Content-Type: application/json
+```
+
+请求体与 `/chat/stream` 相同；响应为单个 JSON（`ChatResponse`），字段与 `done` 事件对齐
+（不含 `sources`，新增 `trace_id` 与 `answer`）。
+
+会话遵循文档路由状态机（详见 [MVP1 Chat 执行计划](mvp1-chat-execution-plan.md)）：
+
+- Conversation 通过 `focus_document_id` 持久化当前聚焦文档；为空即对齐阶段。
+- 对齐阶段按文档聚合分数决策：锁定投递（`DOC_DELIVERED`，零 LLM）、澄清
+  （候选文档写入会话 `chat_context.pending_options`，用户回复序号/标题/确认词可直接锁定）、
+  或基于文档目录回答（含"你可以帮我做什么"）。
+- 聚焦阶段以文档全文为上下文回答；强证据指向其他文档时切换并投递新文档，
+  中等证据时先向用户确认。
+- 路由决策完整记录在 `rag_trace.retrieval_result.doc_routing`。
 
 ## 9. Prompt、模型与 Trace API
 

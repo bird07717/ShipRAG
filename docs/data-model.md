@@ -271,9 +271,24 @@ PK `(chunk_id, element_id)`，并唯一 `(chunk_id, ordinal)`。同一映射中�
 
 每个 `model_type` 最多一个 `enabled=true` 的配置。`enabled` 表示“供新请求或新构建选择”，不表示可以立即删除历史配置；被 Active Index 引用的旧 Embedding 配置即使不再 enabled，也必须保持可解析和可调用，直到相关知识库完成重建。
 
-当前公开 API 只提供模型配置的安全只读快照；当前 Provider 实际使用的密钥来自运行时 `Settings`（环境变量/Secret 注入）。虽然 Schema 预留了加密密钥字段，模型配置写入、密钥轮换和从该表解密供 Provider 调用的工作流尚未在当前应用中实现。
+公开 API 提供模型配置的安全只读快照（`GET /api/v1/models`），并为 `LLM` / `RERANK` 行提供管理写入入口 `PATCH /api/v1/models/{id}`（可更新 `model_name`、`base_url`、`parameters`、`enabled`）。`begin_turn` 每轮读取该表快照，因此写入在下一轮对话即生效、无需重启；Provider 实际使用的 API Key 仍来自运行时 `Settings`（环境变量/Secret 注入）。Embedding/OCR/VISION 与索引构建绑定，不支持在线调整。Schema 预留的加密密钥字段的写入、轮换和解密供 Provider 调用的工作流尚未实现。
 
 Embedding 配置启用前必须声明并通过契约测试验证输出维度。V1 的 `document_chunk.embedding` 使用部署级固定 `vector(N)`：更换模型只有在输出相同 N 时才能通过普通新索引逐步发布。改变 N 需要新的 ADR、Schema/向量索引迁移、双写或维护窗口方案以及所有知识库重建，不能仅创建一个不同维度的 Knowledge Index。
+
+### `rag_config`
+
+单行（`id CHECK = true`）全局检索参数表，由管理界面通过 `GET/PATCH /api/v1/rag-config` 读写：
+
+| 字段 | 约束/说明 |
+|---|---|
+| `id` | 恒为 `true`，保证仅一行 |
+| `vector_top_k` / `bm25_top_k` | 双路召回候选数 |
+| `fusion_top_k` | RRF 融合后进入重排的数量 |
+| `rerank_top_n` | 重排后保留的候选数 |
+| `context_max_chunks` | 送入 LLM 的上下文章节上限 |
+| `created_at` / `updated_at` | 非空 |
+
+`begin_turn` 每轮读取该表快照进入 `Turn.retrieval`，行缺失时回退 `Settings` 默认值；Playground 的手动参数在同一层覆盖，行为不受影响。
 
 ### `prompt_template`
 

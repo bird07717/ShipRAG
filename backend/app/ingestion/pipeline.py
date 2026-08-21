@@ -71,9 +71,7 @@ class IndexPipeline:
                         index, document, prev_index_id, task_id, position, len(documents)
                     )
                 else:
-                    await self._process_document(
-                        index, document, task_id, position, len(documents)
-                    )
+                    await self._process_document(index, document, task_id, position, len(documents))
             counts = await self._finalize_index(index_id, kb_id, task_id)
             followup = await self.repository.create_followup_build_if_needed(kb_id)
             return IndexBuildResult(
@@ -403,7 +401,8 @@ class IndexPipeline:
                            dc.is_procedural, now()
                     FROM document_chunk dc
                     LEFT JOIN document_parent_chunk op ON op.id = dc.parent_id
-                    LEFT JOIN document_parent_chunk np ON np.index_document_id = :new_index_document_id
+                    LEFT JOIN document_parent_chunk np
+                         ON np.index_document_id = :new_index_document_id
                          AND np.sequence_no = op.sequence_no
                     WHERE dc.index_document_id = :old_index_document_id
                     """

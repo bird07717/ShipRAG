@@ -189,7 +189,7 @@ async def test_procedural_seed_expands_neighbors_then_orders_parent_by_sequence(
 
 
 @pytest.mark.asyncio
-async def test_zhipu_stream_ignores_thinking_and_collects_usage() -> None:
+async def test_zhipu_stream_passes_through_thinking_and_collects_usage() -> None:
     body = (
         'data: {"choices":[{"delta":{"reasoning_content":"internal","content":"端口"}}]}\n\n'
         'data: {"choices":[{"delta":{"content":"3306。[S1]"}}],'
@@ -200,6 +200,8 @@ async def test_zhipu_stream_ignores_thinking_and_collects_usage() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         assert payload["stream"] is True
+        # DB model_config parameters are authoritative: the thinking block is
+        # passed through because omitting it would enable the provider default.
         assert payload["thinking"] == {"type": "enabled"}
         assert payload["messages"] == [
             {"role": "system", "content": RAG_SYSTEM_GUARD},

@@ -25,12 +25,25 @@ class LlmProvider(Protocol):
 
     def stream(self, prompt: str) -> AsyncIterator[str]: ...
 
+    async def complete(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float | None = None,
+    ) -> str: ...
+
     async def aclose(self) -> None: ...
 
 
 class FakeLlmProvider:
-    def __init__(self, chunks: list[str] | None = None) -> None:
+    def __init__(
+        self, chunks: list[str] | None = None, completions: list[str] | None = None
+    ) -> None:
         self.chunks = chunks or ["根据知识库资料，", "相关配置请参见所列说明。[S1]"]
+        self.completions = list(completions or [])
         self.usage: dict[str, Any] = {"provider": "fake"}
 
     async def stream(self, prompt: str) -> AsyncIterator[str]:
@@ -38,6 +51,20 @@ class FakeLlmProvider:
         for chunk in self.chunks:
             await asyncio.sleep(0)
             yield chunk
+
+    async def complete(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        del prompt, system, max_tokens, temperature, timeout_seconds
+        if not self.completions:
+            raise LlmError("UPSTREAM_UNAVAILABLE", "Fake complete 未配置", retryable=False)
+        return self.completions.pop(0)
 
     async def aclose(self) -> None:
         return None
@@ -61,7 +88,9 @@ class ZhipuLlmProvider:
         self.usage: dict[str, Any] = {}
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
-            base_url=settings.zhipu_base_url,
+            # DB model_config.base_url wins (admin-adjustable per turn);
+            # the env setting is the fallback for legacy rows.
+            base_url=snapshot.base_url or settings.zhipu_base_url,
             headers={"Authorization": f"Bearer {settings.zhipu_api_key.get_secret_value()}"},
             timeout=httpx.Timeout(settings.m3_provider_timeout_seconds),
             follow_redirects=False,
@@ -81,9 +110,62 @@ class ZhipuLlmProvider:
             "temperature": temperature,
         }
         thinking = self.parameters.get("thinking")
-        if thinking is not None and self.settings.m3_llm_thinking_enabled:
+        if thinking is not None:
+            # DB model_config is authoritative. Omitting the key would fall
+            # back to the provider default (GLM-5.2: thinking enabled), which
+            # silently burns the max_tokens budget on reasoning.
             payload["thinking"] = thinking
         return payload
+
+    async def complete(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            # complete() serves short utility calls (e.g. query rewriting);
+            # reasoning would only burn the token and latency budgets.
+            "thinking": {"type": "disabled"},
+        }
+        try:
+            response = await self.client.post(
+                "chat/completions",
+                json=payload,
+                timeout=httpx.Timeout(timeout_seconds) if timeout_seconds is not None else None,
+            )
+            if response.status_code == 429 or response.status_code >= 500:
+                raise LlmError("UPSTREAM_UNAVAILABLE", "模型服务暂时不可用", retryable=True)
+            if response.is_error:
+                raise LlmError("UPSTREAM_UNAVAILABLE", "模型服务请求失败", retryable=False)
+            data = response.json()
+            if isinstance(data.get("usage"), dict):
+                self.usage = dict(data["usage"])
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise LlmError("UPSTREAM_PROTOCOL_ERROR", "模型响应格式异常", retryable=False)
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, str) or not content.strip():
+                raise LlmError("UPSTREAM_PROTOCOL_ERROR", "模型响应为空", retryable=False)
+            return content.strip()
+        except LlmError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise LlmError("UPSTREAM_TIMEOUT", "模型服务响应超时", retryable=True) from exc
+        except httpx.RequestError as exc:
+            raise LlmError("UPSTREAM_UNAVAILABLE", "模型服务暂时不可用", retryable=True) from exc
 
     async def stream(self, prompt: str) -> AsyncIterator[str]:
         try:

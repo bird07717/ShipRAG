@@ -8,8 +8,8 @@ from rq import Queue, Worker
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.tasks.recovery import reconcile_abandoned_index_builds
 from app.tasks.gc import run_index_gc_sync
+from app.tasks.recovery import reconcile_abandoned_index_builds
 
 logger = logging.getLogger(__name__)
 
