@@ -2,7 +2,8 @@
 
 Pure functions only: aggregation of reranked chunk candidates into document
 scores, the ALIGNING/DOC_FOCUS decision policy, and rule-based resolution of
-clarification replies. See docs/mvp1-chat-execution-plan.md.
+clarification replies. The target replacement is documented in
+docs/technical-support-refactor-plan.md.
 """
 
 from __future__ import annotations

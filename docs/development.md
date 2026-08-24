@@ -127,7 +127,7 @@ ZHIPU_API_KEY=...
 ./scripts/check-m0.sh
 ```
 
-探测器不打印 Key、请求正文、签名 URL 或模型响应正文。2026-08-17 在线报告 10/10 通过，五种输入均返回 1024 维，`EMBEDDING_DIMENSION=1024` 已冻结。
+探测器不打印 Key、请求正文、签名 URL 或模型响应正文。当次报告只代表当前端点、凭据、模型和配置；`EMBEDDING_DIMENSION=1024` 仍由当前配置和 ADR 冻结。
 
 ## 9. M2 文档入库验收
 
@@ -143,7 +143,7 @@ ZHIPU_API_KEY=...
 M2_SMOKE_PROVIDER=siliconflow ./scripts/check-m2.sh
 ```
 
-烟测通过真实 HTTP 上传、MinIO、PostgreSQL、RQ 投递和 Pipeline，完成后清理自身随机测试数据。完整接口与验收结果见 [M2 验收记录](m2-acceptance.md)。
+烟测通过真实 HTTP 上传、MinIO、PostgreSQL、RQ 投递和 Pipeline，完成后清理自身随机测试数据。接口契约见 [API 契约](api-contract.md)，摄取过程见 [摄取管线](ingestion-pipeline.md)。
 
 ## 10. M3 文本 RAG 验收
 
@@ -211,7 +211,7 @@ M5_SMOKE_LLM_PROVIDER=zhipu \
 ./scripts/check-m7.sh
 ```
 
-M7 会执行全量工程门禁、生产镜像构建、独立空卷生产栈启动、Word/RQ/索引/Playground/SSE 联调、并发压测、Worker 重启、Redis/MinIO/PostgreSQL 中断恢复以及 PostgreSQL 备份恢复。执行期间本地开发依赖会被逐个短暂停止并自动恢复，不应与其他本地业务负载共用该环境。仓库内的历史 M7 记录只覆盖到 Alembic `0006`；对当前 `0011` Schema 或其后的代码发布，必须重新运行该门禁并保存新的证据。
+M7 会执行全量工程门禁、生产镜像构建、独立空卷生产栈启动、Word/RQ/索引/Playground/SSE 联调、并发压测、Worker 重启、Redis/MinIO/PostgreSQL 中断恢复以及 PostgreSQL 备份恢复。执行期间本地开发依赖会被逐个短暂停止并自动恢复，不应与其他本地业务负载共用该环境。对任何目标版本发布，都必须在相同代码、配置和 Schema 上重新运行该门禁并保存当次证据。
 
 部署与故障操作见 [生产部署指南](deployment/production.md)和[恢复 Runbook](deployment/recovery-runbook.md)。
 

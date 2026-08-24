@@ -420,7 +420,7 @@ Content-Type: application/json
 请求体与 `/chat/stream` 相同；响应为单个 JSON（`ChatResponse`），字段与 `done` 事件对齐
 （不含 `sources`，新增 `trace_id` 与 `answer`）。
 
-会话遵循文档路由状态机（详见 [MVP1 Chat 执行计划](mvp1-chat-execution-plan.md)）：
+当前会话遵循以下文档路由状态机；后续目标架构与兼容迁移见[对话式技术支持系统重构计划](technical-support-refactor-plan.md)：
 
 - Conversation 通过 `focus_document_id` 持久化当前聚焦文档；为空即对齐阶段。
 - 对齐阶段按文档聚合分数决策：锁定投递（`DOC_DELIVERED`，零 LLM）、澄清

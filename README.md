@@ -1,8 +1,8 @@
 # Enterprise RAG Platform
 
-企业产品文档知识库与多模态 RAG 问答平台。仓库包含 M0–M7 的实现与 2026-08-17 的 V1.0.0 验收证据；当前代码、OpenAPI 和 Alembic 迁移头才是后续修改与发布的事实来源。
+企业产品文档知识库与多模态 RAG 问答平台。当前代码、OpenAPI 和 Alembic 迁移头是系统行为、修改与发布的事实来源。
 
-> 当前迁移头为 `0014`。M7 记录中的 `0006` 是当次历史验收所使用的 Schema，不能替代对 `0007`–`0014` 之后代码的重新验收。
+> 当前迁移头为 `0014`。对目标版本的发布结论必须来自相同代码、配置和 Schema 上重新执行的检查，不能沿用历史阶段性结论。
 
 ## 当前能力
 
@@ -11,7 +11,7 @@
 - `/api/v1` 服务级 Bearer Token 认证骨架
 - RQ Worker 与三条基础队列
 - PostgreSQL 17 + pgvector、Redis、MinIO 私有 Bucket
-- Alembic `0001`–`0008`：包括默认 RAG Prompt v2、Parent/Child Chunk、相邻 Chunk 和不完整内容标记
+- Alembic `0001`–`0014`：包括摄取、RAG、Parent/Child Chunk、文档聚焦、运行时配置、模型密钥审计和质量指标
 - Vue 3 + TypeScript + Vite + Element Plus 的 RAG Studio 管理台
 - 后端和前端静态检查、测试、覆盖率与生产构建门禁
 - DOCX/OOXML、MinIO 图片传输、严格中文 BM25 和云模型契约探测套件
@@ -59,7 +59,7 @@ cd frontend && npm run dev
 - Redis：`127.0.0.1:16379`
 - MinIO API/Console：`127.0.0.1:19000/19001`
 
-完整说明见 [生产部署指南](docs/deployment/production.md)、[当前 API 契约](docs/api-contract.md)及 [M7 历史验收记录](docs/m7-acceptance.md)。
+完整说明见 [工程文档索引](docs/README.md)、[生产部署指南](docs/deployment/production.md)、[当前 API 契约](docs/api-contract.md)及 [对话式技术支持重构计划](docs/technical-support-refactor-plan.md)。
 
 ## 质量检查
 
@@ -73,7 +73,7 @@ M0 本地验证（云凭据缺失时报告仍保留 BLOCKED 状态）：
 ./scripts/check-m0.sh --allow-blocked
 ```
 
-使用非生产 SiliconFlow/智谱凭据执行完整验证时运行 `./scripts/check-m0.sh`。提交的 2026-08-17 脱敏在线报告为 10/10 PASS，Embedding 维度已冻结为 1024；`pg_search` 风险已按“未修改、仅服务端托管、不分发”接受，M0 状态为 PASS。详见 [M0 核查](docs/m0-review.md)。
+使用非生产 SiliconFlow/智谱凭据执行完整验证时运行 `./scripts/check-m0.sh`。该命令会在本地生成脱敏探测报告；报告只代表当次端点、凭据、模型和配置的执行结果，不作为长期静态验收结论。Embedding 维度仍按当前配置与 ADR 冻结为 1024。
 
 M2 文档入库验收：
 
