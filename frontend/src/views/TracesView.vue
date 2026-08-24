@@ -15,7 +15,16 @@ const traceSearch = ref("");
 const activeTraceDetail = ref<RagTrace | null>(null);
 const loadingDetail = ref(false);
 
-const RESPONSE_TYPES = ["ANSWERED", "UNCONFIRMED", "OUT_OF_SCOPE", "DOC_DELIVERED"] as const;
+const RESPONSE_TYPES = [
+  "ANSWERED",
+  "UNCONFIRMED",
+  "OUT_OF_SCOPE",
+  "DOC_DELIVERED",
+  "DOCUMENT_DELIVERED",
+  "CLARIFICATION_REQUIRED",
+  "NO_MATCH",
+  "ESCALATION_REQUIRED",
+] as const;
 const STATUSES = ["RUNNING", "COMPLETED", "FAILED", "CANCELLED"] as const;
 
 const traceFilter = ref<{
@@ -98,6 +107,25 @@ const detailUsage = computed(() => {
   const usage = activeTraceDetail.value?.model_usage;
   if (!usage || typeof usage !== "object" || !("total_tokens" in (usage as object))) return null;
   return usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+});
+
+type SupportTrace = {
+  support_version: number;
+  focus_document_id?: string;
+  support_mode?: string;
+  problem_resolution?: { method?: string };
+  document_switch?: { query?: string };
+  validation_result?: { valid?: boolean; code?: string };
+  workflow_before?: unknown;
+  workflow_after?: unknown;
+  document_claims?: unknown;
+  escalation?: unknown;
+  failure?: { code?: string };
+};
+
+const supportTrace = computed(() => {
+  const trace = activeTraceDetail.value?.retrieval_result;
+  return trace && trace.support_version === 1 ? (trace as SupportTrace) : null;
 });
 
 const citationWarning = computed(() => {
@@ -280,6 +308,16 @@ async function selectTrace(traceId: string): Promise<void> {
           />
           <h4 class="section-label">Answer</h4>
           <p class="detail-answer">{{ activeTraceDetail.answer || "（无答案）" }}</p>
+          <section v-if="supportTrace" class="support-trace">
+            <h4>Technical Support 决策</h4>
+            <dl>
+              <dt>聚焦文档</dt><dd class="mono">{{ supportTrace.focus_document_id ?? "—" }}</dd>
+              <dt>支持模式</dt><dd>{{ supportTrace.support_mode ?? "—" }}</dd>
+              <dt>路由/切换</dt><dd>{{ supportTrace.problem_resolution?.method ?? supportTrace.document_switch?.query ?? "—" }}</dd>
+              <dt>校验结果</dt><dd>{{ supportTrace.validation_result?.valid === true ? "已通过" : supportTrace.validation_result?.valid === false ? `未通过（${supportTrace.validation_result.code ?? "UNKNOWN"}）` : "—" }}</dd>
+            </dl>
+            <CodeBlock :code="store.formatJson({ workflow_before: supportTrace.workflow_before, workflow_after: supportTrace.workflow_after, document_claims: supportTrace.document_claims, escalation: supportTrace.escalation, failure: supportTrace.failure })" max-height="220px" />
+          </section>
 
           <h4 class="section-label">Sources（答案引用来源）</h4>
           <ul v-if="detailSources.length" class="source-list">
@@ -455,6 +493,31 @@ async function selectTrace(traceId: string): Promise<void> {
   line-height: 1.8;
   white-space: pre-wrap;
 }
+
+.support-trace {
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+}
+
+.support-trace h4 {
+  margin: 0 0 10px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.support-trace dl {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 5px 10px;
+  margin: 0 0 12px;
+  font-size: 12px;
+}
+
+.support-trace dt { color: var(--text-tertiary); }
+.support-trace dd { min-width: 0; margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
 
 .section-label {
   margin: 0 0 8px;

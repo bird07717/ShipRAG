@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
 from app.api.dependencies import get_app_settings, get_resources
@@ -19,6 +19,8 @@ from app.api.schemas import (
     ModelConfigUpdate,
     ModelProbeResponse,
     PlaygroundRequest,
+    ProblemProfileResponse,
+    ProblemProfileUpsert,
     PromptResponse,
     RagConfigResponse,
     RagConfigUpdate,
@@ -34,8 +36,20 @@ from app.rag.prompt import runtime_prompt_entries
 from app.rag.repository import RagRepository
 from app.rag.welcome import build_welcome
 from app.services.rag import RagService
+from app.support.repository import SupportRepository
+from app.support.service import TechnicalSupportService
 
 router = APIRouter()
+
+
+def _use_technical_support(
+    settings: Settings,
+    *,
+    knowledge_id: UUID,
+    conversation_id: UUID | None,
+) -> bool:
+    del knowledge_id, conversation_id
+    return settings.chat_execution_mode == "technical_support"
 
 
 def get_rag_repository(
@@ -53,6 +67,20 @@ def get_rag_service(
     return RagService(repository, settings, resources.minio)
 
 
+def get_support_repository(
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    resources: Annotated[AppResources, Depends(get_resources)],
+) -> SupportRepository:
+    return SupportRepository(resources.database, settings)
+
+
+def get_support_service(
+    repository: Annotated[SupportRepository, Depends(get_support_repository)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> TechnicalSupportService:
+    return TechnicalSupportService(repository, settings)
+
+
 @router.get("/chat/welcome", response_model=WelcomeResponse, tags=["chat"])
 async def chat_welcome(
     knowledge_id: UUID,
@@ -67,10 +95,29 @@ async def chat_welcome(
 async def chat_stream(
     payload: ChatStreamRequest,
     request: Request,
-    service: Annotated[RagService, Depends(get_rag_service)],
+    support_service: Annotated[TechnicalSupportService, Depends(get_support_service)],
+    legacy_service: Annotated[RagService, Depends(get_rag_service)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=200)] = None,
 ) -> StreamingResponse:
-    return StreamingResponse(
-        service.chat_stream(
+    if _use_technical_support(
+        request.app.state.settings,
+        knowledge_id=payload.knowledge_id,
+        conversation_id=payload.conversation_id,
+    ):
+        iterator = support_service.stream(
+            knowledge_id=payload.knowledge_id,
+            conversation_id=payload.conversation_id,
+            question=payload.question,
+            request_id=payload.request_id or str(request.state.request_id),
+            user_id=payload.user_id,
+            problem_code=payload.problem_code,
+            document_id=payload.document_id,
+            choice_id=payload.choice_id,
+            include_images=payload.include_images,
+            idempotency_key=idempotency_key,
+        )
+    else:
+        iterator = legacy_service.chat_stream(
             knowledge_id=payload.knowledge_id,
             conversation_id=payload.conversation_id,
             question=payload.question,
@@ -78,7 +125,9 @@ async def chat_stream(
             product_name="",
             scope_description="本产品相关的问题，包括参数、功能、使用步骤、维护和故障排查",
             user_id=payload.user_id,
-        ),
+        )
+    return StreamingResponse(
+        iterator,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -92,9 +141,28 @@ async def chat_stream(
 async def chat(
     payload: ChatRequest,
     request: Request,
-    service: Annotated[RagService, Depends(get_rag_service)],
+    support_service: Annotated[TechnicalSupportService, Depends(get_support_service)],
+    legacy_service: Annotated[RagService, Depends(get_rag_service)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=200)] = None,
 ) -> dict[str, Any]:
-    return await service.generate(
+    if _use_technical_support(
+        request.app.state.settings,
+        knowledge_id=payload.knowledge_id,
+        conversation_id=payload.conversation_id,
+    ):
+        return await support_service.handle(
+            knowledge_id=payload.knowledge_id,
+            conversation_id=payload.conversation_id,
+            question=payload.question,
+            request_id=payload.request_id or str(request.state.request_id),
+            user_id=payload.user_id,
+            problem_code=payload.problem_code,
+            document_id=payload.document_id,
+            choice_id=payload.choice_id,
+            include_images=payload.include_images,
+            idempotency_key=idempotency_key,
+        )
+    return await legacy_service.generate(
         knowledge_id=payload.knowledge_id,
         conversation_id=payload.conversation_id,
         question=payload.question,
@@ -103,6 +171,97 @@ async def chat(
         scope_description="本产品相关的问题，包括参数、功能、使用步骤、维护和故障排查",
         user_id=payload.user_id,
     )
+
+
+@router.post("/support/chat", response_model=ChatResponse, tags=["support"])
+async def support_chat(
+    payload: ChatRequest,
+    request: Request,
+    service: Annotated[TechnicalSupportService, Depends(get_support_service)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=200)] = None,
+) -> dict[str, Any]:
+    """Formal enterprise endpoint; it never enters the Generic RAG stack."""
+    return await service.handle(
+        knowledge_id=payload.knowledge_id,
+        conversation_id=payload.conversation_id,
+        question=payload.question,
+        request_id=payload.request_id or str(request.state.request_id),
+        user_id=payload.user_id,
+        problem_code=payload.problem_code,
+        document_id=payload.document_id,
+        choice_id=payload.choice_id,
+        include_images=payload.include_images,
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post("/support/chat/stream", tags=["support"])
+async def support_chat_stream(
+    payload: ChatStreamRequest,
+    request: Request,
+    service: Annotated[TechnicalSupportService, Depends(get_support_service)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=200)] = None,
+) -> StreamingResponse:
+    """Validated support SSE endpoint without a legacy routing dependency."""
+    return StreamingResponse(
+        service.stream(
+            knowledge_id=payload.knowledge_id,
+            conversation_id=payload.conversation_id,
+            question=payload.question,
+            request_id=payload.request_id or str(request.state.request_id),
+            user_id=payload.user_id,
+            problem_code=payload.problem_code,
+            document_id=payload.document_id,
+            choice_id=payload.choice_id,
+            include_images=payload.include_images,
+            idempotency_key=idempotency_key,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get(
+    "/support/problem-profiles", response_model=list[ProblemProfileResponse], tags=["support"]
+)
+async def list_problem_profiles(
+    knowledge_id: UUID,
+    repository: Annotated[SupportRepository, Depends(get_support_repository)],
+) -> list[dict[str, Any]]:
+    profiles = await repository.list_profiles(knowledge_id)
+    return [
+        {
+            "id": item.id,
+            "document_id": item.document_id,
+            "knowledge_id": item.knowledge_id,
+            "problem_code": item.problem_code,
+            "canonical_question": item.canonical_question,
+            "aliases": item.aliases,
+            "keywords": item.keywords,
+            "product_name": item.product_name,
+            "model_names": item.model_names,
+            "task_type": item.task_type,
+            "enabled": item.enabled,
+            "support_ready": item.support_ready,
+            "readiness_reasons": item.readiness_reasons,
+            "created_at": item.created_at,
+            "updated_at": item.updated_at,
+        }
+        for item in profiles
+    ]
+
+
+@router.put("/support/problem-profiles", response_model=ProblemProfileResponse, tags=["support"])
+async def upsert_problem_profile(
+    knowledge_id: UUID,
+    payload: ProblemProfileUpsert,
+    repository: Annotated[SupportRepository, Depends(get_support_repository)],
+) -> dict[str, Any]:
+    return await repository.upsert_profile(knowledge_id, payload.model_dump(mode="json"))
 
 
 @router.get("/documents/{document_id}/content", tags=["documents"])
@@ -319,7 +478,18 @@ async def list_traces(
     ] = None,
     mode: Annotated[Literal["CHAT", "PLAYGROUND"] | None, Query()] = None,
     response_type: Annotated[
-        Literal["ANSWERED", "UNCONFIRMED", "OUT_OF_SCOPE", "DOC_DELIVERED"] | None,
+        Literal[
+            "ANSWERED",
+            "UNCONFIRMED",
+            "OUT_OF_SCOPE",
+            "DOC_DELIVERED",
+            "DOCUMENT_DELIVERED",
+            "CLARIFICATION_REQUIRED",
+            "NEED_MORE_INFORMATION",
+            "NO_MATCH",
+            "ESCALATION_REQUIRED",
+        ]
+        | None,
         Query(),
     ] = None,
     user_id: Annotated[str | None, Query(max_length=100)] = None,

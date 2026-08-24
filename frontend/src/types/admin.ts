@@ -158,6 +158,29 @@ export interface PromptTemplate {
   updated_at?: string;
 }
 
+export interface ProblemProfile {
+  id: string;
+  knowledge_id: string;
+  document_id: string;
+  problem_code: string;
+  canonical_question: string;
+  aliases: string[];
+  keywords: string[];
+  product_name: string | null;
+  model_names: string[];
+  task_type: string | null;
+  enabled: boolean;
+  support_ready: boolean;
+  readiness_reasons: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export type ProblemProfilePayload = Omit<
+  ProblemProfile,
+  "id" | "knowledge_id" | "support_ready" | "readiness_reasons" | "created_at" | "updated_at"
+>;
+
 export interface MetricsLatencySummary {
   p50_ms: number;
   p95_ms: number;
@@ -206,4 +229,33 @@ export interface MetricsLatency {
   range: { from: string; to: string; mode: string };
   total: MetricsLatencySummary;
   stages: Record<string, number>;
+}
+
+export interface SupportMetrics {
+  range: { from: string; to: string; mode: string };
+  support_turns: number;
+  first_turns: number;
+  followup_turns: number;
+  document_delivered: number;
+  clarification_required: number;
+  clarification_resolved: number;
+  no_match: number;
+  escalation_required: number;
+  canonical_or_alias_matches: number;
+  llm_catalog_matches: number;
+  general_guidance_turns: number;
+  evidence_missing: number;
+  high_risk_intercepts: number;
+  structured_output_retries: number;
+  workflow_conflicts: number;
+  model_calls: number;
+  document_delivery_rate: number;
+  clarification_rate: number;
+  clarification_resolution_rate: number;
+  escalation_rate: number;
+  general_guidance_rate: number;
+  workflow_conflict_rate: number;
+  first_turn_latency: MetricsLatencySummary;
+  followup_latency: MetricsLatencySummary;
+  tokens: { llm_prompt: number; llm_completion: number; llm_total: number };
 }

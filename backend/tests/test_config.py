@@ -11,6 +11,17 @@ def test_production_requires_service_token() -> None:
         Settings(_env_file=None, app_env="production", service_token=None)
 
 
+@pytest.mark.parametrize("app_env", ["staging", "production"])
+def test_deployed_environments_reject_fake_llm(app_env: str) -> None:
+    with pytest.raises(ValidationError, match="fake is forbidden"):
+        Settings(
+            _env_file=None,
+            app_env=app_env,
+            service_token="configured",
+            m3_llm_provider="fake",
+        )
+
+
 def test_csv_settings_are_normalized() -> None:
     settings = Settings(
         _env_file=None,
@@ -22,6 +33,16 @@ def test_csv_settings_are_normalized() -> None:
     assert settings.cors_origin_list == ["http://a.example", "http://b.example"]
     assert settings.queue_names == ("ingestion", "maintenance")
     assert settings.postgres_extension_list == ("vector", "pg_search")
+
+
+def test_chat_execution_mode_only_supports_formal_and_manual_rollback() -> None:
+    assert Settings(_env_file=None).chat_execution_mode == "technical_support"
+    assert (
+        Settings(_env_file=None, chat_execution_mode="legacy_rag").chat_execution_mode
+        == "legacy_rag"
+    )
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, chat_execution_mode="shadow")
 
 
 def test_embedding_dimension_is_frozen() -> None:

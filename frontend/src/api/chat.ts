@@ -6,10 +6,25 @@ function authHeaders(): Record<string, string> {
 }
 
 export interface ChatContentBlock {
-  type: "text" | "image";
+  type: "text" | "table" | "image";
+  sequence_no?: number;
   text?: string;
   source_id?: string;
   image_asset_id?: string;
+  caption?: string;
+  url?: string;
+  mime_type?: string;
+  width?: number;
+  height?: number;
+}
+
+export interface ChatSupportSection {
+  type: string;
+  title: string;
+  content: string;
+  evidence_element_ids: string[];
+  risk_level?: string | null;
+  disclaimer?: string | null;
 }
 
 export interface ChatReference {
@@ -23,11 +38,17 @@ export interface ChatReference {
 export interface ChatDoneEvent {
   conversation_id: string;
   message_id: string;
+  trace_id: string;
+  index_id?: string;
   answer: string;
-  response_type: "ANSWERED" | "UNCONFIRMED" | "OUT_OF_SCOPE" | "DOC_DELIVERED";
-  answer_mode: string | null;
-  disclaimer: string | null;
+  response_type: "ANSWERED" | "UNCONFIRMED" | "OUT_OF_SCOPE" | "DOC_DELIVERED" | "DOCUMENT_DELIVERED" | "CLARIFICATION_REQUIRED" | "NEED_MORE_INFORMATION" | "NO_MATCH" | "ESCALATION_REQUIRED";
+  answer_mode?: string | null;
+  support_mode?: string | null;
+  disclaimer?: string | null;
   content: ChatContentBlock[];
+  sections?: ChatSupportSection[];
+  clarification?: { type: string; message: string; choices: Array<{ choice_id: string; title: string }> } | null;
+  escalation?: { required: boolean; reason: string | null } | null;
   references: ChatReference[];
   usage: Record<string, unknown>;
   latency_ms: number;
@@ -78,9 +99,10 @@ export async function streamChat(
   question: string,
   conversationId: string | undefined,
   callbacks: ChatStreamCallbacks,
+  options: { choiceId?: string } = {},
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(apiBaseUrl + "/api/v1/chat/stream", {
+  const response = await fetch(apiBaseUrl + "/api/v1/support/chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -90,6 +112,7 @@ export async function streamChat(
       knowledge_id: knowledgeId,
       conversation_id: conversationId ?? null,
       question,
+      ...(options.choiceId ? { choice_id: options.choiceId } : {}),
     }),
     signal,
   });

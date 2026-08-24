@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+from typing import Any
+
+from app.support.models import FocusedDocument
+
+
+def deliver_document(
+    document: FocusedDocument, *, include_images: bool
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return original elements in document order; no LLM or chunk reconstruction."""
+    content: list[dict[str, Any]] = []
+    images: list[dict[str, Any]] = []
+    for block in document.blocks:
+        if block.type == "image":
+            if not include_images or block.image_asset_id is None:
+                continue
+            image = {
+                "type": "image",
+                "sequence_no": block.sequence_no,
+                "image_asset_id": str(block.image_asset_id),
+                "caption": block.caption,
+                "mime_type": block.mime_type,
+                "width": block.width,
+                "height": block.height,
+                "url": f"/api/v1/image-assets/{block.image_asset_id}/content",
+            }
+            content.append(image)
+            images.append({key: value for key, value in image.items() if key != "type"})
+        else:
+            content.append(
+                {
+                    "type": "table" if block.type == "table" else "text",
+                    "sequence_no": block.sequence_no,
+                    "text": block.text,
+                    "source_id": str(block.element_id),
+                }
+            )
+    return content, images

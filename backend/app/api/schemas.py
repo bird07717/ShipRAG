@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class KnowledgeBaseCreate(BaseModel):
@@ -204,6 +204,11 @@ class ChatStreamRequest(BaseModel):
     conversation_id: UUID | None = None
     question: str = Field(min_length=1, max_length=4_000)
     user_id: str | None = Field(default=None, min_length=1, max_length=100)
+    problem_code: str | None = Field(default=None, min_length=1, max_length=100)
+    document_id: UUID | None = None
+    choice_id: str | None = Field(default=None, min_length=1, max_length=100)
+    request_id: str | None = Field(default=None, min_length=1, max_length=200)
+    include_images: bool = True
 
 
 class WelcomeResponse(BaseModel):
@@ -256,7 +261,19 @@ class RagTraceResponse(BaseModel):
     citation_result: dict[str, Any]
     status: Literal["RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
     user_id: str | None = None
-    response_type: Literal["ANSWERED", "UNCONFIRMED", "OUT_OF_SCOPE", "DOC_DELIVERED"] | None = None
+    response_type: (
+        Literal[
+            "ANSWERED",
+            "UNCONFIRMED",
+            "OUT_OF_SCOPE",
+            "DOC_DELIVERED",
+            "DOCUMENT_DELIVERED",
+            "CLARIFICATION_REQUIRED",
+            "NO_MATCH",
+            "ESCALATION_REQUIRED",
+        ]
+        | None
+    ) = None
     answer_mode: (
         Literal[
             "PRODUCT_KNOWLEDGE",
@@ -297,7 +314,19 @@ class TraceSummaryResponse(BaseModel):
     question: str
     status: Literal["RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
     user_id: str | None = None
-    response_type: Literal["ANSWERED", "UNCONFIRMED", "OUT_OF_SCOPE", "DOC_DELIVERED"] | None = None
+    response_type: (
+        Literal[
+            "ANSWERED",
+            "UNCONFIRMED",
+            "OUT_OF_SCOPE",
+            "DOC_DELIVERED",
+            "DOCUMENT_DELIVERED",
+            "CLARIFICATION_REQUIRED",
+            "NO_MATCH",
+            "ESCALATION_REQUIRED",
+        ]
+        | None
+    ) = None
     answer_mode: (
         Literal[
             "PRODUCT_KNOWLEDGE",
@@ -365,6 +394,42 @@ class MetricsLatencyResponse(BaseModel):
     range: MetricsRange
     total: MetricsLatencySummary
     stages: dict[str, int]
+
+
+class SupportMetricsResponse(BaseModel):
+    """Operational metrics calculated only from persisted Support traces.
+
+    Metrics which require a labelled expected document (for example Hit@1 and
+    document-switch accuracy) deliberately do not appear here.  They belong
+    to the small developer acceptance suite rather than production telemetry.
+    """
+
+    range: MetricsRange
+    support_turns: int
+    first_turns: int
+    followup_turns: int
+    document_delivered: int
+    clarification_required: int
+    clarification_resolved: int
+    no_match: int
+    escalation_required: int
+    canonical_or_alias_matches: int
+    llm_catalog_matches: int
+    general_guidance_turns: int
+    evidence_missing: int
+    high_risk_intercepts: int
+    structured_output_retries: int
+    workflow_conflicts: int
+    model_calls: int
+    document_delivery_rate: float
+    clarification_rate: float
+    clarification_resolution_rate: float
+    escalation_rate: float
+    general_guidance_rate: float
+    workflow_conflict_rate: float
+    first_turn_latency: MetricsLatencySummary
+    followup_latency: MetricsLatencySummary
+    tokens: dict[str, int]
 
 
 class ModelConfigResponse(BaseModel):
@@ -489,13 +554,24 @@ class ChatRequest(BaseModel):
     conversation_id: UUID | None = None
     question: str = Field(min_length=1, max_length=4_000)
     user_id: str | None = Field(default=None, min_length=1, max_length=100)
+    problem_code: str | None = Field(default=None, min_length=1, max_length=100)
+    document_id: UUID | None = None
+    choice_id: str | None = Field(default=None, min_length=1, max_length=100)
+    request_id: str | None = Field(default=None, min_length=1, max_length=200)
+    include_images: bool = True
 
 
 class ChatContentBlock(BaseModel):
-    type: Literal["text", "image"]
+    type: Literal["text", "table", "image"]
+    sequence_no: int | None = None
     text: str | None = None
     source_id: str | None = None
     image_asset_id: str | None = None
+    caption: str | None = None
+    url: str | None = None
+    mime_type: str | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 class ChatReference(BaseModel):
@@ -506,11 +582,104 @@ class ChatReference(BaseModel):
     download_url: str
 
 
+class ChatImage(BaseModel):
+    image_asset_id: str
+    sequence_no: int | None = None
+    caption: str | None = None
+    url: str
+    mime_type: str | None = None
+    width: int | None = None
+    height: int | None = None
+
+
+class ChatDocument(BaseModel):
+    id: str
+    problem_code: str | None = None
+    title: str
+    download_url: str | None = None
+
+
+class ChatRouting(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    method: str | None = None
+    confidence: float | None = None
+    decision: str | None = None
+
+
+class ChatSupportSection(BaseModel):
+    type: Literal[
+        "DOCUMENT_FACT",
+        "DOCUMENT_EXPLANATION",
+        "GENERAL_GUIDANCE",
+        "UNVERIFIED_HYPOTHESIS",
+        "NEED_INFORMATION",
+        "WARNING",
+    ]
+    title: str
+    content: str
+    evidence_element_ids: list[str] = Field(default_factory=list)
+    risk_level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] | None = None
+    disclaimer: str | None = None
+
+
+class ChatChoice(BaseModel):
+    choice_id: str
+    document_id: str
+    problem_code: str | None = None
+    title: str
+
+
+class ChatClarification(BaseModel):
+    type: Literal["DOCUMENT_CHOICE", "CONFIRM_DOCUMENT_SWITCH", "NEED_MORE_INFORMATION"]
+    message: str
+    choices: list[ChatChoice] = Field(default_factory=list)
+
+
+class ChatWorkflow(BaseModel):
+    current_step: int | None = None
+    completed_steps: list[int] = Field(default_factory=list)
+    skipped_steps: list[int] = Field(default_factory=list)
+    blocked_step: int | None = None
+    observations: list[dict[str, str]] = Field(default_factory=list)
+    collected_information: dict[str, str] = Field(default_factory=dict)
+    missing_information: list[str] = Field(default_factory=list)
+    pending_options: list[dict[str, Any]] = Field(default_factory=list)
+    escalation: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatEscalationSummary(BaseModel):
+    problem_code: str | None = None
+    current_step: int | None = None
+    completed_steps: list[int] = Field(default_factory=list)
+    observations: list[str] = Field(default_factory=list)
+    checks_performed: list[int] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+
+
+class ChatEscalation(BaseModel):
+    required: bool
+    reason: str | None = None
+    summary: ChatEscalationSummary | None = None
+    trace_id: str | None = None
+
+
 class ChatResponse(BaseModel):
     message_id: str
     conversation_id: str
     trace_id: str
-    response_type: Literal["ANSWERED", "UNCONFIRMED", "OUT_OF_SCOPE", "DOC_DELIVERED"]
+    index_id: str | None = None
+    response_type: Literal[
+        "ANSWERED",
+        "UNCONFIRMED",
+        "OUT_OF_SCOPE",
+        "DOC_DELIVERED",
+        "DOCUMENT_DELIVERED",
+        "CLARIFICATION_REQUIRED",
+        "NEED_MORE_INFORMATION",
+        "NO_MATCH",
+        "ESCALATION_REQUIRED",
+    ]
     answer_mode: (
         Literal[
             "PRODUCT_KNOWLEDGE",
@@ -522,7 +691,44 @@ class ChatResponse(BaseModel):
         | None
     ) = None
     disclaimer: str | None = None
-    content: list[ChatContentBlock]
-    references: list[ChatReference]
-    usage: dict[str, Any]
+    answer: str = ""
+    support_mode: str | None = None
+    sections: list[ChatSupportSection] = Field(default_factory=list)
+    content: list[ChatContentBlock] = Field(default_factory=list)
+    images: list[ChatImage] = Field(default_factory=list)
+    document: ChatDocument | None = None
+    routing: ChatRouting | None = None
+    workflow: ChatWorkflow | None = None
+    clarification: ChatClarification | None = None
+    escalation: ChatEscalation | None = None
+    references: list[ChatReference] = Field(default_factory=list)
+    usage: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int
+
+
+class ProblemProfileUpsert(BaseModel):
+    document_id: UUID
+    problem_code: str = Field(min_length=1, max_length=100)
+    canonical_question: str = Field(min_length=1, max_length=500)
+    aliases: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    product_name: str | None = Field(default=None, max_length=200)
+    model_names: list[str] = Field(default_factory=list)
+    task_type: str | None = Field(default=None, max_length=50)
+    enabled: bool = True
+
+    @field_validator("aliases", "keywords", "model_names")
+    @classmethod
+    def non_empty_string_items(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("列表项不能为空")
+        return value
+
+
+class ProblemProfileResponse(ProblemProfileUpsert):
+    id: UUID
+    knowledge_id: UUID
+    support_ready: bool
+    readiness_reasons: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime

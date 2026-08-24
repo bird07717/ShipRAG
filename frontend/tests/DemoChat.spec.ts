@@ -89,7 +89,7 @@ describe("DemoChat", () => {
       }),
     );
 
-    expect(wrapper.text()).toContain("Ask your knowledge base");
+    expect(wrapper.text()).toContain("测试技术支持问答");
     expect(wrapper.text()).toContain("你好，我是文档助手");
     expect(wrapper.text()).toContain("如何配置数据库？");
   });
@@ -124,7 +124,7 @@ describe("DemoChat", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("如何配置数据库？");
-    expect(wrapper.text()).toContain("RAG Assistant");
+    expect(wrapper.text()).toContain("技术支持助手");
     expect(wrapper.text()).toContain("第一段");
     expect(wrapper.text()).toContain("Sources · 1");
     expect(wrapper.text()).toContain("manual.docx");
@@ -173,6 +173,6 @@ describe("DemoChat", () => {
     expect(buttons).toHaveLength(1);
     await buttons[0]!.trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("Ask your knowledge base");
+    expect(wrapper.text()).toContain("测试技术支持问答");
   });
 });

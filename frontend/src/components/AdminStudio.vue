@@ -13,6 +13,7 @@ import PlaygroundView from "@/views/PlaygroundView.vue";
 import TracesView from "@/views/TracesView.vue";
 import ConfigurationView from "@/views/ConfigurationView.vue";
 import SettingsView from "@/views/SettingsView.vue";
+import SupportProfilesView from "@/views/SupportProfilesView.vue";
 
 const props = defineProps<{ view: string }>();
 
@@ -27,6 +28,7 @@ const views: Record<string, typeof DashboardView> = {
   traces: TracesView,
   configuration: ConfigurationView,
   settings: SettingsView,
+  "support-profiles": SupportProfilesView,
 };
 
 let indexPollTimer: ReturnType<typeof setInterval> | undefined;

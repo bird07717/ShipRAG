@@ -11,12 +11,14 @@ import TrendChart, { type TrendPoint } from "@/components/ui/TrendChart.vue";
 import type {
   MetricsOverview,
   MetricsTimeseriesPoint,
+  SupportMetrics,
   TraceSummary,
 } from "@/types/admin";
 
 const store = useAdminStore();
 
 const overview = ref<MetricsOverview | null>(null);
+const supportMetrics = ref<SupportMetrics | null>(null);
 const timeseries = ref<MetricsTimeseriesPoint[]>([]);
 const noAnswerTraces = ref<TraceSummary[]>([]);
 const metricsError = ref("");
@@ -57,6 +59,7 @@ async function loadMetrics() {
     adminApi.getMetricsOverview(params),
     adminApi.getMetricsTimeseries(params),
     adminApi.listNoAnswerTraces(),
+    adminApi.getSupportMetrics(params),
   ]);
   // Shape guards: an older backend (pre-metrics) or a gateway returning a
   // JSON error array must not crash the dashboard render.
@@ -72,6 +75,13 @@ async function loadMetrics() {
   }
   if (results[2].status === "fulfilled" && Array.isArray(results[2].value)) {
     noAnswerTraces.value = results[2].value;
+  }
+  if (
+    results[3].status === "fulfilled" &&
+    results[3].value &&
+    typeof results[3].value.support_turns === "number"
+  ) {
+    supportMetrics.value = results[3].value;
   }
   if (overview.value === null || results.some((result) => result.status === "rejected")) {
     metricsError.value = "质量指标加载失败，可能是后端尚未提供 /metrics 接口（需迁移 0014）。";
@@ -145,6 +155,41 @@ onMounted(loadMetrics);
       :closable="false"
       show-icon
     />
+
+    <section v-if="supportMetrics" class="panel">
+      <header class="panel-header">
+        <div>
+          <h3>Technical Support（7d）</h3>
+          <span class="sub">只统计 Support V2 Trace；Hit@1 与切换准确率在标注集离线评测中计算</span>
+        </div>
+      </header>
+      <div class="metric-grid support-metric-grid">
+        <MetricCard
+          label="Support Turns"
+          :value="supportMetrics.support_turns.toLocaleString()"
+          :context="`首轮 ${supportMetrics.first_turns} · 后续 ${supportMetrics.followup_turns}`"
+          :icon="ChatDotRound"
+        />
+        <MetricCard
+          label="Document Delivery"
+          :value="percent(supportMetrics.document_delivery_rate)"
+          :context="`${supportMetrics.document_delivered} 次完整文档交付`"
+          :icon="Notebook"
+        />
+        <MetricCard
+          label="Clarification"
+          :value="percent(supportMetrics.clarification_rate)"
+          :context="`后续成功 ${percent(supportMetrics.clarification_resolution_rate)}`"
+          :icon="Warning"
+        />
+        <MetricCard
+          label="Escalation"
+          :value="percent(supportMetrics.escalation_rate)"
+          :context="`Workflow 冲突 ${supportMetrics.workflow_conflicts} · P95 ${supportMetrics.followup_latency.p95_ms} ms`"
+          :icon="Clock"
+        />
+      </div>
+    </section>
 
     <section v-if="chartPoints.length" class="panel">
       <header class="panel-header">

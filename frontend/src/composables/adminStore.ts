@@ -11,6 +11,8 @@ import type {
   ModelConfigUpdatePayload,
   ModelProbeResult,
   PromptTemplate,
+  ProblemProfile,
+  ProblemProfilePayload,
   RagConfig,
   RagConfigUpdatePayload,
   RagTrace,
@@ -31,6 +33,7 @@ export const adminStore = reactive({
   models: [] as ModelConfig[],
   ragConfig: null as RagConfig | null,
   prompts: [] as PromptTemplate[],
+  problemProfiles: [] as ProblemProfile[],
   elements: [] as Array<Record<string, unknown>>,
   chunks: [] as Array<Record<string, unknown>>,
   latestIndexTasks: {} as Record<string, IndexTask | undefined>,
@@ -165,6 +168,9 @@ export const adminStore = reactive({
     await this.run(async () => {
       await this.loadKnowledgeDetails();
       this.traces = await adminApi.listTraces(this.selectedKnowledgeId || undefined);
+      this.problemProfiles = this.selectedKnowledgeId
+        ? await adminApi.listProblemProfiles(this.selectedKnowledgeId)
+        : [];
     });
   },
 
@@ -291,7 +297,21 @@ export const adminStore = reactive({
     await this.run(async () => {
       await adminApi.updateRagConfig(payload);
       this.ragConfig = await adminApi.getRagConfig();
-    }, "RAG 检索配置已保存，下一轮对话生效");
+  }, "RAG 检索配置已保存，下一轮对话生效");
+  },
+
+  async loadProblemProfiles(): Promise<void> {
+    this.problemProfiles = this.selectedKnowledgeId
+      ? await adminApi.listProblemProfiles(this.selectedKnowledgeId)
+      : [];
+  },
+
+  async saveProblemProfile(payload: ProblemProfilePayload): Promise<void> {
+    if (!this.selectedKnowledgeId) return;
+    await this.run(async () => {
+      await adminApi.upsertProblemProfile(this.selectedKnowledgeId, payload);
+      await this.loadProblemProfiles();
+    }, "问题 Profile 已保存，下一轮路由生效");
   },
 
   async saveModelConfig(modelId: string, payload: ModelConfigUpdatePayload): Promise<void> {

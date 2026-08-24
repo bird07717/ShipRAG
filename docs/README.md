@@ -11,7 +11,8 @@
 | [api-contract.md](api-contract.md) | REST、异步任务、错误格式与 SSE 事件协议 |
 | [ingestion-pipeline.md](ingestion-pipeline.md) | DOCX 上传、解析、图片处理、Chunk、Embedding 和构建发布 |
 | [rag-pipeline.md](rag-pipeline.md) | 在线检索、融合、Rerank、Prompt、流式回答与引用 |
-| [technical-support-refactor-plan.md](technical-support-refactor-plan.md) | 对话式技术支持系统的目标架构、迁移步骤、测试、上线门禁和完成定义 |
+| [technical-support-refactor-plan.md](technical-support-refactor-plan.md) | 精简技术支持主链路、可选项、取消项和验证顺序 |
+| [vdr600-support-readiness.md](vdr600-support-readiness.md) | VDR600 真实文档导入与 Support 验证记录 |
 | [development.md](development.md) | 本地开发、专项检查和质量门禁 |
 | [deployment/production.md](deployment/production.md) | 生产部署、迁移与发布流程 |
 | [deployment/recovery-runbook.md](deployment/recovery-runbook.md) | 依赖故障、数据备份和恢复操作 |
@@ -29,7 +30,9 @@
 | [ADR-0007](adr/0007-fixed-embedding-dimension.md) | 接受 | V1 使用部署级固定 Embedding 维度，改变维度走 Schema 迁移 |
 | [ADR-0008](adr/0008-online-model-config-and-secrets.md) | 接受 | 全模型类型在线编辑（按消费时机生效）、密钥优先级链与维度契约门禁 |
 
-ADR 描述的是已接受的架构决策，不自动等于每一项管理工作流均已落地。当前 RAG Studio 不实现 Chat SSE 客户端；ADR-0005 所述的密钥存储与 ADR-0008 的在线模型编辑、密钥写入/轮换、维度门禁已作为公开管理能力提供。
+ADR 描述的是已接受的架构决策，不自动等于每一项管理工作流均已落地。Support Studio 的
+问答测试页调用正式 Support SSE；Generic RAG Playground 只用于检索诊断。ADR-0005 所述的
+密钥存储与 ADR-0008 的在线模型编辑、密钥写入/轮换、维度门禁已作为管理能力提供。
 
 ## 规范性语言
 

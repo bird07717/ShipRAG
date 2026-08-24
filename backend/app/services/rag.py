@@ -1048,7 +1048,9 @@ class RagService:
                 index_id=turn.index_id,
                 document_id=decision.document_id,
             )
-            await self.repository.set_conversation_focus(turn.conversation_id, decision.document_id)
+            await self.repository.set_conversation_focus(
+                turn.conversation_id, decision.document_id, turn.index_id
+            )
             delivery = self._build_delivery_payload(document)
             return _ChatPlan(
                 kind="DELIVER",
@@ -1075,7 +1077,9 @@ class RagService:
                     index_id=turn.index_id,
                     document_id=matched_id,
                 )
-                await self.repository.set_conversation_focus(turn.conversation_id, matched_id)
+                await self.repository.set_conversation_focus(
+                    turn.conversation_id, matched_id, turn.index_id
+                )
                 delivery = self._build_delivery_payload(document)
                 routing = decision.to_dict()
                 routing["resolved_from"] = "TITLE_MATCH"

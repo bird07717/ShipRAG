@@ -1,8 +1,10 @@
-# Enterprise RAG Platform
+# Enterprise Technical Support Assistant
 
-企业产品文档知识库与多模态 RAG 问答平台。当前代码、OpenAPI 和 Alembic 迁移头是系统行为、修改与发布的事实来源。
+面向企业技术文档的问题识别、完整文档交付和文档约束后续问答服务。Generic RAG
+只保留为兼容回退和检索调试工具，不是正式 Support 问答主链路。当前代码、OpenAPI 和
+Alembic 迁移头是系统行为、修改与发布的事实来源。
 
-> 当前迁移头为 `0014`。对目标版本的发布结论必须来自相同代码、配置和 Schema 上重新执行的检查，不能沿用历史阶段性结论。
+> 当前迁移头为 `0018`。对目标版本的发布结论必须来自相同代码、配置和 Schema 上重新执行的检查，不能沿用历史阶段性结论。
 
 ## 当前能力
 
@@ -11,8 +13,10 @@
 - `/api/v1` 服务级 Bearer Token 认证骨架
 - RQ Worker 与三条基础队列
 - PostgreSQL 17 + pgvector、Redis、MinIO 私有 Bucket
-- Alembic `0001`–`0014`：包括摄取、RAG、Parent/Child Chunk、文档聚焦、运行时配置、模型密钥审计和质量指标
-- Vue 3 + TypeScript + Vite + Element Plus 的 RAG Studio 管理台
+- Alembic `0001`–`0018`：包括摄取、RAG、Support 问题目录、会话并发、文档版本锁定和响应契约
+- Vue 3 + TypeScript + Vite + Element Plus 的 Support Studio 管理台
+- `/api/v1/support/chat` 与 `/api/v1/support/chat/stream` 正式技术支持接口：首轮返回完整文档及图片，后续由 LLM 在聚焦文档事实边界内解释
+- 问题目录只要求稳定的问题编号、标准问题和关联文档；Alias、关键词、产品和型号均为可选优化项
 - 后端和前端静态检查、测试、覆盖率与生产构建门禁
 - DOCX/OOXML、MinIO 图片传输、严格中文 BM25 和云模型契约探测套件
 - Word 上传、幂等校验、RQ 全量索引构建、Element/Chunk 与 1024 维图文 Embedding
@@ -28,7 +32,7 @@
 - Qwen3-VL-Reranker 图文重排、可审计降级与完整引用校验
 - 自动/人工发布双索引、失败隔离、索引/任务管理 API 与原子切换
 - RAG Playground 参数实验、PLAYGROUND Trace 和检索全阶段诊断
-- 服务端质量统计：Chat 请求 `user_id` 透传、trace 持久化 `response_type`/`answer_mode`（迁移 `0014`）与 `/metrics` 无答案率、延迟分位数、token 成本聚合 API
+- 服务端质量统计：Chat 请求 `user_id` 透传、trace 持久化 `response_type`/`answer_mode`，`/metrics` 提供无答案率、延迟分位数、token 成本及 Support 专属运行指标
 - 全模型类型在线编辑（LLM/Rerank 下一轮生效；Embedding/OCR/Vision 下一次构建生效并标记重建）、API Key 加密写入/轮换/回退（ADR-0008 维度契约门禁与审计）
 - Knowledge Base、Documents、三栏预览、Index Build、Models（全类型可编辑、密钥管理与连通性测试）、RAG 检索配置、Prompt（只读）和 Trace 管理页面
 - Backend/Worker/Frontend 生产镜像、Nginx SSE 代理和带迁移门禁的生产 Compose
@@ -53,13 +57,13 @@ cd frontend && npm run dev
 
 默认开发地址：
 
-- RAG Studio：`http://127.0.0.1:5173`
+- Support Studio：`http://127.0.0.1:5173`
 - FastAPI：`http://127.0.0.1:18000`
 - PostgreSQL：`127.0.0.1:15432`
 - Redis：`127.0.0.1:16379`
 - MinIO API/Console：`127.0.0.1:19000/19001`
 
-完整说明见 [工程文档索引](docs/README.md)、[生产部署指南](docs/deployment/production.md)、[当前 API 契约](docs/api-contract.md)及 [对话式技术支持重构计划](docs/technical-support-refactor-plan.md)。
+完整说明见 [工程文档索引](docs/README.md)、[生产部署指南](docs/deployment/production.md)、[当前 API 契约](docs/api-contract.md)及 [精简技术支持设计](docs/technical-support-refactor-plan.md)。
 
 ## 质量检查
 

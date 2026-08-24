@@ -11,6 +11,7 @@ from app.api.schemas import (
     MetricsLatencyResponse,
     MetricsOverviewResponse,
     MetricsTimeseriesPoint,
+    SupportMetricsResponse,
 )
 from app.common.errors import ApiError
 from app.core.resources import AppResources
@@ -84,6 +85,21 @@ async def metrics_latency(
     return await repository.latency(
         knowledge_id=knowledge_id,
         mode=mode,
+        created_from=_parse_datetime(created_from),
+        created_to=_parse_datetime(created_to),
+    )
+
+
+@router.get("/metrics/support", response_model=SupportMetricsResponse)
+async def support_metrics(
+    repository: Annotated[MetricsRepository, Depends(get_metrics_repository)],
+    knowledge_id: Annotated[UUID | None, Query()] = None,
+    created_from: Annotated[str | None, Query(alias="from")] = None,
+    created_to: Annotated[str | None, Query(alias="to")] = None,
+) -> dict[str, Any]:
+    """Return operational statistics for formal technical-support turns."""
+    return await repository.support(
+        knowledge_id=knowledge_id,
         created_from=_parse_datetime(created_from),
         created_to=_parse_datetime(created_to),
     )

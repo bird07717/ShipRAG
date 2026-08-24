@@ -14,8 +14,9 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from app.common.errors import ApiError
+from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
-from app.rag.llm import ZhipuLlmProvider, create_llm_provider
+from app.rag.llm import FakeLlmProvider, LlmError, ZhipuLlmProvider, create_llm_provider
 from app.rag.model_probe import probe_model
 from app.rag.models import ModelSnapshot
 from app.rag.rerank import SiliconFlowRerankProvider, create_rerank_provider
@@ -127,6 +128,18 @@ class TestProviderKeyPrecedence:
             api_key=SecretStr("sk-from-db"),
         )
         assert isinstance(create_llm_provider(settings, snapshot), ZhipuLlmProvider)
+
+    def test_auto_without_key_allows_fake_only_in_test(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ZHIPU_API_KEY", "")
+        snapshot = ModelSnapshot(provider="zhipu", model_name="glm-5.2", parameters={})
+        test_settings = Settings(_env_file=None, app_env="test", m3_llm_provider="auto")
+        assert isinstance(create_llm_provider(test_settings, snapshot), FakeLlmProvider)
+        development = Settings(_env_file=None, app_env="development", m3_llm_provider="auto")
+        with pytest.raises(LlmError) as exc_info:
+            create_llm_provider(development, snapshot)
+        assert exc_info.value.code == "MODEL_NOT_CONFIGURED"
 
     def test_create_rerank_provider_auto_uses_snapshot_key(
         self, monkeypatch: pytest.MonkeyPatch

@@ -18,7 +18,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "Enterprise RAG Platform"
+    app_name: str = "Enterprise Technical Support Assistant"
     app_env: Literal["development", "test", "staging", "production"] = "development"
     log_level: str = "INFO"
     api_prefix: str = "/api/v1"
@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     m3_llm_temperature: float = 0.1
     m3_trace_retain_prompt: bool = True
     m3_provider_timeout_seconds: float = 120.0
+
+    # Formal Support is the default. Legacy RAG remains only as a simple,
+    # explicit rollback for the compatibility /chat endpoints.
+    chat_execution_mode: Literal["legacy_rag", "technical_support"] = "technical_support"
+    support_history_max_messages: int = 8
+    support_llm_max_tokens: int = 2_048
+    support_llm_temperature: float = 0.1
 
     m3_doc_agg_t_high: float = 0.9
     m3_doc_agg_t_low: float = 0.5
@@ -382,6 +389,8 @@ class Settings(BaseSettings):
     def validate_production_security(self) -> Self:
         if self.app_env == "production" and not self.service_token:
             raise ValueError("SERVICE_TOKEN is required in production")
+        if self.app_env in {"staging", "production"} and self.m3_llm_provider == "fake":
+            raise ValueError("M3_LLM_PROVIDER=fake is forbidden in staging and production")
         return self
 
     @property

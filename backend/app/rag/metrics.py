@@ -88,7 +88,9 @@ class MetricsRepository:
                 count(*) FILTER (WHERE response_type = 'ANSWERED') AS answered,
                 count(*) FILTER (WHERE response_type = 'UNCONFIRMED') AS unconfirmed,
                 count(*) FILTER (WHERE response_type = 'OUT_OF_SCOPE') AS out_of_scope,
-                count(*) FILTER (WHERE response_type = 'DOC_DELIVERED') AS doc_delivered,
+                count(*) FILTER (
+                    WHERE response_type IN ('DOC_DELIVERED', 'DOCUMENT_DELIVERED')
+                ) AS doc_delivered,
                 count(*) FILTER (WHERE response_type IS NOT NULL) AS with_response_type,
                 count(DISTINCT user_id) AS unique_users,
                 count(*) FILTER (
@@ -173,7 +175,9 @@ class MetricsRepository:
                    count(*) FILTER (WHERE response_type = 'ANSWERED') AS answered,
                    count(*) FILTER (WHERE response_type = 'UNCONFIRMED') AS unconfirmed,
                    count(*) FILTER (WHERE response_type = 'OUT_OF_SCOPE') AS out_of_scope,
-                   count(*) FILTER (WHERE response_type = 'DOC_DELIVERED') AS doc_delivered,
+                   count(*) FILTER (
+                       WHERE response_type IN ('DOC_DELIVERED', 'DOCUMENT_DELIVERED')
+                   ) AS doc_delivered,
                    COALESCE(percentile_cont(0.95) WITHIN GROUP (
                        ORDER BY (latency ->> 'total_ms')::bigint
                    ), 0)::bigint AS p95_ms,
@@ -258,6 +262,183 @@ class MetricsRepository:
             "stages": {key: int(row[key]) for key in _STAGE_KEYS},
         }
 
+    async def support(
+        self,
+        *,
+        knowledge_id: Any = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate only traces written by the Support V2 orchestration.
+
+        The application records its Support envelope in ``retrieval_result``.
+        This keeps the query backwards-compatible with pre-V2 traces and
+        avoids assigning made-up values to metrics that need a labelled set.
+        """
+        start, end = self.resolve_range(created_from, created_to)
+        where, parameters = self._filters(knowledge_id, "CHAT", start, end)
+        support_where = f"{where} AND retrieval_result ->> 'support_version' = '1'"
+        query = f"""
+            SELECT
+                count(*) AS support_turns,
+                count(*) FILTER (WHERE NOT EXISTS (
+                    SELECT 1 FROM rag_trace prior
+                    WHERE prior.conversation_id = rag_trace.conversation_id
+                      AND prior.created_at < rag_trace.created_at
+                      AND prior.retrieval_result ->> 'support_version' = '1'
+                )) AS first_turns,
+                count(*) FILTER (WHERE EXISTS (
+                    SELECT 1 FROM rag_trace prior
+                    WHERE prior.conversation_id = rag_trace.conversation_id
+                      AND prior.created_at < rag_trace.created_at
+                      AND prior.retrieval_result ->> 'support_version' = '1'
+                )) AS followup_turns,
+                count(*) FILTER (
+                    WHERE response_type = 'DOCUMENT_DELIVERED'
+                ) AS document_delivered,
+                count(*) FILTER (
+                    WHERE response_type = 'CLARIFICATION_REQUIRED'
+                ) AS clarification_required,
+                count(*) FILTER (WHERE response_type = 'NO_MATCH') AS no_match,
+                count(*) FILTER (
+                    WHERE response_type = 'ESCALATION_REQUIRED'
+                ) AS escalation_required,
+                count(*) FILTER (WHERE retrieval_result -> 'problem_resolution' ->> 'method'
+                    IN ('CANONICAL_QUESTION', 'ALIAS')) AS canonical_or_alias_matches,
+                count(*) FILTER (WHERE retrieval_result -> 'problem_resolution' ->> 'method'
+                    = 'LLM_CATALOG') AS llm_catalog_matches,
+                count(*) FILTER (WHERE COALESCE(
+                    (retrieval_result ->> 'general_guidance_count')::integer, 0
+                ) > 0) AS general_guidance_turns,
+                count(*) FILTER (WHERE error ->> 'code' = 'MISSING_EVIDENCE') AS evidence_missing,
+                count(*) FILTER (
+                    WHERE retrieval_result ->> 'high_risk_intercepted' = 'true'
+                ) AS high_risk_intercepts,
+                COALESCE(sum(COALESCE(
+                    (retrieval_result ->> 'structured_output_retries')::bigint, 0
+                )), 0)::bigint AS structured_output_retries,
+                count(*) FILTER (
+                    WHERE error ->> 'code' = 'WORKFLOW_CONFLICT'
+                ) AS workflow_conflicts,
+                COALESCE(sum(COALESCE(
+                    (retrieval_result ->> 'model_calls')::bigint, 0
+                )), 0)::bigint AS model_calls,
+                count(*) FILTER (WHERE response_type = 'CLARIFICATION_REQUIRED' AND EXISTS (
+                    SELECT 1 FROM rag_trace later
+                    WHERE later.conversation_id = rag_trace.conversation_id
+                      AND later.created_at > rag_trace.created_at
+                      AND later.retrieval_result ->> 'support_version' = '1'
+                      AND later.status = 'COMPLETED'
+                      AND later.response_type IN (
+                          'DOCUMENT_DELIVERED', 'ANSWERED', 'ESCALATION_REQUIRED'
+                      )
+                )) AS clarification_resolved,
+                COALESCE(percentile_cont(0.5) WITHIN GROUP (
+                    ORDER BY (latency ->> 'total_ms')::bigint
+                ) FILTER (WHERE NOT EXISTS (
+                    SELECT 1 FROM rag_trace prior
+                    WHERE prior.conversation_id = rag_trace.conversation_id
+                      AND prior.created_at < rag_trace.created_at
+                      AND prior.retrieval_result ->> 'support_version' = '1'
+                )), 0)::bigint AS first_p50_ms,
+                COALESCE(percentile_cont(0.95) WITHIN GROUP (
+                    ORDER BY (latency ->> 'total_ms')::bigint
+                ) FILTER (WHERE NOT EXISTS (
+                    SELECT 1 FROM rag_trace prior
+                    WHERE prior.conversation_id = rag_trace.conversation_id
+                      AND prior.created_at < rag_trace.created_at
+                      AND prior.retrieval_result ->> 'support_version' = '1'
+                )), 0)::bigint AS first_p95_ms,
+                COALESCE(percentile_cont(0.99) WITHIN GROUP (
+                    ORDER BY (latency ->> 'total_ms')::bigint
+                ) FILTER (WHERE NOT EXISTS (
+                    SELECT 1 FROM rag_trace prior
+                    WHERE prior.conversation_id = rag_trace.conversation_id
+                      AND prior.created_at < rag_trace.created_at
+                      AND prior.retrieval_result ->> 'support_version' = '1'
+                )), 0)::bigint AS first_p99_ms,
+                COALESCE(avg((latency ->> 'total_ms')::bigint) FILTER (WHERE NOT EXISTS (
+                    SELECT 1 FROM rag_trace prior
+                    WHERE prior.conversation_id = rag_trace.conversation_id
+                      AND prior.created_at < rag_trace.created_at
+                      AND prior.retrieval_result ->> 'support_version' = '1'
+                )), 0)::bigint AS first_avg_ms,
+                COALESCE(percentile_cont(0.5) WITHIN GROUP (
+                    ORDER BY (latency ->> 'total_ms')::bigint
+                ) FILTER (WHERE EXISTS (
+                    SELECT 1 FROM rag_trace prior
+                    WHERE prior.conversation_id = rag_trace.conversation_id
+                      AND prior.created_at < rag_trace.created_at
+                      AND prior.retrieval_result ->> 'support_version' = '1'
+                )), 0)::bigint AS followup_p50_ms,
+                COALESCE(percentile_cont(0.95) WITHIN GROUP (
+                    ORDER BY (latency ->> 'total_ms')::bigint
+                ) FILTER (WHERE EXISTS (
+                    SELECT 1 FROM rag_trace prior
+                    WHERE prior.conversation_id = rag_trace.conversation_id
+                      AND prior.created_at < rag_trace.created_at
+                      AND prior.retrieval_result ->> 'support_version' = '1'
+                )), 0)::bigint AS followup_p95_ms,
+                COALESCE(percentile_cont(0.99) WITHIN GROUP (
+                    ORDER BY (latency ->> 'total_ms')::bigint
+                ) FILTER (WHERE EXISTS (
+                    SELECT 1 FROM rag_trace prior
+                    WHERE prior.conversation_id = rag_trace.conversation_id
+                      AND prior.created_at < rag_trace.created_at
+                      AND prior.retrieval_result ->> 'support_version' = '1'
+                )), 0)::bigint AS followup_p99_ms,
+                COALESCE(avg((latency ->> 'total_ms')::bigint) FILTER (WHERE EXISTS (
+                    SELECT 1 FROM rag_trace prior
+                    WHERE prior.conversation_id = rag_trace.conversation_id
+                      AND prior.created_at < rag_trace.created_at
+                      AND prior.retrieval_result ->> 'support_version' = '1'
+                )), 0)::bigint AS followup_avg_ms,
+                COALESCE(sum((model_usage ->> 'prompt_tokens')::bigint), 0) AS llm_prompt_tokens,
+                COALESCE(sum((model_usage ->> 'completion_tokens')::bigint), 0)
+                    AS llm_completion_tokens
+            FROM rag_trace
+            WHERE {support_where}
+        """
+        async with self.engine.connect() as connection:
+            result = await connection.execute(text(query), parameters)
+            row = dict(result.mappings().one())
+        support_turns = int(row["support_turns"])
+        clarification_required = int(row["clarification_required"])
+        return {
+            "range": {"from": start.isoformat(), "to": end.isoformat(), "mode": "CHAT"},
+            "support_turns": support_turns,
+            "first_turns": int(row["first_turns"]),
+            "followup_turns": int(row["followup_turns"]),
+            "document_delivered": int(row["document_delivered"]),
+            "clarification_required": clarification_required,
+            "clarification_resolved": int(row["clarification_resolved"]),
+            "no_match": int(row["no_match"]),
+            "escalation_required": int(row["escalation_required"]),
+            "canonical_or_alias_matches": int(row["canonical_or_alias_matches"]),
+            "llm_catalog_matches": int(row["llm_catalog_matches"]),
+            "general_guidance_turns": int(row["general_guidance_turns"]),
+            "evidence_missing": int(row["evidence_missing"]),
+            "high_risk_intercepts": int(row["high_risk_intercepts"]),
+            "structured_output_retries": int(row["structured_output_retries"]),
+            "workflow_conflicts": int(row["workflow_conflicts"]),
+            "model_calls": int(row["model_calls"]),
+            "document_delivery_rate": _rate(int(row["document_delivered"]), support_turns),
+            "clarification_rate": _rate(clarification_required, support_turns),
+            "clarification_resolution_rate": _rate(
+                int(row["clarification_resolved"]), clarification_required
+            ),
+            "escalation_rate": _rate(int(row["escalation_required"]), support_turns),
+            "general_guidance_rate": _rate(int(row["general_guidance_turns"]), support_turns),
+            "workflow_conflict_rate": _rate(int(row["workflow_conflicts"]), support_turns),
+            "first_turn_latency": _latency_summary(row, "first"),
+            "followup_latency": _latency_summary(row, "followup"),
+            "tokens": {
+                "llm_prompt": int(row["llm_prompt_tokens"]),
+                "llm_completion": int(row["llm_completion_tokens"]),
+                "llm_total": int(row["llm_prompt_tokens"]) + int(row["llm_completion_tokens"]),
+            },
+        }
+
 
 def _as_aware(value: datetime | None) -> datetime | None:
     if value is None:
@@ -269,3 +450,12 @@ def _rate(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return round(numerator / denominator, 4)
+
+
+def _latency_summary(row: dict[str, Any], prefix: str) -> dict[str, int]:
+    return {
+        "p50_ms": int(row[f"{prefix}_p50_ms"]),
+        "p95_ms": int(row[f"{prefix}_p95_ms"]),
+        "p99_ms": int(row[f"{prefix}_p99_ms"]),
+        "avg_ms": int(row[f"{prefix}_avg_ms"]),
+    }

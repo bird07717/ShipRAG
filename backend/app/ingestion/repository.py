@@ -335,6 +335,28 @@ class IngestionRepository:
             if document["kb_status"] != "ENABLED":
                 raise ApiError("FORBIDDEN", "知识库已停用", 403)
 
+            profile_result = await connection.execute(
+                text(
+                    """
+                    SELECT problem_code FROM document_problem_profile
+                    WHERE document_id = :document_id AND enabled = true
+                    FOR UPDATE
+                    LIMIT 1
+                    """
+                ),
+                {"document_id": document_id},
+            )
+            profile = profile_result.mappings().one_or_none()
+            if profile is not None:
+                raise ApiError(
+                    "DOCUMENT_PROFILE_IN_USE",
+                    (
+                        f"文档正在被问题档案 {profile['problem_code']} 使用；"
+                        "请先禁用或改绑该档案后再删除"
+                    ),
+                    409,
+                )
+
             remaining_result = await connection.execute(
                 text(
                     """

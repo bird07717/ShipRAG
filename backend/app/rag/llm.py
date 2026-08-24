@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from app.core.config import Settings
 from app.rag.models import ModelSnapshot
@@ -31,6 +32,9 @@ class LlmError(RuntimeError):
         self.detail = detail
 
 
+StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
+
+
 class LlmProvider(Protocol):
     usage: dict[str, Any]
 
@@ -45,6 +49,17 @@ class LlmProvider(Protocol):
         temperature: float,
         timeout_seconds: float | None = None,
     ) -> str: ...
+
+    async def complete_structured(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        schema: type[StructuredModel],
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float | None = None,
+    ) -> StructuredModel: ...
 
     async def aclose(self) -> None: ...
 
@@ -76,6 +91,26 @@ class FakeLlmProvider:
         if not self.completions:
             raise LlmError("UPSTREAM_UNAVAILABLE", "Fake complete 未配置", retryable=False)
         return self.completions.pop(0)
+
+    async def complete_structured(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        schema: type[StructuredModel],
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float | None = None,
+    ) -> StructuredModel:
+        return await _complete_structured(
+            self,
+            prompt,
+            system=system,
+            schema=schema,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+        )
 
     async def aclose(self) -> None:
         return None
@@ -140,6 +175,24 @@ class ZhipuLlmProvider:
         temperature: float,
         timeout_seconds: float | None = None,
     ) -> str:
+        return await self._complete_response(
+            prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+        )
+
+    async def _complete_response(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float | None,
+        response_format: dict[str, str] | None = None,
+    ) -> str:
         payload = {
             "model": self.model_name,
             "messages": [
@@ -153,6 +206,8 @@ class ZhipuLlmProvider:
             # reasoning would only burn the token and latency budgets.
             "thinking": {"type": "disabled"},
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
         try:
             response = await self.client.post(
                 "chat/completions",
@@ -240,9 +295,92 @@ class ZhipuLlmProvider:
         except httpx.RequestError as exc:
             raise LlmError("UPSTREAM_UNAVAILABLE", "模型服务暂时不可用", retryable=True) from exc
 
+    async def complete_structured(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        schema: type[StructuredModel],
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float | None = None,
+    ) -> StructuredModel:
+        # GLM supports JSON mode.  Without it, a long focused-document prompt
+        # can occasionally produce prose or a Markdown fence even after the
+        # normal schema repair retry, which leaves a technical-support turn
+        # needlessly failed.
+        current_prompt = prompt
+        for attempt in range(2):
+            raw = await self._complete_response(
+                current_prompt,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout_seconds=timeout_seconds,
+                response_format={"type": "json_object"},
+            )
+            self.usage["structured_attempts"] = attempt + 1
+            try:
+                return schema.model_validate_json(raw)
+            except (ValidationError, ValueError) as exc:
+                if attempt:
+                    raise LlmError(
+                        "STRUCTURED_OUTPUT_INVALID",
+                        "模型未返回有效的结构化结果",
+                        retryable=False,
+                        detail=str(exc)[:500],
+                    ) from exc
+                current_prompt = (
+                    prompt + "\n上一次输出不符合 JSON Schema。"
+                    "仅重新输出完整 JSON，不要 Markdown。校验错误：" + str(exc)[:500]
+                )
+        raise AssertionError("unreachable")
+
     async def aclose(self) -> None:
         if self._owns_client:
             await self.client.aclose()
+
+
+async def _complete_structured(
+    provider: LlmProvider,
+    prompt: str,
+    *,
+    system: str,
+    schema: type[StructuredModel],
+    max_tokens: int,
+    temperature: float,
+    timeout_seconds: float | None,
+) -> StructuredModel:
+    """Collect and validate JSON, allowing one repair request only."""
+    current_prompt = prompt
+    for attempt in range(2):
+        raw = await provider.complete(
+            current_prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+        )
+        # Keep lightweight operational metadata alongside provider usage so
+        # Support traces can distinguish a first-pass structured completion
+        # from a schema-repair retry without retaining the raw model output.
+        provider.usage["structured_attempts"] = attempt + 1
+        try:
+            return schema.model_validate_json(raw)
+        except (ValidationError, ValueError) as exc:
+            if attempt:
+                raise LlmError(
+                    "STRUCTURED_OUTPUT_INVALID",
+                    "模型未返回有效的结构化结果",
+                    retryable=False,
+                    detail=str(exc)[:500],
+                ) from exc
+            current_prompt = (
+                prompt
+                + "\n上一次输出不符合 JSON Schema。仅重新输出完整 JSON，不要 Markdown。校验错误："
+                + str(exc)[:500]
+            )
+    raise AssertionError("unreachable")
 
 
 def create_llm_provider(settings: Settings, snapshot: ModelSnapshot) -> LlmProvider:
@@ -250,6 +388,20 @@ def create_llm_provider(settings: Settings, snapshot: ModelSnapshot) -> LlmProvi
     has_any_key = settings.has_secret(settings.zhipu_api_key) or settings.has_secret(
         snapshot.api_key
     )
-    if mode == "fake" or (mode == "auto" and not has_any_key):
+    if mode == "fake":
+        if settings.app_env in {"staging", "production"}:
+            raise LlmError(
+                "FAKE_PROVIDER_FORBIDDEN",
+                "当前环境禁止使用模拟模型",
+                retryable=False,
+            )
         return FakeLlmProvider()
+    if mode == "auto" and not has_any_key:
+        if settings.app_env == "test":
+            return FakeLlmProvider()
+        raise LlmError(
+            "MODEL_NOT_CONFIGURED",
+            "LLM 模型或 API Key 未配置",
+            retryable=False,
+        )
     return ZhipuLlmProvider(settings, snapshot)

@@ -46,11 +46,17 @@ const menuGroups: MenuGroup[] = [
     ],
   },
   {
-    label: "RAG",
+    label: "Technical Support",
+    items: [
+      { key: "support-profiles", label: "问题文档配置", subtitle: "标准问题与完整文档映射", icon: Files },
+      { key: "support-chat", label: "Support 问答测试", subtitle: "验证完整文档和后续解释", icon: ChatDotRound },
+    ],
+  },
+  {
+    label: "Diagnostics",
     items: [
       { key: "playground", label: "RAG Playground", subtitle: "检索、Prompt 与答案调试", icon: Operation },
       { key: "traces", label: "Trace", subtitle: "完整 RAG 链路追踪", icon: DataLine },
-      { key: "demo-chat", label: "Demo Chat", subtitle: "模拟用户问答演示", icon: ChatDotRound },
     ],
   },
   {
@@ -70,7 +76,7 @@ const activeView = ref("dashboard");
 const activeMenu = computed(
   () => allItems.find((item) => item.key === activeView.value) ?? allItems[0]!,
 );
-const isDemoChat = computed(() => activeView.value === "demo-chat");
+const isDemoChat = computed(() => activeView.value === "support-chat");
 
 /* Data-driven publishing status (replaces the old decorative A/B diagram) */
 const indexStats = computed(() => {
@@ -88,7 +94,7 @@ const indexStats = computed(() => {
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark">R</span>
-        <div><strong>RAG Studio</strong><small>Knowledge Engine</small></div>
+        <div><strong>Support Studio</strong><small>Technical Documents</small></div>
       </div>
       <nav>
         <div v-for="group in menuGroups" :key="group.label" class="nav-group">
@@ -104,7 +110,7 @@ const indexStats = computed(() => {
           </button>
         </div>
       </nav>
-      <div class="sidebar-footer">V1 · M6 COMPLETE</div>
+      <div class="sidebar-footer">V1 · SUPPORT</div>
     </aside>
 
     <main class="main" :class="{ 'chat-mode': isDemoChat }">

@@ -760,13 +760,16 @@ class RagRepository:
             raise ApiError("DOCUMENT_NOT_FOUND", "文档不存在或已删除", 404)
         return dict(row)
 
-    async def set_conversation_focus(self, conversation_id: UUID, document_id: UUID) -> None:
+    async def set_conversation_focus(
+        self, conversation_id: UUID, document_id: UUID, index_id: UUID
+    ) -> None:
         async with self.engine.begin() as connection:
             await connection.execute(
                 text(
                     """
                     UPDATE conversation
                     SET focus_document_id = :document_id,
+                        focus_index_id = :index_id,
                         chat_context = '{}'::jsonb,
                         updated_at = now()
                     WHERE id = :conversation_id
@@ -775,6 +778,7 @@ class RagRepository:
                 {
                     "conversation_id": conversation_id,
                     "document_id": document_id,
+                    "index_id": index_id,
                 },
             )
 
@@ -785,6 +789,7 @@ class RagRepository:
                     """
                     UPDATE conversation
                     SET focus_document_id = NULL,
+                        focus_index_id = NULL,
                         chat_context = '{}'::jsonb,
                         updated_at = now()
                     WHERE id = :conversation_id

@@ -152,7 +152,9 @@ class _RoutingRepository:
     async def get_chunks_by_ids(self, **kwargs: Any) -> list:
         return []
 
-    async def set_conversation_focus(self, conversation_id: Any, document_id: Any) -> None:
+    async def set_conversation_focus(
+        self, conversation_id: Any, document_id: Any, index_id: Any
+    ) -> None:
         self.focus_updates.append(document_id)
 
     async def clear_conversation_focus(self, conversation_id: Any) -> None:

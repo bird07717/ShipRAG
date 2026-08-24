@@ -11,7 +11,6 @@ const store = useAdminStore();
 
 const activeTab = ref("models");
 const selectedPrompt = ref<PromptTemplate | null>(null);
-
 const TYPE_LABELS: Record<string, string> = {
   LLM: "LLM",
   EMBEDDING: "Embedding",

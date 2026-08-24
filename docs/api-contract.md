@@ -10,9 +10,59 @@
 - Chat 流响应 `Content-Type: text/event-stream; charset=utf-8`。
 - 客户端可以发送 `X-Request-ID`；缺失时服务端生成并在响应头返回。
 - 除健康检查外，生产环境接口必须由服务级 Bearer Token 或可信 API 网关保护。
-- RAG Studio 在生产环境通过反向代理获得访问能力，浏览器不得保存长期服务密钥。
+- Support Studio 在生产环境通过反向代理获得访问能力，浏览器不得保存长期服务密钥。
 
 运行中的 OpenAPI 是当前 REST 实现的机器可读来源；本文补充 OpenAPI 不能完整表达的 SSE 事件和行为边界。下文只列出当前已实现的接口；尚未提供的管理写接口不会因为出现在早期设计稿中而成为可调用契约。
+
+## Technical Support Chat V2
+
+企业软件正式接入使用 `POST /api/v1/support/chat` 或
+`POST /api/v1/support/chat/stream`，这两个接口只进入 Technical Support 链路，不依赖
+Generic RAG。旧 `/api/v1/chat` 暂时作为手动回退兼容入口，`/api/v1/rag/playground` 保留通用
+RAG 调试能力。运行模式只有 `technical_support` 和 `legacy_rag`：前者让兼容入口进入正式
+Support，后者显式回退旧链路。当前规模不建设 Shadow、百分比 Rollout 或对应管理平台。
+
+```json
+{
+  "knowledge_id": "uuid",
+  "question": "PDC怎么用U盘刷版本？",
+  "conversation_id": null,
+  "problem_code": null,
+  "document_id": null,
+  "choice_id": null,
+  "user_id": "enterprise-user-123",
+  "request_id": "enterprise-request-456",
+  "include_images": true
+}
+```
+
+`document_id`、`problem_code`、会话待确认项、标准问题和 Alias 按此顺序解析。
+明确命中时返回 `DOCUMENT_DELIVERED`、原始顺序的 `content`（`text`、`table`、`image`）
+和全量 `images`；该路径不调用回答 LLM 或 Generic RAG。后续聚焦对话返回
+`ANSWERED`、`sections`、`workflow` 和经过服务端验证的图片引用。可能转题会返回
+`CLARIFICATION_REQUIRED`，只能在后续请求传入当前会话的 `choice_id` 后切换。
+技术文档不做默认脱敏；只有可复用密码、令牌等凭据不得进入回答和日志。出现这类内容时，
+服务端返回 `ESCALATION_REQUIRED`，由授权人员决定安全的访问方式。
+
+企业调用应带 `Idempotency-Key`；同一个键用于不同请求返回
+`409 IDEMPOTENCY_KEY_REUSED`，处理中返回 `409 REQUEST_IN_PROGRESS`。图片 URL 指向
+服务端受保护的 Image Asset 内容接口，企业后台应代理该请求，不能把长期 Bearer Token
+交给终端用户。若同一 Conversation 的两个 Support 回合基于相同状态同时提交，后到请求
+返回 `409 WORKFLOW_CONFLICT`，调用方应使用新的幂等键重新读取并提交。
+
+问题配置由以下接口维护：
+
+```text
+GET /api/v1/support/problem-profiles?knowledge_id=<uuid>
+PUT /api/v1/support/problem-profiles?knowledge_id=<uuid>
+```
+
+`PUT` 请求包含 `document_id`、`problem_code`、`canonical_question`、`aliases`、
+`keywords`、`model_names`、`task_type` 和 `enabled`。Alias、关键词、产品、型号和任务类型
+均为可选优化项；启用的 Alias 在同一知识库内仍保持唯一，Profile 必须指向该知识库尚未删除的文档。
+Profile 响应同时返回 `support_ready` 和 `readiness_reasons`。只有启用、文档仍
+存在、文档属于当前发布版本且图片资源完整的 Profile 才进入正式问题目录；显式请求未就绪
+文档返回 `409 DOCUMENT_NOT_SUPPORT_READY`。
 
 ## 2. 错误格式
 
@@ -408,7 +458,7 @@ data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务暂时不可用","trace_
 - Assistant Message 在流开始前创建为 `STREAMING`，完成后写入完整答案和最终 sources。
 - 失败时可保存已生成的部分文本用于 Trace，但普通会话 API 不把失败的部分答案当作已完成回答。
 
-`POST` + JSON 不适用于原生 `EventSource`。任何实现 Chat 的浏览器客户端都必须使用 `fetch`、`ReadableStream` 和能处理跨网络分片 SSE 帧的解析器。RAG Studio 的 DemoChat 页面是面向用户的 Chat SSE 客户端；Playground 由服务端消费同一 RAG 流并返回完整 Trace。
+`POST` + JSON 不适用于原生 `EventSource`。任何实现 Chat 的浏览器客户端都必须使用 `fetch`、`ReadableStream` 和能处理跨网络分片 SSE 帧的解析器。Support Studio 的问答测试页调用正式 Support SSE；Generic RAG Playground 由服务端消费旧 RAG 流并返回完整 Trace。
 
 ### 非流式 Chat 与文档路由状态机
 
@@ -578,6 +628,7 @@ dimension?}`。`dimension` 仅 EMBEDDING 返回，若与冻结维度 1024 不一
 - `GET /api/v1/metrics/overview`：总量、`response_type` 分布、无答案率（`UNCONFIRMED` + `OUT_OF_SCOPE` / 已分类 trace 数）、失败率、引用缺失率、rerank 降级率、独立用户数、延迟分位数（P50/P95/P99/均值，取 `latency.total_ms`）与 token 消耗（LLM 与 rerank 分列）。
 - `GET /api/v1/metrics/timeseries`：按 `granularity=day|hour` 分桶的趋势点，含查询量、各 `response_type` 计数、无答案率、P95 延迟与 token 汇总。
 - `GET /api/v1/metrics/latency`：端到端分位数与各阶段平均耗时（`prepare_turn_ms`、`query_rewrite_ms`、`query_embedding_ms`、`bm25_retrieval_ms`、`vector_retrieval_ms`、`fusion_ms`、`rerank_ms`、`context_expansion_ms`、`prompt_ms`、`llm_ms`）。
+- `GET /api/v1/metrics/support`：仅聚合 `retrieval_result.support_version=1` 的正式 Support Trace，提供首轮/后续轮数、文档交付、澄清及澄清后成功、无匹配、人工升级、确定性/LLM Catalog 路由、证据失败、结构化输出重试、工作流冲突、模型调用、首轮与后续 P50/P95/P99 延迟及 LLM token。文档命中和内容完整性由少量开发验收案例及人工测试确认，不建设独立评测平台，也不从生产 Trace 中虚构。
 
 公共参数：`knowledge_id`（可选）、`mode`（默认 `CHAT`，排除 Playground 实验）、`from` / `to`（可选，默认最近 7 天，最长 92 天，`to` 为开区间；`from >= to` 返回 `422`）。
 

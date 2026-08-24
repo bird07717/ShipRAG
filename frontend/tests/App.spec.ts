@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import App from "@/App.vue";
 
 describe("App", () => {
-  it("renders the M6 RAG Studio navigation", async () => {
+  it("renders the Support Studio navigation", async () => {
     const wrapper = mount(App, {
       global: {
         stubs: {
@@ -16,10 +16,12 @@ describe("App", () => {
       },
     });
 
-    expect(wrapper.text()).toContain("RAG Studio");
+    expect(wrapper.text()).toContain("Support Studio");
+    expect(wrapper.text()).toContain("问题文档配置");
+    expect(wrapper.text()).toContain("Support 问答测试");
     expect(wrapper.text()).toContain("Knowledge Base");
     expect(wrapper.text()).toContain("构建在后台");
-    expect(wrapper.text()).toContain("M6");
+    expect(wrapper.text()).toContain("SUPPORT");
     expect(wrapper.text()).toContain("admin-studio");
     expect(wrapper.text()).toContain("health-panel");
 

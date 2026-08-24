@@ -1,0 +1,660 @@
+# ruff: noqa: RUF001
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any, cast
+from uuid import uuid4
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from app.api.schemas import ChatResponse
+from app.common.errors import ApiError
+from app.core.config import Settings
+from app.support.document_delivery import deliver_document
+from app.support.models import (
+    DocumentContentBlock,
+    EvidenceType,
+    FocusedDocument,
+    ProblemDecision,
+    ProblemProfile,
+    RiskLevel,
+    SupportDraft,
+    SupportTurn,
+)
+from app.support.problem_resolver import ProblemResolver, normalize_for_match
+from app.support.repository import SupportRepository
+from app.support.service import TechnicalSupportService
+from app.support.validator import validate_draft
+from app.support.workflow_state import apply_workflow_update, read_workflow, reset_for_document
+
+
+def _profile(*, alias: str = "PDC U盘升级") -> ProblemProfile:
+    return ProblemProfile(
+        id=uuid4(),
+        document_id=uuid4(),
+        knowledge_id=uuid4(),
+        problem_code="PDC_USB_UPGRADE",
+        canonical_question="如何使用U盘升级PDC",
+        aliases=[alias],
+        keywords=["PDC", "升级"],
+    )
+
+
+def test_problem_profile_readiness_reports_all_blocking_reasons() -> None:
+    row = {
+        "id": uuid4(),
+        "document_id": uuid4(),
+        "kb_id": uuid4(),
+        "problem_code": "PDC_NOT_READY",
+        "canonical_question": "未就绪文档",
+        "aliases": [],
+        "keywords": [],
+        "product_name": None,
+        "model_names": [],
+        "task_type": None,
+        "enabled": True,
+        "document_status": "STORED",
+        "active_index_id": None,
+        "document_published": False,
+        "images_complete": False,
+    }
+
+    profile = SupportRepository._profile(row)
+
+    assert profile.support_ready is False
+    assert profile.readiness_reasons == [
+        "KNOWLEDGE_BASE_NOT_READY",
+        "IMAGE_ASSET_MISSING",
+    ]
+
+
+def _document() -> FocusedDocument:
+    return FocusedDocument(
+        id=uuid4(),
+        title="如何使用U盘升级PDC",
+        problem_code="PDC_USB_UPGRADE",
+        index_id=uuid4(),
+        blocks=[
+            DocumentContentBlock(uuid4(), 1, "text", "设备 IP 为 172.16.8.150。"),
+            DocumentContentBlock(uuid4(), 2, "table", "步骤表格"),
+            DocumentContentBlock(
+                uuid4(),
+                3,
+                "image",
+                image_asset_id=uuid4(),
+                caption="版本界面",
+                mime_type="image/png",
+            ),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_problem_resolver_matches_normalized_alias_and_pending_choice() -> None:
+    profile = _profile(alias="ＰＤＣ， U盘 升级！")
+    resolver = ProblemResolver()
+    assert normalize_for_match("ＰＤＣ， U盘 升级！") == normalize_for_match("pdc u盘升级")
+    alias = await resolver.resolve(question="pdc u盘升级", profiles=[profile])
+    assert alias.decision == ProblemDecision.MATCHED
+    assert alias.method == "ALIAS"
+    pending = await resolver.resolve(
+        question="确认",
+        profiles=[profile],
+        choice_id="switch_1",
+        pending_options=[{"choice_id": "switch_1", "document_id": str(profile.document_id)}],
+    )
+    assert pending.method == "PENDING_CHOICE"
+    invalid = await resolver.resolve(question="确认", profiles=[profile], choice_id="bad")
+    assert invalid.decision == ProblemDecision.NO_MATCH
+
+
+@pytest.mark.asyncio
+async def test_problem_resolver_handles_ambiguity_rules_and_closed_catalog() -> None:
+    first, second = _profile(alias="same"), _profile(alias="same")
+    ambiguous = await ProblemResolver().resolve(question="same", profiles=[first, second])
+    assert ambiguous.decision == ProblemDecision.AMBIGUOUS
+    deterministic = await ProblemResolver().resolve(question="请升级PDC", profiles=[first])
+    assert deterministic.method == "DETERMINISTIC_RULE"
+
+    async def classifier(_: str, __: list[ProblemProfile]) -> str | None:
+        return first.problem_code
+
+    classified = await ProblemResolver(classifier).resolve(
+        question="完全不同的问题", profiles=[first]
+    )
+    assert classified.method == "LLM_CATALOG"
+
+
+def test_document_delivery_keeps_order_and_optionally_suppresses_images() -> None:
+    document = _document()
+    content, images = deliver_document(document, include_images=True)
+    assert [item["sequence_no"] for item in content] == [1, 2, 3]
+    assert [item["type"] for item in content] == ["text", "table", "image"]
+    assert images[0]["image_asset_id"] == str(document.blocks[2].image_asset_id)
+    without_images, hidden_images = deliver_document(document, include_images=False)
+    assert [item["sequence_no"] for item in without_images] == [1, 2]
+    assert hidden_images == []
+
+
+def test_workflow_only_records_explicit_user_updates() -> None:
+    context = reset_for_document(str(uuid4()), "PDC_USB_UPGRADE", str(uuid4()))
+    updated = apply_workflow_update(
+        context,
+        SupportDraft.model_validate(
+            {
+                "mode": "STEP_GUIDANCE",
+                "answer": "继续下一步",
+                "workflow_update": {
+                    "confirmed_completed_steps": [1, 2],
+                    "user_observations": ["Telnet 超时"],
+                    "collected_information": {"computer_os": "Windows 11"},
+                    "missing_information": ["ping 结果", "ping 结果"],
+                },
+            }
+        ).workflow_update,
+    )
+    state = read_workflow(updated)
+    assert state.completed_steps == [1, 2]
+    assert state.observations == [{"source": "USER", "value": "Telnet 超时"}]
+    assert state.missing_information == ["ping 结果"]
+
+
+def test_validator_requires_evidence_limits_images_and_blocks_unsupported_risk() -> None:
+    document = _document()
+    element_id = str(document.blocks[0].element_id)
+    image_id = str(document.blocks[2].image_asset_id)
+    draft = SupportDraft.model_validate(
+        {
+            "mode": "DIAGNOSTIC_ASSISTANCE",
+            "answer": "请先检查。",
+            "sections": [
+                {
+                    "type": "DOCUMENT_FACT",
+                    "title": "地址",
+                    "content": "IP 为 172.16.8.150",
+                    "evidence_element_ids": ["E1"],
+                },
+                {"type": "GENERAL_GUIDANCE", "title": "检查", "content": "可以 ping 172.16.8.150"},
+                {"type": "GENERAL_GUIDANCE", "title": "风险", "content": "请格式化设备"},
+            ],
+            "image_ids": ["I1"],
+        }
+    )
+    validated = validate_draft(
+        draft,
+        document=document,
+        evidence_registry={"E1": element_id},
+        image_registry={"I1": image_id},
+        question="我已完成第一步",
+    )
+    assert validated.sections[0].evidence_element_ids == [element_id]
+    assert validated.sections[1].disclaimer
+    assert validated.escalation.required
+    assert validated.sections[2].type == EvidenceType.WARNING
+    assert validated.sections[2].risk_level == RiskLevel.HIGH
+
+    bad_fact = SupportDraft.model_validate(
+        {
+            "mode": "STEP_GUIDANCE",
+            "answer": "x",
+            "sections": [{"type": "DOCUMENT_FACT", "title": "x", "content": "x"}],
+        }
+    )
+    with pytest.raises(ApiError, match="文档事实"):
+        validate_draft(
+            bad_fact, document=document, evidence_registry={}, image_registry={}, question="x"
+        )
+
+
+@pytest.mark.asyncio
+async def test_support_stream_returns_sse_error_after_response_starts() -> None:
+    service = TechnicalSupportService(None, Settings(_env_file=None, app_env="test"))  # type: ignore[arg-type]
+
+    async def fail(**_: object) -> dict[str, object]:
+        raise ApiError("INVALID_EVIDENCE", "模型引用了当前文档之外的证据", 502)
+
+    service.handle = fail  # type: ignore[method-assign]
+    frames = [frame.decode() async for frame in service.stream(question="测试")]
+    assert frames == [
+        'event: status\ndata: {"stage":"support_processing"}\n\n',
+        (
+            "event: error\ndata: "
+            '{"code":"INVALID_EVIDENCE","message":"模型引用了当前文档之外的证据"}\n\n'
+        ),
+    ]
+
+
+class _ConflictConnection:
+    def __init__(self, *, conflict: bool = True) -> None:
+        self.statements: list[str] = []
+        self.parameters: list[object] = []
+        self.conflict = conflict
+
+    async def execute(self, statement: object, parameters: object = None) -> Any:
+        sql = str(statement)
+        self.statements.append(sql)
+        self.parameters.append(parameters)
+        has_conflict = self.conflict and "UPDATE conversation" in sql
+        return type("Result", (), {"rowcount": 0 if has_conflict else 1})()
+
+
+class _ConflictEngine:
+    def __init__(self, *, conflict: bool = True) -> None:
+        self.connection = _ConflictConnection(conflict=conflict)
+
+    @asynccontextmanager
+    async def begin(self) -> AsyncIterator[_ConflictConnection]:
+        yield self.connection
+
+
+@pytest.mark.asyncio
+async def test_finish_turn_rejects_stale_workflow_version_without_completing_trace() -> None:
+    engine = _ConflictEngine()
+    repository = SupportRepository(engine, Settings(_env_file=None, app_env="test"))  # type: ignore[arg-type]
+    turn = SupportTurn(
+        trace_id=uuid4(),
+        conversation_id=uuid4(),
+        user_message_id=uuid4(),
+        assistant_message_id=uuid4(),
+        knowledge_id=uuid4(),
+        index_id=uuid4(),
+        question="测试",
+        focus_document_id=None,
+        chat_context={},
+        context_version=3,
+        history=[],
+    )
+    with pytest.raises(ApiError, match="另一请求"):
+        await repository.finish_turn(
+            turn,
+            response={
+                "answer": "x",
+                "references": [],
+                "content": [],
+                "response_type": "ANSWERED",
+                "latency_ms": 1,
+            },
+            context={},
+            focus_document_id=None,
+            trace={},
+        )
+    assert (
+        "support_context_version = support_context_version + 1" in engine.connection.statements[1]
+    )
+    assert len(engine.connection.statements) == 2
+
+
+class _ScriptedResult:
+    def __init__(self, value: Any = None, *, rowcount: int = 1) -> None:
+        self.value = value
+        self.rowcount = rowcount
+
+    def mappings(self) -> _ScriptedResult:
+        return self
+
+    def one_or_none(self) -> dict[str, Any] | None:
+        return self.value if isinstance(self.value, dict) else None
+
+    def all(self) -> list[dict[str, Any]]:
+        return self.value or []
+
+    def scalar_one(self) -> Any:
+        return self.value
+
+
+class _ScriptedConnection:
+    def __init__(self, results: list[_ScriptedResult]) -> None:
+        self.results = list(results)
+        self.executed: list[tuple[str, dict[str, Any] | None]] = []
+
+    async def execute(
+        self, statement: object, parameters: dict[str, Any] | None = None
+    ) -> _ScriptedResult:
+        self.executed.append((str(statement), parameters))
+        return self.results.pop(0) if self.results else _ScriptedResult()
+
+
+class _ScriptedEngine:
+    def __init__(self, results: list[_ScriptedResult]) -> None:
+        self.connection = _ScriptedConnection(results)
+
+    @asynccontextmanager
+    async def begin(self) -> AsyncIterator[_ScriptedConnection]:
+        yield self.connection
+
+
+@pytest.mark.asyncio
+async def test_begin_turn_uses_pinned_index_for_focused_conversation() -> None:
+    knowledge_id = uuid4()
+    active_index_id = uuid4()
+    pinned_index_id = uuid4()
+    conversation_id = uuid4()
+    document_id = uuid4()
+    engine = _ScriptedEngine(
+        [
+            _ScriptedResult(
+                {
+                    "status": "ENABLED",
+                    "active_index_id": active_index_id,
+                    "index_status": "ACTIVE",
+                    "index_kb_id": knowledge_id,
+                }
+            ),
+            _ScriptedResult(
+                {
+                    "knowledge_id": knowledge_id,
+                    "focus_document_id": document_id,
+                    "focus_index_id": pinned_index_id,
+                    "focus_index_kb_id": knowledge_id,
+                    "chat_context": {"support_version": 1},
+                    "support_context_version": 2,
+                }
+            ),
+            _ScriptedResult([]),
+            _ScriptedResult(4),
+        ]
+    )
+    repository = SupportRepository(
+        cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
+    )
+
+    turn = await repository.begin_turn(
+        knowledge_id=knowledge_id,
+        conversation_id=conversation_id,
+        question="第三步怎么做",
+        request_id="request-1",
+        user_id=None,
+        idempotency_key=None,
+        request_hash="hash",
+    )
+
+    assert turn.index_id == pinned_index_id
+    assert turn.focus_document_id == document_id
+    trace_insert = next(
+        parameters
+        for sql, parameters in engine.connection.executed
+        if "INSERT INTO rag_trace" in sql
+    )
+    assert trace_insert is not None
+    assert trace_insert["index_id"] == pinned_index_id
+
+
+@pytest.mark.asyncio
+async def test_begin_turn_restarts_failed_idempotent_request() -> None:
+    knowledge_id = uuid4()
+    active_index_id = uuid4()
+    engine = _ScriptedEngine(
+        [
+            _ScriptedResult(
+                {
+                    "status": "ENABLED",
+                    "active_index_id": active_index_id,
+                    "index_status": "ACTIVE",
+                    "index_kb_id": knowledge_id,
+                }
+            ),
+            _ScriptedResult({"request_hash": "same", "response": None, "status": "FAILED"}),
+            _ScriptedResult(),
+            _ScriptedResult([]),
+            _ScriptedResult(0),
+        ]
+    )
+    repository = SupportRepository(
+        cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
+    )
+
+    turn = await repository.begin_turn(
+        knowledge_id=knowledge_id,
+        conversation_id=None,
+        question="如何升级",
+        request_id="request-2",
+        user_id=None,
+        idempotency_key="retry-key",
+        request_hash="same",
+    )
+
+    assert turn.index_id == active_index_id
+    idempotency_writes = [
+        (sql, parameters)
+        for sql, parameters in engine.connection.executed
+        if "support_idempotency" in sql and sql.lstrip().startswith(("UPDATE", "INSERT"))
+    ]
+    assert len(idempotency_writes) == 1
+    sql, parameters = idempotency_writes[0]
+    assert "UPDATE support_idempotency" in sql
+    assert "status = 'RUNNING'" in sql
+    assert parameters is not None
+    assert parameters["key"] == "retry-key"
+
+
+@pytest.mark.asyncio
+async def test_finish_turn_pins_and_clears_focus_index_with_document() -> None:
+    engine = _ConflictEngine(conflict=False)
+    repository = SupportRepository(
+        cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
+    )
+    turn = SupportTurn(
+        trace_id=uuid4(),
+        conversation_id=uuid4(),
+        user_message_id=uuid4(),
+        assistant_message_id=uuid4(),
+        knowledge_id=uuid4(),
+        index_id=uuid4(),
+        question="测试",
+        focus_document_id=None,
+        chat_context={},
+        context_version=0,
+        history=[],
+    )
+    document_id = uuid4()
+
+    await repository.finish_turn(
+        turn,
+        response={
+            "answer": "x",
+            "references": [],
+            "content": [],
+            "response_type": "DOCUMENT_DELIVERED",
+            "latency_ms": 1,
+        },
+        context={},
+        focus_document_id=document_id,
+        trace={},
+    )
+
+    conversation_sql = engine.connection.statements[1]
+    conversation_parameters = engine.connection.parameters[1]
+    assert "focus_index_id = :focus_index" in conversation_sql
+    assert isinstance(conversation_parameters, dict)
+    assert conversation_parameters["focus"] == document_id
+    assert conversation_parameters["focus_index"] == turn.index_id
+
+
+class _SupportServiceRepository:
+    def __init__(
+        self,
+        *,
+        knowledge_id: Any,
+        profile: ProblemProfile | None,
+        document: FocusedDocument,
+    ) -> None:
+        self.knowledge_id = knowledge_id
+        self.profile = profile
+        self.profiles = [profile] if profile is not None else []
+        self.document = document
+        self.chat_context: dict[str, Any] = {}
+        self.finished: dict[str, Any] | None = None
+
+    @staticmethod
+    def request_hash(**_: Any) -> str:
+        return "request-hash"
+
+    async def begin_turn(self, **kwargs: Any) -> SupportTurn:
+        return SupportTurn(
+            trace_id=uuid4(),
+            conversation_id=kwargs.get("conversation_id") or uuid4(),
+            user_message_id=uuid4(),
+            assistant_message_id=uuid4(),
+            knowledge_id=self.knowledge_id,
+            index_id=self.document.index_id,
+            question=kwargs["question"],
+            focus_document_id=None,
+            chat_context=self.chat_context,
+            context_version=0,
+            history=[],
+            idempotency_key=kwargs.get("idempotency_key"),
+        )
+
+    async def list_profiles(self, *_: Any, **__: Any) -> list[ProblemProfile]:
+        return self.profiles
+
+    async def get_profile_by_code(self, *_: Any, **__: Any) -> ProblemProfile | None:
+        return self.profile
+
+    async def get_profile_by_document(self, *_: Any, **__: Any) -> ProblemProfile | None:
+        return self.profile
+
+    async def get_document(self, **_: Any) -> FocusedDocument:
+        return self.document
+
+    async def finish_turn(self, turn: SupportTurn, **kwargs: Any) -> None:
+        self.finished = {"turn": turn, **kwargs}
+
+    async def fail_turn(self, *_: Any, **__: Any) -> None:
+        raise AssertionError("successful service tests must not fail the turn")
+
+
+@pytest.mark.asyncio
+async def test_support_service_delivers_complete_document_without_llm() -> None:
+    knowledge_id = uuid4()
+    profile = _profile()
+    profile.knowledge_id = knowledge_id
+    document = _document()
+    profile.document_id = document.id
+    repository = _SupportServiceRepository(
+        knowledge_id=knowledge_id,
+        profile=profile,
+        document=document,
+    )
+    service = TechnicalSupportService(
+        cast(SupportRepository, repository), Settings(_env_file=None, app_env="test")
+    )
+
+    response = await service.handle(
+        knowledge_id=knowledge_id,
+        conversation_id=None,
+        question="如何升级",
+        request_id="request-3",
+        problem_code=profile.problem_code,
+    )
+
+    assert response["response_type"] == "DOCUMENT_DELIVERED"
+    ChatResponse.model_validate(response)
+    assert response["routing"] == {"method": "PROBLEM_CODE", "confidence": 1.0}
+    assert [block["sequence_no"] for block in response["content"]] == [1, 2, 3]
+    assert response["images"][0]["image_asset_id"] == str(document.blocks[2].image_asset_id)
+    assert repository.finished is not None
+    assert repository.finished["focus_document_id"] == document.id
+    assert repository.finished["context"]["focus"]["index_id"] == str(document.index_id)
+
+
+@pytest.mark.asyncio
+async def test_support_service_returns_no_match_without_fabricating_document() -> None:
+    knowledge_id = uuid4()
+    repository = _SupportServiceRepository(
+        knowledge_id=knowledge_id,
+        profile=None,
+        document=_document(),
+    )
+    service = TechnicalSupportService(
+        cast(SupportRepository, repository), Settings(_env_file=None, app_env="test")
+    )
+
+    response = await service.handle(
+        knowledge_id=knowledge_id,
+        conversation_id=None,
+        question="完全未知的问题",
+        request_id="request-4",
+    )
+
+    assert response["response_type"] == "NO_MATCH"
+    ChatResponse.model_validate(response)
+    assert response["content"] == []
+    assert response["references"] == []
+    assert response["clarification"]["type"] == "NEED_MORE_INFORMATION"
+    assert repository.finished is not None
+    assert repository.finished["focus_document_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_support_service_requires_choice_for_ambiguous_catalog_match() -> None:
+    knowledge_id = uuid4()
+    first = _profile(alias="相同问题")
+    second = _profile(alias="相同问题")
+    first.knowledge_id = second.knowledge_id = knowledge_id
+    repository = _SupportServiceRepository(
+        knowledge_id=knowledge_id,
+        profile=first,
+        document=_document(),
+    )
+    repository.profiles = [first, second]
+    service = TechnicalSupportService(
+        cast(SupportRepository, repository), Settings(_env_file=None, app_env="test")
+    )
+
+    response = await service.handle(
+        knowledge_id=knowledge_id,
+        conversation_id=None,
+        question="相同问题",
+        request_id="request-5",
+    )
+
+    assert response["response_type"] == "CLARIFICATION_REQUIRED"
+    assert response["clarification"]["type"] == "DOCUMENT_CHOICE"
+    assert len(response["clarification"]["choices"]) == 2
+    assert repository.finished is not None
+    assert repository.finished["focus_document_id"] is None
+    assert len(repository.finished["context"]["pending_options"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_support_service_delivers_only_a_pending_confirmed_choice() -> None:
+    knowledge_id = uuid4()
+    profile = _profile()
+    profile.knowledge_id = knowledge_id
+    document = _document()
+    profile.document_id = document.id
+    repository = _SupportServiceRepository(
+        knowledge_id=knowledge_id,
+        profile=profile,
+        document=document,
+    )
+    repository.chat_context = {
+        "support_version": 1,
+        "pending_options": [
+            {
+                "choice_id": "match_1",
+                "document_id": str(document.id),
+                "problem_code": profile.problem_code,
+                "title": profile.canonical_question,
+            }
+        ],
+    }
+    service = TechnicalSupportService(
+        cast(SupportRepository, repository), Settings(_env_file=None, app_env="test")
+    )
+
+    response = await service.handle(
+        knowledge_id=knowledge_id,
+        conversation_id=uuid4(),
+        question="确认第一个",
+        request_id="request-6",
+        choice_id="match_1",
+    )
+
+    assert response["response_type"] == "DOCUMENT_DELIVERED"
+    assert response["routing"]["method"] == "PENDING_CHOICE"
+    assert repository.finished is not None
+    assert repository.finished["focus_document_id"] == document.id

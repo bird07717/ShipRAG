@@ -12,9 +12,12 @@ import type {
   ModelConfigUpdatePayload,
   ModelProbeResult,
   PromptTemplate,
+  ProblemProfile,
+  ProblemProfilePayload,
   RagConfig,
   RagConfigUpdatePayload,
   RagTrace,
+  SupportMetrics,
   TraceSummary,
 } from "@/types/admin";
 
@@ -141,6 +144,8 @@ export const adminApi = {
   ) => apiRequest<MetricsTimeseriesPoint[]>(`/metrics/timeseries${buildMetricsQuery(params)}`),
   getMetricsLatency: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
     apiRequest<MetricsLatency>(`/metrics/latency${buildMetricsQuery(params)}`),
+  getSupportMetrics: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
+    apiRequest<SupportMetrics>(`/metrics/support${buildMetricsQuery(params)}`),
   getTrace: (traceId: string) => apiRequest<RagTrace>(`/traces/${traceId}`),
   runPlayground: (knowledgeId: string, question: string, options: Record<string, number>) =>
     apiRequest<RagTrace>("/rag/playground", {
@@ -173,4 +178,11 @@ export const adminApi = {
       body: JSON.stringify(payload),
     }),
   listPrompts: () => apiRequest<PromptTemplate[]>("/prompts"),
+  listProblemProfiles: (knowledgeId: string) =>
+    apiRequest<ProblemProfile[]>(`/support/problem-profiles?knowledge_id=${knowledgeId}`),
+  upsertProblemProfile: (knowledgeId: string, payload: ProblemProfilePayload) =>
+    apiRequest<ProblemProfile>(`/support/problem-profiles?knowledge_id=${knowledgeId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
 };

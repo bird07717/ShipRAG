@@ -13,8 +13,6 @@ from app.api.metrics import get_metrics_repository
 from app.api.rag import get_rag_repository
 from app.rag.metrics import MetricsRepository
 
-pytestmark = pytest.mark.asyncio
-
 
 class _StubMetricsRepository:
     def __init__(self) -> None:
@@ -74,6 +72,37 @@ class _StubMetricsRepository:
             "range": {"from": "2026-08-14T00:00:00", "to": "2026-08-21T00:00:00", "mode": "CHAT"},
             "total": {"p50_ms": 1200, "p95_ms": 3400, "p99_ms": 5100, "avg_ms": 1500},
             "stages": {"prepare_turn_ms": 40, "llm_ms": 900},
+        }
+
+    async def support(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls["support"] = kwargs
+        return {
+            "range": {"from": "2026-08-14T00:00:00", "to": "2026-08-21T00:00:00", "mode": "CHAT"},
+            "support_turns": 12,
+            "first_turns": 8,
+            "followup_turns": 4,
+            "document_delivered": 7,
+            "clarification_required": 3,
+            "clarification_resolved": 2,
+            "no_match": 1,
+            "escalation_required": 1,
+            "canonical_or_alias_matches": 5,
+            "llm_catalog_matches": 1,
+            "general_guidance_turns": 2,
+            "evidence_missing": 0,
+            "high_risk_intercepts": 1,
+            "structured_output_retries": 1,
+            "workflow_conflicts": 0,
+            "model_calls": 4,
+            "document_delivery_rate": 0.5833,
+            "clarification_rate": 0.25,
+            "clarification_resolution_rate": 0.6667,
+            "escalation_rate": 0.0833,
+            "general_guidance_rate": 0.1667,
+            "workflow_conflict_rate": 0.0,
+            "first_turn_latency": {"p50_ms": 100, "p95_ms": 200, "p99_ms": 300, "avg_ms": 120},
+            "followup_latency": {"p50_ms": 400, "p95_ms": 500, "p99_ms": 600, "avg_ms": 450},
+            "tokens": {"llm_prompt": 1000, "llm_completion": 200, "llm_total": 1200},
         }
 
 
@@ -199,6 +228,24 @@ class TestMetricsApi:
         finally:
             client.app.dependency_overrides.clear()
 
+    def test_support_endpoint_wires_filters(self, client: TestClient) -> None:
+        stub = _StubMetricsRepository()
+        client.app.dependency_overrides[get_metrics_repository] = lambda: stub
+        try:
+            response = client.get(
+                "/api/v1/metrics/support?knowledge_id=00000000-0000-0000-0000-000000000002"
+                "&from=2026-08-14T00:00:00&to=2026-08-21T00:00:00",
+                headers=AUTH,
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["clarification_resolution_rate"] == 0.6667
+            assert body["followup_latency"]["p95_ms"] == 500
+            call = stub.calls["support"]
+            assert str(call["knowledge_id"]) == "00000000-0000-0000-0000-000000000002"
+        finally:
+            client.app.dependency_overrides.clear()
+
 
 class TestTraceFilters:
     def test_traces_endpoint_passes_new_filters(self, client: TestClient) -> None:
@@ -219,6 +266,16 @@ class TestTraceFilters:
             assert call["user_id"] == "mobile-user-1"
             assert call["created_from"] == datetime(2026, 8, 20, 0, 0)
             assert call["created_to"] == datetime(2026, 8, 21, 0, 0)
+        finally:
+            client.app.dependency_overrides.clear()
+
+    def test_traces_endpoint_accepts_support_response_types(self, client: TestClient) -> None:
+        stub = _StubTraceRepository()
+        client.app.dependency_overrides[get_rag_repository] = lambda: stub
+        try:
+            response = client.get("/api/v1/traces?response_type=DOCUMENT_DELIVERED", headers=AUTH)
+            assert response.status_code == 200
+            assert stub.list_calls["response_type"] == "DOCUMENT_DELIVERED"
         finally:
             client.app.dependency_overrides.clear()
 
@@ -295,6 +352,40 @@ def _overview_row(**overrides: Any) -> dict[str, Any]:
     return row
 
 
+def _support_row(**overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "support_turns": 10,
+        "first_turns": 6,
+        "followup_turns": 4,
+        "document_delivered": 5,
+        "clarification_required": 2,
+        "clarification_resolved": 1,
+        "no_match": 1,
+        "escalation_required": 1,
+        "canonical_or_alias_matches": 3,
+        "llm_catalog_matches": 1,
+        "general_guidance_turns": 2,
+        "evidence_missing": 1,
+        "high_risk_intercepts": 1,
+        "structured_output_retries": 1,
+        "workflow_conflicts": 1,
+        "model_calls": 4,
+        "first_p50_ms": 100,
+        "first_p95_ms": 200,
+        "first_p99_ms": 300,
+        "first_avg_ms": 120,
+        "followup_p50_ms": 400,
+        "followup_p95_ms": 500,
+        "followup_p99_ms": 600,
+        "followup_avg_ms": 450,
+        "llm_prompt_tokens": 1000,
+        "llm_completion_tokens": 200,
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.asyncio
 class TestMetricsAggregation:
     async def test_overview_derives_rates_from_row(self) -> None:
         engine = _FakeEngine([_overview_row()])
@@ -388,3 +479,16 @@ class TestMetricsAggregation:
         assert result["stages"]["llm_ms"] == 500
         assert result["stages"]["rerank_ms"] == 10
         assert len(result["stages"]) == 10
+
+    async def test_support_derives_support_rates_and_filters(self) -> None:
+        engine = _FakeEngine([_support_row()])
+        result = await MetricsRepository(engine).support(knowledge_id="kb-1")  # type: ignore[arg-type]
+
+        assert result["document_delivery_rate"] == 0.5
+        assert result["clarification_resolution_rate"] == 0.5
+        assert result["workflow_conflict_rate"] == 0.1
+        assert result["followup_latency"]["p95_ms"] == 500
+        assert result["tokens"]["llm_total"] == 1200
+        sql, params = engine.connection.queries[0]
+        assert "support_version" in sql
+        assert params["kb_id"] == "kb-1"

@@ -4,7 +4,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { adminApi } from "@/api/admin";
 import { fetchImageBlobUrl, fetchWelcome, streamChat, downloadDocument } from "@/api/chat";
 import type { KnowledgeBase } from "@/types/admin";
-import type { ChatContentBlock, ChatReference } from "@/api/chat";
+import type { ChatContentBlock, ChatReference, ChatSupportSection } from "@/api/chat";
 import { renderMarkdown } from "@/utils/markdown";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import ChatComposer from "@/components/ui/ChatComposer.vue";
@@ -15,9 +15,13 @@ interface UiMessage {
   text?: string;
   content?: ChatContentBlock[];
   answer_mode?: string | null;
+  support_mode?: string | null;
   response_type?: string | null;
   disclaimer?: string | null;
   references?: ChatReference[];
+  sections?: ChatSupportSection[];
+  clarification?: { type: string; message: string; choices: Array<{ choice_id: string; title: string }> } | null;
+  escalation?: { required: boolean; reason: string | null } | null;
   latency_ms?: number;
   streaming?: boolean;
   stopped?: boolean;
@@ -54,6 +58,11 @@ const modeLabels: Record<string, string> = {
   PRODUCT_GENERAL: "通用知识",
   UNCONFIRMED: "无法确认",
   OUT_OF_SCOPE: "范围外",
+  DOCUMENT_EXPLANATION: "文档解释",
+  STEP_GUIDANCE: "步骤指导",
+  GENERAL_OPERATION_GUIDANCE: "通用操作",
+  DIAGNOSTIC_ASSISTANCE: "受限诊断",
+  NEED_MORE_INFORMATION: "需要补充信息",
 };
 const modeTones: Record<string, string> = {
   PRODUCT_KNOWLEDGE: "success",
@@ -62,10 +71,6 @@ const modeTones: Record<string, string> = {
   UNCONFIRMED: "neutral",
   OUT_OF_SCOPE: "danger",
 };
-
-const selectedKbName = computed(
-  () => knowledgeBases.value.find((kb) => kb.id === selectedKb.value)?.name ?? "",
-);
 
 const visibleMessages = computed(() =>
   messages.value.filter((message) => !message.id.startsWith("welcome-")),
@@ -80,7 +85,7 @@ function modeTone(m: string) {
   return modeTones[m] ?? "neutral";
 }
 function isText(b: ChatContentBlock): boolean {
-  return b.type === "text";
+  return b.type === "text" || b.type === "table";
 }
 function hasImage(b: ChatContentBlock): boolean {
   return b.type === "image" && !!b.image_asset_id && !!imageUrls[b.image_asset_id];
@@ -129,10 +134,16 @@ async function askQuestion(question: string) {
   await send();
 }
 
+async function confirmChoice(choiceId: string, title: string): Promise<void> {
+  input.value = `确认切换到：${title}`;
+  await nextTick();
+  await send(choiceId);
+}
+
 // 流代际：清空会话/切换KB时递增，旧流的事件不再写回状态
 let streamGeneration = 0;
 
-async function send() {
+async function send(choiceId?: string) {
   if (!input.value.trim() || !selectedKb.value || loading.value) return;
   const q = input.value.trim();
   input.value = "";
@@ -171,13 +182,18 @@ async function send() {
             text: event.answer,
             content: event.content,
             answer_mode: event.answer_mode,
+            support_mode: event.support_mode,
             response_type: event.response_type,
             disclaimer: event.disclaimer,
             references: event.references,
+            sections: event.sections,
+            clarification: event.clarification,
+            escalation: event.escalation,
             latency_ms: event.latency_ms,
             streaming: false,
           };
         }
+        if (!conversationId.value) conversationId.value = event.conversation_id;
         for (const b of event.content) {
           const assetId = b.image_asset_id;
           if (b.type === "image" && assetId && !imageUrls[assetId]) {
@@ -204,7 +220,7 @@ async function send() {
         }
         scrollToBottomDebounce();
       },
-    }, controller.signal);
+    }, { choiceId }, controller.signal);
   } catch (e) {
     const aborted = e instanceof DOMException && e.name === "AbortError";
     const idx = messages.value.findIndex((m) => m.id === pid);
@@ -279,7 +295,7 @@ onMounted(async () => {
 
 <template>
   <div class="demo-page">
-    <PageHeader title="Demo Chat" description="Test the end-user RAG experience.">
+    <PageHeader title="Support 问答测试" description="验证首轮完整文档交付和后续文档约束回答。">
       <template #actions>
         <el-button :disabled="!visibleMessages.length" @click="clearChat">新会话</el-button>
       </template>
@@ -303,15 +319,15 @@ onMounted(async () => {
         </el-select>
       </div>
       <span class="muted context-hint">
-        回答基于 {{ selectedKbName || "所选知识库" }} 的已索引文档并附引用来源
+        首轮返回匹配问题的完整技术文档；后续回答以该文档为事实边界
       </span>
     </div>
 
     <div class="chat-panel">
       <!-- Centered empty / welcome state -->
       <div v-if="showHero" ref="messagesContainer" class="chat-hero">
-        <div class="hero-mark">R</div>
-        <h2>Ask your knowledge base</h2>
+        <div class="hero-mark">S</div>
+        <h2>测试技术支持问答</h2>
         <p>{{ welcomeMessage }}</p>
         <div v-if="suggestions.length" class="hero-suggestions">
           <span class="suggestion-label">Suggested Questions</span>
@@ -339,14 +355,17 @@ onMounted(async () => {
             <div class="bubble user-bubble">{{ msg.text }}</div>
           </template>
           <template v-else>
-            <div class="assistant-avatar">R</div>
+            <div class="assistant-avatar">S</div>
             <div class="assistant-body">
               <div class="assistant-head">
-                <span class="assistant-name">RAG Assistant</span>
+                <span class="assistant-name">技术支持助手</span>
                 <span v-if="msg.answer_mode" class="mode-tag" :class="modeTone(msg.answer_mode)">
                   {{ modeLabel(msg.answer_mode) }}
                 </span>
-                <span v-if="msg.response_type === 'DOC_DELIVERED'" class="mode-tag neutral">
+                <span v-if="msg.support_mode" class="mode-tag" :class="modeTone(msg.support_mode)">
+                  {{ modeLabel(msg.support_mode) }}
+                </span>
+                <span v-if="msg.response_type === 'DOC_DELIVERED' || msg.response_type === 'DOCUMENT_DELIVERED'" class="mode-tag neutral">
                   已提供完整文档
                 </span>
               </div>
@@ -367,6 +386,7 @@ onMounted(async () => {
                         alt="文档图片"
                       />
                       <div v-else class="image-placeholder">图片加载中...</div>
+                      <small v-if="block.caption" class="image-caption">{{ block.caption }}</small>
                     </div>
                   </div>
                   <span v-if="msg.streaming" class="cursor">●●●</span>
@@ -382,6 +402,29 @@ onMounted(async () => {
                 {{ streamingHint }}
               </div>
               <div v-if="msg.disclaimer" class="disclaimer-box">{{ msg.disclaimer }}</div>
+              <div v-if="msg.sections?.length" class="support-sections">
+                <div v-for="(section, index) in msg.sections" :key="index" class="support-section">
+                  <b>{{ section.title }}</b>
+                  <p>{{ section.content }}</p>
+                  <div v-if="section.disclaimer" class="section-disclaimer">
+                    {{ section.disclaimer }}
+                  </div>
+                </div>
+              </div>
+              <div v-if="msg.clarification" class="clarification-box">
+                <p>{{ msg.clarification.message }}</p>
+                <el-button
+                  v-for="choice in msg.clarification.choices"
+                  :key="choice.choice_id"
+                  size="small"
+                  @click="confirmChoice(choice.choice_id, choice.title)"
+                >
+                  {{ choice.title }}
+                </el-button>
+              </div>
+              <div v-if="msg.escalation?.required" class="disclaimer-box danger">
+                已建议人工升级：{{ msg.escalation.reason }}
+              </div>
               <details
                 v-if="msg.references && msg.references.length"
                 class="references-section"
@@ -763,6 +806,43 @@ onMounted(async () => {
   text-align: center;
 }
 
+.image-caption {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.support-sections,
+.clarification-box {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.support-section,
+.clarification-box {
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  background: var(--bg-subtle);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.support-section p,
+.clarification-box p {
+  margin: 3px 0 0;
+}
+
+.section-disclaimer {
+  margin-top: 8px;
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .disclaimer-box {
   margin-top: 10px;
   padding: 8px 12px;
@@ -771,6 +851,12 @@ onMounted(async () => {
   background: var(--warning-bg);
   color: var(--warning);
   font-size: 12px;
+}
+
+.disclaimer-box.danger {
+  border-color: #f0c6c3;
+  color: var(--danger);
+  background: #fff4f3;
 }
 
 .references-section {
