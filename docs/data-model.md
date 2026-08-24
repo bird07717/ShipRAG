@@ -1,6 +1,6 @@
 # V1 逻辑数据模型
 
-本文描述当前 Alembic `0008` Schema 的逻辑模型与一致性规则。具体 SQL 类型、索引语法和命名以 `backend/alembic/versions/` 为准；涉及后续演进的目标性规则会明确标注，不能被当作已存在的运行时检查。
+本文描述当前 Alembic `0013` Schema 的逻辑模型与一致性规则。具体 SQL 类型、索引语法和命名以 `backend/alembic/versions/` 为准；涉及后续演进的目标性规则会明确标注，不能被当作已存在的运行时检查。
 
 ## 1. 通用约定
 
@@ -271,7 +271,11 @@ PK `(chunk_id, element_id)`，并唯一 `(chunk_id, ordinal)`。同一映射中�
 
 每个 `model_type` 最多一个 `enabled=true` 的配置。`enabled` 表示“供新请求或新构建选择”，不表示可以立即删除历史配置；被 Active Index 引用的旧 Embedding 配置即使不再 enabled，也必须保持可解析和可调用，直到相关知识库完成重建。
 
-公开 API 提供模型配置的安全只读快照（`GET /api/v1/models`），并为 `LLM` / `RERANK` 行提供管理写入入口 `PATCH /api/v1/models/{id}`（可更新 `model_name`、`base_url`、`parameters`、`enabled`）。`begin_turn` 每轮读取该表快照，因此写入在下一轮对话即生效、无需重启；Provider 实际使用的 API Key 仍来自运行时 `Settings`（环境变量/Secret 注入）。Embedding/OCR/VISION 与索引构建绑定，不支持在线调整。Schema 预留的加密密钥字段的写入、轮换和解密供 Provider 调用的工作流尚未实现。
+公开 API 提供模型配置的安全只读快照（`GET /api/v1/models`）。`PATCH /api/v1/models/{id}` 按消费时机开放写入（ADR-0008）：`LLM` / `RERANK` 每轮对话快照（下一轮生效）；`OCR` / `VISION` / `EMBEDDING` 在索引构建启动时快照（下一次构建生效，变更后所有知识库标记 `rebuild_required=true`）；EMBEDDING 变更 `model_name` / `base_url` 须先通过维度契约门禁（在线探测输出维度 == 冻结维度 1024，`422 EMBEDDING_DIMENSION_MISMATCH` 拒绝），构建期对返回向量长度做兜底校验。
+
+构建时消费：Worker 在构建启动时一次性读取启用的 `EMBEDDING` / `OCR` / `VISION` 行（`app/ingestion/model_config.py`），DB 行的 `model_name` / `base_url` / 参数 / 解密密钥优先于环境变量；行缺失或 Provider 不受支持时回退环境配置并在任务 `metadata.build_models` 记录来源。构建期间的管理端写入不会进入本次构建。`knowledge_index.embedding_model_name` 记录的即 DB 行的模型名。
+
+API Key 优先级链（ADR-0005，已实现）：数据库密钥（`api_key_ciphertext` AES-GCM 加密，信封密钥为 `MODEL_SECRET_KEY`）> 运行时环境变量（`Settings` 注入）。`PUT/DELETE /api/v1/models/{id}/api-key` 只写不读；API 响应只含 `api_key_configured` 与 `api_key_source`，绝不返回密文、Nonce 或密钥版本。`MODEL_SECRET_KEY` 轮换通过 `MODEL_SECRET_KEY_PREVIOUS` 与 `python -m app.tasks.key_rotation` 在线重加密，`api_key_key_version` 记录行级密钥版本。所有配置与密钥变更写入 `model_config_history` 审计表。
 
 Embedding 配置启用前必须声明并通过契约测试验证输出维度。V1 的 `document_chunk.embedding` 使用部署级固定 `vector(N)`：更换模型只有在输出相同 N 时才能通过普通新索引逐步发布。改变 N 需要新的 ADR、Schema/向量索引迁移、双写或维护窗口方案以及所有知识库重建，不能仅创建一个不同维度的 Knowledge Index。
 
@@ -290,6 +294,19 @@ Embedding 配置启用前必须声明并通过契约测试验证输出维度。V
 
 `begin_turn` 每轮读取该表快照进入 `Turn.retrieval`，行缺失时回退 `Settings` 默认值；Playground 的手动参数在同一层覆盖，行为不受影响。
 
+### `model_config_history`
+
+| 字段 | 约束/说明 |
+|---|---|
+| `id` | PK |
+| `model_config_id` | FK → `model_config.id`，`ON DELETE CASCADE` |
+| `action` | `UPDATE_CONFIG` / `SET_API_KEY` / `CLEAR_API_KEY` |
+| `changed_fields` | 变更字段名数组（jsonb），**不记录任何值** |
+| `actor` | 触发方 request id（≤120 字符） |
+| `created_at` | 非空 |
+
+审计表记录所有模型配置与密钥操作（迁移 `0013`）。API Key 类操作的值（密钥明文/密文）绝不入库入审计。
+
 ### `prompt_template`
 
 | 字段 | 约束/说明 |
@@ -302,6 +319,8 @@ Embedding 配置启用前必须声明并通过契约测试验证输出维度。V
 | `created_at` | 非空 |
 
 唯一 `(name, version)`；全局最多一个 `active=true`。必须支持变量 `{{context}}`、`{{question}}`、`{{history}}`，启用前执行模板变量校验。
+
+当前仅有一行 `default-rag` v2（active，迁移 `0012` 与代码 `DEFAULT_RAG_PROMPT` 保持逐字节同步）。它只在文档路由的片段检索降级路径（CHUNK_RAG 兜底与降级）生效；Chat 主路径（文档问答、澄清与切换）的 Prompt 与解析逻辑强耦合，由代码版本化管理（`backend/app/rag/prompt.py`），不落库，仅通过 `GET /api/v1/prompts` 以 `source=RUNTIME` 只读快照形式暴露。历史 v1 行已于迁移 `0012` 删除。
 
 ### `conversation`
 

@@ -1,52 +1,210 @@
 <script setup lang="ts">
-import { Box, ChatDotRound, Clock, Files, Notebook } from "@element-plus/icons-vue";
+import { computed, onMounted, ref } from "vue";
+import { Box, ChatDotRound, Clock, Files, Notebook, Warning } from "@element-plus/icons-vue";
 
+import { adminApi } from "@/api/admin";
 import { useAdminStore } from "@/composables/adminStore";
 import MetricCard from "@/components/ui/MetricCard.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
+import TrendChart, { type TrendPoint } from "@/components/ui/TrendChart.vue";
+import type {
+  MetricsOverview,
+  MetricsTimeseriesPoint,
+  TraceSummary,
+} from "@/types/admin";
 
 const store = useAdminStore();
+
+const overview = ref<MetricsOverview | null>(null);
+const timeseries = ref<MetricsTimeseriesPoint[]>([]);
+const noAnswerTraces = ref<TraceSummary[]>([]);
+const metricsError = ref("");
+
+const drilldown = ref<{ label: string; from: string; to: string } | null>(null);
+const drilldownTraces = ref<TraceSummary[]>([]);
+const drilldownLoading = ref(false);
+
+const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
+
+// Bucket span inferred from the first two points (day granularity is what
+// we request; hour would come back as 1h gaps). Falls back to 1 day.
+const bucketSpanMs = computed(() => {
+  const [first, second] = timeseries.value;
+  if (first && second) {
+    const span = new Date(second.bucket).getTime() - new Date(first.bucket).getTime();
+    if (span > 0) return span;
+  }
+  return 86_400_000;
+});
+
+const chartPoints = computed<TrendPoint[]>(() => {
+  const hourly = bucketSpanMs.value <= 3_600_000;
+  return timeseries.value.map((point) => ({
+    bucket: point.bucket,
+    label: hourly
+      ? point.bucket.slice(5, 13).replace("T", " ")
+      : point.bucket.slice(5, 10),
+    queries: point.queries,
+    noAnswerRate: point.no_answer_rate,
+  }));
+});
+
+async function loadMetrics() {
+  metricsError.value = "";
+  const params = { knowledgeId: store.selectedKnowledgeId || undefined };
+  const results = await Promise.allSettled([
+    adminApi.getMetricsOverview(params),
+    adminApi.getMetricsTimeseries(params),
+    adminApi.listNoAnswerTraces(),
+  ]);
+  // Shape guards: an older backend (pre-metrics) or a gateway returning a
+  // JSON error array must not crash the dashboard render.
+  if (
+    results[0].status === "fulfilled" &&
+    results[0].value &&
+    typeof results[0].value.total_traces === "number"
+  ) {
+    overview.value = results[0].value;
+  }
+  if (results[1].status === "fulfilled" && Array.isArray(results[1].value)) {
+    timeseries.value = results[1].value;
+  }
+  if (results[2].status === "fulfilled" && Array.isArray(results[2].value)) {
+    noAnswerTraces.value = results[2].value;
+  }
+  if (overview.value === null || results.some((result) => result.status === "rejected")) {
+    metricsError.value = "质量指标加载失败，可能是后端尚未提供 /metrics 接口（需迁移 0014）。";
+  }
+}
+
+async function openBucketDrilldown(point: TrendPoint) {
+  const bucketStart = new Date(point.bucket);
+  const bucketEnd = new Date(bucketStart.getTime() + bucketSpanMs.value);
+  drilldown.value = { label: point.label, from: point.bucket, to: bucketEnd.toISOString() };
+  drilldownTraces.value = [];
+  drilldownLoading.value = true;
+  try {
+    drilldownTraces.value = await adminApi.listTraces(store.selectedKnowledgeId || undefined, {
+      from: point.bucket,
+      to: bucketEnd.toISOString(),
+      limit: 100,
+    });
+  } finally {
+    drilldownLoading.value = false;
+  }
+}
+
+onMounted(loadMetrics);
 </script>
 
 <template>
   <div class="dashboard">
-    <div class="metric-grid">
+    <div v-if="overview" class="metric-grid">
       <MetricCard
-        label="Knowledge Bases"
-        :value="store.knowledgeBases.length"
-        context="独立产品域"
-        :icon="Notebook"
+        label="Queries (7d)"
+        :value="overview.total_traces.toLocaleString()"
+        :context="`${overview.unique_users} 个独立用户`"
+        :icon="ChatDotRound"
       />
       <MetricCard
-        label="Documents"
-        :value="store.totalDocuments.toLocaleString()"
-        context="有效 Word 源"
-        :icon="Files"
+        label="No-Answer Rate"
+        :value="percent(overview.no_answer_rate)"
+        :context="`UNCONFIRMED + OUT_OF_SCOPE / ${overview.classified_traces}`"
+        :icon="Warning"
       />
       <MetricCard
-        label="Indexed Chunks"
-        :value="store.totalChunks.toLocaleString()"
-        context="当前在线快照"
+        label="Failure Rate"
+        :value="percent(overview.failure_rate)"
+        :context="`失败 ${overview.failed} / ${overview.total_traces}`"
+        :icon="Clock"
+      />
+      <MetricCard
+        label="P95 Latency"
+        :value="`${overview.latency.p95_ms.toLocaleString()} ms`"
+        :context="`P50 ${overview.latency.p50_ms.toLocaleString()} ms`"
         :icon="Box"
       />
       <MetricCard
-        label="Recent Queries"
-        :value="store.traces.length"
-        context="最近 50 条 Trace"
-        :icon="ChatDotRound"
+        label="LLM Tokens (7d)"
+        :value="overview.tokens.llm_total.toLocaleString()"
+        :context="`Rerank ${overview.tokens.rerank_total.toLocaleString()}`"
+        :icon="Files"
+      />
+      <MetricCard
+        label="Doc Delivered"
+        :value="percent(overview.doc_delivered_rate)"
+        :context="`零 LLM 快路径占比`"
+        :icon="Notebook"
       />
     </div>
+    <el-alert
+      v-else-if="metricsError"
+      :title="metricsError"
+      type="warning"
+      :closable="false"
+      show-icon
+    />
+
+    <section v-if="chartPoints.length" class="panel">
+      <header class="panel-header">
+        <div>
+          <h3>Query Volume &amp; No-Answer Rate</h3>
+          <span class="sub">最近 7 天 · 点击柱形下钻该时段的 Trace</span>
+        </div>
+      </header>
+      <TrendChart :points="chartPoints" @select="openBucketDrilldown" />
+    </section>
+
+    <section class="panel">
+      <header class="panel-header">
+        <div>
+          <h3>Unanswered Questions</h3>
+          <span class="sub">知识库覆盖缺口 — 无答案问题下钻，点击行查看 Trace 归因</span>
+        </div>
+      </header>
+      <el-table
+        v-if="noAnswerTraces.length"
+        class="clickable-table"
+        :data="noAnswerTraces"
+        @row-click="(row: any) => store.openTrace(row.trace_id)"
+      >
+        <el-table-column
+          prop="question"
+          label="Question"
+          min-width="280"
+          show-overflow-tooltip
+        />
+        <el-table-column prop="response_type" label="Response" width="150">
+          <template #default="scope">
+            <StatusBadge :status="scope.row.response_type ?? 'UNKNOWN'" />
+          </template>
+        </el-table-column>
+        <el-table-column prop="user_id" label="User" width="140">
+          <template #default="scope">{{ scope.row.user_id ?? "—" }}</template>
+        </el-table-column>
+        <el-table-column label="Time" min-width="170">
+          <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
+        </el-table-column>
+      </el-table>
+      <EmptyState
+        v-else
+        :icon="Warning"
+        title="近期没有无答案问题"
+        description="当回答被判为 UNCONFIRMED 时，问题会出现在这里，用于定位知识库覆盖缺口。"
+      />
+    </section>
 
     <section class="panel">
       <header class="panel-header">
         <div>
           <h3>Recent Activity</h3>
-          <span class="sub">最近的 Playground 与 Chat 查询</span>
+          <span class="sub">最近的 Playground 与 Chat 查询，点击行查看 Trace</span>
         </div>
       </header>
       <el-table
         v-if="store.traces.length"
+        class="clickable-table"
         :data="store.traces.slice(0, 10)"
         @row-click="(row: any) => store.openTrace(row.trace_id)"
       >
@@ -76,6 +234,46 @@ const store = useAdminStore();
         description="在 RAG Playground 或 Demo Chat 中发起查询后，这里会展示最近的活动。"
       />
     </section>
+
+    <el-dialog
+      :model-value="drilldown !== null"
+      :title="drilldown ? `Trace — ${drilldown.label}` : ''"
+      width="720px"
+      @update:model-value="drilldown = null"
+    >
+      <el-table
+        v-loading="drilldownLoading"
+        class="clickable-table"
+        :data="drilldownTraces"
+        max-height="480"
+        @row-click="(row: any) => store.openTrace(row.trace_id)"
+      >
+        <el-table-column
+          prop="question"
+          label="Question"
+          min-width="240"
+          show-overflow-tooltip
+        />
+        <el-table-column label="Response" width="140">
+          <template #default="scope">
+            <StatusBadge :status="scope.row.response_type ?? scope.row.status" />
+          </template>
+        </el-table-column>
+        <el-table-column label="Latency" width="100">
+          <template #default="scope">
+            <span class="mono">{{ scope.row.latency?.total_ms ?? "—" }} ms</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="user_id" label="User" width="120">
+          <template #default="scope">{{ scope.row.user_id ?? "—" }}</template>
+        </el-table-column>
+      </el-table>
+      <EmptyState
+        v-if="!drilldownLoading && !drilldownTraces.length"
+        title="该时段没有 Trace"
+        description="试试点击相邻的柱形。"
+      />
+    </el-dialog>
   </div>
 </template>
 
@@ -89,5 +287,15 @@ const store = useAdminStore();
 
 .dashboard > * {
   min-width: 0;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-content-gap);
+}
+
+:deep(.clickable-table .el-table__row) {
+  cursor: pointer;
 }
 </style>

@@ -8,6 +8,9 @@ from rq import Queue
 
 from app.core.config import Settings, get_settings
 from app.core.resources import AppResources
+from app.ingestion.embedding import create_embedding_provider
+from app.ingestion.image_understanding import create_ocr_provider, create_vision_provider
+from app.ingestion.model_config import load_build_models
 from app.ingestion.pipeline import IndexPipeline
 from app.ingestion.repository import BuildReference, IngestionRepository
 
@@ -37,8 +40,19 @@ def _enqueue_followup(settings: Settings, followup: BuildReference | None) -> No
 async def _run_index_task(index_id: UUID, task_id: UUID) -> dict[str, int | str]:
     settings = get_settings()
     resources = AppResources.create(settings)
-    pipeline = IndexPipeline(resources.database, resources.minio, settings)
     try:
+        # Snapshot build-bound model configs once: admin edits during the
+        # build must not leak into it (same snapshot semantics as begin_turn).
+        configs = await load_build_models(resources.database, settings)
+        pipeline = IndexPipeline(
+            resources.database,
+            resources.minio,
+            settings,
+            embedding_provider=create_embedding_provider(settings, configs["EMBEDDING"].snapshot),
+            ocr_provider=create_ocr_provider(settings, configs["OCR"].snapshot),
+            vision_provider=create_vision_provider(settings, configs["VISION"].snapshot),
+            model_sources={model_type: config.source for model_type, config in configs.items()},
+        )
         try:
             result = await pipeline.run(index_id, task_id)
             _enqueue_followup(settings, result.followup_build)

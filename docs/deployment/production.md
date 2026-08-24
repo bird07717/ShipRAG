@@ -1,6 +1,6 @@
 # V1.0.0 生产部署指南
 
-> **版本边界**：V1.0.0/M7 的历史验收运行在 Alembic `0006`。当前代码的迁移头为 `0008`；部署当前代码时，发布验证和恢复演练必须在目标镜像与 `0008` Schema 上重新执行，不能只引用历史 M7 结论。
+> **版本边界**：V1.0.0/M7 的历史验收运行在 Alembic `0006`。当前代码的迁移头为 `0013`；部署当前代码时，发布验证和恢复演练必须在目标镜像与 `0013` Schema 上重新执行，不能只引用历史 M7 结论。
 
 ## 1. 发布拓扑
 
@@ -39,6 +39,7 @@ MINIO_ROOT_USER=<独立访问账号>
 MINIO_ROOT_PASSWORD=<随机对象存储密码>
 SILICONFLOW_API_KEY=<非测试生产凭据>
 ZHIPU_API_KEY=<非测试生产凭据>
+MODEL_SECRET_KEY=<32 字节 base64，加密 model_config 中的 API 密钥>
 CORS_ORIGINS=https://rag.example.internal
 ```
 
@@ -48,6 +49,16 @@ CORS_ORIGINS=https://rag.example.internal
 - `SERVICE_TOKEN` 只发给企业 API 网关/可信业务系统。RAG Studio 的会话输入仅用于受控内网调试。
 - 镜像发布时把 `BACKEND_IMAGE`、`FRONTEND_IMAGE` 设置为仓库中的不可变 Digest，不复用浮动标签。
 - 生产不得使用 `fake` Provider。
+- **`MODEL_SECRET_KEY` 必须与数据库备份一同纳入加密备份**：该密钥丢失后，
+  `model_config.api_key_ciphertext` 中的所有数据库密钥不可恢复（环境变量密钥不受影响，
+  可通过 `DELETE /api/v1/models/{id}/api-key` 回退）。Backend 与 Worker 必须使用同一密钥。
+- **`MODEL_SECRET_KEY` 轮换流程**（在线，不中断服务）：
+  1. 生成新密钥并设置 `MODEL_SECRET_KEY=<新>`、`MODEL_SECRET_KEY_VERSION=<N+1>`、
+     `MODEL_SECRET_KEY_PREVIOUS=<旧>`、`MODEL_SECRET_KEY_PREVIOUS_VERSION=<N>`；
+  2. 重启 Backend 与 Worker（旧版本行仍可用旧密钥解密，服务不受影响）；
+  3. 执行 `cd backend && ../.venv/bin/python -m app.tasks.key_rotation`，
+     输出 `{"rotated": K, "remaining_on_old_version": 0}` 即完成；
+  4. 确认后可移除 `MODEL_SECRET_KEY_PREVIOUS*` 配置。
 
 ## 4. 构建与首次部署
 
@@ -98,7 +109,7 @@ Alembic 默认采用向前升级。不得让旧代码连接到它不兼容的新
 - Redis：开启 AOF；它只保存队列，不是业务事实源。Redis 丢失后以 PostgreSQL `task_record` 审计并人工重提未完成构建。
 - 备份必须加密、限制访问并配置保留周期。只验证“备份成功”不算完成，必须验证可恢复。
 
-2026-08-17 的 M7 曾用当时完整数据库执行 `pg_dump -Fc → 新数据库 pg_restore`，并验证 Alembic `0006`、两个扩展和验收知识库数据。当前发布至少还应验证迁移头为 `0008`，以及 `0008` 升级后新建索引的 Parent/Child Chunk 数据可正常构建、查询和恢复。
+2026-08-17 的 M7 曾用当时完整数据库执行 `pg_dump -Fc → 新数据库 pg_restore`，并验证 Alembic `0006`、两个扩展和验收知识库数据。当前发布至少还应验证迁移头为 `0013`、`0009` 升级后的会话文档聚焦数据与 `0011` 的 `rag_config` 行可正常读写、`0012` 后 `prompt_template` 仅存 active 的 default-rag v2 且内容与代码常量一致、`0013` 后 `PUT/DELETE /api/v1/models/{id}/api-key` 与 `model_config_history` 审计行可正常读写，以及 `0008` 升级后新建索引的 Parent/Child Chunk 数据可正常构建、查询和恢复。
 
 ## 8. 停止与卸载
 

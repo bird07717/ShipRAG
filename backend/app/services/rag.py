@@ -109,6 +109,7 @@ class RagService:
         question: str,
         request_id: str,
         mode: str = "CHAT",
+        user_id: str | None = None,
         retrieval_overrides: dict[str, int] | None = None,
     ) -> PreparedRag:
         started_at = time.perf_counter()
@@ -124,6 +125,7 @@ class RagService:
             question=normalized_question,
             request_id=request_id,
             mode=mode,
+            user_id=user_id,
         )
         # Effective retrieval knobs: DB rag_config snapshot from begin_turn,
         # optionally overridden per-call (playground overrides win so the
@@ -320,9 +322,14 @@ class RagService:
                 message=exc.message,
                 partial_answer="",
                 timings=timings,
+                stage="prepare",
             )
             raise
         except EmbeddingError as exc:
+            # EmbeddingError messages already carry the upstream reason
+            # (e.g. "Embedding 上游返回 HTTP 401") — keep it as detail.
+            # retryable is intentionally omitted: the message distinguishes
+            # transient network faults from permanent auth/config errors.
             await self.repository.fail_turn(
                 turn,
                 status="FAILED",
@@ -330,9 +337,14 @@ class RagService:
                 message="查询向量生成失败",
                 partial_answer="",
                 timings=timings,
+                stage="query_embedding",
+                detail=str(exc),
             )
             raise ApiError("UPSTREAM_UNAVAILABLE", "查询向量生成失败", 503) from exc
         except RerankError as exc:
+            # Only non-degradable rerank errors reach fail_turn (degradable
+            # ones were already downgraded above) — those are config or
+            # protocol errors, so retrying is pointless.
             await self.repository.fail_turn(
                 turn,
                 status="FAILED",
@@ -340,6 +352,9 @@ class RagService:
                 message=exc.public_message,
                 partial_answer="",
                 timings=timings,
+                stage="rerank",
+                retryable=False,
+                detail=getattr(exc, "detail", None),
             )
             raise ApiError(exc.code, exc.public_message, 502) from exc
         except Exception:
@@ -350,6 +365,7 @@ class RagService:
                 message="RAG 请求准备失败",
                 partial_answer="",
                 timings=timings,
+                stage="prepare",
             )
             raise
         finally:
@@ -619,6 +635,7 @@ class RagService:
                     message="客户端已断开",
                     partial_answer="".join(prepared.answer_parts),
                     timings=prepared.timings,
+                    stage="llm",
                 )
             )
             await asyncio.shield(task)
@@ -633,6 +650,9 @@ class RagService:
                 message=exc.public_message,
                 partial_answer="".join(prepared.answer_parts),
                 timings=prepared.timings,
+                stage="llm",
+                retryable=exc.retryable,
+                detail=getattr(exc, "detail", None),
             )
             yield sse_event(
                 "error",
@@ -652,6 +672,7 @@ class RagService:
                 message="回答生成失败",
                 partial_answer="".join(prepared.answer_parts),
                 timings=prepared.timings,
+                stage="llm",
             )
             yield sse_event(
                 "error",
@@ -675,6 +696,7 @@ class RagService:
         request_id: str,
         product_name: str = "",
         scope_description: str = "",
+        user_id: str | None = None,
     ) -> AsyncIterator[bytes]:
         prepared = await self.prepare(
             knowledge_id=knowledge_id,
@@ -682,6 +704,7 @@ class RagService:
             question=question,
             request_id=request_id,
             mode="CHAT",
+            user_id=user_id,
         )
         turn = prepared.turn
         plan, plan_error = await self._safely_plan_chat_turn(
@@ -758,6 +781,8 @@ class RagService:
                 timings=prepared.timings,
                 prompt=prompt,
                 doc_routing=plan.routing,
+                response_type=result.response_type.value,
+                answer_mode=result.answer_mode.value if result.answer_mode else None,
             )
 
             yield sse_event(
@@ -786,6 +811,7 @@ class RagService:
                     message="客户端已断开",
                     partial_answer="".join(prepared.answer_parts),
                     timings=prepared.timings,
+                    stage="llm",
                 )
             )
             await asyncio.shield(task)
@@ -800,6 +826,9 @@ class RagService:
                 message=exc.public_message,
                 partial_answer="".join(prepared.answer_parts),
                 timings=prepared.timings,
+                stage="llm",
+                retryable=exc.retryable,
+                detail=getattr(exc, "detail", None),
             )
             yield sse_event(
                 "error",
@@ -819,6 +848,7 @@ class RagService:
                 message="回答生成失败",
                 partial_answer="".join(prepared.answer_parts),
                 timings=prepared.timings,
+                stage="llm",
             )
             yield sse_event(
                 "error",
@@ -842,6 +872,7 @@ class RagService:
         request_id: str,
         product_name: str = "",
         scope_description: str = "",
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         prepared = await self.prepare(
             knowledge_id=knowledge_id,
@@ -849,6 +880,7 @@ class RagService:
             question=question,
             request_id=request_id,
             mode="CHAT",
+            user_id=user_id,
         )
         turn = prepared.turn
         plan, plan_error = await self._safely_plan_chat_turn(
@@ -873,6 +905,8 @@ class RagService:
                 timings=prepared.timings,
                 prompt=None,
                 doc_routing=plan.routing,
+                response_type=result.response_type.value,
+                answer_mode=result.answer_mode.value if result.answer_mode else None,
             )
             return self._chat_payload(
                 turn, result, plan.references, {}, prepared.timings["total_ms"]
@@ -902,6 +936,8 @@ class RagService:
                 timings=prepared.timings,
                 prompt=prompt,
                 doc_routing=plan.routing,
+                response_type=result.response_type.value,
+                answer_mode=result.answer_mode.value if result.answer_mode else None,
             )
             return self._chat_payload(
                 turn, result, plan.references, usage, prepared.timings["total_ms"]
@@ -916,6 +952,9 @@ class RagService:
                 message=exc.public_message,
                 partial_answer="",
                 timings=prepared.timings,
+                stage="llm",
+                retryable=exc.retryable,
+                detail=getattr(exc, "detail", None),
             )
             raise ApiError(exc.code, exc.public_message, 504 if exc.retryable else 503) from exc
         except ApiError:
@@ -929,6 +968,7 @@ class RagService:
                 message="回答生成失败",
                 partial_answer="",
                 timings=prepared.timings,
+                stage="llm",
             )
             raise
         finally:
@@ -960,6 +1000,7 @@ class RagService:
                 message=exc.message,
                 partial_answer="",
                 timings=prepared.timings,
+                stage="routing",
             )
             return _ChatPlan(kind="ROUTING"), ApiError(exc.code, exc.message, exc.status_code)
         except Exception:
@@ -971,6 +1012,7 @@ class RagService:
                 message="文档路由失败",
                 partial_answer="",
                 timings=prepared.timings,
+                stage="routing",
             )
             return _ChatPlan(kind="ROUTING"), ApiError("INTERNAL_ERROR", "文档路由失败", 500)
 
@@ -1258,6 +1300,8 @@ class RagService:
             timings=prepared.timings,
             prompt=None,
             doc_routing=plan.routing,
+            response_type=result.response_type.value,
+            answer_mode=result.answer_mode.value if result.answer_mode else None,
         )
         yield sse_event(
             "done",
@@ -1305,9 +1349,7 @@ class RagService:
         )
 
     @staticmethod
-    def _match_catalog_title(
-        question: str, catalog: list[dict[str, Any]]
-    ) -> dict[str, Any] | None:
+    def _match_catalog_title(question: str, catalog: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Return the catalog document whose title contains the question.
 
         The containment direction (normalized question inside normalized

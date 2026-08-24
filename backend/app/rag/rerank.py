@@ -13,11 +13,21 @@ from app.rag.models import ModelSnapshot, RerankDocument, RerankItem, RerankOutc
 
 
 class RerankError(RuntimeError):
-    def __init__(self, code: str, message: str, *, degradable: bool) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        degradable: bool,
+        detail: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.public_message = message
         self.degradable = degradable
+        # Non-sensitive upstream diagnostic (e.g. HTTP status), persisted in
+        # the trace error payload for operators.
+        self.detail = detail
 
 
 class RerankProvider(Protocol):
@@ -57,18 +67,21 @@ class SiliconFlowRerankProvider:
         snapshot: ModelSnapshot,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        if not settings.has_secret(settings.siliconflow_api_key):
+        # DB-stored key (decrypted per turn) wins; the env setting is the
+        # bootstrap fallback (ADR-0005 priority chain).
+        api_key = snapshot.api_key or settings.siliconflow_api_key
+        if not settings.has_secret(api_key):
             raise RerankError("MODEL_NOT_CONFIGURED", "SiliconFlow Rerank 未配置", degradable=False)
         if snapshot.provider.lower() != "siliconflow":
             raise RerankError("MODEL_NOT_CONFIGURED", "Rerank Provider 不受支持", degradable=False)
-        assert settings.siliconflow_api_key is not None
+        assert api_key is not None
         self.model_name = snapshot.model_name
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
             # DB model_config.base_url wins (admin-adjustable per turn);
             # the env setting is the fallback for legacy rows.
             base_url=snapshot.base_url or settings.siliconflow_base_url,
-            headers={"Authorization": f"Bearer {settings.siliconflow_api_key.get_secret_value()}"},
+            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
             timeout=httpx.Timeout(settings.m5_provider_timeout_seconds),
             follow_redirects=False,
         )
@@ -105,11 +118,17 @@ class SiliconFlowRerankProvider:
                         await asyncio.sleep(0.5 * (2**attempt))
                         continue
                     raise RerankError(
-                        "UPSTREAM_UNAVAILABLE", "Rerank 服务暂时不可用", degradable=True
+                        "UPSTREAM_UNAVAILABLE",
+                        "Rerank 服务暂时不可用",
+                        degradable=True,
+                        detail=f"HTTP {response.status_code}",
                     )
                 if response.is_error:
                     raise RerankError(
-                        "UPSTREAM_PROTOCOL_ERROR", "Rerank 服务请求失败", degradable=False
+                        "UPSTREAM_PROTOCOL_ERROR",
+                        "Rerank 服务请求失败",
+                        degradable=False,
+                        detail=f"HTTP {response.status_code}",
                     )
                 break
             except httpx.TimeoutException as exc:
@@ -166,6 +185,9 @@ class SiliconFlowRerankProvider:
 
 def create_rerank_provider(settings: Settings, snapshot: ModelSnapshot) -> RerankProvider:
     mode = settings.m5_rerank_provider
-    if mode == "fake" or (mode == "auto" and not settings.has_secret(settings.siliconflow_api_key)):
+    has_any_key = settings.has_secret(settings.siliconflow_api_key) or settings.has_secret(
+        snapshot.api_key
+    )
+    if mode == "fake" or (mode == "auto" and not has_any_key):
         return FakeRerankProvider()
     return SiliconFlowRerankProvider(settings, snapshot)

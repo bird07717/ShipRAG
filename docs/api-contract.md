@@ -53,6 +53,13 @@ INDEX_NOT_READY              409
 KNOWLEDGE_BASE_NOT_READY     409
 DUPLICATE_DOCUMENT           409
 MODEL_NOT_CONFIGURED         503
+MODEL_NOT_FOUND              404
+MODEL_UPDATE_FORBIDDEN       409
+MODEL_UPDATE_CONFLICT        409
+MODEL_SECRET_NOT_CONFIGURED  409
+MODEL_PROBE_FAILED           409
+EMBEDDING_DIMENSION_MISMATCH 422
+API_KEY_DECRYPT_FAILED       500
 UPSTREAM_TIMEOUT             504
 UPSTREAM_UNAVAILABLE         503
 INTERNAL_ERROR               500
@@ -303,7 +310,8 @@ Content-Type: application/json
 {
   "knowledge_id": "uuid",
   "conversation_id": "uuid-or-null",
-  "question": "如何配置数据库？"
+  "question": "如何配置数据库？",
+  "user_id": "mobile-user-42"
 }
 ```
 
@@ -311,6 +319,7 @@ Content-Type: application/json
 
 - `question` 去除首尾空白后不能为空，最大长度在 M1 冻结。
 - `conversation_id=null` 时服务端创建 Conversation。
+- `user_id` 可选（1–100 字符）：调用方（如移动端 BFF）透传其登录体系中的用户标识，仅用于 Trace 归因、质量统计与按用户过滤，服务端不校验其真实性与权限。
 - 已有 Conversation 的 `knowledge_id` 必须与请求一致，否则返回 `409 CONVERSATION_KB_MISMATCH`。
 - 知识库必须 `ENABLED` 且存在 Active Index。
 
@@ -421,29 +430,158 @@ Content-Type: application/json
   中等证据时先向用户确认。
 - 路由决策完整记录在 `rag_trace.retrieval_result.doc_routing`。
 
-## 9. Prompt、模型与 Trace API
+## 9. Prompt、模型、RAG 配置与 Trace API
 
 当前已实现的管理与诊断接口：
 
 ```http
-GET  /api/v1/prompts
-GET  /api/v1/models
-GET /api/v1/traces
-GET /api/v1/traces/{trace_id}
-GET /api/v1/conversations/{conversation_id}/messages
+GET   /api/v1/prompts
+GET   /api/v1/models
+PATCH /api/v1/models/{model_id}
+PUT   /api/v1/models/{model_id}/api-key
+DELETE /api/v1/models/{model_id}/api-key
+POST  /api/v1/models/{model_id}/probe
+GET   /api/v1/rag-config
+PATCH /api/v1/rag-config
+GET   /api/v1/traces
+GET   /api/v1/traces/{trace_id}
+GET   /api/v1/conversations/{conversation_id}/messages
 ```
 
-Prompt 和模型页面在当前版本为只读安全快照。尚未提供 Prompt 创建/启用、模型创建/编辑/测试/启用或 API Key 轮换端点；这些操作不应由调用方假定可用。
+### 模型查询与在线调整
 
-模型响应只返回：
+`GET /api/v1/models` 返回全部五种类型（LLM / EMBEDDING / RERANK / OCR / VISION）的安全快照。模型响应只返回：
 
 ```json
 {
-  "api_key_configured": true
+  "api_key_configured": true,
+  "api_key_source": "DATABASE"
 }
 ```
 
-模型响应还包含非敏感的 `id`、名称、类型、Provider、模型名称、启用状态与参数。绝不返回 `api_key_ciphertext`、Nonce、密钥版本、掩码以外的密钥材料或任何可还原密钥。Trace 查询可能含问题、Prompt、答案和检索上下文，必须置于可信代理与服务 Token 边界之后。
+模型响应还包含非敏感的 `id`、名称、类型、Provider、Base URL、模型名称、启用状态与参数。绝不返回 `api_key_ciphertext`、Nonce、密钥版本、掩码以外的密钥材料或任何可还原密钥。
+
+`PATCH /api/v1/models/{model_id}` 的可编辑类型按消费时机划分：
+
+| 类型 | 生效语义 |
+|---|---|
+| `LLM` / `RERANK` | `begin_turn` 每轮快照，写入后下一轮对话即生效、无需重启 |
+| `OCR` / `VISION` | 索引构建启动时快照，写入后**下一次索引构建**生效；已有 Active Index 不受影响。变更后所有知识库自动标记 `rebuild_required=true` |
+| `EMBEDDING` | 同上构建时生效，但变更 `model_name` / `base_url` 时必须先通过**维度契约门禁**（见下）；`parameters` / `enabled` 变更无需门禁 |
+
+请求体（对所有可编辑类型一致）：
+
+```json
+{
+  "model_name": "glm-5.2",
+  "base_url": "https://open.bigmodel.cn/api/paas/v4/",
+  "enabled": true,
+  "parameters": {
+    "temperature": 0.1,
+    "max_tokens": 4096,
+    "thinking": { "type": "enabled" }
+  }
+}
+```
+
+约束与错误：
+
+- 所有字段可选，但至少提供一个，否则返回 `422 VALIDATION_ERROR`。
+- `base_url` 必须以 `http(s)://` 开头并以 `/` 结尾。
+- `parameters.temperature` 取值 0–2；`parameters.max_tokens` 取值 100–100000；
+  `parameters.thinking` 必须为 `{"type": "enabled" | "disabled"}`。未知键原样透传。
+- 模型不存在返回 `404 MODEL_NOT_FOUND`。
+- 每个 `model_type` 最多一个 `enabled=true` 配置，违反时返回 `409 MODEL_UPDATE_CONFLICT`。
+- 尚未提供模型创建、删除端点；这些操作不应由调用方假定可用。
+
+### 构建时模型消费与维度契约门禁（Embedding / OCR / Vision）
+
+索引构建启动时一次性快照启用的 `EMBEDDING` / `OCR` / `VISION` 行（含解密密钥），
+构建期间的管理端写入不会进入本次构建；行缺失或 Provider 不受支持时回退
+`Settings` 环境配置并在任务 `metadata.build_models` 记录来源
+（`DATABASE` / `ENV` / `ENV_FALLBACK`）。`PUT/DELETE /api/v1/models/{id}/api-key`
+对这三类写入或清除数据库密钥同样只在下一次构建生效，并标记
+`rebuild_required=true`。
+
+**维度契约门禁（ADR-0008）**：`PATCH` 变更 EMBEDDING 行的 `model_name` 或
+`base_url`（实际值发生变化）时，服务端先用候选值 + 生效密钥发起一次最小
+Embedding 探测，实测输出维度必须等于冻结维度 1024：
+
+- 维度不符 → `422 EMBEDDING_DIMENSION_MISMATCH`；
+- 探测不可达 / Provider 不受支持 → `409 MODEL_PROBE_FAILED`；
+- 值未变化或仅改 `parameters` / `enabled` 不触发探测。
+
+构建期兜底：索引构建对每批返回向量校验长度等于冻结维度，不符则以
+`EMBEDDING_DIMENSION_MISMATCH` 终止构建——即使门禁被直改库绕过，
+`vector(N)` 列也不会收到脏数据。
+
+### API Key 管理（write-only，ADR-0005）
+
+`PUT /api/v1/models/{model_id}/api-key` 请求体 `{"api_key": "..."}`（1–4096 字符），
+`DELETE /api/v1/models/{model_id}/api-key` 清除数据库密钥。两者返回更新后的
+`ModelConfigResponse`。规则：
+
+- **密钥只写不读**：API 永远只返回 `api_key_configured` 与 `api_key_source`
+  （`DATABASE` / `ENV` / `null`），绝不返回密文、Nonce、密钥版本或任何可还原材料。
+- **优先级链**：数据库密钥（AES-GCM 加密，`MODEL_SECRET_KEY` 信封）> 环境变量
+  （`SILICONFLOW_API_KEY` / `ZHIPU_API_KEY`）。清除数据库密钥即回退环境变量。
+- 未配置 `MODEL_SECRET_KEY` 时写入返回 `409 MODEL_SECRET_NOT_CONFIGURED`。
+- `begin_turn` 每轮解密并快照 LLM/Rerank 密钥，写入下一轮对话即生效、无需重启。
+- 所有写入（含 `PATCH /models`）在 `model_config_history` 表记录
+  操作类型、变更字段名与 actor（request id），不记录任何值。
+- `MODEL_SECRET_KEY` 轮换：设置 `MODEL_SECRET_KEY_PREVIOUS` 后运行
+  `python -m app.tasks.key_rotation`（密钥只经环境变量，不经 Redis）。
+
+### 连通性探测
+
+`POST /api/v1/models/{model_id}/probe` 用当前生效配置（DB 行 + 生效密钥）向上游
+发起一次最小请求，返回 `{ok, model_type, provider, model_name, latency_ms, detail,
+dimension?}`。`dimension` 仅 EMBEDDING 返回，若与冻结维度 1024 不一致则
+`ok=false` 并在 `detail` 说明。探测结果不含密钥、内部 URL 或上游原始响应体。
+
+### RAG 运行时检索配置
+
+`GET /api/v1/rag-config` 返回全局单行检索参数（`rag_config` 表，迁移 `0011`）；行缺失时回退 `Settings` 环境默认值：
+
+```json
+{
+  "vector_top_k": 10,
+  "bm25_top_k": 10,
+  "fusion_top_k": 20,
+  "rerank_top_n": 10,
+  "context_max_chunks": 8,
+  "updated_at": "..."
+}
+```
+
+`PATCH /api/v1/rag-config` 更新部分或全部字段，每个字段取值范围 `1`–`100`，至少提供一个否则返回 `422 VALIDATION_ERROR`。`begin_turn` 每轮读取快照，保存后下一轮对话即生效；Playground 的手动参数仍可在同一层临时覆盖（见第 7 节）。
+
+### Prompt 与 Trace
+
+`GET /api/v1/prompts` 返回两类只读条目，运行时内置模板在前：
+
+- `source=RUNTIME`：Chat 主路径（文档问答、澄清与切换）实际使用的三个代码管理模板（`runtime-doc-qa` / `runtime-chunk-qa` / `runtime-routing`），与解析逻辑强耦合（`[MODE:*]` 标记、`[IMG:S*]` 引用），由代码版本化管理（`backend/app/rag/prompt.py`）；`description` 字段说明各自作用，`active` 恒为 `false`，`created_at` / `updated_at` 为空。
+- `source=DATABASE`：`prompt_template` 表的版本化模板（当前仅 `default-rag` v2 一行，active），只在文档路由的片段检索降级路径（CHUNK_RAG 兜底与降级）生效。迁移 `0012` 保证该行内容与代码常量 `DEFAULT_RAG_PROMPT` 逐字节一致。
+
+两类条目均不可写：尚未提供 Prompt 创建、版本切换或启用端点，这些操作不应由调用方假定可用。Trace 查询可能含问题、Prompt、答案和检索上下文，必须置于可信代理与服务 Token 边界之后。
+
+### Trace 查询
+
+`GET /api/v1/traces` 支持过滤参数：`knowledge_id`、`status`、`mode`、`response_type`（`ANSWERED` / `UNCONFIRMED` / `OUT_OF_SCOPE` / `DOC_DELIVERED`）、`user_id`、`from` / `to`（ISO 时间戳，按 `created_at` 过滤，`to` 为开区间）与 `limit`（默认 50，最大 200）。摘要行自迁移 `0014` 起包含 `user_id`、`response_type`、`answer_mode`。
+
+失败 trace 的 `error` 载荷为 `{"code", "message"}` 并按可用性附加运维字段：`stage`（失败阶段：`prepare` / `query_embedding` / `routing` / `rerank` / `llm`）、`retryable`（是否可安全重试）、`detail`（非敏感的上游诊断信息，如 `HTTP 429`，用于区分限流与宕机）。这些字段面向运营排障，调用方不应依赖其存在性做逻辑分支。
+
+### 服务端质量统计（Metrics）
+
+基于 `rag_trace` 实时聚合的只读统计（迁移 `0014` 提供持久化的 `user_id` / `response_type` / `answer_mode`，并回填历史 `DOC_DELIVERED`）：
+
+- `GET /api/v1/metrics/overview`：总量、`response_type` 分布、无答案率（`UNCONFIRMED` + `OUT_OF_SCOPE` / 已分类 trace 数）、失败率、引用缺失率、rerank 降级率、独立用户数、延迟分位数（P50/P95/P99/均值，取 `latency.total_ms`）与 token 消耗（LLM 与 rerank 分列）。
+- `GET /api/v1/metrics/timeseries`：按 `granularity=day|hour` 分桶的趋势点，含查询量、各 `response_type` 计数、无答案率、P95 延迟与 token 汇总。
+- `GET /api/v1/metrics/latency`：端到端分位数与各阶段平均耗时（`prepare_turn_ms`、`query_rewrite_ms`、`query_embedding_ms`、`bm25_retrieval_ms`、`vector_retrieval_ms`、`fusion_ms`、`rerank_ms`、`context_expansion_ms`、`prompt_ms`、`llm_ms`）。
+
+公共参数：`knowledge_id`（可选）、`mode`（默认 `CHAT`，排除 Playground 实验）、`from` / `to`（可选，默认最近 7 天，最长 92 天，`to` 为开区间；`from >= to` 返回 `422`）。
+
+比率分母说明：无答案率与文档投递率的分母是 `response_type` 非空的 trace 数（`classified_traces`）。迁移 `0014` 之前的历史行除可回填的 `DOC_DELIVERED` 外 `response_type` 为空，不计入分母；失败回合也不计入。
 
 ## 10. 兼容性规则
 

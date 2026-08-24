@@ -12,6 +12,7 @@ import httpx
 
 from app.core.config import Settings
 from app.ingestion.models import EmbeddingInput
+from app.rag.models import ModelSnapshot
 
 
 class EmbeddingError(RuntimeError):
@@ -53,17 +54,28 @@ class FakeEmbeddingProvider:
 class SiliconFlowEmbeddingProvider:
     provider = "siliconflow"
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
-        if not settings.has_secret(settings.siliconflow_api_key):
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        *,
+        snapshot: ModelSnapshot | None = None,
+    ) -> None:
+        # DB model_config snapshot wins (admin-managed); env settings are the
+        # bootstrap fallback (same priority chain as chat-side providers).
+        api_key = (snapshot.api_key if snapshot else None) or settings.siliconflow_api_key
+        if not settings.has_secret(api_key):
             raise EmbeddingError("SiliconFlow Embedding 未配置")
-        assert settings.siliconflow_api_key is not None
-        self.model_name = settings.siliconflow_embedding_model
+        assert api_key is not None
+        self.model_name = (snapshot.model_name if snapshot else None) or (
+            settings.siliconflow_embedding_model
+        )
         self.dimension = settings.embedding_dimension
         self.batch_size = settings.m2_embedding_batch_size
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
-            base_url=settings.siliconflow_base_url,
-            headers={"Authorization": f"Bearer {settings.siliconflow_api_key.get_secret_value()}"},
+            base_url=(snapshot.base_url if snapshot else None) or settings.siliconflow_base_url,
+            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
             timeout=httpx.Timeout(settings.m0_provider_timeout_seconds),
             follow_redirects=False,
         )
@@ -130,8 +142,11 @@ class SiliconFlowEmbeddingProvider:
             await self.client.aclose()
 
 
-def create_embedding_provider(settings: Settings) -> EmbeddingProvider:
+def create_embedding_provider(
+    settings: Settings, snapshot: ModelSnapshot | None = None
+) -> EmbeddingProvider:
     mode = settings.m2_embedding_provider
-    if mode == "fake" or (mode == "auto" and not settings.has_secret(settings.siliconflow_api_key)):
+    api_key = (snapshot.api_key if snapshot else None) or settings.siliconflow_api_key
+    if mode == "fake" or (mode == "auto" and not settings.has_secret(api_key)):
         return FakeEmbeddingProvider(settings.embedding_dimension)
-    return SiliconFlowEmbeddingProvider(settings)
+    return SiliconFlowEmbeddingProvider(settings, snapshot=snapshot)

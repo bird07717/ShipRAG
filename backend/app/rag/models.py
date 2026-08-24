@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
+from pydantic import SecretStr
+
 
 @dataclass(frozen=True, slots=True)
 class ModelSnapshot:
@@ -11,6 +13,8 @@ class ModelSnapshot:
     model_name: str
     parameters: dict[str, Any]
     base_url: str | None = None
+    # Decrypted DB-stored API key; None means fall back to the env setting.
+    api_key: SecretStr | None = None
 
 
 @dataclass(frozen=True, slots=True)

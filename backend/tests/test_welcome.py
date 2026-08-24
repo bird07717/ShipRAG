@@ -55,9 +55,7 @@ def test_welcome_without_active_index_guides_build() -> None:
 
 
 def test_welcome_disabled_kb_reports_disabled() -> None:
-    payload = build_welcome(
-        _kb(status="DISABLED"), [{"document_id": "a", "title": "手册"}]
-    )
+    payload = build_welcome(_kb(status="DISABLED"), [{"document_id": "a", "title": "手册"}])
     assert payload["knowledge_base"]["ready"] is False
     assert "已停用" in payload["message"]
     assert payload["suggestions"] == []

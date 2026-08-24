@@ -17,7 +17,7 @@ RAG_SYSTEM_GUARD = (
 )
 
 DEFAULT_RAG_PROMPT = """# 任务
-仅依据下方知识库证据回答当前问题，用清晰、简洁、可执行的中文直接作答。
+仅依据下方“知识库证据”回答“当前问题”，用清晰、简洁、可执行的中文直接作答。
 
 # 事实边界
 1. 对话历史只用于理解省略、指代和上下文衔接，不能单独作为事实依据。所有事实必须由知识库证据支持。
@@ -29,18 +29,20 @@ DEFAULT_RAG_PROMPT = """# 任务
 
 # 信息不足
 - 完全没有相关证据时，只回答：知识库中没有足够信息。
-- 有部分相关证据时，先回答能够确认的部分，再明确说明具体缺少什么。
+- 有部分相关证据时，先回答能够确认的部分，再明确说明具体缺少什么。不要把整题笼统判为无信息。
 
 # 引用
 1. 只能引用证据块已有的 [S1]、[S2] 等编号，绝不编造编号。
-2. 每个可核验的步骤、参数、条件、风险或结论都要在对应句末就近引用。
-3. 引用必须真正支持紧邻的表述。
-4. 知识库中没有足够信息无需引用。
+2. 每个可核验的步骤、参数、条件、风险或结论都要在对应句末就近引用。一个结论可引用多个来源。
+3. 引用必须真正支持紧邻的表述。不要引用未用于答案的来源，也不要单独列“参考资料”。
+4. “知识库中没有足够信息”以及对证据缺失或冲突的说明无需引用。
 
 # 组织方式
 - 优先匹配用户意图。操作类问题按前置条件、操作步骤、参数说明、风险/注意事项组织。
-- 综合各证据块，不机械照抄。
+  只输出证据实际支持的部分。
+- 综合各证据块，不机械照抄，不按 [S1]、[S2] 的检索排序逐块复述。
 - 保留产品名、界面标签、IP、分辨率和参数方向等关键原文。
+  不要把示例值误写成所有设备都必须使用的固定值。
 
 <conversation_history>
 {{history}}
@@ -223,6 +225,57 @@ CHUNK_QA_PROMPT_TEMPLATE = """# 角色
 <current_question>
 {{question}}
 </current_question>"""
+
+
+RUNTIME_PROMPTS: list[dict[str, str]] = [
+    {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "name": "runtime-doc-qa",
+        "description": (
+            "聚焦文档全文问答：会话锁定文档后，以该文档全文为唯一事实来源生成回答，"
+            "支持 [MODE:*] 回答模式标记与 [IMG:S*] 图片引用。"
+        ),
+        "template": DOC_QA_PROMPT_TEMPLATE,
+    },
+    {
+        "id": "00000000-0000-0000-0000-000000000011",
+        "name": "runtime-chunk-qa",
+        "description": (
+            "片段检索问答：聚焦文档超出 Prompt 预算降级时，以检索片段为上下文生成回答，"
+            "保留回答模式与图片引用机制。"
+        ),
+        "template": CHUNK_QA_PROMPT_TEMPLATE,
+    },
+    {
+        "id": "00000000-0000-0000-0000-000000000012",
+        "name": "runtime-routing",
+        "description": (
+            "文档路由：对齐阶段的文档聚合决策、候选文档澄清问题生成与聚焦文档切换确认。"
+        ),
+        "template": ROUTING_PROMPT_TEMPLATE,
+    },
+]
+
+
+def runtime_prompt_entries() -> list[dict[str, Any]]:
+    """Read-only snapshots of the code-managed runtime prompts.
+
+    These templates are tightly coupled with the doc-router parsing logic
+    ([MODE:*] tags, [IMG:S*] markers); they are versioned in code and only
+    exposed for observability, never editable through the API.
+    """
+    return [
+        {
+            "id": UUID(entry["id"]),
+            "name": entry["name"],
+            "version": 1,
+            "content": entry["template"],
+            "active": False,
+            "source": "RUNTIME",
+            "description": entry["description"],
+        }
+        for entry in RUNTIME_PROMPTS
+    ]
 
 
 def build_doc_qa_prompt_template(product_name: str, scope_description: str) -> str:

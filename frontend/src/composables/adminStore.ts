@@ -9,6 +9,7 @@ import type {
   IndexTask,
   ModelConfig,
   ModelConfigUpdatePayload,
+  ModelProbeResult,
   PromptTemplate,
   RagConfig,
   RagConfigUpdatePayload,
@@ -298,6 +299,24 @@ export const adminStore = reactive({
       await adminApi.updateModel(modelId, payload);
       this.models = await adminApi.listModels();
     }, "模型配置已保存，下一轮对话生效");
+  },
+
+  async putModelApiKey(modelId: string, apiKey: string): Promise<void> {
+    await this.run(async () => {
+      await adminApi.putApiKey(modelId, apiKey);
+      this.models = await adminApi.listModels();
+    }, "API 密钥已加密保存（数据库密钥优先于环境变量）");
+  },
+
+  async clearModelApiKey(modelId: string): Promise<void> {
+    await this.run(async () => {
+      await adminApi.deleteApiKey(modelId);
+      this.models = await adminApi.listModels();
+    }, "数据库密钥已清除，回退到环境变量密钥");
+  },
+
+  async probeModel(modelId: string): Promise<ModelProbeResult> {
+    return await adminApi.probeModel(modelId);
   },
 
   async openTraceSilent(traceId: string): Promise<RagTrace> {

@@ -2,7 +2,7 @@
 
 企业产品文档知识库与多模态 RAG 问答平台。仓库包含 M0–M7 的实现与 2026-08-17 的 V1.0.0 验收证据；当前代码、OpenAPI 和 Alembic 迁移头才是后续修改与发布的事实来源。
 
-> 当前迁移头为 `0010`。M7 记录中的 `0006` 是当次历史验收所使用的 Schema，不能替代对 `0007`–`0010` 之后代码的重新验收。
+> 当前迁移头为 `0014`。M7 记录中的 `0006` 是当次历史验收所使用的 Schema，不能替代对 `0007`–`0014` 之后代码的重新验收。
 
 ## 当前能力
 
@@ -28,7 +28,9 @@
 - Qwen3-VL-Reranker 图文重排、可审计降级与完整引用校验
 - 自动/人工发布双索引、失败隔离、索引/任务管理 API 与原子切换
 - RAG Playground 参数实验、PLAYGROUND Trace 和检索全阶段诊断
-- Knowledge Base、Documents、三栏预览、Index Build、Models/Prompt（只读）和 Trace 管理页面
+- 服务端质量统计：Chat 请求 `user_id` 透传、trace 持久化 `response_type`/`answer_mode`（迁移 `0014`）与 `/metrics` 无答案率、延迟分位数、token 成本聚合 API
+- 全模型类型在线编辑（LLM/Rerank 下一轮生效；Embedding/OCR/Vision 下一次构建生效并标记重建）、API Key 加密写入/轮换/回退（ADR-0008 维度契约门禁与审计）
+- Knowledge Base、Documents、三栏预览、Index Build、Models（全类型可编辑、密钥管理与连通性测试）、RAG 检索配置、Prompt（只读）和 Trace 管理页面
 - Backend/Worker/Frontend 生产镜像、Nginx SSE 代理和带迁移门禁的生产 Compose
 - 真实 HTTP/RQ 联调、并发基线、依赖恢复、备份恢复和发布 Runbook
 

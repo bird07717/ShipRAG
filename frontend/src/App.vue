@@ -127,14 +127,6 @@ const indexStats = computed(() => {
             >
               上传文档
             </el-button>
-            <el-button
-              v-if="activeView === 'indexes'"
-              type="primary"
-              :disabled="!store.selectedKnowledgeId"
-              @click="store.buildIndex()"
-            >
-              新建构建
-            </el-button>
           </template>
         </PageHeader>
         <div class="page-body">

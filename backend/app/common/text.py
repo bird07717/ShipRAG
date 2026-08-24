@@ -4,9 +4,7 @@ import math
 import re
 
 # CJK Unified Ideographs + Extension A, common CJK punctuation and fullwidth forms
-_CJK_PATTERN = re.compile(
-    "[\u2e80-\u9fff\u3000-\u303f\uff00-\uffef\U00020000-\U0002a6df]"
-)
+_CJK_PATTERN = re.compile("[\u2e80-\u9fff\u3000-\u303f\uff00-\uffef\U00020000-\U0002a6df]")
 
 _MOJIBAKE_MARKERS = (
     "锟斤拷",

@@ -13,8 +13,31 @@ from app.rag.prompt import (
     build_context,
     build_doc_qa_prompt_template,
     build_routing_prompt_template,
+    runtime_prompt_entries,
     validate_prompt_template,
 )
+
+
+def test_runtime_prompt_entries_snapshot() -> None:
+    entries = runtime_prompt_entries()
+
+    assert [entry["name"] for entry in entries] == [
+        "runtime-doc-qa",
+        "runtime-chunk-qa",
+        "runtime-routing",
+    ]
+    templates = {
+        "runtime-doc-qa": DOC_QA_PROMPT_TEMPLATE,
+        "runtime-chunk-qa": CHUNK_QA_PROMPT_TEMPLATE,
+        "runtime-routing": ROUTING_PROMPT_TEMPLATE,
+    }
+    for entry in entries:
+        assert entry["source"] == "RUNTIME"
+        assert entry["active"] is False
+        assert entry["version"] == 1
+        assert entry["description"]
+        assert entry["content"] == templates[entry["name"]]
+        validate_prompt_template(entry["content"])
 
 
 def test_doc_qa_template_has_required_variables() -> None:

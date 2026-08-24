@@ -65,14 +65,19 @@ async def rewrite_query(
     prompt = _REWRITE_TEMPLATE.format(history=render_history(history), question=question)
     try:
         rewritten = (
-            await provider.complete(
-                prompt,
-                system=QUERY_REWRITE_GUARD,
-                max_tokens=max_tokens,
-                temperature=0.0,
-                timeout_seconds=timeout_seconds,
+            (
+                await provider.complete(
+                    prompt,
+                    system=QUERY_REWRITE_GUARD,
+                    max_tokens=max_tokens,
+                    temperature=0.0,
+                    timeout_seconds=timeout_seconds,
+                )
             )
-        ).strip().strip(_QUOTES).strip()
+            .strip()
+            .strip(_QUOTES)
+            .strip()
+        )
     except LlmError as exc:
         return question, {"status": "DEGRADED", "reason": exc.code}
     if not rewritten or len(rewritten) > max_chars:

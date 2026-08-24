@@ -42,9 +42,7 @@ class _FakeConnection:
     async def __aexit__(self, *args: Any) -> None:
         return None
 
-    async def execute(
-        self, statement: Any, params: dict[str, Any] | None = None
-    ) -> _FakeResult:
+    async def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _FakeResult:
         self.executed.append((str(statement), params))
         if not self.results:
             return _FakeResult([])
@@ -121,12 +119,34 @@ async def test_update_model_config_rejects_unknown_model() -> None:
 
 @pytest.mark.asyncio
 async def test_update_model_config_rejects_non_chat_models() -> None:
-    engine = _FakeEngine([[{"id": uuid4(), "model_type": "EMBEDDING"}]])
+    """EMBEDDING is now editable (ADR-0008): the update succeeds at the
+    repository layer (the dimension gate lives at the API layer) and flags
+    every knowledge base for rebuild."""
+    model_id = uuid4()
+    row = _updated_row()
+    row["model_type"] = "EMBEDDING"
+    engine = _FakeEngine([[{"id": model_id, "model_type": "EMBEDDING"}], [row]])
     repository = RagRepository(cast(AsyncEngine, engine), _settings())
 
-    with pytest.raises(ApiError) as exc_info:
-        await repository.update_model_config(uuid4(), model_name="other-embedding")
-    assert exc_info.value.status_code == 409
+    result = await repository.update_model_config(model_id, model_name="other-embedding")
+
+    assert result["model_type"] == "EMBEDDING"
+    executed_sql = [sql for sql, _ in engine.connection.executed]
+    assert any("rebuild_required = true" in sql for sql in executed_sql)
+    history_sql = executed_sql[2]
+    assert "model_config_history" in history_sql
+
+
+@pytest.mark.asyncio
+async def test_update_model_config_llm_change_skips_rebuild_flag() -> None:
+    model_id = uuid4()
+    engine = _FakeEngine([[{"id": model_id, "model_type": "LLM"}], [_updated_row()]])
+    repository = RagRepository(cast(AsyncEngine, engine), _settings())
+
+    await repository.update_model_config(model_id, model_name="glm-5.2")
+
+    executed_sql = [sql for sql, _ in engine.connection.executed]
+    assert not any("rebuild_required = true" in sql for sql in executed_sql)
 
 
 @pytest.mark.asyncio

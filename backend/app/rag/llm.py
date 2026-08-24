@@ -13,11 +13,22 @@ from app.rag.prompt import RAG_SYSTEM_GUARD
 
 
 class LlmError(RuntimeError):
-    def __init__(self, code: str, message: str, *, retryable: bool) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool,
+        detail: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.public_message = message
         self.retryable = retryable
+        # Non-sensitive diagnostic context (e.g. upstream HTTP status) that
+        # does not belong in the user-facing message but is persisted in the
+        # trace error payload for operators.
+        self.detail = detail
 
 
 class LlmProvider(Protocol):
@@ -77,11 +88,14 @@ class ZhipuLlmProvider:
         snapshot: ModelSnapshot,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        if not settings.has_secret(settings.zhipu_api_key):
+        # DB-stored key (decrypted per turn) wins; the env setting is the
+        # bootstrap fallback (ADR-0005 priority chain).
+        api_key = snapshot.api_key or settings.zhipu_api_key
+        if not settings.has_secret(api_key):
             raise LlmError("MODEL_NOT_CONFIGURED", "智谱 LLM 未配置", retryable=False)
         if snapshot.provider.lower() != "zhipu":
             raise LlmError("MODEL_NOT_CONFIGURED", "LLM Provider 不受支持", retryable=False)
-        assert settings.zhipu_api_key is not None
+        assert api_key is not None
         self.model_name = snapshot.model_name
         self.parameters = snapshot.parameters
         self.settings = settings
@@ -91,7 +105,7 @@ class ZhipuLlmProvider:
             # DB model_config.base_url wins (admin-adjustable per turn);
             # the env setting is the fallback for legacy rows.
             base_url=snapshot.base_url or settings.zhipu_base_url,
-            headers={"Authorization": f"Bearer {settings.zhipu_api_key.get_secret_value()}"},
+            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
             timeout=httpx.Timeout(settings.m3_provider_timeout_seconds),
             follow_redirects=False,
         )
@@ -146,9 +160,19 @@ class ZhipuLlmProvider:
                 timeout=httpx.Timeout(timeout_seconds) if timeout_seconds is not None else None,
             )
             if response.status_code == 429 or response.status_code >= 500:
-                raise LlmError("UPSTREAM_UNAVAILABLE", "模型服务暂时不可用", retryable=True)
+                raise LlmError(
+                    "UPSTREAM_UNAVAILABLE",
+                    "模型服务暂时不可用",
+                    retryable=True,
+                    detail=f"HTTP {response.status_code}",
+                )
             if response.is_error:
-                raise LlmError("UPSTREAM_UNAVAILABLE", "模型服务请求失败", retryable=False)
+                raise LlmError(
+                    "UPSTREAM_UNAVAILABLE",
+                    "模型服务请求失败",
+                    retryable=False,
+                    detail=f"HTTP {response.status_code}",
+                )
             data = response.json()
             if isinstance(data.get("usage"), dict):
                 self.usage = dict(data["usage"])
@@ -173,9 +197,19 @@ class ZhipuLlmProvider:
                 "POST", "chat/completions", json=self._payload(prompt)
             ) as response:
                 if response.status_code == 429 or response.status_code >= 500:
-                    raise LlmError("UPSTREAM_UNAVAILABLE", "模型服务暂时不可用", retryable=True)
+                    raise LlmError(
+                        "UPSTREAM_UNAVAILABLE",
+                        "模型服务暂时不可用",
+                        retryable=True,
+                        detail=f"HTTP {response.status_code}",
+                    )
                 if response.is_error:
-                    raise LlmError("UPSTREAM_UNAVAILABLE", "模型服务请求失败", retryable=False)
+                    raise LlmError(
+                        "UPSTREAM_UNAVAILABLE",
+                        "模型服务请求失败",
+                        retryable=False,
+                        detail=f"HTTP {response.status_code}",
+                    )
                 async for line in response.aiter_lines():
                     stripped = line.strip()
                     if not stripped or stripped.startswith(":") or not stripped.startswith("data:"):
@@ -213,6 +247,9 @@ class ZhipuLlmProvider:
 
 def create_llm_provider(settings: Settings, snapshot: ModelSnapshot) -> LlmProvider:
     mode = settings.m3_llm_provider
-    if mode == "fake" or (mode == "auto" and not settings.has_secret(settings.zhipu_api_key)):
+    has_any_key = settings.has_secret(settings.zhipu_api_key) or settings.has_secret(
+        snapshot.api_key
+    )
+    if mode == "fake" or (mode == "auto" and not has_any_key):
         return FakeLlmProvider()
     return ZhipuLlmProvider(settings, snapshot)

@@ -414,6 +414,10 @@ async def test_prepare_marks_turn_failed_when_query_embedding_fails() -> None:
     assert error.value.code == "UPSTREAM_UNAVAILABLE"
     assert repository.failed is not None
     assert repository.failed["code"] == "UPSTREAM_UNAVAILABLE"
+    assert repository.failed["stage"] == "query_embedding"
+    # upstream reason is preserved as detail instead of a blanket retryable
+    assert repository.failed["detail"] == "查询模型与 Active Index 的 Embedding 模型快照不一致"
+    assert "retryable" not in repository.failed
 
 
 def test_sse_event_uses_utf8_json_frame() -> None:

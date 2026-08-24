@@ -16,6 +16,7 @@ from PIL import Image
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.common.errors import ApiError
 from app.core.config import Settings
 from app.ingestion.chunker import build_chunks, build_parent_chunks
 from app.ingestion.embedding import EmbeddingProvider, create_embedding_provider
@@ -48,6 +49,7 @@ class IndexPipeline:
         embedding_provider: EmbeddingProvider | None = None,
         ocr_provider: ImageUnderstandingProvider | None = None,
         vision_provider: ImageUnderstandingProvider | None = None,
+        model_sources: dict[str, str] | None = None,
     ) -> None:
         self.engine = engine
         self.minio = minio
@@ -55,6 +57,9 @@ class IndexPipeline:
         self.embedding_provider = embedding_provider or create_embedding_provider(settings)
         self.ocr_provider = ocr_provider or create_ocr_provider(settings)
         self.vision_provider = vision_provider or create_vision_provider(settings)
+        # {"EMBEDDING": "DATABASE" | "ENV" | "ENV_FALLBACK", ...} — recorded
+        # into task metadata so the build's model provenance is auditable.
+        self.model_sources = model_sources or {}
         self.repository = IngestionRepository(engine, settings)
 
     async def run(self, index_id: UUID, task_id: UUID) -> IndexBuildResult:
@@ -152,6 +157,8 @@ class IndexPipeline:
             "current_document_position": position,
             "total_documents": total,
         }
+        if self.model_sources:
+            task_metadata["build_models"] = self.model_sources
         await self._update_task(task_id, "RUNNING", "PARSING", progress, metadata=task_metadata)
         await self._update_document_status(index_document_id, "PARSING", started=True)
         data = await self._download_object(document["minio_bucket"], document["minio_object_key"])
@@ -210,7 +217,14 @@ class IndexPipeline:
         if len(vectors) != len(chunks):
             raise ValueError("Embedding 数量与 Chunk 数量不一致")
         if any(len(vector) != self.settings.embedding_dimension for vector in vectors):
-            raise ValueError("Embedding 维度不一致")
+            # Last-resort invariant: the edit-time dimension gate can be
+            # bypassed by direct DB writes; the build must fail loudly
+            # instead of persisting vectors that break the vector(N) column.
+            raise ApiError(
+                "EMBEDDING_DIMENSION_MISMATCH",
+                "Embedding 输出维度与部署冻结维度不一致，索引构建终止",
+                422,
+            )
 
         await self._persist_document(
             index=index,
@@ -252,6 +266,8 @@ class IndexPipeline:
             "total_documents": total,
             "reused": True,
         }
+        if self.model_sources:
+            task_metadata["build_models"] = self.model_sources
         await self._update_task(task_id, "RUNNING", "PARSING", progress, metadata=task_metadata)
         await self._update_document_status(index_document_id, "PARSING", started=True)
 

@@ -73,6 +73,7 @@ const traceDetail = {
   answer: "答案内容",
   sources: [{ source_id: "S1", document: "a.docx", section_path: ["1", "2"], page: null }],
   citation_result: {},
+  model_usage: {},
 };
 
 const model = {

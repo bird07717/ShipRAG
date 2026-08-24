@@ -73,6 +73,7 @@ const traceDetail = {
   answer: "答案",
   sources: [],
   citation_result: {},
+  model_usage: {},
 };
 
 function stubApi() {

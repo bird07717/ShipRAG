@@ -42,6 +42,10 @@ class Settings(BaseSettings):
 
     readiness_timeout_seconds: float = 2.0
     model_secret_key: SecretStr | None = None
+    model_secret_key_version: int = 1
+    model_secret_key_previous: SecretStr | None = None
+    model_secret_key_previous_version: int | None = None
+    model_probe_timeout_seconds: float = 15.0
     embedding_dimension: int = 1024
 
     siliconflow_api_key: SecretStr | None = None

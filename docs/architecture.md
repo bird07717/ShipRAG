@@ -59,7 +59,7 @@ flowchart LR
 职责：
 
 - Admin REST API 与 Chat SSE API
-- 知识库、逻辑文档、索引、任务和 Trace 管理；模型与 Prompt 只读查询
+- 知识库、逻辑文档、索引、任务和 Trace 管理；模型快照查询与 LLM/Rerank 在线调整、RAG 运行时检索配置、Prompt 只读查询
 - 构建请求合并与索引发布协调
 - RAG 在线流程编排
 - 请求鉴权、参数校验、错误映射和结构化日志
@@ -71,6 +71,7 @@ flowchart LR
 职责：
 
 - 下载并校验 DOCX
+- 构建启动时快照 DB 中的 Embedding/OCR/Vision 模型配置与解密密钥（回退环境变量，来源记入任务元数据）
 - Mammoth 与 OOXML 解析
 - 图片提取、OCR、Vision Caption
 - Element 与 Chunk 生成

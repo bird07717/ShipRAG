@@ -203,6 +203,7 @@ class ChatStreamRequest(BaseModel):
     knowledge_id: UUID
     conversation_id: UUID | None = None
     question: str = Field(min_length=1, max_length=4_000)
+    user_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class WelcomeResponse(BaseModel):
@@ -217,8 +218,10 @@ class PromptResponse(BaseModel):
     version: int
     content: str
     active: bool
-    created_at: datetime
-    updated_at: datetime
+    source: Literal["DATABASE", "RUNTIME"] = "DATABASE"
+    description: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class MessageResponse(BaseModel):
@@ -252,6 +255,18 @@ class RagTraceResponse(BaseModel):
     latency: dict[str, Any]
     citation_result: dict[str, Any]
     status: Literal["RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
+    user_id: str | None = None
+    response_type: Literal["ANSWERED", "UNCONFIRMED", "OUT_OF_SCOPE", "DOC_DELIVERED"] | None = None
+    answer_mode: (
+        Literal[
+            "PRODUCT_KNOWLEDGE",
+            "PRODUCT_EXPLAINED",
+            "PRODUCT_GENERAL",
+            "UNCONFIRMED",
+            "OUT_OF_SCOPE",
+        ]
+        | None
+    ) = None
     error: dict[str, Any]
     created_at: datetime
     finished_at: datetime | None
@@ -281,10 +296,75 @@ class TraceSummaryResponse(BaseModel):
     index_id: UUID
     question: str
     status: Literal["RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
+    user_id: str | None = None
+    response_type: Literal["ANSWERED", "UNCONFIRMED", "OUT_OF_SCOPE", "DOC_DELIVERED"] | None = None
+    answer_mode: (
+        Literal[
+            "PRODUCT_KNOWLEDGE",
+            "PRODUCT_EXPLAINED",
+            "PRODUCT_GENERAL",
+            "UNCONFIRMED",
+            "OUT_OF_SCOPE",
+        ]
+        | None
+    ) = None
     latency: dict[str, Any]
     error: dict[str, Any]
     created_at: datetime
     finished_at: datetime | None
+
+
+class MetricsRange(BaseModel):
+    from_: str = Field(alias="from")
+    to: str
+    mode: str = "CHAT"
+
+    model_config = {"populate_by_name": True}
+
+
+class MetricsLatencySummary(BaseModel):
+    p50_ms: int
+    p95_ms: int
+    p99_ms: int
+    avg_ms: int
+
+
+class MetricsOverviewResponse(BaseModel):
+    range: MetricsRange
+    total_traces: int
+    completed: int
+    failed: int
+    cancelled: int
+    response_type_counts: dict[str, int]
+    classified_traces: int
+    no_answer_rate: float
+    doc_delivered_rate: float
+    failure_rate: float
+    citation_missing_rate: float
+    rerank_degraded_rate: float
+    unique_users: int
+    latency: MetricsLatencySummary
+    tokens: dict[str, int]
+
+
+class MetricsTimeseriesPoint(BaseModel):
+    bucket: str
+    queries: int
+    failed: int
+    answered: int
+    unconfirmed: int
+    out_of_scope: int
+    doc_delivered: int
+    no_answer_rate: float
+    p95_ms: int
+    llm_tokens: int
+    rerank_tokens: int
+
+
+class MetricsLatencyResponse(BaseModel):
+    range: MetricsRange
+    total: MetricsLatencySummary
+    stages: dict[str, int]
 
 
 class ModelConfigResponse(BaseModel):
@@ -297,8 +377,23 @@ class ModelConfigResponse(BaseModel):
     parameters: dict[str, Any]
     enabled: bool
     api_key_configured: bool
+    api_key_source: Literal["DATABASE", "ENV"] | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ApiKeyUpdate(BaseModel):
+    api_key: str = Field(min_length=1, max_length=4_096)
+
+
+class ModelProbeResponse(BaseModel):
+    ok: bool
+    model_type: Literal["LLM", "EMBEDDING", "RERANK", "OCR", "VISION"]
+    provider: str
+    model_name: str
+    latency_ms: int
+    detail: str
+    dimension: int | None = None
 
 
 def _validate_model_parameters(parameters: dict[str, Any]) -> None:
@@ -393,6 +488,7 @@ class ChatRequest(BaseModel):
     knowledge_id: UUID
     conversation_id: UUID | None = None
     question: str = Field(min_length=1, max_length=4_000)
+    user_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class ChatContentBlock(BaseModel):

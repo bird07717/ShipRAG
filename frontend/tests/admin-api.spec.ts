@@ -82,3 +82,40 @@ describe("admin API", () => {
     expect((fetchMock.mock.calls[3]?.[1] as RequestInit).method).toBe("DELETE");
   });
 });
+
+describe("metrics API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("maps camelCase filters to snake_case query params", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ total_traces: 0 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminApi.getMetricsOverview({ knowledgeId: "kb-1", from: "2026-08-14" });
+    const url = String(fetchMock.mock.calls[0]?.[0]);
+    // regression: previously emitted ?knowledgeId=... which the backend ignored
+    expect(url).toContain("knowledge_id=kb-1");
+    expect(url).not.toContain("knowledgeId");
+    expect(url).toContain("from=2026-08-14");
+  });
+
+  it("omits the query string when no filters are set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminApi.getMetricsTimeseries();
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("?");
+  });
+
+  it("fetches latency metrics with granularity passthrough", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminApi.getMetricsLatency({ knowledgeId: "kb-1" });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/metrics/latency?knowledge_id=kb-1");
+  });
+});

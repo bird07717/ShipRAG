@@ -35,8 +35,7 @@ def test_should_rewrite_true_for_short_follow_up_with_history() -> None:
 
 def test_should_rewrite_false_for_long_standalone_question() -> None:
     question = (
-        "VDR主机升级过程中断电导致系统无法启动，应该按照什么样的完整流程恢复固件并保留配置？"
-        * 2
+        "VDR主机升级过程中断电导致系统无法启动，应该按照什么样的完整流程恢复固件并保留配置？" * 2
     )
     assert len(question) > 40
     assert should_rewrite(question, _HISTORY, max_chars=40) is False
@@ -44,8 +43,7 @@ def test_should_rewrite_false_for_long_standalone_question() -> None:
 
 def test_should_rewrite_true_for_long_question_with_follow_up_marker() -> None:
     question = (
-        "升级完成后如果它提示证书过期导致无法连接平台，需要重新申请证书还是可以直接续期？"
-        * 2
+        "升级完成后如果它提示证书过期导致无法连接平台，需要重新申请证书还是可以直接续期？" * 2
     )
     assert len(question) > 40
     assert should_rewrite(question, _HISTORY, max_chars=40) is True

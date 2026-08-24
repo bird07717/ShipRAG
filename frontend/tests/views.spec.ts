@@ -100,6 +100,25 @@ describe("view smoke", () => {
         let body: unknown = [];
         const path = String(url);
         if (path.includes("/knowledge-bases")) body = [kb];
+        else if (path.includes("/metrics/overview"))
+          body = {
+            range: { from: "2026-08-14T00:00:00", to: "2026-08-21T00:00:00", mode: "CHAT" },
+            total_traces: 10,
+            completed: 9,
+            failed: 1,
+            cancelled: 0,
+            response_type_counts: { ANSWERED: 6, UNCONFIRMED: 2, OUT_OF_SCOPE: 1, DOC_DELIVERED: 1 },
+            classified_traces: 10,
+            no_answer_rate: 0.3,
+            doc_delivered_rate: 0.1,
+            failure_rate: 0.1,
+            citation_missing_rate: 0,
+            rerank_degraded_rate: 0,
+            unique_users: 3,
+            latency: { p50_ms: 100, p95_ms: 200, p99_ms: 300, avg_ms: 120 },
+            tokens: { llm_prompt: 100, llm_completion: 50, llm_total: 150, rerank_total: 10 },
+          };
+        else if (path.includes("/metrics/")) body = [];
         else if (path.includes("/documents")) body = [doc];
         else if (path.includes("/indexes")) body = [index];
         else if (path.includes("/tasks")) body = [];

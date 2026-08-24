@@ -32,6 +32,7 @@ const statusMap: Record<string, { label: string; tone: Tone }> = {
   PENDING: { label: "Pending", tone: "warning" },
   DRAFT: { label: "Draft", tone: "neutral" },
   PAUSED: { label: "Paused", tone: "warning" },
+  RUNTIME: { label: "Runtime", tone: "neutral" },
   FAILED: { label: "Failed", tone: "danger" },
   CANCELLED: { label: "Cancelled", tone: "danger" },
   ERROR: { label: "Error", tone: "danger" },

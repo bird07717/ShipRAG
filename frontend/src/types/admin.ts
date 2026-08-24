@@ -84,6 +84,9 @@ export interface TraceSummary {
   index_id: string;
   question: string;
   status: string;
+  user_id?: string | null;
+  response_type?: string | null;
+  answer_mode?: string | null;
   latency: Record<string, number>;
   error: Record<string, unknown>;
   created_at: string;
@@ -97,6 +100,7 @@ export interface RagTrace extends TraceSummary {
   answer: string | null;
   sources: Array<Record<string, unknown>>;
   citation_result: Record<string, unknown>;
+  model_usage: Record<string, unknown>;
 }
 
 export interface ModelConfig {
@@ -108,9 +112,20 @@ export interface ModelConfig {
   model_name: string;
   enabled: boolean;
   api_key_configured: boolean;
+  api_key_source?: "DATABASE" | "ENV" | null;
   parameters: Record<string, unknown>;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface ModelProbeResult {
+  ok: boolean;
+  model_type: string;
+  provider: string;
+  model_name: string;
+  latency_ms: number;
+  detail: string;
+  dimension?: number | null;
 }
 
 export interface RagConfig {
@@ -137,4 +152,58 @@ export interface PromptTemplate {
   version: number;
   content: string;
   active: boolean;
+  source?: "DATABASE" | "RUNTIME";
+  description?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface MetricsLatencySummary {
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+  avg_ms: number;
+}
+
+export interface MetricsOverview {
+  range: { from: string; to: string; mode: string };
+  total_traces: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  response_type_counts: Record<string, number>;
+  classified_traces: number;
+  no_answer_rate: number;
+  doc_delivered_rate: number;
+  failure_rate: number;
+  citation_missing_rate: number;
+  rerank_degraded_rate: number;
+  unique_users: number;
+  latency: MetricsLatencySummary;
+  tokens: {
+    llm_prompt: number;
+    llm_completion: number;
+    llm_total: number;
+    rerank_total: number;
+  };
+}
+
+export interface MetricsTimeseriesPoint {
+  bucket: string;
+  queries: number;
+  failed: number;
+  answered: number;
+  unconfirmed: number;
+  out_of_scope: number;
+  doc_delivered: number;
+  no_answer_rate: number;
+  p95_ms: number;
+  llm_tokens: number;
+  rerank_tokens: number;
+}
+
+export interface MetricsLatency {
+  range: { from: string; to: string; mode: string };
+  total: MetricsLatencySummary;
+  stages: Record<string, number>;
 }

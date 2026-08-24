@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { Search, SetUp } from "@element-plus/icons-vue";
+import { computed, onMounted, ref } from "vue";
+import { Refresh, Search, SetUp } from "@element-plus/icons-vue";
 
+import { adminApi } from "@/api/admin";
 import { useAdminStore } from "@/composables/adminStore";
-import type { RagTrace } from "@/types/admin";
+import type { RagTrace, TraceSummary } from "@/types/admin";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
@@ -13,6 +14,51 @@ const store = useAdminStore();
 const traceSearch = ref("");
 const activeTraceDetail = ref<RagTrace | null>(null);
 const loadingDetail = ref(false);
+
+const RESPONSE_TYPES = ["ANSWERED", "UNCONFIRMED", "OUT_OF_SCOPE", "DOC_DELIVERED"] as const;
+const STATUSES = ["RUNNING", "COMPLETED", "FAILED", "CANCELLED"] as const;
+
+const traceFilter = ref<{
+  status: string;
+  responseType: string;
+  userId: string;
+  range: [Date, Date] | null;
+}>({
+  status: "",
+  responseType: "",
+  userId: "",
+  range: null,
+});
+const traces = ref<TraceSummary[]>([]);
+const loadingTraces = ref(false);
+
+async function loadTraces(): Promise<void> {
+  loadingTraces.value = true;
+  try {
+    traces.value = await adminApi.listTraces(store.selectedKnowledgeId || undefined, {
+      status: traceFilter.value.status || undefined,
+      responseType: traceFilter.value.responseType || undefined,
+      userId: traceFilter.value.userId.trim() || undefined,
+      from: traceFilter.value.range?.[0]?.toISOString(),
+      to: traceFilter.value.range?.[1]?.toISOString(),
+      limit: 200,
+    });
+  } finally {
+    loadingTraces.value = false;
+  }
+}
+
+function resetFilters(): void {
+  traceFilter.value = { status: "", responseType: "", userId: "", range: null };
+  void loadTraces();
+}
+
+onMounted(() => {
+  if (store.traces.length) {
+    traces.value = store.traces;
+  }
+  void loadTraces();
+});
 
 const LATENCY_STEPS: Array<{ key: string; label: string }> = [
   { key: "query_rewrite_ms", label: "Query Rewrite" },
@@ -29,8 +75,8 @@ const LATENCY_STEPS: Array<{ key: string; label: string }> = [
 
 const filteredTraces = computed(() => {
   const keyword = traceSearch.value.trim().toLowerCase();
-  if (!keyword) return store.traces;
-  return store.traces.filter((trace) => trace.question.toLowerCase().includes(keyword));
+  if (!keyword) return traces.value;
+  return traces.value.filter((trace) => trace.question.toLowerCase().includes(keyword));
 });
 
 const timeline = computed(() => {
@@ -40,6 +86,47 @@ const timeline = computed(() => {
     ...step,
     ms: trace.latency[step.key] as number,
   }));
+});
+
+const detailSources = computed(() => {
+  const trace = activeTraceDetail.value;
+  if (!Array.isArray(trace?.sources)) return [];
+  return trace.sources as Array<Record<string, unknown>>;
+});
+
+const detailUsage = computed(() => {
+  const usage = activeTraceDetail.value?.model_usage;
+  if (!usage || typeof usage !== "object" || !("total_tokens" in (usage as object))) return null;
+  return usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+});
+
+const citationWarning = computed(() => {
+  const result = activeTraceDetail.value?.citation_result as
+    | { citation_missing?: boolean; invalid_source_ids?: string[] }
+    | undefined;
+  if (!result || !result.citation_missing) return null;
+  const invalid = result.invalid_source_ids ?? [];
+  return invalid.length ? `答案缺少引用，且包含无效引用：${invalid.join("、")}` : "答案未引用任何来源";
+});
+
+const STAGE_LABELS: Record<string, string> = {
+  prepare: "请求准备",
+  query_embedding: "查询向量化",
+  routing: "文档路由",
+  rerank: "重排",
+  llm: "答案生成",
+};
+
+const errorDescription = computed(() => {
+  const error = activeTraceDetail.value?.error as
+    | { message?: string; detail?: string; stage?: string; retryable?: boolean }
+    | undefined;
+  if (!error) return "";
+  const parts: string[] = [];
+  if (error.detail) parts.push(`上游详情：${error.detail}`);
+  if (error.stage) parts.push(`失败阶段：${STAGE_LABELS[error.stage] ?? error.stage}`);
+  if (error.retryable != null) parts.push(error.retryable ? "可重试" : "不可重试");
+  return [error.message, ...parts].filter(Boolean).join(" · ");
 });
 
 async function selectTrace(traceId: string): Promise<void> {
@@ -63,11 +150,60 @@ async function selectTrace(traceId: string): Promise<void> {
         </div>
       </header>
       <div class="panel-body list-toolbar">
+        <el-select
+          v-model="traceFilter.status"
+          placeholder="状态"
+          clearable
+          class="filter-select"
+          @change="loadTraces"
+        >
+          <el-option
+            v-for="s in STATUSES"
+            :key="s"
+            :label="s"
+            :value="s"
+          />
+        </el-select>
+        <el-select
+          v-model="traceFilter.responseType"
+          placeholder="响应类型"
+          clearable
+          class="filter-select"
+          @change="loadTraces"
+        >
+          <el-option
+            v-for="type in RESPONSE_TYPES"
+            :key="type"
+            :label="type"
+            :value="type"
+          />
+        </el-select>
+        <el-input
+          v-model="traceFilter.userId"
+          placeholder="用户 ID"
+          clearable
+          class="filter-user"
+          @keyup.enter="loadTraces"
+          @clear="loadTraces"
+        />
+        <el-date-picker
+          v-model="traceFilter.range"
+          type="datetimerange"
+          range-separator="→"
+          start-placeholder="开始时间"
+          end-placeholder="结束时间"
+          class="filter-range"
+        />
+        <el-button :icon="Refresh" :loading="loadingTraces" @click="loadTraces">
+          查询
+        </el-button>
+        <el-button text @click="resetFilters">重置</el-button>
         <el-input
           v-model="traceSearch"
-          placeholder="搜索问题..."
+          placeholder="在结果中搜索问题..."
           clearable
           :prefix-icon="Search"
+          class="filter-search"
         />
       </div>
       <div v-loading="loadingDetail" class="trace-rows">
@@ -83,9 +219,15 @@ async function selectTrace(traceId: string): Promise<void> {
             <b class="trace-question">{{ trace.question }}</b>
             <small class="trace-meta">
               {{ trace.mode }} · {{ store.formatDate(trace.created_at) }}
+              <template v-if="trace.user_id"> · {{ trace.user_id }}</template>
+              <template v-if="trace.error?.code"> · ⚠ {{ trace.error.code }}</template>
             </small>
           </div>
           <div class="trace-row-side">
+            <StatusBadge
+              v-if="trace.response_type"
+              :status="trace.response_type"
+            />
             <StatusBadge :status="trace.status" />
             <small class="mono">{{ trace.latency.total_ms ?? "—" }} ms</small>
           </div>
@@ -106,14 +248,59 @@ async function selectTrace(traceId: string): Promise<void> {
             <h3 class="detail-question">{{ activeTraceDetail.question }}</h3>
             <div class="detail-meta">
               <StatusBadge :status="activeTraceDetail.status" />
+              <StatusBadge
+                v-if="activeTraceDetail.response_type"
+                :status="activeTraceDetail.response_type"
+              />
               <span class="muted">{{ activeTraceDetail.mode }}</span>
+              <span v-if="activeTraceDetail.user_id" class="muted">
+                用户 {{ activeTraceDetail.user_id }}
+              </span>
               <span class="mono muted">{{ activeTraceDetail.trace_id }}</span>
             </div>
           </div>
         </header>
         <div class="panel-body">
+          <el-alert
+            v-if="activeTraceDetail.error?.code"
+            :title="`错误：${activeTraceDetail.error.code}`"
+            :description="errorDescription"
+            type="error"
+            :closable="false"
+            show-icon
+            class="detail-error"
+          />
+          <el-alert
+            v-if="citationWarning"
+            :title="citationWarning"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="detail-error"
+          />
           <h4 class="section-label">Answer</h4>
           <p class="detail-answer">{{ activeTraceDetail.answer || "（无答案）" }}</p>
+
+          <h4 class="section-label">Sources（答案引用来源）</h4>
+          <ul v-if="detailSources.length" class="source-list">
+            <li v-for="source in detailSources" :key="String(source.source_id)">
+              <b>{{ source.document }}</b>
+              <small v-if="Array.isArray(source.section_path) && source.section_path.length">
+                · {{ (source.section_path as string[]).join(" / ") }}
+              </small>
+              <small v-if="source.page != null"> · 第 {{ source.page }} 页</small>
+            </li>
+          </ul>
+          <p v-else class="muted detail-empty">（答案未引用任何来源）</p>
+
+          <div v-if="detailUsage" class="usage-row">
+            <h4 class="section-label">Model Usage</h4>
+            <span class="mono">
+              prompt {{ detailUsage.prompt_tokens ?? 0 }} · completion
+              {{ detailUsage.completion_tokens ?? 0 }} · total
+              {{ detailUsage.total_tokens ?? 0 }} tokens
+            </span>
+          </div>
 
           <h4 class="section-label">Timeline</h4>
           <ol class="latency-timeline">
@@ -163,7 +350,28 @@ async function selectTrace(traceId: string): Promise<void> {
 }
 
 .list-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
   padding-bottom: 12px;
+}
+
+.filter-select {
+  width: 150px;
+}
+
+.filter-user {
+  width: 140px;
+}
+
+.filter-range {
+  width: 340px;
+}
+
+.filter-search {
+  flex: 1;
+  min-width: 160px;
 }
 
 .trace-rows {
@@ -257,6 +465,44 @@ async function selectTrace(traceId: string): Promise<void> {
 
 .section-label + .detail-answer {
   margin-bottom: 16px;
+}
+
+.source-list {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 16px;
+  padding: 0 0 0 2px;
+  list-style: none;
+}
+
+.source-list li {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.source-list small {
+  color: var(--text-tertiary);
+}
+
+.detail-empty {
+  margin: 0 0 16px;
+  font-size: 13px;
+}
+
+.usage-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.usage-row .section-label {
+  margin: 0;
+}
+
+.usage-row span {
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 .latency-timeline {

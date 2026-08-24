@@ -122,11 +122,13 @@ class _RoutingRepository:
         self.completed: dict[str, Any] | None = None
         self.failed: dict[str, Any] | None = None
         self.saved: dict[str, Any] | None = None
+        self.begin_kwargs: dict[str, Any] | None = None
         self.focus_updates: list[Any] = []
         self.pending_updates: list[dict[str, Any]] = []
         self.pending_clears: int = 0
 
     async def begin_turn(self, **kwargs: Any) -> Turn:
+        self.begin_kwargs = kwargs
         return self.turn
 
     async def vector_search(self, **kwargs: Any) -> list[RetrievalCandidate]:
@@ -249,6 +251,7 @@ async def test_aligning_clear_winner_delivers_document_without_llm():
         conversation_id=None,
         question="如何U盘升级PDC",
         request_id="req-deliver",
+        user_id="mobile-user-1",
     )
 
     assert result["response_type"] == "DOC_DELIVERED"
@@ -264,6 +267,10 @@ async def test_aligning_clear_winner_delivers_document_without_llm():
     assert repo.focus_updates == [DOC_A]
     assert repo.completed is not None
     assert repo.completed["doc_routing"]["decision"] == "DELIVER"
+    # persisted quality-metrics outcome (migration 0014)
+    assert repo.completed["response_type"] == "DOC_DELIVERED"
+    assert repo.begin_kwargs is not None
+    assert repo.begin_kwargs["user_id"] == "mobile-user-1"
     # delivery stores the summary (not the full blocks) as message content
     assert TITLE_A in repo.completed["answer"]
     assert repo.completed["usage"] == {}
@@ -304,6 +311,8 @@ async def test_doc_focus_stay_answers_from_full_document():
     assert result["references"][0]["document_id"] == str(DOC_A)
     assert repo.focus_updates == []
     assert repo.completed["doc_routing"]["decision"] == "STAY"
+    assert repo.completed["response_type"] == "ANSWERED"
+    assert repo.completed["answer_mode"] == "PRODUCT_KNOWLEDGE"
 
 
 @pytest.mark.asyncio
@@ -476,9 +485,7 @@ async def test_single_eligible_candidate_clarifies_with_pending():
         turn=_turn(),
         candidates=[_candidate(DOC_A, 1)],
     )
-    llm = _RecordingLlmProvider(
-        ["您是想了解《故障解决文档11—如何U盘升级PDC》的内容吗？"]
-    )
+    llm = _RecordingLlmProvider(["您是想了解《故障解决文档11—如何U盘升级PDC》的内容吗？"])
     service = _service(repo, llm)
 
     result = await service.generate(
@@ -795,10 +802,7 @@ async def test_doc_focus_stay_degrades_to_chunk_rag_when_document_too_large():
     assert result["references"][0]["document_id"] == str(DOC_A)
     assert repo.completed["doc_routing"]["decision"] == "STAY"
     assert repo.completed["doc_routing"]["degraded_to"] == "CHUNK_RAG"
-    assert (
-        repo.completed["doc_routing"]["degradation_reason"]
-        == "DOCUMENT_EXCEEDS_PROMPT_BUDGET"
-    )
+    assert repo.completed["doc_routing"]["degradation_reason"] == "DOCUMENT_EXCEEDS_PROMPT_BUDGET"
     assert repo.failed is None
 
 
@@ -836,9 +840,7 @@ async def test_chat_stream_degraded_chunk_rag_strips_mode_tag():
         candidates=[_candidate(DOC_A, 1)],
         document_blocks={str(DOC_A): _huge_document()},
     )
-    llm = _RecordingLlmProvider(
-        ["[MODE:PRODUCT_KNOWLEDGE]\n将U盘插入", "USB端口。[S1]"]
-    )
+    llm = _RecordingLlmProvider(["[MODE:PRODUCT_KNOWLEDGE]\n将U盘插入", "USB端口。[S1]"])
     service = _service(repo, llm)
 
     frames = [
@@ -876,7 +878,7 @@ async def test_generate_llm_failure_raises_and_marks_failed():
         async def stream(self, prompt: str) -> Any:
             if False:
                 yield ""
-            raise LlmError("UPSTREAM_TIMEOUT", "timeout", retryable=True)
+            raise LlmError("UPSTREAM_TIMEOUT", "timeout", retryable=True, detail="HTTP 429")
 
         async def aclose(self) -> None:
             return None
@@ -905,4 +907,7 @@ async def test_generate_llm_failure_raises_and_marks_failed():
     assert exc_info.value.code == "UPSTREAM_TIMEOUT"
     assert repo.failed is not None
     assert repo.failed["status"] == "FAILED"
+    assert repo.failed["stage"] == "llm"
+    assert repo.failed["retryable"] is True
+    assert repo.failed["detail"] == "HTTP 429"
     assert repo.pending_updates == []

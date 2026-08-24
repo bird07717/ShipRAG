@@ -5,8 +5,12 @@ import type {
   KnowledgeBase,
   KnowledgeIndex,
   IndexTask,
+  MetricsLatency,
+  MetricsOverview,
+  MetricsTimeseriesPoint,
   ModelConfig,
   ModelConfigUpdatePayload,
+  ModelProbeResult,
   PromptTemplate,
   RagConfig,
   RagConfigUpdatePayload,
@@ -28,6 +32,17 @@ export class ApiRequestError extends Error {
 function authorizationHeaders(): Record<string, string> {
   const token = sessionStorage.getItem("rag_service_token")?.trim();
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function buildMetricsQuery(params: Record<string, string | undefined>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (!value) continue;
+    // Callers use camelCase keys; the API contract uses snake_case.
+    search.set(key === "knowledgeId" ? "knowledge_id" : key, value);
+  }
+  const query = search.toString();
+  return query ? `?${query}` : "";
 }
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -95,8 +110,37 @@ export const adminApi = {
     apiRequest<GarbageCollectionResult>(`/indexes/${indexId}`, {
       method: "DELETE",
     }),
-  listTraces: (knowledgeId?: string) =>
-    apiRequest<TraceSummary[]>(`/traces${knowledgeId ? `?knowledge_id=${knowledgeId}` : ""}`),
+  listTraces: (
+    knowledgeId?: string,
+    filters: {
+      status?: string;
+      responseType?: string;
+      userId?: string;
+      from?: string;
+      to?: string;
+      limit?: number;
+    } = {},
+  ) => {
+    const search = new URLSearchParams();
+    if (knowledgeId) search.set("knowledge_id", knowledgeId);
+    if (filters.status) search.set("status", filters.status);
+    if (filters.responseType) search.set("response_type", filters.responseType);
+    if (filters.userId) search.set("user_id", filters.userId);
+    if (filters.from) search.set("from", filters.from);
+    if (filters.to) search.set("to", filters.to);
+    if (filters.limit) search.set("limit", String(filters.limit));
+    const query = search.toString();
+    return apiRequest<TraceSummary[]>(`/traces${query ? `?${query}` : ""}`);
+  },
+  listNoAnswerTraces: (limit = 20) =>
+    apiRequest<TraceSummary[]>(`/traces?response_type=UNCONFIRMED&mode=CHAT&limit=${limit}`),
+  getMetricsOverview: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
+    apiRequest<MetricsOverview>(`/metrics/overview${buildMetricsQuery(params)}`),
+  getMetricsTimeseries: (
+    params: { knowledgeId?: string; from?: string; to?: string; granularity?: string } = {},
+  ) => apiRequest<MetricsTimeseriesPoint[]>(`/metrics/timeseries${buildMetricsQuery(params)}`),
+  getMetricsLatency: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
+    apiRequest<MetricsLatency>(`/metrics/latency${buildMetricsQuery(params)}`),
   getTrace: (traceId: string) => apiRequest<RagTrace>(`/traces/${traceId}`),
   runPlayground: (knowledgeId: string, question: string, options: Record<string, number>) =>
     apiRequest<RagTrace>("/rag/playground", {
@@ -108,6 +152,19 @@ export const adminApi = {
     apiRequest<ModelConfig>(`/models/${modelId}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
+    }),
+  putApiKey: (modelId: string, apiKey: string) =>
+    apiRequest<ModelConfig>(`/models/${modelId}/api-key`, {
+      method: "PUT",
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
+  deleteApiKey: (modelId: string) =>
+    apiRequest<ModelConfig>(`/models/${modelId}/api-key`, {
+      method: "DELETE",
+    }),
+  probeModel: (modelId: string) =>
+    apiRequest<ModelProbeResult>(`/models/${modelId}/probe`, {
+      method: "POST",
     }),
   getRagConfig: () => apiRequest<RagConfig>("/rag-config"),
   updateRagConfig: (payload: RagConfigUpdatePayload) =>

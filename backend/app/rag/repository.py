@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -11,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.common.errors import ApiError
 from app.common.text import estimate_tokens
 from app.core.config import Settings
+from app.core.secrets import ModelSecretBox
 from app.rag.models import ModelSnapshot, RetrievalCandidate, RetrievalConfig, Turn
 
 
@@ -18,6 +21,42 @@ class RagRepository:
     def __init__(self, engine: AsyncEngine, settings: Settings) -> None:
         self.engine = engine
         self.settings = settings
+        self._secret_box: ModelSecretBox | None = None
+
+    def _require_secret_box(self) -> ModelSecretBox:
+        if self._secret_box is None:
+            if self.settings.model_secret_key is None:
+                raise ApiError(
+                    "MODEL_SECRET_NOT_CONFIGURED",
+                    "未配置 MODEL_SECRET_KEY，无法管理数据库 API 密钥",
+                    409,
+                )
+            self._secret_box = ModelSecretBox(
+                self.settings.model_secret_key,
+                version=self.settings.model_secret_key_version,
+                previous_key=self.settings.model_secret_key_previous,
+                previous_version=self.settings.model_secret_key_previous_version,
+            )
+        return self._secret_box
+
+    def _decrypt_api_key(self, row: dict[str, Any]) -> SecretStr | None:
+        ciphertext = row.get("api_key_ciphertext")
+        if ciphertext is None:
+            return None
+        box = self._require_secret_box()
+        return box.decrypt(
+            bytes(ciphertext),
+            bytes(row["api_key_nonce"]),
+            int(row["api_key_key_version"] or 1),
+        )
+
+    def _api_key_source(self, model_type: str, stored_key: bool) -> str | None:
+        if stored_key:
+            return "DATABASE"
+        environment_key = self._environment_key_for(model_type)
+        if environment_key is not None and environment_key.get_secret_value().strip():
+            return "ENV"
+        return None
 
     async def begin_turn(
         self,
@@ -27,6 +66,7 @@ class RagRepository:
         question: str,
         request_id: str,
         mode: str = "CHAT",
+        user_id: str | None = None,
     ) -> Turn:
         trace_id = uuid4()
         user_message_id = uuid4()
@@ -124,7 +164,8 @@ class RagRepository:
             llm_result = await connection.execute(
                 text(
                     """
-                    SELECT provider, model_name, parameters, base_url
+                    SELECT provider, model_name, parameters, base_url,
+                           api_key_ciphertext, api_key_nonce, api_key_key_version
                     FROM model_config WHERE model_type = 'LLM' AND enabled
                     """
                 )
@@ -136,7 +177,8 @@ class RagRepository:
             rerank_result = await connection.execute(
                 text(
                     """
-                    SELECT provider, model_name, parameters, base_url
+                    SELECT provider, model_name, parameters, base_url,
+                           api_key_ciphertext, api_key_nonce, api_key_key_version
                     FROM model_config WHERE model_type = 'RERANK' AND enabled
                     """
                 )
@@ -211,10 +253,10 @@ class RagRepository:
                     """
                     INSERT INTO rag_trace (
                         id, trace_id, request_id, kb_id, index_id, conversation_id,
-                        message_id, question, mode, status
+                        message_id, question, mode, status, user_id
                     ) VALUES (
                         :id, :trace_id, :request_id, :kb_id, :index_id, :conversation_id,
-                        :message_id, :question, :mode, 'RUNNING'
+                        :message_id, :question, :mode, 'RUNNING', :user_id
                     )
                     """
                 ),
@@ -228,6 +270,7 @@ class RagRepository:
                     "message_id": assistant_message_id,
                     "question": question,
                     "mode": mode,
+                    "user_id": user_id,
                 },
             )
             await connection.execute(
@@ -253,6 +296,7 @@ class RagRepository:
                 model_name=str(llm_row["model_name"]),
                 parameters=dict(parameters),
                 base_url=(str(llm_row["base_url"]) if llm_row["base_url"] is not None else None),
+                api_key=self._decrypt_api_key(dict(llm_row)),
             ),
             history=history,
             rerank=ModelSnapshot(
@@ -262,6 +306,7 @@ class RagRepository:
                 base_url=(
                     str(rerank_row["base_url"]) if rerank_row["base_url"] is not None else None
                 ),
+                api_key=self._decrypt_api_key(dict(rerank_row)),
             ),
             focus_document_id=focus_document_id,
             chat_context=chat_context,
@@ -583,6 +628,8 @@ class RagRepository:
         timings: dict[str, int],
         prompt: str | None = None,
         doc_routing: dict[str, Any] | None = None,
+        response_type: str | None = None,
+        answer_mode: str | None = None,
     ) -> None:
         routing_patch = ""
         routing_params: dict[str, Any] = {}
@@ -617,6 +664,7 @@ class RagRepository:
                     UPDATE rag_trace SET answer = :answer, sources = CAST(:sources AS jsonb),
                         model_usage = CAST(:usage AS jsonb), latency = CAST(:latency AS jsonb),
                         citation_result = CAST(:citation_result AS jsonb),
+                        response_type = :response_type, answer_mode = :answer_mode,
                         status = 'COMPLETED', finished_at = now()
                     """
                     + routing_patch
@@ -632,6 +680,8 @@ class RagRepository:
                     "usage": json.dumps(usage),
                     "citation_result": json.dumps(citation_result, ensure_ascii=False),
                     "latency": json.dumps(timings),
+                    "response_type": response_type,
+                    "answer_mode": answer_mode,
                     **routing_params,
                 },
             )
@@ -649,8 +699,18 @@ class RagRepository:
         message: str,
         partial_answer: str,
         timings: dict[str, int],
+        stage: str | None = None,
+        retryable: bool | None = None,
+        detail: str | None = None,
     ) -> None:
         message_status = "CANCELLED" if status == "CANCELLED" else "FAILED"
+        error: dict[str, Any] = {"code": code, "message": message}
+        if stage is not None:
+            error["stage"] = stage
+        if retryable is not None:
+            error["retryable"] = retryable
+        if detail is not None:
+            error["detail"] = detail
         async with self.engine.begin() as connection:
             await connection.execute(
                 text(
@@ -676,7 +736,7 @@ class RagRepository:
                 {
                     "trace_id": turn.trace_id,
                     "answer": partial_answer,
-                    "error": json.dumps({"code": code, "message": message}, ensure_ascii=False),
+                    "error": json.dumps(error, ensure_ascii=False),
                     "latency": json.dumps(timings),
                     "status": status,
                 },
@@ -794,9 +854,7 @@ class RagRepository:
             "name": str(row["name"]),
             "description": row["description"],
             "status": str(row["status"]),
-            "active_index_id": (
-                str(row["active_index_id"]) if row["active_index_id"] else None
-            ),
+            "active_index_id": (str(row["active_index_id"]) if row["active_index_id"] else None),
         }
 
     async def list_kb_documents(self, knowledge_id: UUID) -> list[dict[str, Any]]:
@@ -894,6 +952,10 @@ class RagRepository:
         knowledge_id: UUID | None = None,
         status: str | None = None,
         mode: str | None = None,
+        user_id: str | None = None,
+        response_type: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         clauses = ["1 = 1"]
@@ -907,9 +969,22 @@ class RagRepository:
         if mode is not None:
             clauses.append("mode = :mode")
             parameters["mode"] = mode
+        if user_id is not None:
+            clauses.append("user_id = :user_id")
+            parameters["user_id"] = user_id
+        if response_type is not None:
+            clauses.append("response_type = :response_type")
+            parameters["response_type"] = response_type
+        if created_from is not None:
+            clauses.append("created_at >= :created_from")
+            parameters["created_from"] = created_from
+        if created_to is not None:
+            clauses.append("created_at < :created_to")
+            parameters["created_to"] = created_to
         query = f"""
             SELECT trace_id, request_id, mode, kb_id, index_id, question, status,
-                   latency, error, created_at, finished_at
+                   user_id, response_type, answer_mode, latency, error,
+                   created_at, finished_at
             FROM rag_trace
             WHERE {" AND ".join(clauses)}
             ORDER BY created_at DESC
@@ -951,11 +1026,145 @@ class RagRepository:
             rows = []
             for raw in result.mappings():
                 row = dict(raw)
-                row["api_key_configured"] = self._api_key_configured(
-                    str(row["model_type"]), bool(row.pop("stored_key_configured"))
-                )
+                model_type = str(row["model_type"])
+                stored_key = bool(row.pop("stored_key_configured"))
+                row["api_key_configured"] = self._api_key_configured(model_type, stored_key)
+                row["api_key_source"] = self._api_key_source(model_type, stored_key)
                 rows.append(row)
             return rows
+
+    async def _record_history(
+        self,
+        connection: Any,
+        model_id: UUID,
+        action: str,
+        changed_fields: list[str],
+        actor: str,
+    ) -> None:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO model_config_history (
+                    id, model_config_id, action, changed_fields, actor
+                ) VALUES (
+                    :id, :model_config_id, :action, CAST(:changed_fields AS jsonb), :actor
+                )
+                """
+            ),
+            {
+                "id": uuid4(),
+                "model_config_id": model_id,
+                "action": action,
+                "changed_fields": json.dumps(changed_fields),
+                "actor": actor[:120],
+            },
+        )
+
+    _MODEL_ROW_SELECT = (
+        "SELECT id, name, model_type, provider, base_url, model_name, parameters,"
+        " enabled, api_key_ciphertext, api_key_nonce, api_key_key_version,"
+        " created_at, updated_at FROM model_config"
+    )
+
+    def _public_model_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        model_type = str(row["model_type"])
+        stored_key = row.get("api_key_ciphertext") is not None
+        public = {key: value for key, value in row.items() if not key.startswith("api_key_")}
+        public["api_key_configured"] = self._api_key_configured(model_type, stored_key)
+        public["api_key_source"] = self._api_key_source(model_type, stored_key)
+        return public
+
+    async def set_api_key(self, model_id: UUID, api_key: str, *, actor: str) -> dict[str, Any]:
+        normalized = api_key.strip()
+        if not normalized:
+            raise ApiError("VALIDATION_ERROR", "API 密钥不能为空", 422)
+        if len(normalized) > 4096:
+            raise ApiError("VALIDATION_ERROR", "API 密钥超过长度限制", 422)
+        box = self._require_secret_box()
+        ciphertext, nonce = box.encrypt(normalized)
+        async with self.engine.begin() as connection:
+            updated = await connection.execute(
+                text(
+                    "UPDATE model_config SET api_key_ciphertext = :ciphertext,"
+                    " api_key_nonce = :nonce, api_key_key_version = :key_version,"
+                    " updated_at = now() WHERE id = :id"
+                    " RETURNING id, name, model_type, provider, base_url, model_name,"
+                    " parameters, enabled, api_key_ciphertext, api_key_nonce,"
+                    " api_key_key_version, created_at, updated_at"
+                ),
+                {
+                    "ciphertext": ciphertext,
+                    "nonce": nonce,
+                    "key_version": box.version,
+                    "id": model_id,
+                },
+            )
+            row = updated.mappings().one_or_none()
+            if row is None:
+                raise ApiError("MODEL_NOT_FOUND", "模型配置不存在", 404)
+            await self._record_history(connection, model_id, "SET_API_KEY", ["api_key"], actor)
+            if str(row["model_type"]) in self._BUILD_BOUND_MODEL_TYPES:
+                await connection.execute(
+                    text("UPDATE knowledge_base SET rebuild_required = true, updated_at = now()")
+                )
+            return self._public_model_row(dict(row))
+
+    async def clear_api_key(self, model_id: UUID, *, actor: str) -> dict[str, Any]:
+        async with self.engine.begin() as connection:
+            existing = await connection.execute(
+                text("SELECT api_key_ciphertext FROM model_config WHERE id = :id"),
+                {"id": model_id},
+            )
+            row = existing.mappings().one_or_none()
+            if row is None:
+                raise ApiError("MODEL_NOT_FOUND", "模型配置不存在", 404)
+            had_key = row["api_key_ciphertext"] is not None
+            updated = await connection.execute(
+                text(
+                    "UPDATE model_config SET api_key_ciphertext = NULL,"
+                    " api_key_nonce = NULL, api_key_key_version = NULL, updated_at = now()"
+                    " WHERE id = :id"
+                    " RETURNING id, name, model_type, provider, base_url, model_name,"
+                    " parameters, enabled, api_key_ciphertext, api_key_nonce,"
+                    " api_key_key_version, created_at, updated_at"
+                ),
+                {"id": model_id},
+            )
+            result = dict(updated.mappings().one())
+            if had_key:
+                await self._record_history(
+                    connection, model_id, "CLEAR_API_KEY", ["api_key"], actor
+                )
+                if str(result["model_type"]) in self._BUILD_BOUND_MODEL_TYPES:
+                    await connection.execute(
+                        text(
+                            "UPDATE knowledge_base SET rebuild_required = true, updated_at = now()"
+                        )
+                    )
+            return self._public_model_row(result)
+
+    async def read_model_with_key(self, model_id: UUID) -> dict[str, Any]:
+        """Internal: full row plus the decrypted key. Never return via API."""
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(self._MODEL_ROW_SELECT + " WHERE id = :id"),
+                {"id": model_id},
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                raise ApiError("MODEL_NOT_FOUND", "模型配置不存在", 404)
+            data = dict(row)
+            data["api_key"] = self._decrypt_api_key(data)
+            return data
+
+    # All five model types are editable online. Per-turn consumers
+    # (LLM/RERANK) take effect on the next chat request; build-bound types
+    # (EMBEDDING/OCR/VISION) on the next index build. EMBEDDING edits that
+    # change model_name/base_url additionally pass the dimension gate at the
+    # API layer (see docs/api-contract.md §9).
+    # Build-bound types: config changes only affect the NEXT index build, so
+    # knowledge bases must be flagged for rebuild.
+    _BUILD_BOUND_MODEL_TYPES = ("EMBEDDING", "OCR", "VISION")
 
     async def update_model_config(
         self,
@@ -965,6 +1174,7 @@ class RagRepository:
         base_url: str | None = None,
         parameters: dict[str, Any] | None = None,
         enabled: bool | None = None,
+        actor: str = "system",
     ) -> dict[str, Any]:
         """Admin write path for runtime model settings (LLM / RERANK only).
 
@@ -986,26 +1196,26 @@ class RagRepository:
             existing = existing_result.mappings().one_or_none()
             if existing is None:
                 raise ApiError("MODEL_NOT_FOUND", "模型配置不存在", 404)
-            if str(existing["model_type"]) not in ("LLM", "RERANK"):
-                raise ApiError(
-                    "MODEL_UPDATE_FORBIDDEN",
-                    "该模型类型由环境配置管理，仅 LLM / Rerank 支持在线调整",
-                    409,
-                )
+            model_type = str(existing["model_type"])
             assignments: list[str] = []
             params: dict[str, Any] = {"id": model_id}
+            changed_fields: list[str] = []
             if model_name is not None:
                 assignments.append("model_name = :model_name")
                 params["model_name"] = model_name
+                changed_fields.append("model_name")
             if base_url is not None:
                 assignments.append("base_url = :base_url")
                 params["base_url"] = base_url
+                changed_fields.append("base_url")
             if parameters is not None:
                 assignments.append("parameters = CAST(:parameters AS jsonb)")
                 params["parameters"] = json.dumps(parameters, ensure_ascii=False)
+                changed_fields.append("parameters")
             if enabled is not None:
                 assignments.append("enabled = :enabled")
                 params["enabled"] = enabled
+                changed_fields.append("enabled")
             assignments.append("updated_at = now()")
             try:
                 updated_result = await connection.execute(
@@ -1014,7 +1224,7 @@ class RagRepository:
                         + ", ".join(assignments)
                         + " WHERE id = :id RETURNING id, name, model_type, provider,"
                         " base_url, model_name, parameters, enabled,"
-                        " (api_key_ciphertext IS NOT NULL) AS stored_key_configured,"
+                        " api_key_ciphertext, api_key_nonce, api_key_key_version,"
                         " created_at, updated_at"
                     ),
                     params,
@@ -1023,11 +1233,15 @@ class RagRepository:
                 raise ApiError(
                     "MODEL_UPDATE_CONFLICT", "同一模型类型只能启用一个配置", 409
                 ) from exc
+            await self._record_history(connection, model_id, "UPDATE_CONFIG", changed_fields, actor)
+            if model_type in self._BUILD_BOUND_MODEL_TYPES and changed_fields:
+                # Config changes only take effect on the next build; flag
+                # every knowledge base so the console surfaces the drift.
+                await connection.execute(
+                    text("UPDATE knowledge_base SET rebuild_required = true, updated_at = now()")
+                )
             row = dict(updated_result.mappings().one())
-        row["api_key_configured"] = self._api_key_configured(
-            str(row["model_type"]), bool(row.pop("stored_key_configured"))
-        )
-        return row
+        return self._public_model_row(row)
 
     _RAG_CONFIG_FIELDS = (
         "vector_top_k",

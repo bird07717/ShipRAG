@@ -59,9 +59,9 @@ cd backend
 ../.venv/bin/alembic upgrade head
 ```
 
-当前迁移头为 `0008`：`0001` 启用 pgvector，`0002` 创建文档入库 Schema，`0003` 创建文本 RAG Schema，`0004` 扩展图片理解快照，`0005` 启用 `pg_search`、创建中文 BM25 索引并加入 Rerank 与引用 Trace，`0006` 添加后台索引时间线和 Trace 筛选查询索引，`0007` 写入默认 RAG Prompt v2，`0008` 增加 Parent/Child Chunk、相邻 Chunk 与不完整内容元数据。
+当前迁移头为 `0013`：`0001` 启用 pgvector，`0002` 创建文档入库 Schema，`0003` 创建文本 RAG Schema，`0004` 扩展图片理解快照，`0005` 启用 `pg_search`、创建中文 BM25 索引并加入 Rerank 与引用 Trace，`0006` 添加后台索引时间线和 Trace 筛选查询索引，`0007` 写入默认 RAG Prompt v2，`0008` 增加 Parent/Child Chunk、相邻 Chunk 与不完整内容元数据，`0009` 增加会话文档聚焦状态（Chat 文档路由），`0010` 提高默认 LLM 输出预算并关闭 thinking，`0011` 创建单行 `rag_config` 全局检索参数表，`0012` 删除过时的 default-rag v1 并使 v2 与代码常量保持同步，`0013` 创建模型配置与 API 密钥操作的审计表。
 
-升级后请确认 `alembic current` 与 `alembic heads` 均为 `0008`。`0008` 会将已有 Active Index 对应知识库标为 `rebuild_required=true`，但不会原地修改历史快照；需通过构建接口为受影响知识库创建并发布一个新索引，才会产生 Parent/Child Chunk 数据。
+升级后请确认 `alembic current` 与 `alembic heads` 均为 `0013`。`0008` 会将已有 Active Index 对应知识库标为 `rebuild_required=true`，但不会原地修改历史快照；需通过构建接口为受影响知识库创建并发布一个新索引，才会产生 Parent/Child Chunk 数据。`0011` 的 `rag_config` 行缺失时运行时回退 `Settings` 环境默认值，首次 `PATCH /api/v1/rag-config` 会自动补种该行。`0012` 将 `prompt_template` 的 active 行内容与 `app/rag/prompt.py` 的 `DEFAULT_RAG_PROMPT` 对齐（该常量是迁移种入的唯一事实来源），并删除不再使用的 v1 行。`0013` 的 `model_config_history` 审计表在数据导入后为空属正常现象。
 
 ## 5. 启动后端
 
@@ -211,7 +211,7 @@ M5_SMOKE_LLM_PROVIDER=zhipu \
 ./scripts/check-m7.sh
 ```
 
-M7 会执行全量工程门禁、生产镜像构建、独立空卷生产栈启动、Word/RQ/索引/Playground/SSE 联调、并发压测、Worker 重启、Redis/MinIO/PostgreSQL 中断恢复以及 PostgreSQL 备份恢复。执行期间本地开发依赖会被逐个短暂停止并自动恢复，不应与其他本地业务负载共用该环境。仓库内的历史 M7 记录只覆盖到 Alembic `0006`；对当前 `0008` Schema 或其后的代码发布，必须重新运行该门禁并保存新的证据。
+M7 会执行全量工程门禁、生产镜像构建、独立空卷生产栈启动、Word/RQ/索引/Playground/SSE 联调、并发压测、Worker 重启、Redis/MinIO/PostgreSQL 中断恢复以及 PostgreSQL 备份恢复。执行期间本地开发依赖会被逐个短暂停止并自动恢复，不应与其他本地业务负载共用该环境。仓库内的历史 M7 记录只覆盖到 Alembic `0006`；对当前 `0011` Schema 或其后的代码发布，必须重新运行该门禁并保存新的证据。
 
 部署与故障操作见 [生产部署指南](deployment/production.md)和[恢复 Runbook](deployment/recovery-runbook.md)。
 
