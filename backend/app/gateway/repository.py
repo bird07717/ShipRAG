@@ -102,17 +102,157 @@ class GatewayRepository:
 
     async def get_policy(self, knowledge_id: UUID) -> dict[str, Any]:
         resolved = await self.resolve_policy(knowledge_id=knowledge_id, conversation_id=None)
+        readiness = await self.get_readiness(knowledge_id)
         return {
             "knowledge_id": resolved.knowledge_id,
             "execution_policy": resolved.policy,
             "config_version": resolved.config_version,
             "fallback_conditions": list(resolved.fallback_conditions),
             "source": "DATABASE" if resolved.config_version else "DEFAULT",
+            "readiness": readiness,
         }
+
+    async def get_readiness(self, knowledge_id: UUID) -> dict[str, Any]:
+        async with self.engine.connect() as connection:
+            kb = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT kb.status, kb.active_index_id,
+                                   i.status AS index_status, i.embedding_model_name,
+                                   (SELECT count(*) FROM document_problem_profile p
+                                    WHERE p.kb_id = kb.id) AS profile_count,
+                                   (SELECT count(*)
+                                    FROM document_problem_profile p
+                                    JOIN document_source d
+                                      ON d.id = p.document_id AND d.kb_id = p.kb_id
+                                    WHERE p.kb_id = kb.id AND p.enabled
+                                      AND d.status = 'STORED'
+                                      AND kb.active_index_id IS NOT NULL
+                                      AND EXISTS (
+                                          SELECT 1 FROM document_element e
+                                          WHERE e.index_id = kb.active_index_id
+                                            AND e.document_id = p.document_id
+                                      )
+                                      AND NOT EXISTS (
+                                          SELECT 1 FROM document_element e
+                                          LEFT JOIN image_asset a ON a.element_id = e.id
+                                          WHERE e.index_id = kb.active_index_id
+                                            AND e.document_id = p.document_id
+                                            AND e.element_type = 'IMAGE' AND a.id IS NULL
+                                      )) AS ready_profile_count,
+                                   EXISTS (
+                                       SELECT 1 FROM prompt_template WHERE active
+                                   ) AS prompt_ready
+                            FROM knowledge_base kb
+                            LEFT JOIN knowledge_index i ON i.id = kb.active_index_id
+                            WHERE kb.id = :kb_id
+                            """
+                        ),
+                        {"kb_id": knowledge_id},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if kb is None:
+                raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
+            model_rows = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT model_type, provider, model_name,
+                               api_key_ciphertext IS NOT NULL AS stored_key_configured
+                        FROM model_config
+                        WHERE enabled AND model_type IN ('LLM', 'RERANK')
+                        """
+                    )
+                )
+            ).mappings()
+
+        models = {str(row["model_type"]): dict(row) for row in model_rows}
+        support_blockers: list[str] = []
+        rag_blockers: list[str] = []
+        if kb["status"] != "ENABLED":
+            support_blockers.append("知识库已停用")
+            rag_blockers.append("知识库已停用")
+        if int(kb["ready_profile_count"] or 0) == 0:
+            support_blockers.append("没有已发布就绪的 Problem Profile")
+
+        llm = models.get("LLM")
+        if llm is None:
+            support_blockers.append("LLM 模型未启用")
+            rag_blockers.append("LLM 模型未启用")
+        elif str(llm["provider"]) != "fake" and not (
+            bool(llm["stored_key_configured"])
+            or self.settings.has_secret(self.settings.zhipu_api_key)
+        ):
+            support_blockers.append("LLM API Key 未配置")
+            rag_blockers.append("LLM API Key 未配置")
+
+        if kb["active_index_id"] is None:
+            rag_blockers.append("知识库没有 Active Index")
+        elif kb["index_status"] != "ACTIVE":
+            rag_blockers.append("Active Index 状态异常")
+        if not kb["prompt_ready"]:
+            rag_blockers.append("Active Prompt 未配置")
+
+        rerank = models.get("RERANK")
+        if rerank is None:
+            rag_blockers.append("Rerank 模型未启用")
+        elif str(rerank["provider"]) != "fake" and not (
+            bool(rerank["stored_key_configured"])
+            or self.settings.has_secret(self.settings.siliconflow_api_key)
+        ):
+            rag_blockers.append("Rerank API Key 未配置")
+
+        embedding_uses_fake = self.settings.m2_embedding_provider == "fake" or (
+            self.settings.m2_embedding_provider == "auto"
+            and not self.settings.has_secret(self.settings.siliconflow_api_key)
+        )
+        query_embedding_model = (
+            "deterministic-shake256"
+            if embedding_uses_fake
+            else self.settings.siliconflow_embedding_model
+        )
+        if (
+            kb["active_index_id"] is not None
+            and str(kb["embedding_model_name"]) != query_embedding_model
+        ):
+            rag_blockers.append("查询 Embedding 模型与 Active Index 快照不一致")
+
+        return {
+            "support": {
+                "ready": not support_blockers,
+                "blockers": support_blockers,
+                "profile_count": int(kb["profile_count"] or 0),
+                "ready_profile_count": int(kb["ready_profile_count"] or 0),
+            },
+            "rag": {"ready": not rag_blockers, "blockers": rag_blockers},
+        }
+
+    @staticmethod
+    def _policy_blockers(execution_policy: ExecutionPolicy, readiness: dict[str, Any]) -> list[str]:
+        blockers: list[str] = []
+        if execution_policy != ExecutionPolicy.RAG_ONLY:
+            blockers.extend(str(item) for item in readiness["support"]["blockers"])
+        if execution_policy != ExecutionPolicy.SUPPORT_ONLY:
+            blockers.extend(str(item) for item in readiness["rag"]["blockers"])
+        return list(dict.fromkeys(blockers))
 
     async def update_policy(
         self, knowledge_id: UUID, execution_policy: ExecutionPolicy
     ) -> dict[str, Any]:
+        readiness = await self.get_readiness(knowledge_id)
+        blockers = self._policy_blockers(execution_policy, readiness)
+        if blockers:
+            raise ApiError(
+                "ENGINE_POLICY_NOT_READY",
+                "问答引擎尚未满足运行条件",
+                409,
+                {"blockers": blockers},
+            )
         async with self.engine.begin() as connection:
             exists = await connection.execute(
                 text("SELECT 1 FROM knowledge_base WHERE id = :kb_id FOR UPDATE"),
@@ -152,6 +292,7 @@ class GatewayRepository:
             "fallback_conditions": list(row["fallback_conditions"] or []),
             "source": "DATABASE",
             "updated_at": row["updated_at"],
+            "readiness": readiness,
         }
 
     async def freeze_conversation(
@@ -192,6 +333,15 @@ class GatewayRepository:
         reason: str,
     ) -> None:
         async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE rag_trace SET message_id = NULL
+                    WHERE trace_id = :parent_trace_id AND engine = 'SUPPORT'
+                    """
+                ),
+                {"parent_trace_id": support_trace_id},
+            )
             await connection.execute(
                 text(
                     """

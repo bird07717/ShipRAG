@@ -168,6 +168,15 @@ export interface RuntimePolicy {
   fallback_conditions: string[];
   source: "DATABASE" | "DEFAULT";
   updated_at?: string | null;
+  readiness: {
+    support: {
+      ready: boolean;
+      blockers: string[];
+      profile_count: number;
+      ready_profile_count: number;
+    };
+    rag: { ready: boolean; blockers: string[] };
+  };
 }
 
 export interface PromptTemplate {
@@ -199,11 +208,6 @@ export interface ProblemProfile {
   created_at: string;
   updated_at: string;
 }
-
-export type ProblemProfilePayload = Omit<
-  ProblemProfile,
-  "id" | "knowledge_id" | "support_ready" | "readiness_reasons" | "created_at" | "updated_at"
->;
 
 export type ProfileDraftOperation = "CREATE" | "UPDATE" | "NONE";
 export type ProfileDraftStatus = "DRAFT" | "APPROVED" | "REJECTED" | "PUBLISHED";
@@ -406,6 +410,11 @@ export interface RequestErrorsByDay {
 export interface FailureSummary {
   from: string;
   to: string;
+  scope: {
+    trace_failures: "KNOWLEDGE_BASE" | "GLOBAL";
+    request_errors: "GLOBAL";
+    knowledge_id: string | null;
+  };
   trace_failures: TraceFailureGroup[];
   request_errors: RequestErrorGroup[];
   request_errors_by_day: RequestErrorsByDay[];

@@ -145,7 +145,10 @@ describe("chat API", () => {
       onError,
     });
 
-    expect(onError).toHaveBeenCalledWith("上游超时");
+    expect(onError).toHaveBeenCalledWith(
+      "上游超时（UPSTREAM_TIMEOUT）",
+      { code: "UPSTREAM_TIMEOUT", message: "上游超时" },
+    );
   });
 
   it("preserves an SSE event split across arbitrary network chunks", async () => {

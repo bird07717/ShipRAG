@@ -11,15 +11,9 @@ import DocumentsView from "@/views/DocumentsView.vue";
 import IndexBuildView from "@/views/IndexBuildView.vue";
 import LogsView from "@/views/LogsView.vue";
 import PlaygroundView from "@/views/PlaygroundView.vue";
-import TracesView from "@/views/TracesView.vue";
 import ConfigurationView from "@/views/ConfigurationView.vue";
-import SettingsView from "@/views/SettingsView.vue";
 import EngineRoutingView from "@/views/EngineRoutingView.vue";
 import SupportProfilesView from "@/views/SupportProfilesView.vue";
-import SupportConfigurationView from "@/views/SupportConfigurationView.vue";
-import SupportErrorsView from "@/views/SupportErrorsView.vue";
-import RagConfigurationView from "@/views/RagConfigurationView.vue";
-import RagErrorsView from "@/views/RagErrorsView.vue";
 import ConversationTimeline from "@/components/ConversationTimeline.vue";
 
 const props = defineProps<{ view: string }>();
@@ -33,15 +27,9 @@ const views: Record<string, Component> = {
   indexes: IndexBuildView,
   logs: LogsView,
   playground: PlaygroundView,
-  traces: TracesView,
   configuration: ConfigurationView,
-  settings: SettingsView,
   "engine-routing": EngineRoutingView,
   "support-profiles": SupportProfilesView,
-  "support-configuration": SupportConfigurationView,
-  "support-errors": SupportErrorsView,
-  "rag-configuration": RagConfigurationView,
-  "rag-errors": RagErrorsView,
 };
 
 let indexPollTimer: ReturnType<typeof setInterval> | undefined;
@@ -79,7 +67,7 @@ onUnmounted(() => clearInterval(indexPollTimer));
       class="studio-alert"
       @close="store.notice = ''"
     />
-    <component :is="views[props.view] ?? SettingsView" />
+    <component :is="views[props.view] ?? DashboardView" />
 
     <!-- Shared trace detail drawer (opened from Dashboard recent activity) -->
     <el-drawer

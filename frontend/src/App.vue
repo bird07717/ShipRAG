@@ -3,12 +3,10 @@ import {
   Box,
   ChatDotRound,
   Cpu,
-  DataLine,
   Files,
   Notebook,
   Odometer,
   Operation,
-  Setting,
   Tickets,
 } from "@element-plus/icons-vue";
 import { computed, onMounted, onUnmounted, ref, watch, type Component } from "vue";
@@ -33,65 +31,58 @@ interface MenuGroup {
 
 const menuGroups: MenuGroup[] = [
   {
-    label: "Overview",
+    label: "概览",
     items: [
       { key: "dashboard", label: "Dashboard", subtitle: "知识与索引运行概况", icon: Odometer },
     ],
   },
   {
-    label: "Runtime",
+    label: "知识管理",
+    items: [
+      { key: "knowledge", label: "Knowledge Base", subtitle: "知识域与目录管理", icon: Notebook },
+      { key: "documents", label: "Documents", subtitle: "文档上传、内容与切片检查", icon: Files },
+      { key: "support-profiles", label: "发布管理", subtitle: "候选 Profile 审核与原子发布", icon: Files },
+    ],
+  },
+  {
+    label: "运行与验证",
     items: [
       { key: "engine-routing", label: "Engine Routing", subtitle: "统一配置新会话的问答引擎策略", icon: Operation },
       { key: "support-chat", label: "DemoChat 问答测试", subtitle: "通过统一 Gateway 验证真实对外能力", icon: ChatDotRound },
     ],
   },
   {
-    label: "Data",
+    label: "运维",
     items: [
-      { key: "knowledge", label: "Knowledge Base", subtitle: "知识域与目录管理", icon: Notebook },
-      { key: "documents", label: "Documents", subtitle: "Word 文档、Element 与 Chunk", icon: Files },
-      { key: "indexes", label: "Index Build", subtitle: "双索引构建与原子发布", icon: Box },
+      { key: "logs", label: "Logs & Traces", subtitle: "错误、失败任务与完整链路排查", icon: Tickets },
+      { key: "configuration", label: "模型与系统配置", subtitle: "模型、Prompt、RAG 参数与访问设置", icon: Cpu },
     ],
   },
   {
-    label: "Technical Support",
+    label: "高级工具",
     items: [
-      { key: "support-profiles", label: "问题文档配置", subtitle: "标准问题与完整文档映射", icon: Files },
-      { key: "support-configuration", label: "Support Configuration", subtitle: "Profile 与完整文档发布就绪状态", icon: Setting },
-      { key: "support-errors", label: "Support Errors", subtitle: "Profile、文档、工作流与安全错误", icon: Tickets },
-    ],
-  },
-  {
-    label: "Generic RAG",
-    items: [
+      { key: "indexes", label: "Index Build", subtitle: "手工构建、快照与回收诊断", icon: Box },
       { key: "playground", label: "RAG Playground", subtitle: "检索、Prompt 与答案调试", icon: Operation },
-      { key: "rag-configuration", label: "RAG Configuration", subtitle: "召回、融合、重排与上下文配置", icon: Cpu },
-      { key: "rag-errors", label: "RAG Errors", subtitle: "检索、模型与引用错误", icon: Tickets },
-    ],
-  },
-  {
-    label: "Diagnostics",
-    items: [
-      { key: "logs", label: "Logs & Errors", subtitle: "失败请求、轮次与任务排查", icon: Tickets },
-      { key: "traces", label: "Trace", subtitle: "完整 RAG 链路追踪", icon: DataLine },
-    ],
-  },
-  {
-    label: "Configuration",
-    items: [
-      { key: "configuration", label: "Models & Prompt", subtitle: "共享模型注册与提示词快照", icon: Cpu },
-      { key: "settings", label: "Settings", subtitle: "本地管理台设置", icon: Setting },
     ],
   },
 ];
 
 const allItems = menuGroups.flatMap((group) => group.items);
+const legacyViewAliases: Record<string, string> = {
+  "support-configuration": "support-profiles",
+  "support-errors": "logs",
+  "rag-errors": "logs",
+  traces: "logs",
+  "rag-configuration": "configuration",
+  settings: "configuration",
+};
 
 const store = useAdminStore();
 
 function hashView(): string {
   const value = window.location.hash.replace(/^#\/?/, "");
-  return allItems.some((item) => item.key === value) ? value : "dashboard";
+  const resolved = legacyViewAliases[value] ?? value;
+  return allItems.some((item) => item.key === resolved) ? resolved : "dashboard";
 }
 
 const activeView = ref(hashView());
@@ -107,6 +98,8 @@ function selectKnowledge(): void {
 function syncHash(): void {
   const next = hashView();
   if (next !== activeView.value) activeView.value = next;
+  const target = `#/${next}`;
+  if (window.location.hash !== target) window.history.replaceState(null, "", target);
 }
 
 watch(activeView, (view) => {
@@ -125,6 +118,7 @@ watch(
 
 onMounted(() => {
   window.addEventListener("hashchange", syncHash);
+  syncHash();
   if (isDemoChat.value && !store.knowledgeBases.length) {
     void store.run(() => store.refreshAll());
   }

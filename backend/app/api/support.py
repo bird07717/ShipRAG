@@ -12,8 +12,8 @@ from app.api.schemas import (
     ChatResponse,
     ChatStreamRequest,
     ProblemProfileResponse,
-    ProblemProfileUpsert,
 )
+from app.observability.recorder import observe_stream_errors
 from app.support.repository import SupportRepository
 from app.support.service import TechnicalSupportService
 
@@ -50,17 +50,20 @@ async def support_chat_stream(
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=200)] = None,
 ) -> StreamingResponse:
     return StreamingResponse(
-        service.stream(
-            knowledge_id=payload.knowledge_id,
-            conversation_id=payload.conversation_id,
-            question=payload.question,
-            request_id=payload.request_id or str(request.state.request_id),
-            user_id=payload.user_id,
-            problem_code=payload.problem_code,
-            document_id=payload.document_id,
-            choice_id=payload.choice_id,
-            include_images=payload.include_images,
-            idempotency_key=idempotency_key,
+        observe_stream_errors(
+            request,
+            service.stream(
+                knowledge_id=payload.knowledge_id,
+                conversation_id=payload.conversation_id,
+                question=payload.question,
+                request_id=payload.request_id or str(request.state.request_id),
+                user_id=payload.user_id,
+                problem_code=payload.problem_code,
+                document_id=payload.document_id,
+                choice_id=payload.choice_id,
+                include_images=payload.include_images,
+                idempotency_key=idempotency_key,
+            ),
         ),
         media_type="text/event-stream",
         headers={
@@ -97,12 +100,3 @@ async def list_problem_profiles(
         }
         for item in profiles
     ]
-
-
-@router.put("/problem-profiles", response_model=ProblemProfileResponse)
-async def upsert_problem_profile(
-    knowledge_id: UUID,
-    payload: ProblemProfileUpsert,
-    repository: Annotated[SupportRepository, Depends(get_support_repository)],
-) -> dict[str, Any]:
-    return await repository.upsert_profile(knowledge_id, payload.model_dump(mode="json"))

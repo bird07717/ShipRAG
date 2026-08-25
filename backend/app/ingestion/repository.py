@@ -397,7 +397,7 @@ class IngestionRepository:
         knowledge_id: UUID,
         reason: str = "MANUAL",
         *,
-        activate_on_success: bool = True,
+        activate_on_success: bool = False,
     ) -> BuildReference:
         async with self.engine.begin() as connection:
             kb_result = await connection.execute(
@@ -885,7 +885,7 @@ class IngestionRepository:
             return dict(activated)
 
     async def retry_index(
-        self, index_id: UUID, *, activate_on_success: bool = True
+        self, index_id: UUID, *, activate_on_success: bool = False
     ) -> BuildReference:
         async with self.engine.begin() as connection:
             failed_result = await connection.execute(
@@ -1044,6 +1044,58 @@ class IngestionRepository:
                 ),
                 parameters,
             )
+
+    async def recover_failed_enqueue(self, index_id: UUID, task_id: UUID) -> bool:
+        """Return a queue-delivery failure to its pre-enqueue state exactly once."""
+        async with self.engine.begin() as connection:
+            state_result = await connection.execute(
+                text(
+                    """
+                    SELECT i.status AS index_status, i.error_code AS index_error_code,
+                           t.status AS task_status, t.stage AS task_stage,
+                           t.error_code AS task_error_code
+                    FROM knowledge_index i
+                    JOIN task_record t ON t.index_id = i.id
+                    WHERE i.id = :index_id AND t.id = :task_id
+                    FOR UPDATE OF i, t
+                    """
+                ),
+                {"index_id": index_id, "task_id": task_id},
+            )
+            state = state_result.mappings().one_or_none()
+            if (
+                state is None
+                or state["index_status"] != "FAILED"
+                or state["index_error_code"] != "QUEUE_UNAVAILABLE"
+                or state["task_status"] != "FAILED"
+                or state["task_stage"] != "QUEUE"
+                or state["task_error_code"] != "QUEUE_UNAVAILABLE"
+            ):
+                return False
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_index
+                    SET status = 'BUILDING', error_code = NULL, error_message = NULL,
+                        finished_at = NULL
+                    WHERE id = :index_id
+                    """
+                ),
+                {"index_id": index_id},
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE task_record
+                    SET status = 'QUEUED', stage = 'QUEUED', progress = 0,
+                        error_code = NULL, error_message = NULL,
+                        started_at = NULL, finished_at = NULL, updated_at = now()
+                    WHERE id = :task_id
+                    """
+                ),
+                {"task_id": task_id},
+            )
+            return True
 
     async def find_deletable_indexes(
         self, retention_count: int, retention_days: int

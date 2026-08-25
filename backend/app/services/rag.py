@@ -64,6 +64,10 @@ def _elapsed_ms(started_at: float) -> int:
     return max(0, round((time.perf_counter() - started_at) * 1000))
 
 
+def _unexpected_detail(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"[:500]
+
+
 @dataclass(slots=True)
 class _ChatPlan:
     kind: str  # "DELIVER" | "DOC_QA" | "CHUNK_RAG" | "ROUTING"
@@ -111,6 +115,10 @@ class RagService:
         mode: str = "CHAT",
         user_id: str | None = None,
         retrieval_overrides: dict[str, int] | None = None,
+        reuse_user_message_id: UUID | None = None,
+        reuse_assistant_message_id: UUID | None = None,
+        parent_trace_id: UUID | None = None,
+        fallback_reason: str | None = None,
     ) -> PreparedRag:
         started_at = time.perf_counter()
         normalized_question = question.strip()
@@ -126,6 +134,10 @@ class RagService:
             request_id=request_id,
             mode=mode,
             user_id=user_id,
+            reuse_user_message_id=reuse_user_message_id,
+            reuse_assistant_message_id=reuse_assistant_message_id,
+            parent_trace_id=parent_trace_id,
+            fallback_reason=fallback_reason,
         )
         # Effective retrieval knobs: DB rag_config snapshot from begin_turn,
         # optionally overridden per-call (playground overrides win so the
@@ -357,7 +369,7 @@ class RagService:
                 detail=getattr(exc, "detail", None),
             )
             raise ApiError(exc.code, exc.public_message, 502) from exc
-        except Exception:
+        except Exception as exc:
             await self.repository.fail_turn(
                 turn,
                 status="FAILED",
@@ -366,6 +378,7 @@ class RagService:
                 partial_answer="",
                 timings=timings,
                 stage="prepare",
+                detail=_unexpected_detail(exc),
             )
             raise
         finally:
@@ -617,8 +630,10 @@ class RagService:
             yield sse_event(
                 "done",
                 {
+                    "trace_id": str(turn.trace_id),
                     "conversation_id": str(turn.conversation_id),
                     "message_id": str(turn.assistant_message_id),
+                    "index_id": str(turn.index_id),
                     "answer": answer,
                     "sources": valid_sources,
                     "usage": usage,
@@ -663,7 +678,7 @@ class RagService:
                     "retryable": exc.retryable,
                 },
             )
-        except Exception:
+        except Exception as exc:
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
             await self.repository.fail_turn(
                 turn,
@@ -673,6 +688,7 @@ class RagService:
                 partial_answer="".join(prepared.answer_parts),
                 timings=prepared.timings,
                 stage="llm",
+                detail=_unexpected_detail(exc),
             )
             yield sse_event(
                 "error",
@@ -697,6 +713,10 @@ class RagService:
         product_name: str = "",
         scope_description: str = "",
         user_id: str | None = None,
+        reuse_user_message_id: UUID | None = None,
+        reuse_assistant_message_id: UUID | None = None,
+        parent_trace_id: UUID | None = None,
+        fallback_reason: str | None = None,
     ) -> AsyncIterator[bytes]:
         prepared = await self.prepare(
             knowledge_id=knowledge_id,
@@ -705,6 +725,10 @@ class RagService:
             request_id=request_id,
             mode="CHAT",
             user_id=user_id,
+            reuse_user_message_id=reuse_user_message_id,
+            reuse_assistant_message_id=reuse_assistant_message_id,
+            parent_trace_id=parent_trace_id,
+            fallback_reason=fallback_reason,
         )
         turn = prepared.turn
         plan, plan_error = await self._safely_plan_chat_turn(
@@ -788,8 +812,10 @@ class RagService:
             yield sse_event(
                 "done",
                 {
+                    "trace_id": str(turn.trace_id),
                     "conversation_id": str(turn.conversation_id),
                     "message_id": str(turn.assistant_message_id),
+                    "index_id": str(turn.index_id),
                     "answer": result.answer,
                     "sources": result.valid_sources,
                     "usage": usage,
@@ -839,7 +865,7 @@ class RagService:
                     "retryable": exc.retryable,
                 },
             )
-        except Exception:
+        except Exception as exc:
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
             await self.repository.fail_turn(
                 turn,
@@ -849,6 +875,7 @@ class RagService:
                 partial_answer="".join(prepared.answer_parts),
                 timings=prepared.timings,
                 stage="llm",
+                detail=_unexpected_detail(exc),
             )
             yield sse_event(
                 "error",
@@ -873,6 +900,10 @@ class RagService:
         product_name: str = "",
         scope_description: str = "",
         user_id: str | None = None,
+        reuse_user_message_id: UUID | None = None,
+        reuse_assistant_message_id: UUID | None = None,
+        parent_trace_id: UUID | None = None,
+        fallback_reason: str | None = None,
     ) -> dict[str, Any]:
         prepared = await self.prepare(
             knowledge_id=knowledge_id,
@@ -881,6 +912,10 @@ class RagService:
             request_id=request_id,
             mode="CHAT",
             user_id=user_id,
+            reuse_user_message_id=reuse_user_message_id,
+            reuse_assistant_message_id=reuse_assistant_message_id,
+            parent_trace_id=parent_trace_id,
+            fallback_reason=fallback_reason,
         )
         turn = prepared.turn
         plan, plan_error = await self._safely_plan_chat_turn(
@@ -959,7 +994,7 @@ class RagService:
             raise ApiError(exc.code, exc.public_message, 504 if exc.retryable else 503) from exc
         except ApiError:
             raise
-        except Exception:
+        except Exception as exc:
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
             await self.repository.fail_turn(
                 turn,
@@ -969,6 +1004,7 @@ class RagService:
                 partial_answer="",
                 timings=prepared.timings,
                 stage="llm",
+                detail=_unexpected_detail(exc),
             )
             raise
         finally:
@@ -1003,7 +1039,7 @@ class RagService:
                 stage="routing",
             )
             return _ChatPlan(kind="ROUTING"), ApiError(exc.code, exc.message, exc.status_code)
-        except Exception:
+        except Exception as exc:
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
             await self.repository.fail_turn(
                 turn,
@@ -1013,6 +1049,7 @@ class RagService:
                 partial_answer="",
                 timings=prepared.timings,
                 stage="routing",
+                detail=_unexpected_detail(exc),
             )
             return _ChatPlan(kind="ROUTING"), ApiError("INTERNAL_ERROR", "文档路由失败", 500)
 
@@ -1310,8 +1347,10 @@ class RagService:
         yield sse_event(
             "done",
             {
+                "trace_id": str(turn.trace_id),
                 "conversation_id": str(turn.conversation_id),
                 "message_id": str(turn.assistant_message_id),
+                "index_id": str(turn.index_id),
                 "answer": result.answer,
                 "sources": result.valid_sources,
                 "usage": usage,
@@ -1398,6 +1437,7 @@ class RagService:
             "message_id": str(turn.assistant_message_id),
             "conversation_id": str(turn.conversation_id),
             "trace_id": str(turn.trace_id),
+            "index_id": str(turn.index_id),
             "response_type": result.response_type.value,
             "answer_mode": result.answer_mode.value if result.answer_mode else None,
             "answer": result.answer,

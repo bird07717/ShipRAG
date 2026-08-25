@@ -53,6 +53,32 @@ def _failure_trace(
     return result
 
 
+def _failure_stage(code: str, current_stage: str) -> str:
+    # Direct delivery is a distinct product stage.  A missing document or
+    # image discovered there must not be reported as the focused-chat loading
+    # stage merely because both paths use the same repository errors.
+    if current_stage == "DOCUMENT_DELIVERY":
+        return current_stage
+    if code in {
+        "INVALID_EVIDENCE",
+        "MISSING_EVIDENCE",
+        "INVALID_IMAGE_REFERENCE",
+        "UNSUPPORTED_PRODUCT_PARAMETER",
+    }:
+        return "VALIDATION"
+    if code == "WORKFLOW_CONFLICT":
+        return "WORKFLOW"
+    if code in {
+        "DOCUMENT_NOT_FOUND",
+        "DOCUMENT_NOT_SUPPORT_READY",
+        "IMAGE_ASSET_MISSING",
+    }:
+        return "DOCUMENT_LOADING"
+    if code == "MODEL_NOT_CONFIGURED":
+        return "LLM"
+    return current_stage
+
+
 class _CatalogResult(BaseModel):
     problem_code: str | None = None
 
@@ -135,6 +161,7 @@ class TechnicalSupportService:
         include_images: bool,
         started: float,
     ) -> tuple[dict[str, Any], dict[str, Any], UUID | None]:
+        await self.repository.set_stage(turn, "DOCUMENT_DELIVERY")
         document = await self.repository.get_document(
             knowledge_id=turn.knowledge_id,
             index_id=turn.index_id,
@@ -178,6 +205,7 @@ class TechnicalSupportService:
         choice_id: str | None = None,
         include_images: bool = True,
         idempotency_key: str | None = None,
+        return_internal_ids: bool = False,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         clean_question = question.strip()
@@ -200,7 +228,12 @@ class TechnicalSupportService:
             request_hash=request_hash,
         )
         if turn.replay is not None:
-            return turn.replay
+            replay = dict(turn.replay)
+            if not return_internal_ids:
+                replay.pop("_fallback_message_pair", None)
+                replay.pop("_gateway_response", None)
+            return replay
+        current_stage = "PROFILE_RESOLUTION"
         try:
             # A choice is the only path that can confirm a pending document
             # switch. It precedes focus-based assistant behavior.
@@ -218,6 +251,7 @@ class TechnicalSupportService:
                 )
                 if selected.decision != ProblemDecision.MATCHED or selected.profile is None:
                     raise ApiError("INVALID_CHOICE", "选择不属于当前会话的待确认文档", 409)
+                current_stage = "DOCUMENT_DELIVERY"
                 response, context, delivered_focus = await self._deliver(
                     turn=turn,
                     profile=selected.profile,
@@ -254,6 +288,7 @@ class TechnicalSupportService:
                             "文档尚未满足技术支持发布条件",
                             409,
                         )
+                    current_stage = "DOCUMENT_DELIVERY"
                     response, context, focus = await self._deliver(
                         turn=turn,
                         profile=profile,
@@ -273,6 +308,7 @@ class TechnicalSupportService:
                             "问题对应文档尚未满足技术支持发布条件",
                             409,
                         )
+                    current_stage = "DOCUMENT_DELIVERY"
                     response, context, focus = await self._deliver(
                         turn=turn,
                         profile=profile,
@@ -285,6 +321,7 @@ class TechnicalSupportService:
                 else:
                     resolution = await resolver.resolve(question=clean_question, profiles=profiles)
                     if resolution.decision == ProblemDecision.MATCHED and resolution.profile:
+                        current_stage = "DOCUMENT_DELIVERY"
                         response, context, focus = await self._deliver(
                             turn=turn,
                             profile=resolution.profile,
@@ -335,6 +372,11 @@ class TechnicalSupportService:
                             )
                             context = {"support_version": 1}
                         focus = None
+                if response.get("response_type") == "NO_MATCH":
+                    response["_fallback_message_pair"] = {
+                        "user_message_id": str(turn.user_message_id),
+                        "assistant_message_id": str(turn.assistant_message_id),
+                    }
                 await self.repository.finish_turn(
                     turn,
                     response=response,
@@ -347,10 +389,14 @@ class TechnicalSupportService:
                         ),
                     },
                 )
+                if not return_internal_ids:
+                    response.pop("_fallback_message_pair", None)
                 return response
 
             # Focused turns load the complete, frozen document directly and
             # never invoke the Generic RAG stack.
+            current_stage = "DOCUMENT_LOADING"
+            await self.repository.set_stage(turn, current_stage)
             profile = await self.repository.get_profile_by_document(
                 knowledge_id, turn.focus_document_id
             )
@@ -360,6 +406,8 @@ class TechnicalSupportService:
                 document_id=turn.focus_document_id,
                 problem_code=profile.problem_code if profile else None,
             )
+            current_stage = "LLM"
+            await self.repository.set_stage(turn, current_stage)
             llm = await self.repository.get_llm()
             provider = create_llm_provider(self.settings, llm)
             try:
@@ -376,6 +424,8 @@ class TechnicalSupportService:
                     workflow=turn.chat_context,
                     history=turn.history,
                 )
+                current_stage = "VALIDATION"
+                await self.repository.set_stage(turn, current_stage)
                 prompt_usage = assistant.prompt_usage
                 # The model can only propose a query. Resolve it again and
                 # require an explicit subsequent choice before changing focus.
@@ -429,6 +479,8 @@ class TechnicalSupportService:
                         )
                         return response
 
+                current_stage = "WORKFLOW"
+                await self.repository.set_stage(turn, current_stage)
                 context = apply_workflow_update(turn.chat_context, draft.workflow_update)
                 response = self._base_response(turn, started)
                 selected_images = [
@@ -521,6 +573,7 @@ class TechnicalSupportService:
                 code=exc.code,
                 message=exc.message,
                 trace=_failure_trace(turn, exc.code, details=exc.details or None),
+                stage=_failure_stage(exc.code, current_stage),
                 detail=exc.details or None,
             )
             raise
@@ -532,7 +585,7 @@ class TechnicalSupportService:
                 trace=_failure_trace(
                     turn, exc.code, details={"retryable": exc.retryable, "detail": exc.detail}
                 ),
-                stage="llm",
+                stage="LLM",
                 retryable=exc.retryable,
                 detail=exc.detail,
             )
@@ -543,9 +596,27 @@ class TechnicalSupportService:
                 code="INTERNAL_ERROR",
                 message="技术支持处理失败",
                 trace=_failure_trace(turn, "INTERNAL_ERROR"),
+                stage=current_stage,
                 detail=f"{type(exc).__name__}: {exc}"[:500],
             )
             raise
+
+    async def save_gateway_response(
+        self,
+        *,
+        knowledge_id: UUID,
+        idempotency_key: str | None,
+        support_trace_id: UUID,
+        response: dict[str, Any],
+    ) -> None:
+        if idempotency_key is None:
+            return
+        await self.repository.save_gateway_response(
+            knowledge_id=knowledge_id,
+            idempotency_key=idempotency_key,
+            support_trace_id=support_trace_id,
+            response=response,
+        )
 
     async def stream(self, **kwargs: Any) -> AsyncIterator[bytes]:
         yield _sse("status", {"stage": "support_processing"})
@@ -555,10 +626,10 @@ class TechnicalSupportService:
             # The HTTP response has already started.  Returning a regular
             # FastAPI error here would disconnect the browser without a useful
             # message, so keep the error in the SSE protocol.
-            yield _sse("error", {"code": exc.code, "message": exc.message})
-            return
-        except Exception:
-            yield _sse("error", {"code": "INTERNAL_ERROR", "message": "技术支持处理失败"})
+            yield _sse(
+                "error",
+                {"code": exc.code, "message": exc.message, "status_code": exc.status_code},
+            )
             return
         yield _sse(
             "trace",

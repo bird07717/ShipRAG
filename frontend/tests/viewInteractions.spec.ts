@@ -215,6 +215,7 @@ const failedTask = {
 const failureSummary = {
   from: "2026-08-14T00:00:00Z",
   to: "2026-08-21T00:00:00Z",
+  scope: { trace_failures: "KNOWLEDGE_BASE" as const, request_errors: "GLOBAL" as const, knowledge_id: "kb-1" },
   trace_failures: [{ error_code: "INVALID_EVIDENCE", count: 2, last_seen: "2026-08-20T10:00:00Z" }],
   request_errors: [{ path: "/api/v1/support/chat/stream", status_code: 502, count: 3, last_seen: "2026-08-20T10:00:00Z" }],
   request_errors_by_day: [{ day: "2026-08-20", count: 3 }],
@@ -228,6 +229,13 @@ function stubApi() {
   vi.spyOn(adminApi, "listTraces").mockResolvedValue([traceSummary]);
   vi.spyOn(adminApi, "listModels").mockResolvedValue([model]);
   vi.spyOn(adminApi, "listPrompts").mockResolvedValue([prompt]);
+  vi.spyOn(adminApi, "getRagConfig").mockResolvedValue({
+    vector_top_k: 10,
+    bm25_top_k: 10,
+    fusion_top_k: 20,
+    rerank_top_n: 10,
+    context_max_chunks: 8,
+  });
   vi.spyOn(adminApi, "getTrace").mockResolvedValue(traceDetail);
   vi.spyOn(adminApi, "runPlayground").mockResolvedValue(traceDetail);
   vi.spyOn(adminApi, "listElements").mockResolvedValue({
@@ -287,6 +295,8 @@ describe("view interactions", () => {
 
     await wrapper.get(".el-table__row").trigger("click");
     await flushPromises();
+    expect(adminApi.listElements).toHaveBeenLastCalledWith("doc-1", "idx-1");
+    expect(adminApi.listChunks).toHaveBeenLastCalledWith("doc-1", "idx-1");
     expect(wrapper.text()).toContain("Elements · 1");
     expect(wrapper.text()).toContain("Chunks · 1");
 
@@ -312,8 +322,20 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("Score 0.90");
   });
 
-  it("traces: selects a trace and renders the latency timeline", async () => {
-    const wrapper = await mountView("traces");
+  it("logs: opens full traces and renders the latency timeline", async () => {
+    vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
+    vi.spyOn(adminApi, "listRequestErrors").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+    });
+    const wrapper = await mountView("logs");
+    const tracesTab = wrapper
+      .findAll(".el-tabs__item")
+      .find((tab) => tab.text().includes("全量 Trace"));
+    await tracesTab!.trigger("click");
+    await flushPromises();
     expect(wrapper.text()).toContain("如何配置数据库？");
 
     await wrapper.get(".trace-row").trigger("click");
@@ -336,7 +358,7 @@ describe("view interactions", () => {
       detail: { exception_type: "LlmError", stack: "Traceback (most recent call last)" },
     });
     vi.spyOn(adminApi, "listTasks").mockResolvedValue([]);
-    vi.spyOn(adminApi, "listTraces").mockResolvedValue([failedTraceSummary]);
+    const listTraces = vi.spyOn(adminApi, "listTraces").mockResolvedValue([failedTraceSummary]);
     vi.spyOn(adminApi, "getTrace").mockResolvedValue(failedTraceDetail);
     vi.spyOn(adminApi, "listConversationMessages").mockResolvedValue(conversationMessages);
 
@@ -361,6 +383,18 @@ describe("view interactions", () => {
       .find((tab) => tab.text().includes("失败轮次"));
     await failedTab!.trigger("click");
     await flushPromises();
+    const engineSelect = wrapper
+      .findAllComponents({ name: "ElSelect" })
+      .find((select) => select.props("placeholder") === "全部引擎");
+    await engineSelect!.setValue("SUPPORT");
+    engineSelect!.vm.$emit("change", "SUPPORT");
+    await flushPromises();
+    expect(listTraces).toHaveBeenCalledWith("kb-1", {
+      status: "FAILED",
+      engine: "SUPPORT",
+      errorCode: undefined,
+      limit: 200,
+    });
     const failedRow = wrapper
       .findAll(".el-table__row")
       .find((row) => row.text().includes("为什么升级失败"));
@@ -442,6 +476,8 @@ describe("view interactions", () => {
     const wrapper = await mountView("configuration");
     expect(wrapper.text()).toContain("qwen");
     expect(wrapper.text()).toContain("siliconflow");
+    expect(wrapper.text()).toContain("RAG 检索参数");
+    expect(wrapper.text()).toContain("访问设置");
 
     const promptTab = wrapper
       .findAll(".el-tabs__item")
@@ -452,11 +488,23 @@ describe("view interactions", () => {
 
     await wrapper.get(".prompt-row").trigger("click");
     expect(wrapper.text()).toContain("SYS PROMPT");
+
+    const ragTab = wrapper
+      .findAll(".el-tabs__item")
+      .find((tab) => tab.text().includes("RAG 检索参数"));
+    await ragTab!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Generic RAG 全局配置");
   });
 
-  it("settings: switches section and clears the credential", async () => {
+  it("configuration: opens access settings and clears the credential", async () => {
     sessionStorage.setItem("rag_service_token", "tok");
-    const wrapper = await mountView("settings");
+    const wrapper = await mountView("configuration");
+    const accessTab = wrapper
+      .findAll(".el-tabs__item")
+      .find((tab) => tab.text().includes("访问设置"));
+    await accessTab!.trigger("click");
+    await flushPromises();
     const danger = wrapper
       .findAll(".settings-nav button")
       .find((b) => b.text().includes("危险操作"));

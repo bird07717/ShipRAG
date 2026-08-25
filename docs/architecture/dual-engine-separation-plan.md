@@ -151,7 +151,7 @@ POST /api/v1/chat/stream
 POST /api/v1/support/chat             # 强制 Support
 POST /api/v1/support/chat/stream
 GET  /api/v1/support/problem-profiles
-PUT  /api/v1/support/problem-profiles
+# Profile 写入只允许通过 Knowledge Release 草稿审核与原子发布
 
 POST /api/v1/rag/chat                 # 强制 RAG
 POST /api/v1/rag/chat/stream

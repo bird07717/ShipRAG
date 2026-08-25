@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { Refresh, Search, SetUp } from "@element-plus/icons-vue";
 
 import { adminApi } from "@/api/admin";
@@ -14,6 +14,11 @@ const store = useAdminStore();
 const traceSearch = ref("");
 const activeTraceDetail = ref<RagTrace | null>(null);
 const loadingDetail = ref(false);
+const loadError = ref("");
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Trace 加载失败";
+}
 
 const RESPONSE_TYPES = [
   "ANSWERED",
@@ -43,6 +48,7 @@ const loadingTraces = ref(false);
 
 async function loadTraces(): Promise<void> {
   loadingTraces.value = true;
+  loadError.value = "";
   try {
     traces.value = await adminApi.listTraces(store.selectedKnowledgeId || undefined, {
       status: traceFilter.value.status || undefined,
@@ -52,6 +58,9 @@ async function loadTraces(): Promise<void> {
       to: traceFilter.value.range?.[1]?.toISOString(),
       limit: 200,
     });
+  } catch (error) {
+    traces.value = [];
+    loadError.value = errorMessage(error);
   } finally {
     loadingTraces.value = false;
   }
@@ -68,6 +77,8 @@ onMounted(() => {
   }
   void loadTraces();
 });
+
+watch(() => store.selectedKnowledgeId, () => void loadTraces());
 
 const LATENCY_STEPS: Array<{ key: string; label: string }> = [
   { key: "query_rewrite_ms", label: "Query Rewrite" },
@@ -159,8 +170,12 @@ const errorDescription = computed(() => {
 
 async function selectTrace(traceId: string): Promise<void> {
   loadingDetail.value = true;
+  loadError.value = "";
   try {
     activeTraceDetail.value = await store.openTraceSilent(traceId);
+  } catch (error) {
+    activeTraceDetail.value = null;
+    loadError.value = errorMessage(error);
   } finally {
     loadingDetail.value = false;
   }
@@ -169,6 +184,14 @@ async function selectTrace(traceId: string): Promise<void> {
 
 <template>
   <div class="trace-view">
+    <el-alert
+      v-if="loadError"
+      class="trace-load-error"
+      :title="loadError"
+      type="error"
+      show-icon
+      @close="loadError = ''"
+    />
     <!-- Trace list -->
     <section class="panel trace-list">
       <header class="panel-header">
@@ -234,7 +257,7 @@ async function selectTrace(traceId: string): Promise<void> {
           class="filter-search"
         />
       </div>
-      <div v-loading="loadingDetail" class="trace-rows">
+      <div v-loading="loadingTraces" class="trace-rows">
         <button
           v-for="trace in filteredTraces"
           :key="trace.trace_id"
@@ -246,7 +269,7 @@ async function selectTrace(traceId: string): Promise<void> {
           <div class="trace-row-main">
             <b class="trace-question">{{ trace.question }}</b>
             <small class="trace-meta">
-              {{ trace.mode }} · {{ store.formatDate(trace.created_at) }}
+              {{ trace.engine ?? "RAG" }} · {{ trace.mode }} · {{ store.formatDate(trace.created_at) }}
               <template v-if="trace.user_id"> · {{ trace.user_id }}</template>
               <template v-if="trace.error?.code"> · ⚠ {{ trace.error.code }}</template>
             </small>
@@ -261,7 +284,7 @@ async function selectTrace(traceId: string): Promise<void> {
           </div>
         </button>
         <EmptyState
-          v-if="!filteredTraces.length"
+          v-if="!loadingTraces && !loadError && !filteredTraces.length"
           title="暂无 Trace"
           description="发起 Playground 查询或 Demo Chat 对话后，这里会记录完整链路。"
         />
@@ -269,13 +292,14 @@ async function selectTrace(traceId: string): Promise<void> {
     </section>
 
     <!-- Trace detail -->
-    <section class="panel trace-detail">
+    <section v-loading="loadingDetail" class="panel trace-detail">
       <template v-if="activeTraceDetail">
         <header class="panel-header">
           <div>
             <h3 class="detail-question">{{ activeTraceDetail.question }}</h3>
             <div class="detail-meta">
               <StatusBadge :status="activeTraceDetail.status" />
+              <StatusBadge :status="activeTraceDetail.engine ?? 'RAG'" />
               <StatusBadge
                 v-if="activeTraceDetail.response_type"
                 :status="activeTraceDetail.response_type"
@@ -297,6 +321,25 @@ async function selectTrace(traceId: string): Promise<void> {
           </div>
         </header>
         <div class="panel-body">
+          <el-alert
+            v-if="activeTraceDetail.parent_trace_id"
+            :title="`由 ${activeTraceDetail.fallback_from ?? 'SUPPORT'} 降级到当前引擎`"
+            :description="`原因：${activeTraceDetail.fallback_reason ?? '未记录'} · 父 Trace：${activeTraceDetail.parent_trace_id}`"
+            type="info"
+            :closable="false"
+            show-icon
+            class="detail-error fallback-link"
+          >
+            <template #default>
+              <el-button
+                text
+                size="small"
+                @click="selectTrace(activeTraceDetail.parent_trace_id!)"
+              >
+                查看父 Trace
+              </el-button>
+            </template>
+          </el-alert>
           <el-alert
             v-if="activeTraceDetail.error?.code"
             :title="`错误：${activeTraceDetail.error.code}`"
@@ -389,6 +432,14 @@ async function selectTrace(traceId: string): Promise<void> {
   grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
   gap: var(--space-content-gap);
   align-items: start;
+}
+
+.trace-load-error {
+  grid-column: 1 / -1;
+}
+
+.fallback-link :deep(.el-alert__content) {
+  min-width: 0;
 }
 
 .trace-list {

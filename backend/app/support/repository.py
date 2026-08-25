@@ -583,6 +583,49 @@ class SupportRepository:
                     },
                 )
 
+    async def set_stage(self, turn: SupportTurn, stage: str) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE rag_trace SET stage = :stage
+                    WHERE trace_id = :trace_id AND status = 'RUNNING'
+                    """
+                ),
+                {"trace_id": turn.trace_id, "stage": stage},
+            )
+
+    async def save_gateway_response(
+        self,
+        *,
+        knowledge_id: UUID,
+        idempotency_key: str,
+        support_trace_id: UUID,
+        response: dict[str, Any],
+    ) -> None:
+        async with self.engine.begin() as conn:
+            result = await conn.execute(
+                text(
+                    """
+                    UPDATE support_idempotency
+                    SET response = response || jsonb_build_object(
+                            '_gateway_response', CAST(:gateway_response AS jsonb)
+                        ),
+                        updated_at = now()
+                    WHERE kb_id = :kb_id AND idempotency_key = :key
+                      AND trace_id = :trace_id AND status = 'COMPLETED'
+                    """
+                ),
+                {
+                    "kb_id": knowledge_id,
+                    "key": idempotency_key,
+                    "trace_id": support_trace_id,
+                    "gateway_response": json.dumps(response, ensure_ascii=False),
+                },
+            )
+            if result.rowcount != 1:
+                raise ApiError("IDEMPOTENCY_STATE_INVALID", "降级幂等状态不一致", 409)
+
     async def fail_turn(
         self,
         turn: SupportTurn,
@@ -630,62 +673,3 @@ class SupportRepository:
                     ),
                     {"kb_id": turn.knowledge_id, "key": turn.idempotency_key},
                 )
-
-    async def upsert_profile(self, knowledge_id: UUID, payload: dict[str, Any]) -> dict[str, Any]:
-        profile_id = uuid4()
-        async with self.engine.begin() as conn:
-            parameters = {
-                "id": profile_id,
-                "kb_id": knowledge_id,
-                **payload,
-                "aliases": json.dumps(payload["aliases"], ensure_ascii=False),
-                "keywords": json.dumps(payload["keywords"], ensure_ascii=False),
-                "model_names": json.dumps(payload["model_names"], ensure_ascii=False),
-            }
-            existing = await conn.execute(
-                text(
-                    """
-                    SELECT id FROM document_problem_profile
-                    WHERE kb_id = :kb_id AND problem_code = :problem_code
-                    FOR UPDATE
-                    """
-                ),
-                parameters,
-            )
-            if existing.scalar_one_or_none() is None:
-                statement = text("""
-                    INSERT INTO document_problem_profile (id, document_id, kb_id, problem_code, canonical_question, aliases, keywords, product_name, model_names, task_type, enabled)
-                    VALUES (:id, :document_id, :kb_id, :problem_code, :canonical_question, CAST(:aliases AS jsonb), CAST(:keywords AS jsonb), :product_name, CAST(:model_names AS jsonb), :task_type, :enabled)
-                    RETURNING *
-                """)
-            else:
-                statement = text("""
-                    UPDATE document_problem_profile
-                    SET document_id = :document_id, canonical_question = :canonical_question,
-                        aliases = CAST(:aliases AS jsonb), keywords = CAST(:keywords AS jsonb),
-                        product_name = :product_name, model_names = CAST(:model_names AS jsonb),
-                        task_type = :task_type, enabled = :enabled, updated_at = now()
-                    WHERE kb_id = :kb_id AND problem_code = :problem_code
-                    RETURNING *
-                """)
-            row = (await conn.execute(statement, parameters)).mappings().one()
-        profile = await self.get_profile_by_code(knowledge_id, str(row["problem_code"]))
-        if profile is None:
-            raise ApiError("PROBLEM_PROFILE_NOT_FOUND", "问题画像保存后不可见", 500)
-        return {
-            "id": profile.id,
-            "document_id": profile.document_id,
-            "knowledge_id": profile.knowledge_id,
-            "problem_code": profile.problem_code,
-            "canonical_question": profile.canonical_question,
-            "aliases": profile.aliases,
-            "keywords": profile.keywords,
-            "product_name": profile.product_name,
-            "model_names": profile.model_names,
-            "task_type": profile.task_type,
-            "enabled": profile.enabled,
-            "support_ready": profile.support_ready,
-            "readiness_reasons": profile.readiness_reasons,
-            "created_at": profile.created_at,
-            "updated_at": profile.updated_at,
-        }

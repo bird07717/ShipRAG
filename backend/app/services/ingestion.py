@@ -83,6 +83,23 @@ class IngestionService:
                 operation, idempotency_key, request_hash
             )
             if replay is not None:
+                build_data = replay.get("build_request")
+                if isinstance(build_data, dict):
+                    build = BuildReference(
+                        requested=bool(build_data.get("requested")),
+                        coalesced=bool(build_data.get("coalesced")),
+                        index_id=(
+                            UUID(str(build_data["index_id"]))
+                            if build_data.get("index_id")
+                            else None
+                        ),
+                        task_id=(
+                            UUID(str(build_data["task_id"])) if build_data.get("task_id") else None
+                        ),
+                        rebuild_required=bool(build_data.get("rebuild_required")),
+                        replayed=True,
+                    )
+                    await self._enqueue_reference(build)
                 return replay
 
             document_id = uuid4()
@@ -230,7 +247,16 @@ class IngestionService:
         return {"deleted_index_ids": [str(index_id)], "deleted_count": 1}
 
     async def _enqueue_reference(self, build: BuildReference) -> None:
-        if build.replayed or build.coalesced or build.index_id is None or build.task_id is None:
+        if (
+            not build.requested
+            or build.coalesced
+            or build.index_id is None
+            or build.task_id is None
+        ):
+            return
+        if build.replayed and not await self.repository.recover_failed_enqueue(
+            build.index_id, build.task_id
+        ):
             return
         try:
             await asyncio.to_thread(

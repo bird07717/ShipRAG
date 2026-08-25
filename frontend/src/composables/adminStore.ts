@@ -13,7 +13,6 @@ import type {
   ModelProbeResult,
   PromptTemplate,
   ProblemProfile,
-  ProblemProfilePayload,
   ProfileDraftPatch,
   ProfileFeedback,
   RagConfig,
@@ -43,6 +42,7 @@ export const adminStore = reactive({
   profileFeedback: [] as ProfileFeedback[],
   elements: [] as Array<Record<string, unknown>>,
   chunks: [] as Array<Record<string, unknown>>,
+  documentInspectionIndexId: "",
   latestIndexTasks: {} as Record<string, IndexTask | undefined>,
   systemInfo: null as SystemInfo | null,
 
@@ -87,6 +87,19 @@ export const adminStore = reactive({
   get activeIndex(): KnowledgeIndex | null {
     const activeId = this.selectedKnowledge?.active_index_id;
     return this.indexes.find((index) => index.id === activeId) ?? null;
+  },
+  get documentInspectionIndexes(): Array<{ id: string; label: string }> {
+    const result: Array<{ id: string; label: string }> = [];
+    if (this.selectedRelease) {
+      result.push({
+        id: this.selectedRelease.index_id,
+        label: `候选 Index v${this.selectedRelease.index_version}`,
+      });
+    }
+    if (this.activeIndex && !result.some((item) => item.id === this.activeIndex!.id)) {
+      result.push({ id: this.activeIndex.id, label: `线上 Active Index v${this.activeIndex.version}` });
+    }
+    return result;
   },
   get pendingReviewCount(): number {
     return this.selectedRelease?.drafts?.filter((draft) => draft.status !== "APPROVED").length ?? 0;
@@ -252,11 +265,11 @@ export const adminStore = reactive({
     if (!this.error) this.knowledgeDrawerOpen = false;
   },
 
-  async upload(file: File): Promise<void> {
+  async upload(file: File, idempotencyKey: string = crypto.randomUUID()): Promise<void> {
     if (!this.selectedKnowledgeId) return;
     const knowledgeId = this.selectedKnowledgeId;
     await this.run(async () => {
-      await adminApi.uploadDocument(knowledgeId, file);
+      await adminApi.uploadDocument(knowledgeId, file, idempotencyKey);
       await Promise.all([
         this.loadKnowledgeBases(),
         this.loadKnowledgeDetails(),
@@ -294,11 +307,28 @@ export const adminStore = reactive({
   async inspectDocument(document: DocumentItem): Promise<void> {
     this.selectedDocument = document;
     this.documentDrawerOpen = true;
+    this.documentInspectionIndexId =
+      this.selectedRelease?.index_id ?? this.activeIndex?.id ?? "";
+    await this.loadDocumentInspection();
+  },
+
+  async loadDocumentInspection(): Promise<void> {
+    const document = this.selectedDocument;
+    const indexId = this.documentInspectionIndexId;
+    if (!document || !indexId) {
+      this.elements = [];
+      this.chunks = [];
+      return;
+    }
     await this.run(async () => {
       const [elementResult, chunkResult] = await Promise.all([
-        adminApi.listElements(document.id),
-        adminApi.listChunks(document.id),
+        adminApi.listElements(document.id, indexId),
+        adminApi.listChunks(document.id, indexId),
       ]);
+      if (this.selectedDocument?.id !== document.id || this.documentInspectionIndexId !== indexId) {
+        return;
+      }
+      this.documentInspectionIndexId = elementResult.index_id;
       this.elements = elementResult.items;
       this.chunks = chunkResult.items;
     });
@@ -307,7 +337,7 @@ export const adminStore = reactive({
   async buildIndex(): Promise<void> {
     if (!this.selectedKnowledgeId) return;
     await this.run(async () => {
-      await adminApi.buildIndex(this.selectedKnowledgeId, false);
+      await adminApi.buildIndex(this.selectedKnowledgeId);
       await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
       await this.loadReleaseWorkspace().catch(() => undefined);
     }, "候选索引构建已提交，完成后需要审核发布");
@@ -463,14 +493,6 @@ export const adminStore = reactive({
       ]);
       await this.loadReleaseWorkspace();
     }, "候选索引与 Profile 已原子发布");
-  },
-
-  async saveProblemProfile(payload: ProblemProfilePayload): Promise<void> {
-    if (!this.selectedKnowledgeId) return;
-    await this.run(async () => {
-      await adminApi.upsertProblemProfile(this.selectedKnowledgeId, payload);
-      await this.loadProblemProfiles();
-    }, "问题 Profile 已保存，下一轮路由生效");
   },
 
   async saveModelConfig(modelId: string, payload: ModelConfigUpdatePayload): Promise<void> {

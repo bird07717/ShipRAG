@@ -19,9 +19,15 @@ describe("AdminStudio settings", () => {
     );
 
     const wrapper = mount(AdminStudio, {
-      props: { view: "settings" },
+      props: { view: "configuration" },
       global: { plugins: [ElementPlus] },
     });
+    await flushPromises();
+
+    const accessTab = wrapper
+      .findAll(".el-tabs__item")
+      .find((tab) => tab.text().includes("访问设置"));
+    await accessTab!.trigger("click");
     await flushPromises();
 
     const input = wrapper.get("input");

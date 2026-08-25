@@ -7,8 +7,9 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi import UploadFile
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
+from app.api.schemas import IndexBuildRequest
 from app.core.config import Settings
 from app.ingestion.chunker import build_chunks, build_parent_chunks
 from app.ingestion.embedding import FakeEmbeddingProvider, SiliconFlowEmbeddingProvider
@@ -33,6 +34,12 @@ def _limits() -> DocxLimits:
         max_entry_bytes=10_000_000,
         max_compression_ratio=100,
     )
+
+
+def test_index_build_contract_rejects_auto_activation() -> None:
+    assert IndexBuildRequest().activate_on_success is False
+    with pytest.raises(ValidationError):
+        IndexBuildRequest(activate_on_success=True)  # type: ignore[arg-type]
 
 
 def test_docx_validation_and_parser_preserve_order(tmp_path) -> None:
@@ -228,6 +235,7 @@ class _FakeUploadRepository:
     def __init__(self, replay: dict[str, Any] | None = None) -> None:
         self.replay = replay
         self.created = False
+        self.recovered: list[tuple[Any, Any]] = []
 
     async def find_idempotent_response(
         self, operation: str, idempotency_key: str, request_hash: str
@@ -254,6 +262,13 @@ class _FakeUploadRepository:
             created=True,
             build=BuildReference(False, False, None, None, False),
         )
+
+    async def recover_failed_enqueue(self, index_id: Any, task_id: Any) -> bool:
+        self.recovered.append((index_id, task_id))
+        return True
+
+    async def mark_build_enqueue_failed(self, *_: Any) -> None:
+        raise AssertionError("replayed enqueue should succeed in this test")
 
 
 class _FakeDeleteRepository:
@@ -308,6 +323,53 @@ async def test_upload_service_stores_valid_docx_without_build(tmp_path) -> None:
     assert repository.created
     assert minio.uploaded == path.read_bytes()
     assert response["build_request"]["requested"] is False
+
+
+@pytest.mark.asyncio
+async def test_upload_idempotency_replay_retries_failed_queue_enqueue(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "upload.docx"
+    create_docx_fixture(path)
+    index_id = uuid4()
+    task_id = uuid4()
+    replay = {
+        "document": {"id": str(uuid4())},
+        "build_request": {
+            "requested": True,
+            "coalesced": False,
+            "index_id": str(index_id),
+            "task_id": str(task_id),
+            "rebuild_required": False,
+        },
+    }
+    repository = _FakeUploadRepository(replay)
+    minio = _FakeMinio()
+    enqueued: list[tuple[Any, Any]] = []
+
+    def fake_enqueue(_: Any, queued_index_id: Any, queued_task_id: Any) -> None:
+        enqueued.append((queued_index_id, queued_task_id))
+
+    monkeypatch.setattr("app.services.ingestion.enqueue_index_build", fake_enqueue)
+    service = IngestionService(
+        cast(IngestionRepository, repository),
+        cast(Any, minio),
+        Settings(_env_file=None, app_env="test", m2_embedding_provider="fake"),
+    )
+
+    response = await service.upload_document(
+        knowledge_id=uuid4(),
+        upload=UploadFile(filename=path.name, file=BytesIO(path.read_bytes())),
+        display_name="上传测试",
+        request_build=True,
+        idempotency_key="same-upload-key",
+    )
+
+    assert response == replay
+    assert not repository.created
+    assert not minio.uploaded
+    assert repository.recovered == [(index_id, task_id)]
+    assert enqueued == [(index_id, task_id)]
 
 
 @pytest.mark.asyncio

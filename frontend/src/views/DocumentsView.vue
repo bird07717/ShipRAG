@@ -9,11 +9,13 @@ import StatusBadge from "@/components/ui/StatusBadge.vue";
 const store = useAdminStore();
 
 const pendingFile = ref<File | null>(null);
+const pendingUploadKey = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
 
 function pickFile(event: Event): void {
   const input = event.target as HTMLInputElement;
   pendingFile.value = input.files?.[0] ?? null;
+  pendingUploadKey.value = pendingFile.value ? crypto.randomUUID() : "";
 }
 
 function openPicker(): void {
@@ -22,9 +24,10 @@ function openPicker(): void {
 
 async function confirmUpload(): Promise<void> {
   if (!pendingFile.value) return;
-  await store.upload(pendingFile.value);
+  await store.upload(pendingFile.value, pendingUploadKey.value || crypto.randomUUID());
   if (!store.error) {
     pendingFile.value = null;
+    pendingUploadKey.value = "";
     if (fileInput.value) fileInput.value.value = "";
   }
 }
@@ -176,15 +179,31 @@ function formatSize(size: number): string {
           <span class="muted">{{ formatSize(store.selectedDocument.file_size) }}</span>
           <span class="muted">{{ store.formatDate(store.selectedDocument.created_at) }}</span>
         </div>
+        <div class="inspection-index">
+          <label>检查索引版本</label>
+          <el-select
+            v-model="store.documentInspectionIndexId"
+            :disabled="!store.documentInspectionIndexes.length"
+            @change="store.loadDocumentInspection()"
+          >
+            <el-option
+              v-for="index in store.documentInspectionIndexes"
+              :key="index.id"
+              :label="index.label"
+              :value="index.id"
+            />
+          </el-select>
+          <span class="mono muted">{{ store.documentInspectionIndexId || "无可检查索引" }}</span>
+        </div>
         <el-tabs>
           <el-tab-pane :label="`Elements · ${store.elements.length}`">
             <div class="scroll-list">
-              <pre v-for="item in store.elements" :key="String(item.id)">{{ item.element_type }} · {{ item.content }}</pre>
+              <pre v-for="item in store.elements" :key="String(item.id)">{{ store.formatJson(item) }}</pre>
             </div>
           </el-tab-pane>
           <el-tab-pane :label="`Chunks · ${store.chunks.length}`">
             <div class="scroll-list">
-              <pre v-for="item in store.chunks" :key="String(item.id)">{{ item.chunk_type }} · {{ item.content }}</pre>
+              <pre v-for="item in store.chunks" :key="String(item.id)">{{ store.formatJson(item) }}</pre>
             </div>
           </el-tab-pane>
         </el-tabs>
@@ -200,6 +219,19 @@ function formatSize(size: number): string {
 
 .result-count {
   font-size: 12px;
+}
+
+.inspection-index {
+  display: grid;
+  grid-template-columns: auto minmax(220px, 1fr);
+  gap: 8px 12px;
+  align-items: center;
+  margin: 16px 0;
+}
+
+.inspection-index .mono {
+  grid-column: 2;
+  font-size: 11px;
 }
 
 :deep(.el-table__row) {

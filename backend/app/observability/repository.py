@@ -215,6 +215,11 @@ class ObservabilityRepository:
         return {
             "from": start,
             "to": end,
+            "scope": {
+                "trace_failures": "KNOWLEDGE_BASE" if knowledge_id else "GLOBAL",
+                "request_errors": "GLOBAL",
+                "knowledge_id": str(knowledge_id) if knowledge_id else None,
+            },
             "trace_failures": trace_failures,
             "request_errors": request_errors,
             "request_errors_by_day": by_day,

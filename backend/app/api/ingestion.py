@@ -307,9 +307,8 @@ async def delete_index(
 async def retry_index(
     index_id: UUID,
     service: Annotated[IngestionService, Depends(get_ingestion_service)],
-    activate_on_success: Annotated[bool, Query()] = True,
 ) -> dict[str, Any]:
-    build = await service.retry_build(index_id, activate_on_success=activate_on_success)
+    build = await service.retry_build(index_id, activate_on_success=False)
     return {
         "requested": build.requested,
         "coalesced": build.coalesced,

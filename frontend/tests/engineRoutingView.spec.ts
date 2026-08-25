@@ -29,6 +29,10 @@ const policy: RuntimePolicy = {
   config_version: 1,
   fallback_conditions: ["NO_MATCH"],
   source: "DATABASE",
+  readiness: {
+    support: { ready: true, blockers: [], profile_count: 1, ready_profile_count: 1 },
+    rag: { ready: true, blockers: [] },
+  },
 };
 
 describe("EngineRoutingView", () => {

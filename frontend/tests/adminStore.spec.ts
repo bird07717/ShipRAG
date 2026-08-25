@@ -147,7 +147,7 @@ describe("adminStore", () => {
     const upload = vi.spyOn(adminApi, "uploadDocument").mockResolvedValue(undefined);
     adminStore.uploadDrawerOpen = true;
     await adminStore.upload(new File(["x"], "a.docx"));
-    expect(upload).toHaveBeenCalledWith("kb-1", expect.any(File));
+    expect(upload).toHaveBeenCalledWith("kb-1", expect.any(File), expect.any(String));
     expect(adminStore.uploadDrawerOpen).toBe(false);
     expect(adminStore.notice).toBe("文档已上传，候选索引构建已提交；完成后请审核 Profile 草稿");
   });
@@ -165,7 +165,7 @@ describe("adminStore", () => {
       .mockResolvedValue({ deleted_index_ids: ["x"], deleted_count: 1 });
 
     await adminStore.buildIndex();
-    expect(build).toHaveBeenCalledWith("kb-1", false);
+    expect(build).toHaveBeenCalledWith("kb-1");
     await adminStore.activateIndex("idx-1");
     expect(activate).toHaveBeenCalledWith("idx-1");
     await adminStore.gcIndexes();

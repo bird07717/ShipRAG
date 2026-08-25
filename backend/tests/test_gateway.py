@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from app.gateway.models import ChatEngine, ExecutionPolicy, ResolvedPolicy
+from app.gateway.repository import GatewayRepository
 from app.gateway.service import ChatGatewayService
 
 
@@ -31,11 +32,14 @@ class FakeSupport:
         self.calls = 0
         self.conversation_id = uuid4()
         self.trace_id = uuid4()
+        self.user_message_id = uuid4()
+        self.assistant_message_id = uuid4()
+        self.gateway_response: dict[str, Any] | None = None
+        self.saved_gateway_responses: list[dict[str, Any]] = []
 
     async def handle(self, **kwargs: Any) -> dict[str, Any]:
-        del kwargs
         self.calls += 1
-        return {
+        response = {
             "message_id": str(uuid4()),
             "conversation_id": str(self.conversation_id),
             "trace_id": str(self.trace_id),
@@ -47,6 +51,17 @@ class FakeSupport:
             "usage": {},
             "latency_ms": 1,
         }
+        if kwargs.get("return_internal_ids") and self.response_type == "NO_MATCH":
+            response["_fallback_message_pair"] = {
+                "user_message_id": str(self.user_message_id),
+                "assistant_message_id": str(self.assistant_message_id),
+            }
+        if self.gateway_response is not None:
+            response["_gateway_response"] = self.gateway_response
+        return response
+
+    async def save_gateway_response(self, **kwargs: Any) -> None:
+        self.saved_gateway_responses.append(dict(kwargs["response"]))
 
 
 class FakeRag:
@@ -54,9 +69,11 @@ class FakeRag:
         self.calls = 0
         self.conversation_id = uuid4()
         self.trace_id = uuid4()
+        self.last_kwargs: dict[str, Any] = {}
 
     async def generate(self, **kwargs: Any) -> dict[str, Any]:
         self.calls += 1
+        self.last_kwargs = kwargs
         conversation_id = kwargs.get("conversation_id") or self.conversation_id
         return {
             "message_id": str(uuid4()),
@@ -88,6 +105,23 @@ def policy(value: ExecutionPolicy, frozen: ChatEngine | None = None) -> Resolved
         fallback_conditions=("NO_MATCH",),
         frozen_engine=frozen,
     )
+
+
+def test_policy_readiness_requires_only_the_engines_selected_by_policy() -> None:
+    readiness = {
+        "support": {"blockers": ["support blocked"]},
+        "rag": {"blockers": ["rag blocked"]},
+    }
+
+    assert GatewayRepository._policy_blockers(ExecutionPolicy.SUPPORT_ONLY, readiness) == [
+        "support blocked"
+    ]
+    assert GatewayRepository._policy_blockers(ExecutionPolicy.RAG_ONLY, readiness) == [
+        "rag blocked"
+    ]
+    assert GatewayRepository._policy_blockers(
+        ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK, readiness
+    ) == ["support blocked", "rag blocked"]
 
 
 def kwargs(knowledge_id: UUID) -> dict[str, Any]:
@@ -147,7 +181,29 @@ async def test_no_match_falls_back_and_links_traces() -> None:
     assert response["answer"] == "rag"
     assert response["fallback"]["reason"] == "NO_MATCH"
     assert repository.links == [(support.trace_id, rag.trace_id, "NO_MATCH")]
+    assert rag.last_kwargs["reuse_user_message_id"] == support.user_message_id
+    assert rag.last_kwargs["reuse_assistant_message_id"] == support.assistant_message_id
+    assert rag.last_kwargs["parent_trace_id"] == support.trace_id
+    assert rag.last_kwargs["fallback_reason"] == "NO_MATCH"
     assert repository.frozen == [(support.conversation_id, ChatEngine.RAG)]
+
+
+async def test_fallback_idempotency_replays_final_response_without_second_rag_call() -> None:
+    repository = FakeGatewayRepository()
+    support = FakeSupport("NO_MATCH")
+    rag = FakeRag()
+    resolved = policy(ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK)
+    service = ChatGatewayService(repository, support, rag)  # type: ignore[arg-type]
+    request = kwargs(resolved.knowledge_id)
+    request["idempotency_key"] = "fallback-key"
+
+    first = await service.handle(policy=resolved, **request)
+    support.gateway_response = support.saved_gateway_responses[0]
+    second = await service.handle(policy=resolved, **request)
+
+    assert second == first
+    assert rag.calls == 1
+    assert repository.links == [(support.trace_id, rag.trace_id, "NO_MATCH")]
 
 
 async def test_safety_result_never_falls_back() -> None:
@@ -216,3 +272,26 @@ async def test_fallback_stream_exposes_transition_and_final_rag_metadata() -> No
     assert '"execution_engine":"RAG"' in done
     assert '"fallback":{"from":"SUPPORT","reason":"NO_MATCH"' in done
     assert repository.links == [(support.trace_id, rag.trace_id, "NO_MATCH")]
+    assert rag.last_kwargs["reuse_user_message_id"] == support.user_message_id
+    assert rag.last_kwargs["reuse_assistant_message_id"] == support.assistant_message_id
+    assert rag.last_kwargs["parent_trace_id"] == support.trace_id
+    assert rag.last_kwargs["fallback_reason"] == "NO_MATCH"
+
+
+async def test_fallback_stream_idempotency_replays_done_without_second_rag_call() -> None:
+    repository = FakeGatewayRepository()
+    support = FakeSupport("NO_MATCH")
+    rag = FakeRag()
+    resolved = policy(ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK)
+    service = ChatGatewayService(repository, support, rag)  # type: ignore[arg-type]
+    request = kwargs(resolved.knowledge_id)
+    request["idempotency_key"] = "fallback-stream-key"
+
+    first_frames = [frame.decode() async for frame in service.stream(policy=resolved, **request)]
+    first_done = next(frame for frame in first_frames if frame.startswith("event: done"))
+    support.gateway_response = support.saved_gateway_responses[0]
+    second_frames = [frame.decode() async for frame in service.stream(policy=resolved, **request)]
+    second_done = next(frame for frame in second_frames if frame.startswith("event: done"))
+
+    assert json.loads(second_done.splitlines()[1][6:]) == json.loads(first_done.splitlines()[1][6:])
+    assert rag.calls == 1

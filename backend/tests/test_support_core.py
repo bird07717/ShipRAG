@@ -453,7 +453,7 @@ async def test_support_stream_returns_sse_error_after_response_starts() -> None:
         'event: status\ndata: {"stage":"support_processing"}\n\n',
         (
             "event: error\ndata: "
-            '{"code":"INVALID_EVIDENCE","message":"模型引用了当前文档之外的证据"}\n\n'
+            '{"code":"INVALID_EVIDENCE","message":"模型引用了当前文档之外的证据","status_code":502}\n\n'
         ),
     ]
 
@@ -841,6 +841,9 @@ class _SupportServiceRepository:
     async def fail_turn(self, *_: Any, **__: Any) -> None:
         raise AssertionError("successful service tests must not fail the turn")
 
+    async def set_stage(self, *_: Any, **__: Any) -> None:
+        return None
+
 
 @pytest.mark.asyncio
 async def test_support_service_delivers_complete_document_without_llm() -> None:
@@ -874,6 +877,43 @@ async def test_support_service_delivers_complete_document_without_llm() -> None:
     assert repository.finished is not None
     assert repository.finished["focus_document_id"] == document.id
     assert repository.finished["context"]["focus"]["index_id"] == str(document.index_id)
+
+
+@pytest.mark.asyncio
+async def test_support_document_delivery_failure_records_delivery_stage() -> None:
+    knowledge_id = uuid4()
+    profile = _profile()
+    profile.knowledge_id = knowledge_id
+    document = _document()
+    profile.document_id = document.id
+
+    class _FailingDeliveryRepository(_SupportServiceRepository):
+        def __init__(self) -> None:
+            super().__init__(knowledge_id=knowledge_id, profile=profile, document=document)
+            self.failed: dict[str, Any] | None = None
+
+        async def get_document(self, **_: Any) -> FocusedDocument:
+            raise ApiError("DOCUMENT_NOT_FOUND", "文档内容不存在", 404)
+
+        async def fail_turn(self, *_: Any, **kwargs: Any) -> None:
+            self.failed = kwargs
+
+    repository = _FailingDeliveryRepository()
+    service = TechnicalSupportService(
+        cast(SupportRepository, repository), Settings(_env_file=None, app_env="test")
+    )
+
+    with pytest.raises(ApiError, match="文档内容不存在"):
+        await service.handle(
+            knowledge_id=knowledge_id,
+            conversation_id=None,
+            question="如何升级",
+            request_id="request-delivery-failure",
+            problem_code=profile.problem_code,
+        )
+
+    assert repository.failed is not None
+    assert repository.failed["stage"] == "DOCUMENT_DELIVERY"
 
 
 @pytest.mark.asyncio

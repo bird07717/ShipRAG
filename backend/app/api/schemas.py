@@ -49,7 +49,9 @@ class BuildRequestResponse(BaseModel):
 
 class IndexBuildRequest(BaseModel):
     reason: Literal["MANUAL", "REPROCESS", "MODEL_CHANGED"] = "MANUAL"
-    activate_on_success: bool = True
+    # All new builds are staged candidates.  Index/Profile publication is
+    # owned by the knowledge-release transaction.
+    activate_on_success: Literal[False] = False
 
 
 class IndexBuildResponse(BaseModel):
@@ -228,6 +230,7 @@ class RuntimePolicyResponse(BaseModel):
     fallback_conditions: list[str]
     source: Literal["DATABASE", "DEFAULT"]
     updated_at: datetime | None = None
+    readiness: dict[str, Any]
 
 
 class PromptResponse(BaseModel):
@@ -506,6 +509,7 @@ class FailureSummaryResponse(BaseModel):
 
     from_: datetime = Field(alias="from")
     to: datetime
+    scope: dict[str, Any]
     trace_failures: list[TraceFailureGroup]
     request_errors: list[RequestErrorGroup]
     request_errors_by_day: list[RequestErrorsByDay]

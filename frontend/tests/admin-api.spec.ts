@@ -66,7 +66,7 @@ describe("admin API", () => {
     await adminApi.listElements("doc-1", "index-1");
     await adminApi.listChunks("doc-1");
     await adminApi.listIndexes("kb-1");
-    await adminApi.buildIndex("kb-1", false);
+    await adminApi.buildIndex("kb-1");
     await adminApi.activateIndex("index-1");
     await adminApi.listTraces();
     await adminApi.listTraces("kb-1");
@@ -78,6 +78,7 @@ describe("admin API", () => {
     const upload = fetchMock.mock.calls[2]?.[1] as RequestInit;
     expect(upload.body).toBeInstanceOf(FormData);
     expect(new Headers(upload.headers).get("Content-Type")).toBeNull();
+    expect(new Headers(upload.headers).get("Idempotency-Key")).toBeTruthy();
     expect(fetchMock.mock.calls[3]?.[0]).toBe("/api/v1/documents/doc-1?request_build=true");
     expect((fetchMock.mock.calls[3]?.[1] as RequestInit).method).toBe("DELETE");
   });

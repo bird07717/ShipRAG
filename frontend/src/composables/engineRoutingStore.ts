@@ -2,18 +2,16 @@ import { reactive } from "vue";
 
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
-import type { ExecutionPolicy, ProblemProfile, RuntimePolicy } from "@/types/admin";
+import type { ExecutionPolicy, RuntimePolicy } from "@/types/admin";
 
 export const engineRoutingStore = reactive({
   policy: null as RuntimePolicy | null,
-  profiles: [] as ProblemProfile[],
   loading: false,
   error: "",
   notice: "",
 
   reset(): void {
     this.policy = null;
-    this.profiles = [];
     this.loading = false;
     this.error = "";
     this.notice = "";
@@ -29,13 +27,9 @@ export const engineRoutingStore = reactive({
     this.error = "";
     this.notice = "";
     try {
-      const [policy, profiles] = await Promise.all([
-        adminApi.getRuntimePolicy(knowledgeId),
-        adminApi.listProblemProfiles(knowledgeId),
-      ]);
+      const policy = await adminApi.getRuntimePolicy(knowledgeId);
       if (adminStore.selectedKnowledgeId !== knowledgeId) return;
       this.policy = policy;
-      this.profiles = profiles;
     } catch (cause) {
       if (adminStore.selectedKnowledgeId !== knowledgeId) return;
       this.error = cause instanceof Error ? cause.message : "引擎路由配置加载失败";

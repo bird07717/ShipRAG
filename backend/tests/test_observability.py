@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
@@ -11,12 +12,54 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import app.observability.recorder as recorder_module
 from app.api.logs import get_observability_repository
 from app.common.errors import ApiError
-from app.observability.recorder import record_request_error, record_unhandled_exception
+from app.observability.recorder import (
+    observe_stream_errors,
+    record_request_error,
+    record_unhandled_exception,
+)
 from app.observability.repository import ObservabilityRepository
 
 AUTH = {"Authorization": "Bearer test-token"}
+
+
+@pytest.mark.asyncio
+async def test_stream_error_is_persisted_and_enriched_with_request_id(monkeypatch: Any) -> None:
+    recorded: list[dict[str, Any]] = []
+
+    async def capture(_request: Any, **payload: Any) -> None:
+        recorded.append(payload)
+
+    monkeypatch.setattr(recorder_module, "record_request_error", capture)
+    request = cast(
+        Any,
+        SimpleNamespace(
+            state=SimpleNamespace(request_id="req-stream"),
+            url=SimpleNamespace(path="/api/v1/chat/stream"),
+            method="POST",
+        ),
+    )
+
+    async def source() -> Any:
+        yield (
+            b'event: error\ndata: {"code":"MODEL_NOT_CONFIGURED",'
+            b'"message":"LLM model missing","status_code":503}\n\n'
+        )
+
+    frames = [frame.decode() async for frame in observe_stream_errors(request, source())]
+
+    assert recorded == [
+        {
+            "status_code": 503,
+            "error_code": "MODEL_NOT_CONFIGURED",
+            "message": "LLM model missing",
+            "detail": {"stream": True},
+        }
+    ]
+    assert '"request_id":"req-stream"' in frames[0]
+    assert "status_code" not in frames[0]
 
 
 class _FakeResult:
@@ -349,6 +392,13 @@ class _StubRepository:
         return {
             "from": now - timedelta(days=7),
             "to": now,
+            "scope": {
+                "trace_failures": "KNOWLEDGE_BASE" if kwargs.get("knowledge_id") else "GLOBAL",
+                "request_errors": "GLOBAL",
+                "knowledge_id": (
+                    str(kwargs["knowledge_id"]) if kwargs.get("knowledge_id") else None
+                ),
+            },
             "trace_failures": [{"error_code": "INTERNAL_ERROR", "count": 1, "last_seen": now}],
             "request_errors": [],
             "request_errors_by_day": [],
@@ -404,6 +454,8 @@ class TestLogsApi:
             assert response.status_code == 200
             body = response.json()
             assert body["trace_failures"][0]["error_code"] == "INTERNAL_ERROR"
+            assert body["scope"]["trace_failures"] == "KNOWLEDGE_BASE"
+            assert body["scope"]["request_errors"] == "GLOBAL"
             call = stub.calls["summary"]
             assert call["created_from"] == datetime(2026, 8, 14, 0, 0)
             assert str(call["knowledge_id"]) == "00000000-0000-0000-0000-000000000002"

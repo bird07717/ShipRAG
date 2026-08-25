@@ -6,6 +6,8 @@ import type { ModelConfig, PromptTemplate } from "@/types/admin";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
+import RagConfigurationView from "@/views/RagConfigurationView.vue";
+import SettingsView from "@/views/SettingsView.vue";
 
 const store = useAdminStore();
 
@@ -299,6 +301,12 @@ async function saveEdit(): Promise<void> {
             description="数据库中没有版本化管理的 Prompt 模板；文档路由主路径的 Prompt 由代码版本化管理。"
           />
         </div>
+      </el-tab-pane>
+      <el-tab-pane label="RAG 检索参数" name="rag" lazy>
+        <RagConfigurationView />
+      </el-tab-pane>
+      <el-tab-pane label="访问设置" name="access" lazy>
+        <SettingsView />
       </el-tab-pane>
     </el-tabs>
 
