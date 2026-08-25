@@ -339,7 +339,10 @@ class RagRepository:
                         :id, :trace_id, :request_id, :kb_id, :index_id, :conversation_id,
                         :message_id, :question, :mode, 'RUNNING', :user_id,
                         'RAG', 'PREPARE', :parent_trace_id,
-                        CASE WHEN :parent_trace_id IS NULL THEN NULL ELSE 'SUPPORT' END,
+                        CASE
+                            WHEN CAST(:parent_trace_id AS uuid) IS NULL THEN NULL
+                            ELSE 'SUPPORT'
+                        END,
                         :fallback_reason
                     )
                     """

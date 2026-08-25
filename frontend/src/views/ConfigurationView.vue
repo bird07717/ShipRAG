@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 import type { ModelConfig, PromptTemplate } from "@/types/admin";
@@ -9,9 +9,23 @@ import CodeBlock from "@/components/ui/CodeBlock.vue";
 import RagConfigurationView from "@/views/RagConfigurationView.vue";
 import SettingsView from "@/views/SettingsView.vue";
 
+const props = defineProps<{ navigationQuery?: string }>();
 const store = useAdminStore();
 
-const activeTab = ref("models");
+const CONFIG_TABS = new Set(["models", "prompts", "rag", "credentials"]);
+
+function tabFromQuery(query = ""): string {
+  const tab = new URLSearchParams(query).get("tab") ?? "models";
+  return CONFIG_TABS.has(tab) ? tab : "models";
+}
+
+const activeTab = ref(tabFromQuery(props.navigationQuery));
+watch(
+  () => props.navigationQuery,
+  (query) => {
+    activeTab.value = tabFromQuery(query);
+  },
+);
 const selectedPrompt = ref<PromptTemplate | null>(null);
 const TYPE_LABELS: Record<string, string> = {
   LLM: "LLM",
@@ -305,7 +319,7 @@ async function saveEdit(): Promise<void> {
       <el-tab-pane label="RAG 检索参数" name="rag" lazy>
         <RagConfigurationView />
       </el-tab-pane>
-      <el-tab-pane label="访问设置" name="access" lazy>
+      <el-tab-pane label="服务凭证" name="credentials" lazy>
         <SettingsView />
       </el-tab-pane>
     </el-tabs>

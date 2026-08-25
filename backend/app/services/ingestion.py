@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import tempfile
 from pathlib import PurePath
 from typing import Any
@@ -17,6 +18,8 @@ from app.core.config import Settings
 from app.ingestion.repository import BuildReference, DocumentCreateResult, IngestionRepository
 from app.ingestion.validation import DocxLimits, DocxValidationError, validate_docx_package
 from app.tasks.ingestion import enqueue_index_build
+
+logger = logging.getLogger(__name__)
 
 
 class IngestionService:
@@ -197,6 +200,25 @@ class IngestionService:
                 "task_id": result.build.task_id,
                 "rebuild_required": result.build.rebuild_required,
             },
+        }
+
+    async def delete_knowledge_base(self, knowledge_id: UUID) -> dict[str, Any]:
+        result = await self.repository.delete_knowledge_base(knowledge_id)
+        cleanup_failed_count = 0
+        for bucket, object_key in result.storage_objects:
+            try:
+                await self._remove_minio_object(bucket, object_key)
+            except Exception:
+                cleanup_failed_count += 1
+                logger.warning(
+                    "Failed to remove object while deleting knowledge base %s",
+                    knowledge_id,
+                    exc_info=True,
+                )
+        return {
+            "knowledge_id": result.knowledge_id,
+            "deleted": True,
+            "cleanup_failed_count": cleanup_failed_count,
         }
 
     async def collect_garbage(self, kb_id: UUID | None = None) -> dict[str, Any]:

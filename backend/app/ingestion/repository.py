@@ -38,6 +38,12 @@ class DocumentDeleteResult:
 
 
 @dataclass(frozen=True, slots=True)
+class KnowledgeBaseDeleteResult:
+    knowledge_id: UUID
+    storage_objects: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class GarbageCollectionItem:
     index_id: UUID
     kb_id: UUID
@@ -114,6 +120,86 @@ class IngestionRepository:
         if row is None:
             raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
         return self._knowledge_response(dict(row))
+
+    async def delete_knowledge_base(self, knowledge_id: UUID) -> KnowledgeBaseDeleteResult:
+        async with self.engine.begin() as connection:
+            knowledge_result = await connection.execute(
+                text(
+                    """
+                    SELECT kb.id,
+                           EXISTS (
+                               SELECT 1 FROM knowledge_index i
+                               WHERE i.kb_id = kb.id AND i.status = 'BUILDING'
+                           ) AS has_building_index
+                    FROM knowledge_base kb
+                    WHERE kb.id = :knowledge_id
+                    FOR UPDATE OF kb
+                    """
+                ),
+                {"knowledge_id": knowledge_id},
+            )
+            knowledge = knowledge_result.mappings().one_or_none()
+            if knowledge is None:
+                raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
+            if knowledge["has_building_index"]:
+                raise ApiError(
+                    "KNOWLEDGE_BASE_BUILD_IN_PROGRESS",
+                    "知识库正在构建索引，请等待任务结束后再删除",
+                    409,
+                )
+
+            storage_result = await connection.execute(
+                text(
+                    """
+                    SELECT minio_bucket, minio_object_key
+                    FROM document_source
+                    WHERE kb_id = :knowledge_id
+                    UNION
+                    SELECT a.minio_bucket, a.minio_object_key
+                    FROM image_asset a
+                    JOIN knowledge_index i ON i.id = a.index_id
+                    WHERE i.kb_id = :knowledge_id
+                    """
+                ),
+                {"knowledge_id": knowledge_id},
+            )
+            storage_objects = tuple(
+                (str(row["minio_bucket"]), str(row["minio_object_key"]))
+                for row in storage_result.mappings()
+            )
+
+            await connection.execute(
+                text("DELETE FROM rag_trace WHERE kb_id = :knowledge_id"),
+                {"knowledge_id": knowledge_id},
+            )
+            await connection.execute(
+                text("DELETE FROM conversation WHERE knowledge_id = :knowledge_id"),
+                {"knowledge_id": knowledge_id},
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_base
+                    SET active_index_id = NULL, status = 'DISABLED', updated_at = now()
+                    WHERE id = :knowledge_id
+                    """
+                ),
+                {"knowledge_id": knowledge_id},
+            )
+            await connection.execute(
+                text("DELETE FROM knowledge_index WHERE kb_id = :knowledge_id"),
+                {"knowledge_id": knowledge_id},
+            )
+            await connection.execute(
+                text("DELETE FROM document_source WHERE kb_id = :knowledge_id"),
+                {"knowledge_id": knowledge_id},
+            )
+            await connection.execute(
+                text("DELETE FROM knowledge_base WHERE id = :knowledge_id"),
+                {"knowledge_id": knowledge_id},
+            )
+
+        return KnowledgeBaseDeleteResult(knowledge_id, storage_objects)
 
     async def find_idempotent_response(
         self, operation: str, idempotency_key: str, request_hash: str

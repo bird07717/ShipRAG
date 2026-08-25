@@ -162,6 +162,21 @@ onMounted(() => void loadWorkspace());
 
 <template>
   <div class="support-profiles">
+    <div class="scope-toolbar">
+      <span>审核知识库</span>
+      <el-select
+        v-model="store.selectedKnowledgeId"
+        placeholder="选择知识库"
+        @change="store.selectKnowledge()"
+      >
+        <el-option
+          v-for="kb in store.knowledgeBases"
+          :key="kb.id"
+          :label="kb.name"
+          :value="kb.id"
+        />
+      </el-select>
+    </div>
     <section class="readiness-strip">
       <div><span>问题文档</span><strong>{{ store.problemProfiles.length }}</strong></div>
       <div><span>可用于问答</span><strong>{{ readyCount }}</strong></div>
@@ -450,6 +465,9 @@ onMounted(() => void loadWorkspace());
 
 <style scoped>
 .support-profiles { display: grid; gap: var(--space-content-gap); }
+.scope-toolbar { display: flex; align-items: center; gap: 10px; }
+.scope-toolbar span { color: var(--text-secondary); font-size: 13px; font-weight: 600; }
+.scope-toolbar .el-select { width: 260px; }
 .release-panel { display: grid; gap: 14px; }
 .release-actions, .release-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .release-summary { padding: 0 18px; color: var(--text-secondary); font-size: 12px; }

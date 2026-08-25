@@ -127,6 +127,14 @@ onMounted(() => void load());
             :closable="false"
             show-icon
           />
+          <el-alert
+            v-if="routing.policy?.source === 'DEFAULT'"
+            title="当前显示的是系统默认策略，尚未为此知识库保存独立路由配置。"
+            description="选择策略后点击“保存路由策略”，刷新页面仍会使用保存后的配置。"
+            type="warning"
+            :closable="false"
+            show-icon
+          />
 
           <el-radio-group v-model="selectedPolicy" class="policy-list">
             <el-radio

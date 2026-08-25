@@ -17,8 +17,26 @@ import CodeBlock from "@/components/ui/CodeBlock.vue";
 import MetricCard from "@/components/ui/MetricCard.vue";
 import TracesView from "@/views/TracesView.vue";
 
+const props = defineProps<{ navigationQuery?: string }>();
 const store = useAdminStore();
 const loadError = ref("");
+
+const LOG_TABS = new Set(["request-errors", "failed-turns", "task-failures", "escalations", "traces"]);
+
+function navigationState(query = ""): {
+  tab: string;
+  engine: "" | "SUPPORT" | "RAG";
+} {
+  const params = new URLSearchParams(query);
+  const requestedTab = params.get("tab") ?? "request-errors";
+  const requestedEngine = params.get("engine");
+  return {
+    tab: LOG_TABS.has(requestedTab) ? requestedTab : "request-errors",
+    engine: requestedEngine === "SUPPORT" || requestedEngine === "RAG" ? requestedEngine : "",
+  };
+}
+
+const initialNavigation = navigationState(props.navigationQuery);
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "管理日志加载失败";
@@ -128,7 +146,7 @@ const requestErrorDetailText = computed(() => {
 /* ---------------- failed support turns ---------------- */
 
 const failedTraceFilter = ref<{ engine: "" | "SUPPORT" | "RAG"; errorCode: string }>({
-  engine: "",
+  engine: initialNavigation.engine,
   errorCode: "",
 });
 const failedTraces = ref<TraceSummary[]>([]);
@@ -280,7 +298,7 @@ const escalationSummary = computed(() => escalationRecord.value?.summary ?? null
 
 /* ---------------- tabs ---------------- */
 
-const activeTab = ref("request-errors");
+const activeTab = ref(initialNavigation.tab);
 
 function handleTabChange(tab: string | number): void {
   const name = String(tab);
@@ -292,8 +310,18 @@ function handleTabChange(tab: string | number): void {
 
 onMounted(() => {
   void loadSummary();
-  void loadRequestErrors();
+  handleTabChange(activeTab.value);
 });
+
+watch(
+  () => props.navigationQuery,
+  (query) => {
+    const next = navigationState(query);
+    activeTab.value = next.tab;
+    failedTraceFilter.value.engine = next.engine;
+    if (next.tab === "failed-turns") void loadFailedTraces();
+  },
+);
 
 watch(
   () => store.selectedKnowledgeId,
@@ -325,7 +353,22 @@ watch(
             · 请求错误 {{ totalRequestErrors }}（全局）
           </span>
         </div>
-        <el-button :icon="Refresh" :loading="loadingSummary" @click="loadSummary">刷新</el-button>
+        <div class="scope-actions">
+          <el-select
+            v-model="store.selectedKnowledgeId"
+            placeholder="全部知识库"
+            clearable
+            @change="store.selectKnowledge()"
+          >
+            <el-option
+              v-for="kb in store.knowledgeBases"
+              :key="kb.id"
+              :label="kb.name"
+              :value="kb.id"
+            />
+          </el-select>
+          <el-button :icon="Refresh" :loading="loadingSummary" @click="loadSummary">刷新</el-button>
+        </div>
       </header>
       <div class="panel-body overview-body">
         <div class="metric-row">
@@ -861,6 +904,16 @@ watch(
   gap: var(--space-content-gap);
   align-content: start;
   min-width: 0;
+}
+
+.scope-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scope-actions .el-select {
+  width: 220px;
 }
 
 .overview-body {

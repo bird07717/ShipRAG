@@ -119,7 +119,7 @@ describe("DashboardView metrics", () => {
     expect(ticks[0]?.text()).toBe("08-20 05");
   });
 
-  it("degrades to a warning when metrics are unavailable (old backend)", async () => {
+  it("degrades to a current, implementation-neutral warning when metrics are unavailable", async () => {
     vi.spyOn(adminApi, "getMetricsOverview").mockRejectedValue(new Error("404"));
     vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
     vi.spyOn(adminApi, "listNoAnswerTraces").mockResolvedValue([]);
@@ -128,6 +128,8 @@ describe("DashboardView metrics", () => {
     await flushPromises();
 
     expect(wrapper.find(".el-alert").exists()).toBe(true);
+    expect(wrapper.text()).toContain("部分质量指标暂时无法加载");
+    expect(wrapper.text()).not.toContain("迁移 0014");
     expect(wrapper.find("svg.trend-chart").exists()).toBe(false);
   });
 
@@ -140,6 +142,7 @@ describe("DashboardView metrics", () => {
     const wrapper = mount(DashboardView, { global: { plugins: [ElementPlus] } });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("质量指标加载失败");
+    expect(wrapper.text()).toContain("部分质量指标暂时无法加载");
+    expect(wrapper.text()).not.toContain("迁移 0014");
   });
 });

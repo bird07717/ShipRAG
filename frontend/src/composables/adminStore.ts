@@ -22,6 +22,25 @@ import type {
   TraceSummary,
 } from "@/types/admin";
 
+const SELECTED_KNOWLEDGE_STORAGE_KEY = "rag_admin_selected_knowledge_id";
+
+function readSelectedKnowledgeId(): string {
+  try {
+    return localStorage.getItem(SELECTED_KNOWLEDGE_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeSelectedKnowledgeId(knowledgeId: string): void {
+  try {
+    if (knowledgeId) localStorage.setItem(SELECTED_KNOWLEDGE_STORAGE_KEY, knowledgeId);
+    else localStorage.removeItem(SELECTED_KNOWLEDGE_STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable in privacy-restricted browser contexts.
+  }
+}
+
 /*
  * Module-level singleton store shared by all admin views.
  * State survives view switches so Documents / Index Build / Trace
@@ -167,9 +186,15 @@ export const adminStore = reactive({
 
   async loadKnowledgeBases(): Promise<void> {
     this.knowledgeBases = await adminApi.listKnowledgeBases();
-    if (!this.selectedKnowledgeId && this.knowledgeBases.length) {
-      this.selectedKnowledgeId = this.knowledgeBases[0]?.id ?? "";
+    const currentStillExists = this.knowledgeBases.some((kb) => kb.id === this.selectedKnowledgeId);
+    const savedKnowledgeId = readSelectedKnowledgeId();
+    const savedStillExists = this.knowledgeBases.some((kb) => kb.id === savedKnowledgeId);
+    if (!currentStillExists) {
+      this.selectedKnowledgeId = savedStillExists
+        ? savedKnowledgeId
+        : (this.knowledgeBases[0]?.id ?? "");
     }
+    writeSelectedKnowledgeId(this.selectedKnowledgeId);
   },
 
   async loadSystemInfo(): Promise<void> {
@@ -234,6 +259,7 @@ export const adminStore = reactive({
 
   async selectKnowledge(): Promise<void> {
     const knowledgeId = this.selectedKnowledgeId;
+    writeSelectedKnowledgeId(knowledgeId);
     this.selectedDocument = null;
     this.selectedTrace = null;
     await this.run(async () => {
@@ -260,9 +286,46 @@ export const adminStore = reactive({
       this.newKnowledgeDescription = "";
       await this.loadKnowledgeBases();
       this.selectedKnowledgeId = created.id;
+      writeSelectedKnowledgeId(created.id);
       await this.loadKnowledgeDetails();
     }, "知识库已创建");
     if (!this.error) this.knowledgeDrawerOpen = false;
+  },
+
+  async deleteKnowledgeBase(knowledge: KnowledgeBase): Promise<void> {
+    try {
+      await ElMessageBox.prompt(
+        `删除后将永久移除“${knowledge.name}”中的文档、索引、Profile、会话与 Trace。请输入知识库名称确认。`,
+        "删除知识库",
+        {
+          type: "error",
+          confirmButtonText: "永久删除",
+          cancelButtonText: "取消",
+          inputPlaceholder: knowledge.name,
+          inputValidator: (value) => value === knowledge.name || "输入的知识库名称不一致",
+        },
+      );
+    } catch {
+      return;
+    }
+    let cleanupFailedCount = 0;
+    await this.run(async () => {
+      const result = await adminApi.deleteKnowledgeBase(knowledge.id);
+      cleanupFailedCount = result.cleanup_failed_count;
+      if (this.selectedKnowledgeId === knowledge.id) {
+        this.selectedKnowledgeId = "";
+        writeSelectedKnowledgeId("");
+        this.selectedDocument = null;
+        this.documentDrawerOpen = false;
+      }
+      await this.loadKnowledgeBases();
+      await this.loadKnowledgeDetails();
+    });
+    if (!this.error) {
+      this.notice = cleanupFailedCount
+        ? `知识库已删除；${cleanupFailedCount} 个存储对象回收失败，请检查后端日志`
+        : "知识库已删除";
+    }
   },
 
   async upload(file: File, idempotencyKey: string = crypto.randomUUID()): Promise<void> {
@@ -540,6 +603,7 @@ export const adminStore = reactive({
 
   saveToken(value: string): void {
     const token = value.trim();
+    this.serviceToken = token;
     if (token) sessionStorage.setItem("rag_service_token", token);
     else sessionStorage.removeItem("rag_service_token");
     this.notice = "访问凭据仅保存在当前浏览器会话";

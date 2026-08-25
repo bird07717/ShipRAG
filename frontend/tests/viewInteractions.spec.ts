@@ -249,9 +249,9 @@ function stubApi() {
   vi.spyOn(adminApi, "buildIndex").mockResolvedValue(undefined);
 }
 
-async function mountView(view: string) {
+async function mountView(view: string, navigationQuery = "") {
   const wrapper = mount(AdminStudio, {
-    props: { view },
+    props: { view, navigationQuery },
     global: { plugins: [ElementPlus] },
   });
   await flushPromises();
@@ -282,6 +282,7 @@ describe("view interactions", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("知识库详情");
     expect(wrapper.text()).toContain("Active Index");
+    expect(wrapper.text()).toContain("删除知识库");
 
     adminStore.knowledgeSearch = "不存在";
     await flushPromises();
@@ -343,6 +344,24 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("Timeline");
     expect(wrapper.text()).toContain("LLM Generation");
     expect(wrapper.text()).toContain("答案内容");
+  });
+
+  it("logs: applies the retired RAG errors deep-link state", async () => {
+    vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
+    const listTraces = vi.mocked(adminApi.listTraces);
+    const wrapper = await mountView("logs", "tab=failed-turns&engine=RAG");
+
+    expect(wrapper.find(".el-tabs__item.is-active").text()).toContain("失败轮次");
+    const engineSelect = wrapper
+      .findAllComponents({ name: "ElSelect" })
+      .find((select) => select.props("placeholder") === "全部引擎");
+    expect(engineSelect?.props("modelValue")).toBe("RAG");
+    expect(listTraces).toHaveBeenCalledWith("kb-1", {
+      status: "FAILED",
+      engine: "RAG",
+      errorCode: undefined,
+      limit: 200,
+    });
   });
 
   it("logs: reviews request errors, failed turns and opens conversation replay", async () => {
@@ -477,7 +496,7 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("qwen");
     expect(wrapper.text()).toContain("siliconflow");
     expect(wrapper.text()).toContain("RAG 检索参数");
-    expect(wrapper.text()).toContain("访问设置");
+    expect(wrapper.text()).toContain("服务凭证");
 
     const promptTab = wrapper
       .findAll(".el-tabs__item")
@@ -497,14 +516,10 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("Generic RAG 全局配置");
   });
 
-  it("configuration: opens access settings and clears the credential", async () => {
+  it("configuration: opens service credentials and clears the credential", async () => {
     sessionStorage.setItem("rag_service_token", "tok");
-    const wrapper = await mountView("configuration");
-    const accessTab = wrapper
-      .findAll(".el-tabs__item")
-      .find((tab) => tab.text().includes("访问设置"));
-    await accessTab!.trigger("click");
-    await flushPromises();
+    const wrapper = await mountView("configuration", "tab=credentials");
+    expect(wrapper.find(".el-tabs__item.is-active").text()).toContain("服务凭证");
     const danger = wrapper
       .findAll(".settings-nav button")
       .find((b) => b.text().includes("危险操作"));

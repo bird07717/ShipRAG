@@ -81,6 +81,11 @@ export const adminApi = {
       method: "POST",
       body: JSON.stringify({ name, description: description || null }),
     }),
+  deleteKnowledgeBase: (knowledgeId: string) =>
+    apiRequest<{ knowledge_id: string; deleted: boolean; cleanup_failed_count: number }>(
+      `/knowledge-bases/${knowledgeId}`,
+      { method: "DELETE" },
+    ),
   listDocuments: (knowledgeId: string) =>
     apiRequest<DocumentItem[]>(`/knowledge-bases/${knowledgeId}/documents`),
   deleteDocument: (documentId: string) =>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, type Component } from "vue";
+import { computed, onMounted, onUnmounted, type Component } from "vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 import { renderMarkdown } from "@/utils/markdown";
@@ -16,7 +16,7 @@ import EngineRoutingView from "@/views/EngineRoutingView.vue";
 import SupportProfilesView from "@/views/SupportProfilesView.vue";
 import ConversationTimeline from "@/components/ConversationTimeline.vue";
 
-const props = defineProps<{ view: string }>();
+const props = defineProps<{ view: string; navigationQuery?: string }>();
 
 const store = useAdminStore();
 
@@ -31,6 +31,12 @@ const views: Record<string, Component> = {
   "engine-routing": EngineRoutingView,
   "support-profiles": SupportProfilesView,
 };
+
+const viewProps = computed(() =>
+  ["logs", "configuration"].includes(props.view)
+    ? { navigationQuery: props.navigationQuery ?? "" }
+    : {},
+);
 
 let indexPollTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -67,7 +73,7 @@ onUnmounted(() => clearInterval(indexPollTimer));
       class="studio-alert"
       @close="store.notice = ''"
     />
-    <component :is="views[props.view] ?? DashboardView" />
+    <component :is="views[props.view] ?? DashboardView" v-bind="viewProps" />
 
     <!-- Shared trace detail drawer (opened from Dashboard recent activity) -->
     <el-drawer

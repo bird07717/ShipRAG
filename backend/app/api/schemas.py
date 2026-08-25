@@ -27,6 +27,12 @@ class KnowledgeBaseResponse(BaseModel):
     building_index_id: UUID | None = None
 
 
+class KnowledgeBaseDeleteResponse(BaseModel):
+    knowledge_id: UUID
+    deleted: bool
+    cleanup_failed_count: int = 0
+
+
 class DocumentResponse(BaseModel):
     id: UUID
     knowledge_id: UUID

@@ -29,8 +29,8 @@
 | Support Errors | SUPPORT 引擎失败 Trace | 是 Logs 失败轮次的固定过滤子集 | 移除顶级入口，在 Logs 增加引擎过滤 |
 | RAG Errors | RAG 引擎失败 Trace | 是 Logs 失败轮次的固定过滤子集 | 移除顶级入口，在 Logs 增加引擎过滤 |
 | Trace | 全量 Trace 查询与详情 | 与 Logs 同属排障链路，入口分散 | 作为“Logs & Traces”的“全量 Trace”标签页 |
-| RAG Configuration | 全局检索参数 | 属于系统级运行配置 | 作为“模型与系统配置”标签页 |
-| Settings | 浏览器会话凭据 | 属于管理台系统访问配置 | 作为“模型与系统配置”标签页 |
+| RAG Configuration | 全局检索参数 | 属于系统级运行配置 | 作为“模型、凭证与系统配置”标签页 |
+| Settings | 浏览器会话凭据 | 属于管理台系统访问配置 | 作为“模型、凭证与系统配置”的“服务凭证”标签页 |
 | Index Build | 手工构建、进度、GC、旧快照管理 | 低频但无法由 Documents 完整替代 | 保留，移动到“高级工具”分组 |
 | RAG Playground | 显式 RAG 检索调试 | 与 DemoChat 的真实 Gateway 验证目的不同 | 保留，移动到“高级工具”分组 |
 
@@ -41,7 +41,7 @@
 1. 概览：Dashboard。
 2. 知识管理：Knowledge Base、Documents、发布管理。
 3. 运行与验证：Engine Routing、DemoChat 问答测试。
-4. 运维：Logs & Traces、模型与系统配置。
+4. 运维：Logs & Traces、模型、凭证与系统配置。
 5. 高级工具：Index Build、RAG Playground。
 
 这里不把 Index Build 和 RAG Playground 强行塞入主流程页面，因为两者包含大量独立诊断内容；用分组降级比功能删除或不相关页面嵌套更可控。
@@ -54,7 +54,7 @@
 
 - 按目标导航重排分组、名称和说明。
 - 将 `support-configuration`、`support-errors`、`rag-errors`、`traces`、`rag-configuration`、`settings` 定义为旧地址别名。
-- 旧地址分别重定向到 `support-profiles`、`logs` 或 `configuration`。
+- 旧地址分别重定向到 `support-profiles`、`logs` 或 `configuration`，并通过 Hash 查询参数定位到原能力对应的标签和引擎过滤条件。
 - Hash 初始化和 `hashchange` 都执行规范化，保证地址栏与当前页面一致。
 
 ### 4.2 合并排障入口
@@ -76,7 +76,7 @@
 
 - 保留 Models 和 Prompts 标签页。
 - 加入“RAG 检索参数”标签页，复用 `RagConfigurationView`。
-- 加入“访问设置”标签页，复用 `SettingsView`。
+- 加入“服务凭证”标签页，复用 `SettingsView`，提供显式保存并重新加载按钮和当前会话配置状态。
 
 ### 4.4 测试与验证
 
@@ -87,7 +87,7 @@
 3. 旧 Hash 地址会跳转到新的规范入口。
 4. Logs 失败轮次可按引擎过滤，并正确传递 API 参数。
 5. Logs 能进入全量 Trace 标签。
-6. 模型与系统配置能展示 RAG 参数和访问设置标签。
+6. 模型、凭证与系统配置能展示 RAG 参数和服务凭证标签。
 7. 保留的规范视图都能正常挂载。
 
 执行：
@@ -122,17 +122,44 @@ npm run build
 - 顶级导航由 16 个收敛为 10 个，并按概览、知识管理、运行与验证、运维、高级工具重新分组。
 - “问题文档配置”已更名为“发布管理”，继续作为 Profile 审核、验证和原子发布的唯一入口。
 - Logs 已增加引擎过滤和“全量 Trace”标签，替代 Support Errors、RAG Errors 与独立 Trace 入口。
-- 模型配置已增加“RAG 检索参数”和“访问设置”标签，替代独立 RAG Configuration 与 Settings 入口。
-- 六个旧 Hash 地址均保留兼容映射；未知视图安全回退到 Dashboard。
+- 模型配置已增加“RAG 检索参数”和“服务凭证”标签，替代独立 RAG Configuration 与 Settings 入口；凭证可明确保存、立即重新加载管理数据并显示当前会话状态。
+- 六个旧 Hash 地址均保留兼容映射，并精准定位到目标标签：Support/RAG Errors 带引擎过滤，Trace、RAG Configuration 与 Settings 直接打开对应标签；未知视图安全回退到 Dashboard。
 - Logs 和 Trace 在切换知识库后会重新加载当前知识库的数据。
 - Index Build 与 RAG Playground 保留在高级工具中，功能没有被删除或塞入不相关主流程。
+- Dashboard 已移除“后端尚未提供 `/metrics`、需迁移 0014”的过期推断，失败时只展示与实现版本无关的可重试提示。
 
 验证结果：
 
-- 前端完整测试：17 个测试文件、89 个测试全部通过。
+- 前端完整测试：17 个测试文件、91 个测试全部通过。
 - TypeScript / Vue 类型检查：通过。
 - ESLint：通过（零 warning 门槛）。
 - Vite 生产构建：通过。
 - `git diff --check`：通过。
 
 生产构建仍报告主 JavaScript chunk 超过 500 kB 的既有性能提示；它不影响本次构建成功，也不在本次信息架构收敛范围内。
+
+## 8. 全局管理范围栏与知识库删除补充修复（2026-08-25）
+
+### 8.1 问题结论
+
+- `App.vue` 将“当前知识库、环境、线上版本、发布候选”作为全局区域渲染在所有非问答页面。系统配置、凭证等页面并不使用这些知识库上下文，因此这是错误的页面级作用域表达，也重复占用每页首屏空间。
+- Knowledge Base 页面只有创建入口，前端 API 与后端均没有删除知识库能力。只增加前端按钮会形成不可用的假功能，因此本项需要最小范围补充后端删除接口。
+
+### 8.2 实施内容
+
+1. 删除 `App.vue` 的全局管理范围栏，不再在每个页面重复展示环境、线上版本和发布候选。
+2. 只在实际依赖知识库范围且原本缺少选择器的页面补充局部选择器：Dashboard、发布管理、Logs & Traces；Documents、Index Build、Engine Routing、DemoChat、RAG Playground 继续使用各自已有的选择器，系统配置页不展示知识库选择器。
+3. Knowledge Base 列表行菜单和详情抽屉增加“删除知识库”；要求管理员准确输入知识库名称后才允许永久删除。
+4. 新增 `DELETE /api/v1/knowledge-bases/{knowledge_id}`。删除事务会清理该知识库的 Trace、会话、索引、文档及级联的 Profile/发布数据；删除成功后再回收 MinIO 文档与图片对象。
+5. 构建中的知识库在前端禁用删除入口，后端同时以 `409 KNOWLEDGE_BASE_BUILD_IN_PROGRESS` 拒绝删除，避免与索引任务并发破坏数据。
+6. MinIO 对象采用尽力回收：数据库删除成功但个别对象清理失败时，接口返回失败数量、后端记录日志，管理端明确提示管理员检查日志。
+
+### 8.3 补充验证
+
+- 前端类型检查、ESLint：通过。
+- 前端 Vitest：17 个测试文件、91 个测试全部通过。
+- 前端生产构建：通过；仍只有既有的主 chunk 超过 500 kB 提示。
+- 后端 Ruff 检查、格式检查与 Mypy：通过。
+- 后端定向 Pytest（API 与 ingestion）：25 个测试全部通过，包含删除顺序和构建中拒绝场景。
+- 后端完整 Pytest：351 个通过、3 个按环境条件跳过。
+- `git diff --check`：通过。

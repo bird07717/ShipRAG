@@ -111,6 +111,16 @@ async def test_rag_fallback_reuses_support_message_pair() -> None:
             parent_trace_id=support_trace_id,
             fallback_reason="NO_MATCH",
         )
+        # A regular RAG / Playground turn has no parent Trace.  Keep this in
+        # the asyncpg-backed integration test: an untyped NULL used both as a
+        # UUID value and in an `IS NULL` expression otherwise fails at prepare
+        # time before retrieval or the LLM is reached.
+        standalone_turn = await repository.begin_turn(
+            knowledge_id=knowledge_id,
+            conversation_id=None,
+            question="普通 RAG 请求",
+            request_id="req-standalone-rag",
+        )
 
         assert turn.user_message_id == user_message_id
         assert turn.assistant_message_id == assistant_message_id
@@ -149,12 +159,30 @@ async def test_rag_fallback_reuses_support_message_pair() -> None:
                 .mappings()
                 .one()
             )
+            standalone_link = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                        SELECT parent_trace_id, fallback_from, fallback_reason
+                        FROM rag_trace WHERE trace_id = :id
+                        """
+                        ),
+                        {"id": standalone_turn.trace_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
         assert count == 2
         assert assistant_status == "STREAMING"
         assert support_message_id is None
         assert rag_link["parent_trace_id"] == support_trace_id
         assert rag_link["fallback_from"] == "SUPPORT"
         assert rag_link["fallback_reason"] == "NO_MATCH"
+        assert standalone_link["parent_trace_id"] is None
+        assert standalone_link["fallback_from"] is None
+        assert standalone_link["fallback_reason"] is None
     finally:
         async with engine.begin() as connection:
             await connection.execute(

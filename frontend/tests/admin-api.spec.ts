@@ -73,14 +73,17 @@ describe("admin API", () => {
     await adminApi.getTrace("trace-1");
     await adminApi.listModels();
     await adminApi.listPrompts();
+    await adminApi.deleteKnowledgeBase("kb-1");
 
-    expect(fetchMock).toHaveBeenCalledTimes(15);
+    expect(fetchMock).toHaveBeenCalledTimes(16);
     const upload = fetchMock.mock.calls[2]?.[1] as RequestInit;
     expect(upload.body).toBeInstanceOf(FormData);
     expect(new Headers(upload.headers).get("Content-Type")).toBeNull();
     expect(new Headers(upload.headers).get("Idempotency-Key")).toBeTruthy();
     expect(fetchMock.mock.calls[3]?.[0]).toBe("/api/v1/documents/doc-1?request_build=true");
     expect((fetchMock.mock.calls[3]?.[1] as RequestInit).method).toBe("DELETE");
+    expect(fetchMock.mock.calls[15]?.[0]).toBe("/api/v1/knowledge-bases/kb-1");
+    expect((fetchMock.mock.calls[15]?.[1] as RequestInit).method).toBe("DELETE");
   });
 });
 

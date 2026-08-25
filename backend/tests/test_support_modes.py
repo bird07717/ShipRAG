@@ -28,7 +28,7 @@ def test_compatibility_route_has_only_formal_and_manual_rollback_modes() -> None
         Settings(_env_file=None, app_env="test", chat_execution_mode="legacy_rag"),
     )
 
-    assert support_repository._default_policy() == ExecutionPolicy.SUPPORT_ONLY
+    assert support_repository._default_policy() == ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK
     assert rag_repository._default_policy() == ExecutionPolicy.RAG_ONLY
 
 

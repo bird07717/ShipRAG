@@ -22,7 +22,7 @@ describe("App", () => {
     expect(wrapper.text()).toContain("DemoChat 问答测试");
     expect(wrapper.text()).toContain("Engine Routing");
     expect(wrapper.text()).toContain("Logs & Traces");
-    expect(wrapper.text()).toContain("模型与系统配置");
+    expect(wrapper.text()).toContain("模型、凭证与系统配置");
     expect(wrapper.text()).not.toContain("Support Configuration");
     expect(wrapper.text()).not.toContain("RAG Configuration");
     expect(wrapper.text()).not.toContain("Support Errors");
@@ -33,6 +33,7 @@ describe("App", () => {
     expect(wrapper.text()).toContain("admin-studio");
     expect(wrapper.text()).toContain("health-panel");
     expect(wrapper.findAll("nav button")).toHaveLength(10);
+    expect(wrapper.find(".management-context").exists()).toBe(false);
 
     const playground = wrapper.findAll("nav button").find((item) => item.text().includes("RAG Playground"));
     await playground?.trigger("click");
@@ -44,12 +45,12 @@ describe("App", () => {
 
   it.each([
     ["support-configuration", "support-profiles", "候选 Profile 审核与原子发布"],
-    ["support-errors", "logs", "错误、失败任务与完整链路排查"],
-    ["rag-errors", "logs", "错误、失败任务与完整链路排查"],
-    ["traces", "logs", "错误、失败任务与完整链路排查"],
-    ["rag-configuration", "configuration", "模型、Prompt、RAG 参数与访问设置"],
-    ["settings", "configuration", "模型、Prompt、RAG 参数与访问设置"],
-  ])("redirects retired #%s hash to #%s", (legacyView, canonicalView, description) => {
+    ["support-errors", "logs?tab=failed-turns&engine=SUPPORT", "错误、失败任务与完整链路排查"],
+    ["rag-errors", "logs?tab=failed-turns&engine=RAG", "错误、失败任务与完整链路排查"],
+    ["traces", "logs?tab=traces", "错误、失败任务与完整链路排查"],
+    ["rag-configuration", "configuration?tab=rag", "模型、Prompt、RAG 参数与 Service Token"],
+    ["settings", "configuration?tab=credentials", "模型、Prompt、RAG 参数与 Service Token"],
+  ])("redirects retired #%s hash to #%s", (legacyView, canonicalLocation, description) => {
     window.history.replaceState(null, "", `#/${legacyView}`);
     const wrapper = mount(App, {
       global: {
@@ -62,7 +63,7 @@ describe("App", () => {
       },
     });
 
-    expect(window.location.hash).toBe(`#/${canonicalView}`);
+    expect(window.location.hash).toBe(`#/${canonicalLocation}`);
     expect(wrapper.text()).toContain(description);
     wrapper.unmount();
     window.history.replaceState(null, "", "#/dashboard");
