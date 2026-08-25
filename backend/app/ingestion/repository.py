@@ -245,7 +245,7 @@ class IngestionRepository:
             document = dict(document_result.mappings().one())
             build = (
                 await self._request_build_locked(
-                    connection, knowledge_id, "DOCUMENT_CHANGED", activate_on_success=True
+                    connection, knowledge_id, "DOCUMENT_CHANGED", activate_on_success=False
                 )
                 if request_build
                 else BuildReference(False, False, None, None, False)
@@ -385,7 +385,7 @@ class IngestionRepository:
                     connection,
                     UUID(str(document["kb_id"])),
                     "DOCUMENT_CHANGED",
-                    activate_on_success=True,
+                    activate_on_success=False,
                 )
                 if request_build
                 else BuildReference(False, False, None, None, False)
@@ -643,6 +643,17 @@ class IngestionRepository:
                 "metadata": json.dumps({"document_count": len(documents)}),
             },
         )
+        if not activate_on_success:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO knowledge_release (id, kb_id, index_id, status)
+                    VALUES (:id, :kb_id, :index_id, 'DRAFT')
+                    ON CONFLICT (index_id) DO NOTHING
+                    """
+                ),
+                {"id": uuid4(), "kb_id": knowledge_id, "index_id": index_id},
+            )
         await connection.execute(
             text(
                 """
@@ -679,7 +690,7 @@ class IngestionRepository:
                 connection,
                 knowledge_id,
                 "DOCUMENT_CHANGED",
-                activate_on_success=True,
+                activate_on_success=False,
             )
 
     async def get_active_index_id(self, knowledge_id: UUID) -> UUID | None:
@@ -796,9 +807,10 @@ class IngestionRepository:
             target_result = await connection.execute(
                 text(
                     """
-                    SELECT i.*, kb.active_index_id
+                    SELECT i.*, kb.active_index_id, r.status AS release_status
                     FROM knowledge_index i
                     JOIN knowledge_base kb ON kb.id = i.kb_id
+                    LEFT JOIN knowledge_release r ON r.index_id = i.id
                     WHERE i.id = :index_id
                     FOR UPDATE OF kb, i
                     """
@@ -810,6 +822,12 @@ class IngestionRepository:
                 raise ApiError("INDEX_NOT_FOUND", "索引不存在", 404)
             if target["status"] == "ACTIVE" and target["active_index_id"] == index_id:
                 return dict(target)
+            if target["release_status"] is not None and target["release_status"] != "PUBLISHED":
+                raise ApiError(
+                    "RELEASE_REQUIRED",
+                    "该索引包含待审核 Profile，请通过发布候选完成原子发布",
+                    409,
+                )
             if target["status"] != "READY":
                 raise ApiError("INDEX_NOT_READY", "只有 READY 索引可以激活", 409)
 

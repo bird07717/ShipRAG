@@ -51,20 +51,29 @@ const menuGroups: MenuGroup[] = [
     items: [
       { key: "support-profiles", label: "问题文档配置", subtitle: "标准问题与完整文档映射", icon: Files },
       { key: "support-chat", label: "Support 问答测试", subtitle: "验证完整文档和后续解释", icon: ChatDotRound },
+      { key: "support-configuration", label: "Support Configuration", subtitle: "Profile 链路策略与发布门禁", icon: Setting },
+      { key: "support-errors", label: "Support Errors", subtitle: "Profile、文档、工作流与安全错误", icon: Tickets },
+    ],
+  },
+  {
+    label: "Generic RAG",
+    items: [
+      { key: "playground", label: "RAG Playground", subtitle: "检索、Prompt 与答案调试", icon: Operation },
+      { key: "rag-configuration", label: "RAG Configuration", subtitle: "召回、融合、重排与上下文配置", icon: Cpu },
+      { key: "rag-errors", label: "RAG Errors", subtitle: "检索、模型与引用错误", icon: Tickets },
     ],
   },
   {
     label: "Diagnostics",
     items: [
       { key: "logs", label: "Logs & Errors", subtitle: "失败请求、轮次与任务排查", icon: Tickets },
-      { key: "playground", label: "RAG Playground", subtitle: "检索、Prompt 与答案调试", icon: Operation },
       { key: "traces", label: "Trace", subtitle: "完整 RAG 链路追踪", icon: DataLine },
     ],
   },
   {
     label: "Configuration",
     items: [
-      { key: "configuration", label: "Models & Prompt", subtitle: "全局 AI 模型与提示词快照", icon: Cpu },
+      { key: "configuration", label: "Models & Prompt", subtitle: "共享模型注册与提示词快照", icon: Cpu },
       { key: "settings", label: "Settings", subtitle: "本地管理台设置", icon: Setting },
     ],
   },

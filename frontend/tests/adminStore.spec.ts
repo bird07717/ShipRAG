@@ -149,7 +149,7 @@ describe("adminStore", () => {
     await adminStore.upload(new File(["x"], "a.docx"));
     expect(upload).toHaveBeenCalledWith("kb-1", expect.any(File));
     expect(adminStore.uploadDrawerOpen).toBe(false);
-    expect(adminStore.notice).toBe("文档已上传，索引构建已提交");
+    expect(adminStore.notice).toBe("文档已上传，候选索引构建已提交；完成后请审核 Profile 草稿");
   });
 
   it("builds, activates, gc's and deletes indexes", async () => {

@@ -125,6 +125,22 @@ describe("view smoke", () => {
         else if (path.includes("/traces")) body = [trace];
         else if (path.includes("/models")) body = [model];
         else if (path.includes("/prompts")) body = [prompt];
+        else if (path.includes("/runtime-policies/"))
+          body = {
+            knowledge_id: "kb-1",
+            execution_policy: "SUPPORT_ONLY",
+            config_version: 1,
+            fallback_conditions: ["NO_MATCH"],
+            source: "DATABASE",
+          };
+        else if (path.includes("/rag-config"))
+          body = {
+            vector_top_k: 10,
+            bm25_top_k: 10,
+            fusion_top_k: 20,
+            rerank_top_n: 10,
+            context_max_chunks: 8,
+          };
         else if (path.includes("/chat/welcome"))
           body = { knowledge_base: { id: "kb-1", name: "产品库", ready: true }, message: "hi", suggestions: ["Q1"] };
         else if (path.includes("/logs/request-errors"))
@@ -152,6 +168,10 @@ describe("view smoke", () => {
       "traces",
       "configuration",
       "support-profiles",
+      "support-configuration",
+      "support-errors",
+      "rag-configuration",
+      "rag-errors",
       "settings",
     ]) {
       const wrapper = mount(AdminStudio, {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from "vue";
+import { onMounted, onUnmounted, type Component } from "vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 import { renderMarkdown } from "@/utils/markdown";
@@ -15,13 +15,17 @@ import TracesView from "@/views/TracesView.vue";
 import ConfigurationView from "@/views/ConfigurationView.vue";
 import SettingsView from "@/views/SettingsView.vue";
 import SupportProfilesView from "@/views/SupportProfilesView.vue";
+import SupportConfigurationView from "@/views/SupportConfigurationView.vue";
+import SupportErrorsView from "@/views/SupportErrorsView.vue";
+import RagConfigurationView from "@/views/RagConfigurationView.vue";
+import RagErrorsView from "@/views/RagErrorsView.vue";
 import ConversationTimeline from "@/components/ConversationTimeline.vue";
 
 const props = defineProps<{ view: string }>();
 
 const store = useAdminStore();
 
-const views: Record<string, typeof DashboardView> = {
+const views: Record<string, Component> = {
   dashboard: DashboardView,
   knowledge: KnowledgeView,
   documents: DocumentsView,
@@ -32,6 +36,10 @@ const views: Record<string, typeof DashboardView> = {
   configuration: ConfigurationView,
   settings: SettingsView,
   "support-profiles": SupportProfilesView,
+  "support-configuration": SupportConfigurationView,
+  "support-errors": SupportErrorsView,
+  "rag-configuration": RagConfigurationView,
+  "rag-errors": RagErrorsView,
 };
 
 let indexPollTimer: ReturnType<typeof setInterval> | undefined;

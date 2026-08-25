@@ -253,10 +253,11 @@ class RagRepository:
                     """
                     INSERT INTO rag_trace (
                         id, trace_id, request_id, kb_id, index_id, conversation_id,
-                        message_id, question, mode, status, user_id
+                        message_id, question, mode, status, user_id, engine, stage
                     ) VALUES (
                         :id, :trace_id, :request_id, :kb_id, :index_id, :conversation_id,
-                        :message_id, :question, :mode, 'RUNNING', :user_id
+                        :message_id, :question, :mode, 'RUNNING', :user_id,
+                        'RAG', 'PREPARE'
                     )
                     """
                 ),
@@ -959,6 +960,7 @@ class RagRepository:
         mode: str | None = None,
         user_id: str | None = None,
         response_type: str | None = None,
+        engine: str | None = None,
         error_code: str | None = None,
         conversation_id: UUID | None = None,
         created_from: datetime | None = None,
@@ -982,6 +984,9 @@ class RagRepository:
         if response_type is not None:
             clauses.append("response_type = :response_type")
             parameters["response_type"] = response_type
+        if engine is not None:
+            clauses.append("engine = :engine")
+            parameters["engine"] = engine
         if error_code is not None:
             clauses.append("error ->> 'code' = :error_code")
             parameters["error_code"] = error_code
@@ -997,7 +1002,8 @@ class RagRepository:
         query = f"""
             SELECT trace_id, request_id, mode, kb_id, index_id, question, status,
                    user_id, response_type, answer_mode, latency, error,
-                   created_at, finished_at
+                   created_at, finished_at, engine, stage, parent_trace_id,
+                   fallback_from, fallback_reason
             FROM rag_trace
             WHERE {" AND ".join(clauses)}
             ORDER BY created_at DESC

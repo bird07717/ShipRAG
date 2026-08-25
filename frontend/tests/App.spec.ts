@@ -19,6 +19,10 @@ describe("App", () => {
     expect(wrapper.text()).toContain("Support Studio");
     expect(wrapper.text()).toContain("问题文档配置");
     expect(wrapper.text()).toContain("Support 问答测试");
+    expect(wrapper.text()).toContain("Support Configuration");
+    expect(wrapper.text()).toContain("RAG Configuration");
+    expect(wrapper.text()).toContain("Support Errors");
+    expect(wrapper.text()).toContain("RAG Errors");
     expect(wrapper.text()).toContain("Knowledge Base");
     expect(wrapper.text()).toContain("构建在后台");
     expect(wrapper.text()).toContain("SUPPORT");

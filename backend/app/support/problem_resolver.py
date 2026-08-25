@@ -18,6 +18,14 @@ def normalize_for_match(value: str) -> str:
 
 CatalogClassifier = Callable[[str, list[ProblemProfile]], Awaitable[str | None]]
 
+_TASK_TERMS: dict[str, tuple[str, ...]] = {
+    "UPGRADE": ("升级", "更新", "刷版本", "update"),
+    "CHECK": ("检查", "检测", "自检", "check"),
+    "REPLACEMENT": ("更换", "替换", "replacement", "replace"),
+    "CONFIGURATION": ("配置", "设置", "修改", "configuration", "configure"),
+    "ALARM": ("报警", "告警", "异常", "alarm"),
+}
+
 
 class ProblemResolver:
     """Closed-set resolver. It never uses chunk retrieval or produces an answer."""
@@ -69,13 +77,28 @@ class ProblemResolver:
                 ProblemDecision.AMBIGUOUS, "ALIAS_CONFLICT", 0.0, choices=aliases
             )
 
-        # Deterministic catalog rules require a conjunction of any supplied
-        # product/model and an action/keyword, avoiding a loose keyword match.
+        # A model name by itself is commonly shared by many problem documents.
+        # Deterministic routing therefore requires product/model + intent when
+        # both dimensions exist.  Legacy profiles without structured product
+        # metadata need at least two keyword hits; otherwise the closed catalog
+        # classifier makes the decision.
         candidates: list[ProblemProfile] = []
         for profile in available:
-            terms = [*profile.keywords, *profile.model_names]
-            term_words = {normalize_for_match(item) for item in terms if item.strip()}
-            if term_words and any(term in normalized for term in term_words):
+            product_terms = [*profile.model_names]
+            if profile.product_name:
+                product_terms.append(profile.product_name)
+            product_words = {normalize_for_match(item) for item in product_terms if item.strip()}
+            intent_terms = list(profile.keywords)
+            if profile.task_type:
+                intent_terms.extend(
+                    _TASK_TERMS.get(profile.task_type.upper(), (profile.task_type,))
+                )
+            intent_words = {normalize_for_match(item) for item in intent_terms if item.strip()}
+            product_match = any(term in normalized for term in product_words)
+            intent_hits = sum(term in normalized for term in intent_words)
+            if product_words and intent_words and product_match and intent_hits:
+                candidates.append(profile)
+            elif not product_words and intent_words and intent_hits >= min(2, len(intent_words)):
                 candidates.append(profile)
         if len(candidates) == 1:
             return ProblemResolution(

@@ -265,8 +265,14 @@ class SupportRepository:
             )
             await conn.execute(
                 text("""
-                INSERT INTO rag_trace (id, trace_id, request_id, kb_id, index_id, conversation_id, message_id, question, mode, status, user_id)
-                VALUES (:id, :trace_id, :request_id, :kb_id, :index_id, :conversation_id, :message_id, :question, 'CHAT', 'RUNNING', :user_id)
+                INSERT INTO rag_trace (
+                    id, trace_id, request_id, kb_id, index_id, conversation_id,
+                    message_id, question, mode, status, user_id, engine, stage
+                ) VALUES (
+                    :id, :trace_id, :request_id, :kb_id, :index_id, :conversation_id,
+                    :message_id, :question, 'CHAT', 'RUNNING', :user_id,
+                    'SUPPORT', 'PROFILE_RESOLUTION'
+                )
             """),
                 {
                     "id": uuid4(),
@@ -548,7 +554,8 @@ class SupportRepository:
                 text("""
                 UPDATE rag_trace SET answer = :answer, sources = CAST(:sources AS jsonb), retrieval_result = CAST(:trace AS jsonb),
                     selected_context = CAST(:context_blocks AS jsonb), response_type = :response_type,
-                    answer_mode = :answer_mode, model_usage = CAST(:usage AS jsonb), latency = CAST(:latency AS jsonb), status = 'COMPLETED', finished_at = now()
+                    answer_mode = :answer_mode, model_usage = CAST(:usage AS jsonb), latency = CAST(:latency AS jsonb),
+                    stage = 'COMPLETED', status = 'COMPLETED', finished_at = now()
                 WHERE trace_id = :trace_id AND status = 'RUNNING'
             """),
                 {
@@ -606,13 +613,14 @@ class SupportRepository:
             await conn.execute(
                 text("""
                 UPDATE rag_trace SET error = CAST(:error AS jsonb), retrieval_result = CAST(:trace AS jsonb),
-                    status = 'FAILED', finished_at = now()
+                    stage = COALESCE(:stage, stage), status = 'FAILED', finished_at = now()
                 WHERE trace_id = :trace_id AND status = 'RUNNING'
             """),
                 {
                     "trace_id": turn.trace_id,
                     "error": json.dumps(error, ensure_ascii=False),
                     "trace": json.dumps(trace or {}, ensure_ascii=False),
+                    "stage": stage,
                 },
             )
             if turn.idempotency_key:

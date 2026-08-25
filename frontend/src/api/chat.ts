@@ -78,20 +78,14 @@ export async function fetchWelcome(knowledgeId: string): Promise<WelcomePayload>
   return (await response.json()) as WelcomePayload;
 }
 
-function parseSSE(chunk: string): Array<{ event: string; data: string }> {
-  const events: Array<{ event: string; data: string }> = [];
-  const blocks = chunk.split("\n\n");
-  for (const block of blocks) {
-    const lines = block.split("\n");
-    let event = "";
-    let data = "";
-    for (const line of lines) {
-      if (line.startsWith("event: ")) event = line.slice(7);
-      else if (line.startsWith("data: ")) data = line.slice(6);
-    }
-    if (event && data) events.push({ event, data });
+function parseSSEBlock(block: string): { event: string; data: string } | null {
+  let event = "";
+  const dataLines: string[] = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event: ")) event = line.slice(7);
+    else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
   }
-  return events;
+  return event && dataLines.length ? { event, data: dataLines.join("\n") } : null;
 }
 
 export async function streamChat(
@@ -102,7 +96,7 @@ export async function streamChat(
   options: { choiceId?: string } = {},
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(apiBaseUrl + "/api/v1/support/chat/stream", {
+  const response = await fetch(apiBaseUrl + "/api/v1/chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -134,9 +128,13 @@ export async function streamChat(
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
-    const events = parseSSE(buffer);
-    buffer = "";
-    for (const evt of events) {
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      boundary = buffer.indexOf("\n\n");
+      const evt = parseSSEBlock(block);
+      if (!evt) continue;
       try {
         const payload = JSON.parse(evt.data);
         if (evt.event === "trace") {
@@ -149,8 +147,7 @@ export async function streamChat(
           callbacks.onError(payload.message ?? "未知错误");
         }
       } catch {
-        // partial JSON, keep in buffer
-        buffer = evt.data;
+        callbacks.onError("服务返回了无法解析的流事件");
       }
     }
   }
@@ -161,6 +158,7 @@ export async function fetchImageBlobUrl(imageAssetId: string): Promise<string> {
     apiBaseUrl + "/api/v1/image-assets/" + imageAssetId + "/content",
     { headers: authHeaders() },
   );
+  if (!response.ok) throw new Error("图片加载失败：HTTP " + response.status);
   const blob = await response.blob();
   return URL.createObjectURL(blob);
 }

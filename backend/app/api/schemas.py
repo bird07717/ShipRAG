@@ -217,6 +217,19 @@ class WelcomeResponse(BaseModel):
     suggestions: list[str]
 
 
+class RuntimePolicyUpdate(BaseModel):
+    execution_policy: Literal["SUPPORT_ONLY", "RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"]
+
+
+class RuntimePolicyResponse(BaseModel):
+    knowledge_id: UUID
+    execution_policy: Literal["SUPPORT_ONLY", "RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"]
+    config_version: int
+    fallback_conditions: list[str]
+    source: Literal["DATABASE", "DEFAULT"]
+    updated_at: datetime | None = None
+
+
 class PromptResponse(BaseModel):
     id: UUID
     name: str
@@ -291,6 +304,11 @@ class RagTraceResponse(BaseModel):
     error: dict[str, Any]
     created_at: datetime
     finished_at: datetime | None
+    engine: Literal["SUPPORT", "RAG"] = "RAG"
+    stage: str | None = None
+    parent_trace_id: UUID | None = None
+    fallback_from: Literal["SUPPORT", "RAG"] | None = None
+    fallback_reason: str | None = None
 
 
 class PlaygroundOptions(BaseModel):
@@ -346,6 +364,11 @@ class TraceSummaryResponse(BaseModel):
     error: dict[str, Any]
     created_at: datetime
     finished_at: datetime | None
+    engine: Literal["SUPPORT", "RAG"] = "RAG"
+    stage: str | None = None
+    parent_trace_id: UUID | None = None
+    fallback_from: Literal["SUPPORT", "RAG"] | None = None
+    fallback_reason: str | None = None
 
 
 class MetricsRange(BaseModel):
@@ -760,6 +783,7 @@ class ChatResponse(BaseModel):
     clarification: ChatClarification | None = None
     escalation: ChatEscalation | None = None
     references: list[ChatReference] = Field(default_factory=list)
+    fallback: dict[str, Any] | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int
 

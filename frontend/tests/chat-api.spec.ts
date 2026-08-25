@@ -106,6 +106,28 @@ describe("chat API", () => {
     expect(onError).toHaveBeenCalledWith("上游超时");
   });
 
+  it("preserves an SSE event split across arbitrary network chunks", async () => {
+    const onDone = vi.fn();
+    const frame =
+      'event: done\ndata: {"conversation_id":"c-1","message_id":"m-1","trace_id":"t-1","answer":"完整回答","response_type":"ANSWERED","content":[],"references":[],"usage":{},"latency_ms":10}\n\n';
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        sseResponse([frame.slice(0, 17), frame.slice(17, 63), frame.slice(63)]),
+      ),
+    );
+
+    await streamChat("kb-1", "问题", undefined, {
+      onTrace: vi.fn(),
+      onDelta: vi.fn(),
+      onDone,
+      onError: vi.fn(),
+    });
+
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onDone.mock.calls[0]?.[0].answer).toBe("完整回答");
+  });
+
   it("resolves image asset blobs into object URLs", async () => {
     const revokeObjectURL = vi.fn();
     const createObjectURL = vi.fn().mockReturnValue("blob:asset-url");

@@ -6,6 +6,7 @@ import type {
   DocumentItem,
   KnowledgeBase,
   KnowledgeIndex,
+  KnowledgeRelease,
   IndexTask,
   ModelConfig,
   ModelConfigUpdatePayload,
@@ -13,6 +14,8 @@ import type {
   PromptTemplate,
   ProblemProfile,
   ProblemProfilePayload,
+  ProfileDraftPatch,
+  ProfileFeedback,
   RagConfig,
   RagConfigUpdatePayload,
   RagTrace,
@@ -34,6 +37,9 @@ export const adminStore = reactive({
   ragConfig: null as RagConfig | null,
   prompts: [] as PromptTemplate[],
   problemProfiles: [] as ProblemProfile[],
+  knowledgeReleases: [] as KnowledgeRelease[],
+  selectedRelease: null as KnowledgeRelease | null,
+  profileFeedback: [] as ProfileFeedback[],
   elements: [] as Array<Record<string, unknown>>,
   chunks: [] as Array<Record<string, unknown>>,
   latestIndexTasks: {} as Record<string, IndexTask | undefined>,
@@ -135,6 +141,9 @@ export const adminStore = reactive({
     if (!this.selectedKnowledgeId) {
       this.documents = [];
       this.indexes = [];
+      this.knowledgeReleases = [];
+      this.selectedRelease = null;
+      this.profileFeedback = [];
       return;
     }
     [this.documents, this.indexes] = await Promise.all([
@@ -173,6 +182,7 @@ export const adminStore = reactive({
       this.problemProfiles = this.selectedKnowledgeId
         ? await adminApi.listProblemProfiles(this.selectedKnowledgeId)
         : [];
+      await this.loadReleaseWorkspace();
     });
   },
 
@@ -196,8 +206,11 @@ export const adminStore = reactive({
     if (!this.selectedKnowledgeId) return;
     await this.run(async () => {
       await adminApi.uploadDocument(this.selectedKnowledgeId, file);
-      await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
-    }, "文档已上传，索引构建已提交");
+      await Promise.all([
+        this.loadKnowledgeBases(),
+        this.loadKnowledgeDetails(),
+      ]);
+    }, "文档已上传，候选索引构建已提交；完成后请审核 Profile 草稿");
     if (!this.error) this.uploadDrawerOpen = false;
   },
 
@@ -306,6 +319,79 @@ export const adminStore = reactive({
     this.problemProfiles = this.selectedKnowledgeId
       ? await adminApi.listProblemProfiles(this.selectedKnowledgeId)
       : [];
+  },
+
+  async loadReleaseWorkspace(): Promise<void> {
+    if (!this.selectedKnowledgeId) {
+      this.knowledgeReleases = [];
+      this.selectedRelease = null;
+      this.profileFeedback = [];
+      return;
+    }
+    const [releases, feedback] = await Promise.all([
+      adminApi.listKnowledgeReleases(this.selectedKnowledgeId),
+      adminApi.listProfileFeedback(this.selectedKnowledgeId),
+    ]);
+    this.knowledgeReleases = releases;
+    this.profileFeedback = feedback;
+    const candidate = releases.find(
+      (release) => !["PUBLISHED", "CANCELLED"].includes(release.status),
+    );
+    this.selectedRelease = candidate
+      ? await adminApi.getKnowledgeRelease(candidate.id)
+      : null;
+  },
+
+  async refreshSelectedRelease(): Promise<void> {
+    if (!this.selectedRelease) {
+      await this.loadReleaseWorkspace();
+      return;
+    }
+    this.selectedRelease = await adminApi.getKnowledgeRelease(this.selectedRelease.id);
+  },
+
+  async generateProfileDrafts(): Promise<void> {
+    const release = this.selectedRelease;
+    if (!release) return;
+    await this.run(async () => {
+      await adminApi.generateProfileDrafts(release.index_id);
+      await this.refreshSelectedRelease();
+    }, "Profile 草稿已重新生成，请审核后发布");
+  },
+
+  async saveProfileDraft(draftId: string, payload: ProfileDraftPatch): Promise<void> {
+    await this.run(async () => {
+      await adminApi.updateProfileDraft(draftId, payload);
+      await this.refreshSelectedRelease();
+    }, "Profile 草稿已保存，尚未影响线上问答");
+  },
+
+  async regenerateProfileDraft(draftId: string): Promise<void> {
+    await this.run(async () => {
+      await adminApi.regenerateProfileDraft(draftId);
+      await this.refreshSelectedRelease();
+    }, "Profile 草稿已重新生成");
+  },
+
+  async validateKnowledgeRelease(): Promise<void> {
+    if (!this.selectedRelease) return;
+    await this.run(async () => {
+      await adminApi.validateKnowledgeRelease(this.selectedRelease!.id);
+      await this.refreshSelectedRelease();
+    }, "发布前验证已完成");
+  },
+
+  async publishKnowledgeRelease(): Promise<void> {
+    if (!this.selectedRelease) return;
+    await this.run(async () => {
+      await adminApi.publishKnowledgeRelease(this.selectedRelease!.id);
+      await Promise.all([
+        this.loadKnowledgeBases(),
+        this.loadKnowledgeDetails(),
+        this.loadProblemProfiles(),
+      ]);
+      await this.loadReleaseWorkspace();
+    }, "候选索引与 Profile 已原子发布");
   },
 
   async saveProblemProfile(payload: ProblemProfilePayload): Promise<void> {
