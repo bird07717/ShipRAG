@@ -13,6 +13,12 @@ export interface KnowledgeBase {
   updated_at: string;
 }
 
+export interface SystemInfo {
+  name: string;
+  environment: string;
+  version: string;
+}
+
 export interface DocumentItem {
   id: string;
   knowledge_id: string;
@@ -92,6 +98,11 @@ export interface TraceSummary {
   latency: Record<string, number>;
   error: Record<string, unknown>;
   created_at: string;
+  engine?: "SUPPORT" | "RAG";
+  stage?: string | null;
+  parent_trace_id?: string | null;
+  fallback_from?: "SUPPORT" | "RAG" | null;
+  fallback_reason?: string | null;
 }
 
 export interface RagTrace extends TraceSummary {
@@ -148,6 +159,17 @@ export type ModelConfigUpdatePayload = {
 
 export type RagConfigUpdatePayload = Partial<Omit<RagConfig, "updated_at">>;
 
+export type ExecutionPolicy = "SUPPORT_ONLY" | "RAG_ONLY" | "SUPPORT_WITH_RAG_FALLBACK";
+
+export interface RuntimePolicy {
+  knowledge_id: string;
+  execution_policy: ExecutionPolicy;
+  config_version: number;
+  fallback_conditions: string[];
+  source: "DATABASE" | "DEFAULT";
+  updated_at?: string | null;
+}
+
 export interface PromptTemplate {
   id: string;
   name: string;
@@ -182,6 +204,88 @@ export type ProblemProfilePayload = Omit<
   ProblemProfile,
   "id" | "knowledge_id" | "support_ready" | "readiness_reasons" | "created_at" | "updated_at"
 >;
+
+export type ProfileDraftOperation = "CREATE" | "UPDATE" | "NONE";
+export type ProfileDraftStatus = "DRAFT" | "APPROVED" | "REJECTED" | "PUBLISHED";
+
+export interface ValidationIssue {
+  code: string;
+  message: string;
+}
+
+export interface ReleaseValidation {
+  valid?: boolean;
+  errors?: ValidationIssue[];
+  warnings?: ValidationIssue[];
+  checked_draft_count?: number;
+}
+
+export interface ProfileDraft {
+  id: string;
+  release_id: string;
+  kb_id: string;
+  document_id: string;
+  document_name: string;
+  operation: ProfileDraftOperation;
+  target_profile_id: string | null;
+  target_problem_code?: string | null;
+  problem_code: string;
+  canonical_question: string;
+  aliases: string[];
+  keywords: string[];
+  product_name: string | null;
+  model_names: string[];
+  task_type: string | null;
+  enabled: boolean;
+  status: ProfileDraftStatus;
+  generation_source: "LLM" | "FALLBACK" | "MANUAL";
+  confidence: number;
+  reasoning: string | null;
+  validation_result: ReleaseValidation;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ProfileDraftPatch = Partial<
+  Pick<
+    ProfileDraft,
+    | "operation"
+    | "target_profile_id"
+    | "problem_code"
+    | "canonical_question"
+    | "aliases"
+    | "keywords"
+    | "product_name"
+    | "model_names"
+    | "task_type"
+    | "enabled"
+    | "status"
+  >
+>;
+
+export interface KnowledgeRelease {
+  id: string;
+  kb_id: string;
+  index_id: string;
+  index_version: number;
+  index_status: string;
+  status: string;
+  validation_result: ReleaseValidation;
+  generation_error: string | null;
+  draft_count: number;
+  approved_count: number;
+  drafts?: ProfileDraft[];
+  created_at: string;
+  updated_at: string;
+  published_at: string | null;
+}
+
+export interface ProfileFeedback {
+  question: string;
+  occurrences: number;
+  last_seen: string;
+  recommendation: string;
+}
 
 export interface MetricsLatencySummary {
   p50_ms: number;

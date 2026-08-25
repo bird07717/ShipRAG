@@ -9,26 +9,26 @@ import pytest
 from fastapi import Request
 
 import app.support.service as support_service_module
-from app.api.rag import _use_technical_support, support_chat
 from app.api.schemas import ChatRequest
+from app.api.support import support_chat
 from app.core.config import Settings
+from app.gateway.models import ExecutionPolicy
+from app.gateway.repository import GatewayRepository
 from app.support.service import TechnicalSupportService
 
 
 def test_compatibility_route_has_only_formal_and_manual_rollback_modes() -> None:
-    knowledge_id = uuid4()
-    conversation_id = uuid4()
-
-    assert _use_technical_support(
+    support_repository = GatewayRepository(  # type: ignore[arg-type]
+        None,
         Settings(_env_file=None, app_env="test", chat_execution_mode="technical_support"),
-        knowledge_id=knowledge_id,
-        conversation_id=conversation_id,
     )
-    assert not _use_technical_support(
+    rag_repository = GatewayRepository(  # type: ignore[arg-type]
+        None,
         Settings(_env_file=None, app_env="test", chat_execution_mode="legacy_rag"),
-        knowledge_id=knowledge_id,
-        conversation_id=conversation_id,
     )
+
+    assert support_repository._default_policy() == ExecutionPolicy.SUPPORT_ONLY
+    assert rag_repository._default_policy() == ExecutionPolicy.RAG_ONLY
 
 
 def test_formal_support_module_does_not_import_generic_retrieval_stack() -> None:

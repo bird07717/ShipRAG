@@ -49,9 +49,27 @@ export interface ChatDoneEvent {
   sections?: ChatSupportSection[];
   clarification?: { type: string; message: string; choices: Array<{ choice_id: string; title: string }> } | null;
   escalation?: { required: boolean; reason: string | null } | null;
+  execution_engine?: "SUPPORT" | "RAG" | null;
+  fallback?: {
+    from: "SUPPORT" | "RAG";
+    reason: string;
+    support_trace_id?: string;
+  } | null;
   references: ChatReference[];
   usage: Record<string, unknown>;
   latency_ms: number;
+}
+
+export interface ChatStatusEvent {
+  stage: string;
+  engine?: "SUPPORT" | "RAG";
+}
+
+export interface ChatFallbackEvent {
+  from: "SUPPORT" | "RAG";
+  to: "SUPPORT" | "RAG";
+  reason: string;
+  support_trace_id?: string;
 }
 
 export interface ChatStreamCallbacks {
@@ -59,6 +77,8 @@ export interface ChatStreamCallbacks {
   onDelta: (text: string) => void;
   onDone: (event: ChatDoneEvent) => void;
   onError: (message: string) => void;
+  onStatus?: (event: ChatStatusEvent) => void;
+  onFallback?: (event: ChatFallbackEvent) => void;
 }
 
 export interface WelcomePayload {
@@ -78,20 +98,51 @@ export async function fetchWelcome(knowledgeId: string): Promise<WelcomePayload>
   return (await response.json()) as WelcomePayload;
 }
 
-function parseSSE(chunk: string): Array<{ event: string; data: string }> {
-  const events: Array<{ event: string; data: string }> = [];
-  const blocks = chunk.split("\n\n");
-  for (const block of blocks) {
-    const lines = block.split("\n");
-    let event = "";
-    let data = "";
-    for (const line of lines) {
-      if (line.startsWith("event: ")) event = line.slice(7);
-      else if (line.startsWith("data: ")) data = line.slice(6);
-    }
-    if (event && data) events.push({ event, data });
+function parseSSEBlock(block: string): { event: string; data: string } | null {
+  let event = "";
+  const dataLines: string[] = [];
+  for (const line of block.split("\n")) {
+    if (!line || line.startsWith(":")) continue;
+    const colon = line.indexOf(":");
+    const field = colon < 0 ? line : line.slice(0, colon);
+    let value = colon < 0 ? "" : line.slice(colon + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "event") event = value;
+    else if (field === "data") dataLines.push(value);
   }
-  return events;
+  return dataLines.length ? { event: event || "message", data: dataLines.join("\n") } : null;
+}
+
+function consumeSSELines(
+  text: string,
+  state: { line: string; eventLines: string[] },
+  onBlock: (block: string) => void,
+  final = false,
+): void {
+  state.line += text;
+  while (state.line) {
+    const match = /[\r\n]/.exec(state.line);
+    if (!match || match.index === undefined) break;
+    const index = match.index;
+    const delimiter = state.line[index];
+    if (delimiter === "\r" && index === state.line.length - 1 && !final) break;
+    const line = state.line.slice(0, index);
+    const delimiterLength = delimiter === "\r" && state.line[index + 1] === "\n" ? 2 : 1;
+    state.line = state.line.slice(index + delimiterLength);
+    if (line) state.eventLines.push(line);
+    else if (state.eventLines.length) {
+      onBlock(state.eventLines.join("\n"));
+      state.eventLines = [];
+    }
+  }
+  if (final) {
+    if (state.line) state.eventLines.push(state.line);
+    state.line = "";
+    if (state.eventLines.length) {
+      onBlock(state.eventLines.join("\n"));
+      state.eventLines = [];
+    }
+  }
 }
 
 export async function streamChat(
@@ -102,7 +153,7 @@ export async function streamChat(
   options: { choiceId?: string } = {},
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(apiBaseUrl + "/api/v1/support/chat/stream", {
+  const response = await fetch(apiBaseUrl + "/api/v1/chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -128,31 +179,44 @@ export async function streamChat(
   if (!reader) throw new Error("No response body");
 
   const decoder = new TextDecoder();
-  let buffer = "";
+  const parserState = { line: "", eventLines: [] as string[] };
+  let terminalReceived = false;
+  let protocolErrorReported = false;
+
+  const dispatchBlock = (block: string): void => {
+    const evt = parseSSEBlock(block);
+    if (!evt) return;
+    try {
+      const payload = JSON.parse(evt.data);
+      if (evt.event === "trace") {
+        callbacks.onTrace(payload.trace_id, payload.conversation_id);
+      } else if (evt.event === "message") {
+        callbacks.onDelta(payload.delta);
+      } else if (evt.event === "done") {
+        terminalReceived = true;
+        callbacks.onDone(payload as ChatDoneEvent);
+      } else if (evt.event === "status") {
+        callbacks.onStatus?.(payload as ChatStatusEvent);
+      } else if (evt.event === "fallback") {
+        callbacks.onFallback?.(payload as ChatFallbackEvent);
+      } else if (evt.event === "error") {
+        terminalReceived = true;
+        callbacks.onError(payload.message ?? "未知错误");
+      }
+    } catch {
+      protocolErrorReported = true;
+      callbacks.onError("服务返回了无法解析的流事件");
+    }
+  };
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = parseSSE(buffer);
-    buffer = "";
-    for (const evt of events) {
-      try {
-        const payload = JSON.parse(evt.data);
-        if (evt.event === "trace") {
-          callbacks.onTrace(payload.trace_id, payload.conversation_id);
-        } else if (evt.event === "message") {
-          callbacks.onDelta(payload.delta);
-        } else if (evt.event === "done") {
-          callbacks.onDone(payload as ChatDoneEvent);
-        } else if (evt.event === "error") {
-          callbacks.onError(payload.message ?? "未知错误");
-        }
-      } catch {
-        // partial JSON, keep in buffer
-        buffer = evt.data;
-      }
-    }
+    consumeSSELines(decoder.decode(value, { stream: true }), parserState, dispatchBlock);
+  }
+  consumeSSELines(decoder.decode(), parserState, dispatchBlock, true);
+  if (!terminalReceived && !protocolErrorReported && !signal?.aborted) {
+    callbacks.onError("问答流在完成前已断开");
   }
 }
 
@@ -161,6 +225,7 @@ export async function fetchImageBlobUrl(imageAssetId: string): Promise<string> {
     apiBaseUrl + "/api/v1/image-assets/" + imageAssetId + "/content",
     { headers: authHeaders() },
   );
+  if (!response.ok) throw new Error("图片加载失败：HTTP " + response.status);
   const blob = await response.blob();
   return URL.createObjectURL(blob);
 }

@@ -70,6 +70,7 @@ describe("DashboardView metrics", () => {
     await flushPromises();
 
     expect(adminApi.getMetricsOverview).toHaveBeenCalledWith({ knowledgeId: "kb-1" });
+    expect(adminApi.listNoAnswerTraces).toHaveBeenCalledWith("kb-1");
     expect(wrapper.text()).toContain("120"); // total queries
     expect(wrapper.text()).toContain("40.9%"); // no-answer rate
     expect(wrapper.text()).toContain("2,500 ms"); // p95

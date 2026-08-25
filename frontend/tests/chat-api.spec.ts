@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { downloadDocument, fetchImageBlobUrl, streamChat } from "@/api/chat";
 
-function sseResponse(frames: string[]): Response {
+function sseResponse(frames: Array<string | Uint8Array>): Response {
   const encoder = new TextEncoder();
   let index = 0;
   return {
@@ -11,7 +11,13 @@ function sseResponse(frames: string[]): Response {
       getReader: () => ({
         read: () =>
           index < frames.length
-            ? Promise.resolve({ done: false, value: encoder.encode(frames[index++]) })
+            ? Promise.resolve({
+                done: false,
+                value:
+                  typeof frames[index] === "string"
+                    ? encoder.encode(frames[index++] as string)
+                    : frames[index++],
+              })
             : Promise.resolve({ done: true, value: undefined }),
       }),
     },
@@ -39,11 +45,15 @@ describe("chat API", () => {
     const onTrace = vi.fn();
     const onDelta = vi.fn();
     const onDone = vi.fn();
+    const onStatus = vi.fn();
+    const onFallback = vi.fn();
     await streamChat("kb-1", "如何升级", undefined, {
       onTrace,
       onDelta,
       onDone,
       onError: vi.fn(),
+      onStatus,
+      onFallback,
     });
 
     expect(onTrace).toHaveBeenCalledWith("t-1", "c-1");
@@ -54,7 +64,8 @@ describe("chat API", () => {
     expect(donePayload.response_type).toBe("DOC_DELIVERED");
     expect(donePayload.content[0]).toEqual({ type: "text", text: "第一段" });
 
-    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const [url, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/chat/stream");
     expect(request.method).toBe("POST");
     expect(JSON.parse(String(request.body))).toEqual({
       knowledge_id: "kb-1",
@@ -62,6 +73,37 @@ describe("chat API", () => {
       question: "如何升级",
     });
     expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-token");
+  });
+
+  it("dispatches engine status and automatic fallback events", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          'event: status\ndata: {"stage":"gateway_routing","engine":"SUPPORT"}\n\n',
+          'event: fallback\ndata: {"from":"SUPPORT","to":"RAG","reason":"NO_MATCH"}\n\n',
+          'event: done\ndata: {"conversation_id":"c-1","message_id":"m-1","trace_id":"t-1","answer":"RAG回答","response_type":"ANSWERED","execution_engine":"RAG","content":[],"references":[],"usage":{},"latency_ms":10}\n\n',
+        ]),
+      ),
+    );
+    const onStatus = vi.fn();
+    const onFallback = vi.fn();
+
+    await streamChat("kb-1", "问题", undefined, {
+      onTrace: vi.fn(),
+      onDelta: vi.fn(),
+      onDone: vi.fn(),
+      onError: vi.fn(),
+      onStatus,
+      onFallback,
+    });
+
+    expect(onStatus).toHaveBeenCalledWith({ stage: "gateway_routing", engine: "SUPPORT" });
+    expect(onFallback).toHaveBeenCalledWith({
+      from: "SUPPORT",
+      to: "RAG",
+      reason: "NO_MATCH",
+    });
   });
 
   it("surfaces the backend error message on HTTP failure", async () => {
@@ -104,6 +146,115 @@ describe("chat API", () => {
     });
 
     expect(onError).toHaveBeenCalledWith("上游超时");
+  });
+
+  it("preserves an SSE event split across arbitrary network chunks", async () => {
+    const onDone = vi.fn();
+    const frame =
+      'event: done\ndata: {"conversation_id":"c-1","message_id":"m-1","trace_id":"t-1","answer":"完整回答","response_type":"ANSWERED","content":[],"references":[],"usage":{},"latency_ms":10}\n\n';
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        sseResponse([frame.slice(0, 17), frame.slice(17, 63), frame.slice(63)]),
+      ),
+    );
+
+    await streamChat("kb-1", "问题", undefined, {
+      onTrace: vi.fn(),
+      onDelta: vi.fn(),
+      onDone,
+      onError: vi.fn(),
+    });
+
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onDone.mock.calls[0]?.[0].answer).toBe("完整回答");
+  });
+
+  it("accepts CRLF framing, optional field spaces and a CRLF split across chunks", async () => {
+    const onDone = vi.fn();
+    const frame =
+      'event:done\r\ndata:{"conversation_id":"c-1","message_id":"m-1","trace_id":"t-1","answer":"CRLF回答","response_type":"ANSWERED","content":[],"references":[],"usage":{},"latency_ms":10}\r\n\r\n';
+    const split = frame.indexOf("\r\n") + 1;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(sseResponse([frame.slice(0, split), frame.slice(split)])),
+    );
+
+    await streamChat("kb-1", "问题", undefined, {
+      onTrace: vi.fn(),
+      onDelta: vi.fn(),
+      onDone,
+      onError: vi.fn(),
+    });
+
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onDone.mock.calls[0]?.[0].answer).toBe("CRLF回答");
+  });
+
+  it("flushes and dispatches a final event without a trailing blank line", async () => {
+    const onDone = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          'event: done\ndata: {"conversation_id":"c-1","message_id":"m-1","trace_id":"t-1","answer":"尾帧","response_type":"ANSWERED","content":[],"references":[],"usage":{},"latency_ms":10}',
+        ]),
+      ),
+    );
+
+    await streamChat("kb-1", "问题", undefined, {
+      onTrace: vi.fn(),
+      onDelta: vi.fn(),
+      onDone,
+      onError: vi.fn(),
+    });
+
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onDone.mock.calls[0]?.[0].answer).toBe("尾帧");
+  });
+
+  it("reports a stream that ends without done or error", async () => {
+    const onError = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        sseResponse(['event: message\ndata: {"delta":"未完成"}\n\n']),
+      ),
+    );
+
+    await streamChat("kb-1", "问题", undefined, {
+      onTrace: vi.fn(),
+      onDelta: vi.fn(),
+      onDone: vi.fn(),
+      onError,
+    });
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith("问答流在完成前已断开");
+  });
+
+  it("preserves a multibyte UTF-8 character split between byte chunks", async () => {
+    const onDelta = vi.fn();
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(
+      'event: message\ndata: {"delta":"中文"}\n\nevent: done\ndata: {"conversation_id":"c-1","message_id":"m-1","trace_id":"t-1","answer":"中文","response_type":"ANSWERED","content":[],"references":[],"usage":{},"latency_ms":10}\n\n',
+    );
+    const chineseStart = bytes.findIndex((value) => value > 127);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        sseResponse([bytes.slice(0, chineseStart + 1), bytes.slice(chineseStart + 1)]),
+      ),
+    );
+
+    await streamChat("kb-1", "问题", undefined, {
+      onTrace: vi.fn(),
+      onDelta,
+      onDone: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    expect(onDelta).toHaveBeenCalledWith("中文");
   });
 
   it("resolves image asset blobs into object URLs", async () => {

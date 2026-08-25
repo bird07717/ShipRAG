@@ -11,7 +11,7 @@ import {
   Setting,
   Tickets,
 } from "@element-plus/icons-vue";
-import { computed, ref, type Component } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch, type Component } from "vue";
 
 import AdminStudio from "@/components/AdminStudio.vue";
 import DemoChat from "@/components/DemoChat.vue";
@@ -39,6 +39,13 @@ const menuGroups: MenuGroup[] = [
     ],
   },
   {
+    label: "Runtime",
+    items: [
+      { key: "engine-routing", label: "Engine Routing", subtitle: "统一配置新会话的问答引擎策略", icon: Operation },
+      { key: "support-chat", label: "DemoChat 问答测试", subtitle: "通过统一 Gateway 验证真实对外能力", icon: ChatDotRound },
+    ],
+  },
+  {
     label: "Data",
     items: [
       { key: "knowledge", label: "Knowledge Base", subtitle: "知识域与目录管理", icon: Notebook },
@@ -50,21 +57,29 @@ const menuGroups: MenuGroup[] = [
     label: "Technical Support",
     items: [
       { key: "support-profiles", label: "问题文档配置", subtitle: "标准问题与完整文档映射", icon: Files },
-      { key: "support-chat", label: "Support 问答测试", subtitle: "验证完整文档和后续解释", icon: ChatDotRound },
+      { key: "support-configuration", label: "Support Configuration", subtitle: "Profile 与完整文档发布就绪状态", icon: Setting },
+      { key: "support-errors", label: "Support Errors", subtitle: "Profile、文档、工作流与安全错误", icon: Tickets },
+    ],
+  },
+  {
+    label: "Generic RAG",
+    items: [
+      { key: "playground", label: "RAG Playground", subtitle: "检索、Prompt 与答案调试", icon: Operation },
+      { key: "rag-configuration", label: "RAG Configuration", subtitle: "召回、融合、重排与上下文配置", icon: Cpu },
+      { key: "rag-errors", label: "RAG Errors", subtitle: "检索、模型与引用错误", icon: Tickets },
     ],
   },
   {
     label: "Diagnostics",
     items: [
       { key: "logs", label: "Logs & Errors", subtitle: "失败请求、轮次与任务排查", icon: Tickets },
-      { key: "playground", label: "RAG Playground", subtitle: "检索、Prompt 与答案调试", icon: Operation },
       { key: "traces", label: "Trace", subtitle: "完整 RAG 链路追踪", icon: DataLine },
     ],
   },
   {
     label: "Configuration",
     items: [
-      { key: "configuration", label: "Models & Prompt", subtitle: "全局 AI 模型与提示词快照", icon: Cpu },
+      { key: "configuration", label: "Models & Prompt", subtitle: "共享模型注册与提示词快照", icon: Cpu },
       { key: "settings", label: "Settings", subtitle: "本地管理台设置", icon: Setting },
     ],
   },
@@ -74,11 +89,47 @@ const allItems = menuGroups.flatMap((group) => group.items);
 
 const store = useAdminStore();
 
-const activeView = ref("dashboard");
+function hashView(): string {
+  const value = window.location.hash.replace(/^#\/?/, "");
+  return allItems.some((item) => item.key === value) ? value : "dashboard";
+}
+
+const activeView = ref(hashView());
 const activeMenu = computed(
   () => allItems.find((item) => item.key === activeView.value) ?? allItems[0]!,
 );
 const isDemoChat = computed(() => activeView.value === "support-chat");
+
+function selectKnowledge(): void {
+  void store.selectKnowledge();
+}
+
+function syncHash(): void {
+  const next = hashView();
+  if (next !== activeView.value) activeView.value = next;
+}
+
+watch(activeView, (view) => {
+  const target = `#/${view}`;
+  if (window.location.hash !== target) window.history.pushState(null, "", target);
+});
+
+watch(
+  () => store.requestedView,
+  (view) => {
+    if (!view || !allItems.some((item) => item.key === view)) return;
+    activeView.value = view;
+    store.requestedView = "";
+  },
+);
+
+onMounted(() => {
+  window.addEventListener("hashchange", syncHash);
+  if (isDemoChat.value && !store.knowledgeBases.length) {
+    void store.run(() => store.refreshAll());
+  }
+});
+onUnmounted(() => window.removeEventListener("hashchange", syncHash));
 
 /* Data-driven publishing status (replaces the old decorative A/B diagram) */
 const indexStats = computed(() => {
@@ -112,10 +163,49 @@ const indexStats = computed(() => {
           </button>
         </div>
       </nav>
-      <div class="sidebar-footer">V1 · SUPPORT</div>
+      <div class="sidebar-footer">V1 · DUAL ENGINE</div>
     </aside>
 
     <main class="main" :class="{ 'chat-mode': isDemoChat }">
+      <section class="management-context" aria-label="当前管理范围">
+        <div class="context-field">
+          <span>当前知识库</span>
+          <el-select
+            v-model="store.selectedKnowledgeId"
+            placeholder="选择知识库"
+            size="small"
+            @change="selectKnowledge"
+          >
+            <el-option
+              v-for="kb in store.knowledgeBases"
+              :key="kb.id"
+              :label="kb.name"
+              :value="kb.id"
+            />
+          </el-select>
+        </div>
+        <div class="context-fact">
+          <span>环境</span>
+          <strong>{{ store.systemInfo?.environment || "未知" }}</strong>
+        </div>
+        <div class="context-fact">
+          <span>线上版本</span>
+          <strong>{{ store.activeIndex ? `Index v${store.activeIndex.version}` : "无" }}</strong>
+        </div>
+        <button
+          type="button"
+          class="candidate-context"
+          :class="{ actionable: store.selectedRelease }"
+          :disabled="!store.selectedRelease"
+          @click="store.navigate('support-profiles')"
+        >
+          <span>发布候选</span>
+          <strong v-if="store.selectedRelease">
+            v{{ store.selectedRelease.index_version }} · {{ store.pendingReviewCount }} 项待处理
+          </strong>
+          <strong v-else>无</strong>
+        </button>
+      </section>
       <DemoChat v-if="isDemoChat" />
       <div v-else class="page">
         <PageHeader :title="activeMenu.label" :description="activeMenu.subtitle">
@@ -167,6 +257,68 @@ const indexStats = computed(() => {
 </template>
 
 <style scoped>
+.management-context {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  width: min(var(--content-max-width), 100%);
+  margin: 0 auto 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.context-field,
+.context-fact,
+.candidate-context {
+  display: grid;
+  gap: 2px;
+}
+
+.context-field {
+  grid-template-columns: auto 220px;
+  align-items: center;
+  gap: 10px;
+}
+
+.context-field > span,
+.context-fact span,
+.candidate-context span {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.context-fact,
+.candidate-context {
+  padding-left: 18px;
+  border-left: 1px solid var(--border-subtle);
+}
+
+.context-fact strong,
+.candidate-context strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.candidate-context {
+  margin-left: auto;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.candidate-context.actionable {
+  cursor: pointer;
+}
+
+.candidate-context.actionable strong {
+  color: var(--brand-primary);
+}
+
 .index-note {
   display: flex;
   align-items: center;
@@ -222,6 +374,18 @@ const indexStats = computed(() => {
 }
 
 @media (max-width: 900px) {
+  .management-context {
+    flex-wrap: wrap;
+  }
+
+  .context-field {
+    grid-template-columns: 1fr;
+  }
+
+  .candidate-context {
+    margin-left: 0;
+  }
+
   .index-note {
     flex-direction: column;
     align-items: flex-start;

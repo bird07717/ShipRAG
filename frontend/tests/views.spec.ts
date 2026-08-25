@@ -125,6 +125,22 @@ describe("view smoke", () => {
         else if (path.includes("/traces")) body = [trace];
         else if (path.includes("/models")) body = [model];
         else if (path.includes("/prompts")) body = [prompt];
+        else if (path.includes("/runtime-policies/"))
+          body = {
+            knowledge_id: "kb-1",
+            execution_policy: "SUPPORT_ONLY",
+            config_version: 1,
+            fallback_conditions: ["NO_MATCH"],
+            source: "DATABASE",
+          };
+        else if (path.includes("/rag-config"))
+          body = {
+            vector_top_k: 10,
+            bm25_top_k: 10,
+            fusion_top_k: 20,
+            rerank_top_n: 10,
+            context_max_chunks: 8,
+          };
         else if (path.includes("/chat/welcome"))
           body = { knowledge_base: { id: "kb-1", name: "产品库", ready: true }, message: "hi", suggestions: ["Q1"] };
         else if (path.includes("/logs/request-errors"))
@@ -151,7 +167,12 @@ describe("view smoke", () => {
       "playground",
       "traces",
       "configuration",
+      "engine-routing",
       "support-profiles",
+      "support-configuration",
+      "support-errors",
+      "rag-configuration",
+      "rag-errors",
       "settings",
     ]) {
       const wrapper = mount(AdminStudio, {
@@ -200,7 +221,7 @@ describe("view smoke", () => {
     const wrapper = mount(DemoChat, { global: { plugins: [ElementPlus] } });
     await flushPromises();
     await flushPromises();
-    expect(wrapper.text()).toContain("测试技术支持问答");
+    expect(wrapper.text()).toContain("测试统一问答接口");
     expect(wrapper.text()).toContain("问题一");
     wrapper.unmount();
   });

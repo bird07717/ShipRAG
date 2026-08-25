@@ -111,6 +111,18 @@ describe("metrics API", () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("?");
   });
 
+  it("scopes unanswered traces to the selected knowledge base", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminApi.listNoAnswerTraces("kb-1", 25);
+
+    const url = String(fetchMock.mock.calls[0]?.[0]);
+    expect(url).toContain("knowledge_id=kb-1");
+    expect(url).toContain("response_type=UNCONFIRMED");
+    expect(url).toContain("limit=25");
+  });
+
   it("fetches latency metrics with granularity passthrough", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
     vi.stubGlobal("fetch", fetchMock);

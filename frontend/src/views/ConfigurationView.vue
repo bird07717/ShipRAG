@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, reactive, ref } from "vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 import type { ModelConfig, PromptTemplate } from "@/types/admin";
@@ -134,44 +134,6 @@ async function saveEdit(): Promise<void> {
   if (!store.error) editDialogOpen.value = false;
 }
 
-/* ---------- rag retrieval config ---------- */
-
-const RAG_FIELDS = [
-  { key: "vector_top_k", label: "向量召回 Top K", desc: "向量检索返回的候选数量" },
-  { key: "bm25_top_k", label: "BM25 召回 Top K", desc: "关键词检索返回的候选数量" },
-  { key: "fusion_top_k", label: "RRF 融合 Top K", desc: "双路召回融合后进入重排的数量" },
-  { key: "rerank_top_n", label: "Rerank Top N", desc: "重排后保留的候选数量" },
-  { key: "context_max_chunks", label: "上下文最大片段数", desc: "送入 LLM 的上下文章节上限" },
-] as const;
-
-type RagFieldKey = (typeof RAG_FIELDS)[number]["key"];
-
-const ragForm = reactive<Record<RagFieldKey, number>>({
-  vector_top_k: 10,
-  bm25_top_k: 10,
-  fusion_top_k: 20,
-  rerank_top_n: 10,
-  context_max_chunks: 8,
-});
-
-watch(
-  () => store.ragConfig,
-  (config) => {
-    if (!config) return;
-    for (const field of RAG_FIELDS) {
-      ragForm[field.key] = config[field.key];
-    }
-  },
-  { immediate: true },
-);
-
-async function saveRagConfig(): Promise<void> {
-  await store.saveRagConfig({ ...ragForm });
-}
-
-onMounted(() => {
-  if (!store.ragConfig) void store.loadRagConfig().catch(() => undefined);
-});
 </script>
 
 <template>
@@ -245,33 +207,6 @@ onMounted(() => {
             title="暂无模型配置"
             description="全局模型由后端配置管理，用于 Embedding、Rerank 与 LLM 生成。"
           />
-        </div>
-      </el-tab-pane>
-
-      <el-tab-pane label="RAG 检索" name="rag-config">
-        <div class="panel">
-          <header class="panel-header">
-            <div>
-              <h3>检索配置</h3>
-              <span class="sub">
-                保存后下一轮对话立即生效（每轮快照读取），Playground 的手动参数仍可临时覆盖
-              </span>
-            </div>
-          </header>
-          <div class="panel-body rag-form">
-            <div v-for="field in RAG_FIELDS" :key="field.key" class="param-row">
-              <div class="param-label">
-                <label>{{ field.label }}</label>
-                <p class="desc">{{ field.desc }}</p>
-              </div>
-              <el-input-number v-model="ragForm[field.key]" :min="1" :max="100" />
-            </div>
-            <div class="rag-actions">
-              <el-button type="primary" :loading="store.loading" @click="saveRagConfig">
-                保存配置
-              </el-button>
-            </div>
-          </div>
         </div>
       </el-tab-pane>
 

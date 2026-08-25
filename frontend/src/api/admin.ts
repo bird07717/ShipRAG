@@ -14,14 +14,21 @@ import type {
   PromptTemplate,
   ProblemProfile,
   ProblemProfilePayload,
+  KnowledgeRelease,
+  ProfileDraft,
+  ProfileDraftPatch,
+  ProfileFeedback,
+  ReleaseValidation,
   RagConfig,
   RagConfigUpdatePayload,
   RagTrace,
+  RuntimePolicy,
   RequestErrorLog,
   RequestErrorLogList,
   FailureSummary,
   SupportMetrics,
   SupportMessage,
+  SystemInfo,
   TraceSummary,
 } from "@/types/admin";
 
@@ -68,6 +75,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
 }
 
 export const adminApi = {
+  getSystemInfo: () => apiRequest<SystemInfo>("/system/info"),
   listKnowledgeBases: () => apiRequest<KnowledgeBase[]>("/knowledge-bases"),
   createKnowledgeBase: (name: string, description: string) =>
     apiRequest<KnowledgeBase>("/knowledge-bases", {
@@ -125,6 +133,7 @@ export const adminApi = {
       userId?: string;
       errorCode?: string;
       conversationId?: string;
+      engine?: "SUPPORT" | "RAG";
       from?: string;
       to?: string;
       limit?: number;
@@ -137,14 +146,22 @@ export const adminApi = {
     if (filters.userId) search.set("user_id", filters.userId);
     if (filters.errorCode) search.set("error_code", filters.errorCode);
     if (filters.conversationId) search.set("conversation_id", filters.conversationId);
+    if (filters.engine) search.set("engine", filters.engine);
     if (filters.from) search.set("from", filters.from);
     if (filters.to) search.set("to", filters.to);
     if (filters.limit) search.set("limit", String(filters.limit));
     const query = search.toString();
     return apiRequest<TraceSummary[]>(`/traces${query ? `?${query}` : ""}`);
   },
-  listNoAnswerTraces: (limit = 20) =>
-    apiRequest<TraceSummary[]>(`/traces?response_type=UNCONFIRMED&mode=CHAT&limit=${limit}`),
+  listNoAnswerTraces: (knowledgeId?: string, limit = 20) => {
+    const search = new URLSearchParams({
+      response_type: "UNCONFIRMED",
+      mode: "CHAT",
+      limit: String(limit),
+    });
+    if (knowledgeId) search.set("knowledge_id", knowledgeId);
+    return apiRequest<TraceSummary[]>(`/traces?${search.toString()}`);
+  },
   getMetricsOverview: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
     apiRequest<MetricsOverview>(`/metrics/overview${buildMetricsQuery(params)}`),
   getMetricsTimeseries: (
@@ -225,6 +242,13 @@ export const adminApi = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+  getRuntimePolicy: (knowledgeId: string) =>
+    apiRequest<RuntimePolicy>(`/runtime-policies/${knowledgeId}`),
+  updateRuntimePolicy: (knowledgeId: string, executionPolicy: RuntimePolicy["execution_policy"]) =>
+    apiRequest<RuntimePolicy>(`/runtime-policies/${knowledgeId}`, {
+      method: "PUT",
+      body: JSON.stringify({ execution_policy: executionPolicy }),
+    }),
   listPrompts: () => apiRequest<PromptTemplate[]>("/prompts"),
   listProblemProfiles: (knowledgeId: string) =>
     apiRequest<ProblemProfile[]>(`/support/problem-profiles?knowledge_id=${knowledgeId}`),
@@ -233,4 +257,25 @@ export const adminApi = {
       method: "PUT",
       body: JSON.stringify(payload),
     }),
+  listKnowledgeReleases: (knowledgeId: string) =>
+    apiRequest<KnowledgeRelease[]>(`/knowledge-bases/${knowledgeId}/releases`),
+  getKnowledgeRelease: (releaseId: string) =>
+    apiRequest<KnowledgeRelease>(`/releases/${releaseId}`),
+  generateProfileDrafts: (indexId: string) =>
+    apiRequest<ProfileDraft[]>(`/indexes/${indexId}/profile-drafts/generate`, {
+      method: "POST",
+    }),
+  regenerateProfileDraft: (draftId: string) =>
+    apiRequest<ProfileDraft>(`/profile-drafts/${draftId}/regenerate`, { method: "POST" }),
+  updateProfileDraft: (draftId: string, payload: ProfileDraftPatch) =>
+    apiRequest<ProfileDraft>(`/profile-drafts/${draftId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  validateKnowledgeRelease: (releaseId: string) =>
+    apiRequest<ReleaseValidation>(`/releases/${releaseId}/validate`, { method: "POST" }),
+  publishKnowledgeRelease: (releaseId: string) =>
+    apiRequest<KnowledgeRelease>(`/releases/${releaseId}/publish`, { method: "POST" }),
+  listProfileFeedback: (knowledgeId: string) =>
+    apiRequest<ProfileFeedback[]>(`/knowledge-bases/${knowledgeId}/profile-feedback`),
 };
