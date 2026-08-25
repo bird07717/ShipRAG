@@ -119,3 +119,75 @@ describe("metrics API", () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/metrics/latency?knowledge_id=kb-1");
   });
 });
+
+describe("logs & review API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("builds request-error list filters with pagination", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ items: [], total: 0, limit: 10, offset: 20 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminApi.listRequestErrors({
+      requestId: " req-1 ",
+      path: "support",
+      statusCode: 502,
+      from: "2026-08-14",
+      limit: 10,
+      offset: 20,
+    });
+    const url = String(fetchMock.mock.calls[0]?.[0]);
+    expect(url).toContain("/logs/request-errors?");
+    expect(url).toContain("request_id=req-1");
+    expect(url).toContain("path=support");
+    expect(url).toContain("status_code=502");
+    expect(url).toContain("limit=10");
+    expect(url).toContain("offset=20");
+  });
+
+  it("fetches a single request error and the failure summary", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminApi.getRequestError("e-1");
+    await adminApi.getFailureSummary({ knowledgeId: "kb-1" });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("/api/v1/logs/request-errors/e-1");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain(
+      "/logs/failure-summary?knowledge_id=kb-1",
+    );
+  });
+
+  it("lists failed tasks and conversation messages", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminApi.listTasks({ status: "FAILED", knowledgeId: "kb-1", limit: 100 });
+    await adminApi.listConversationMessages("conv-1");
+
+    const tasksUrl = String(fetchMock.mock.calls[0]?.[0]);
+    expect(tasksUrl).toContain("/api/v1/tasks?");
+    expect(tasksUrl).toContain("status=FAILED");
+    expect(tasksUrl).toContain("knowledge_id=kb-1");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe("/api/v1/conversations/conv-1/messages");
+  });
+
+  it("passes error_code and conversation_id trace filters", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminApi.listTraces(undefined, {
+      status: "FAILED",
+      errorCode: "INVALID_EVIDENCE",
+      conversationId: "conv-1",
+    });
+    const url = String(fetchMock.mock.calls[0]?.[0]);
+    expect(url).toContain("status=FAILED");
+    expect(url).toContain("error_code=INVALID_EVIDENCE");
+    expect(url).toContain("conversation_id=conv-1");
+  });
+});

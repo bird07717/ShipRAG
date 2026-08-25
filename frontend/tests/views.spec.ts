@@ -127,6 +127,16 @@ describe("view smoke", () => {
         else if (path.includes("/prompts")) body = [prompt];
         else if (path.includes("/chat/welcome"))
           body = { knowledge_base: { id: "kb-1", name: "产品库", ready: true }, message: "hi", suggestions: ["Q1"] };
+        else if (path.includes("/logs/request-errors"))
+          body = { items: [], total: 0, limit: 20, offset: 0 };
+        else if (path.includes("/logs/failure-summary"))
+          body = {
+            from: "2026-08-14T00:00:00Z",
+            to: "2026-08-21T00:00:00Z",
+            trace_failures: [],
+            request_errors: [],
+            request_errors_by_day: [],
+          };
         else if (path.includes("/health")) body = { status: "ready", checks: {} };
         return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
       }),
@@ -137,6 +147,7 @@ describe("view smoke", () => {
       "knowledge",
       "documents",
       "indexes",
+      "logs",
       "playground",
       "traces",
       "configuration",

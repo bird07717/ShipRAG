@@ -1,6 +1,7 @@
 # ruff: noqa: RUF001
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
@@ -86,6 +87,7 @@ def _document() -> FocusedDocument:
                 image_asset_id=uuid4(),
                 caption="版本界面",
                 mime_type="image/png",
+                ocr_text="VERSION: 2.1.4",
             ),
         ],
     )
@@ -133,9 +135,99 @@ def test_document_delivery_keeps_order_and_optionally_suppresses_images() -> Non
     assert [item["sequence_no"] for item in content] == [1, 2, 3]
     assert [item["type"] for item in content] == ["text", "table", "image"]
     assert images[0]["image_asset_id"] == str(document.blocks[2].image_asset_id)
+    # the vision caption ("版本界面") is ingestion enrichment, not document
+    # content, so it must not ship under the delivered image
+    assert content[2]["caption"] is None
+    assert images[0]["caption"] is None
     without_images, hidden_images = deliver_document(document, include_images=False)
     assert [item["sequence_no"] for item in without_images] == [1, 2]
     assert hidden_images == []
+
+
+def test_document_delivery_keeps_original_alt_text_as_caption() -> None:
+    block = DocumentContentBlock(
+        uuid4(), 1, "image", "出厂设置界面", image_asset_id=uuid4(), caption="AI 生成的描述"
+    )
+    document = FocusedDocument(
+        id=uuid4(),
+        title="t",
+        problem_code=None,
+        index_id=uuid4(),
+        blocks=[block],
+    )
+    content, _ = deliver_document(document, include_images=True)
+    assert content[0]["caption"] == "出厂设置界面"
+
+
+def test_focused_prompt_includes_image_ocr_text() -> None:
+    """Screenshot text is often the only evidence for a fact; the registry
+    line must carry both the vision description and the OCR content."""
+    from app.support.prompt import document_registry
+
+    document = _document()
+    elements, images, content = document_registry(document)
+    image_line = next(line for line in content.splitlines() if "[图片 I1]" in line)
+    assert "描述：版本界面" in image_line
+    assert "图内文字：VERSION: 2.1.4" in image_line
+    assert set(elements) == {"E1", "E2", "E3"}
+    assert set(images) == {"I1"}
+
+
+def test_focused_prompt_image_without_content_falls_back() -> None:
+    from app.support.prompt import document_registry
+
+    document = FocusedDocument(
+        id=uuid4(),
+        title="t",
+        problem_code=None,
+        index_id=uuid4(),
+        blocks=[DocumentContentBlock(uuid4(), 1, "image", image_asset_id=uuid4(), caption=None)],
+    )
+    _, _, content = document_registry(document)
+    assert "（无可识别内容）" in content
+
+
+def test_validator_accepts_ip_from_image_ocr_text() -> None:
+    """A model faithfully repeating a screenshot-only IP must not fail with
+    UNSUPPORTED_PRODUCT_PARAMETER."""
+    document = FocusedDocument(
+        id=uuid4(),
+        title="t",
+        problem_code=None,
+        index_id=uuid4(),
+        blocks=[
+            DocumentContentBlock(
+                uuid4(),
+                1,
+                "image",
+                image_asset_id=uuid4(),
+                caption="IP 配置界面",
+                ocr_text="DEVICE IP: 192.168.3.7",
+            )
+        ],
+    )
+    draft = SupportDraft.model_validate(
+        {
+            "mode": "STEP_GUIDANCE",
+            "answer": "x",
+            "sections": [
+                {
+                    "type": "DOCUMENT_FACT",
+                    "title": "设备地址",
+                    "content": "设备 IP 是 192.168.3.7。",
+                    "evidence_element_ids": ["E1"],
+                }
+            ],
+        }
+    )
+    validated = validate_draft(
+        draft,
+        document=document,
+        evidence_registry={"E1": str(document.blocks[0].element_id)},
+        image_registry={},
+        question="x",
+    )
+    assert validated.sections[0].content == "设备 IP 是 192.168.3.7。"
 
 
 def test_workflow_only_records_explicit_user_updates() -> None:
@@ -208,6 +300,77 @@ def test_validator_requires_evidence_limits_images_and_blocks_unsupported_risk()
         )
 
 
+def test_validator_failures_carry_review_details() -> None:
+    """Each validator rejection must record what the model attempted, so the
+    post-launch review page can explain the failure without re-running it."""
+    document = _document()
+    element_id = str(document.blocks[0].element_id)
+
+    out_of_doc = SupportDraft.model_validate(
+        {
+            "mode": "STEP_GUIDANCE",
+            "answer": "x",
+            "sections": [
+                {
+                    "type": "DOCUMENT_FACT",
+                    "title": "越界证据",
+                    "content": "x",
+                    "evidence_element_ids": ["E99"],
+                }
+            ],
+        }
+    )
+    with pytest.raises(ApiError) as invalid_evidence:
+        validate_draft(
+            out_of_doc,
+            document=document,
+            evidence_registry={"E1": element_id},
+            image_registry={},
+            question="x",
+        )
+    details = invalid_evidence.value.details
+    assert details["section_title"] == "越界证据"
+    assert details["invalid_evidence_ids"] == ["E99"]
+    rejected = details["rejected_draft"]
+    assert rejected["sections"][0]["title"] == "越界证据"
+    assert rejected["sections"][0]["evidence_count"] == 1
+    assert rejected["escalation_required"] is False
+
+    bad_ip = SupportDraft.model_validate(
+        {
+            "mode": "STEP_GUIDANCE",
+            "answer": "x",
+            "sections": [
+                {
+                    "type": "GENERAL_GUIDANCE",
+                    "title": "改地址",
+                    "content": "请改为 10.0.0.99",
+                }
+            ],
+        }
+    )
+    with pytest.raises(ApiError) as unsupported:
+        validate_draft(
+            bad_ip, document=document, evidence_registry={}, image_registry={}, question="x"
+        )
+    assert unsupported.value.details["parameter"] == "10.0.0.99"
+    assert unsupported.value.details["section_title"] == "改地址"
+
+    bad_image = SupportDraft.model_validate(
+        {
+            "mode": "STEP_GUIDANCE",
+            "answer": "x",
+            "sections": [],
+            "image_ids": ["I9"],
+        }
+    )
+    with pytest.raises(ApiError) as invalid_image:
+        validate_draft(
+            bad_image, document=document, evidence_registry={}, image_registry={}, question="x"
+        )
+    assert invalid_image.value.details["invalid_image_ids"] == ["I9"]
+
+
 @pytest.mark.asyncio
 async def test_support_stream_returns_sse_error_after_response_starts() -> None:
     service = TechnicalSupportService(None, Settings(_env_file=None, app_env="test"))  # type: ignore[arg-type]
@@ -247,6 +410,69 @@ class _ConflictEngine:
     @asynccontextmanager
     async def begin(self) -> AsyncIterator[_ConflictConnection]:
         yield self.connection
+
+
+class _RecordingConnection:
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, dict[str, Any] | None]] = []
+
+    async def execute(self, statement: object, parameters: object = None) -> Any:
+        self.executed.append((str(statement), cast(dict[str, Any] | None, parameters)))
+        return _ScriptedResult()
+
+
+class _RecordingEngine:
+    def __init__(self) -> None:
+        self.connection = _RecordingConnection()
+
+    @asynccontextmanager
+    async def begin(self) -> AsyncIterator[_RecordingConnection]:
+        yield self.connection
+
+
+@pytest.mark.asyncio
+async def test_fail_turn_persists_full_error_payload() -> None:
+    """Support failures must keep stage/retryable/detail like legacy RAG
+    fail_turn, otherwise the review page cannot explain upstream errors."""
+    engine = _RecordingEngine()
+    repository = SupportRepository(engine, Settings(_env_file=None, app_env="test"))  # type: ignore[arg-type]
+    turn = SupportTurn(
+        trace_id=uuid4(),
+        conversation_id=uuid4(),
+        user_message_id=uuid4(),
+        assistant_message_id=uuid4(),
+        knowledge_id=uuid4(),
+        index_id=uuid4(),
+        question="测试",
+        focus_document_id=uuid4(),
+        chat_context={},
+        context_version=1,
+        history=[],
+    )
+
+    await repository.fail_turn(
+        turn,
+        code="UPSTREAM_UNAVAILABLE",
+        message="上游暂时不可用",
+        trace={"support_version": 1, "failure": {"code": "UPSTREAM_UNAVAILABLE"}},
+        stage="llm",
+        retryable=True,
+        detail="HTTP 529",
+    )
+
+    trace_sql, trace_params = engine.connection.executed[1]
+    assert "UPDATE rag_trace" in trace_sql
+    assert trace_params is not None
+    error = json.loads(str(trace_params["error"]))
+    assert error == {
+        "code": "UPSTREAM_UNAVAILABLE",
+        "message": "上游暂时不可用",
+        "stage": "llm",
+        "retryable": True,
+        "detail": "HTTP 529",
+    }
+    trace_payload = json.loads(str(trace_params["trace"]))
+    assert trace_payload["failure"]["code"] == "UPSTREAM_UNAVAILABLE"
 
 
 @pytest.mark.asyncio

@@ -109,10 +109,7 @@ class _StubMetricsRepository:
 class _StubTraceRepository:
     def __init__(self) -> None:
         self.list_calls: dict[str, Any] = {}
-
-    async def list_traces(self, **kwargs: Any) -> list[dict[str, Any]]:
-        self.list_calls = kwargs
-        return [
+        self.rows: list[dict[str, Any]] = [
             {
                 "trace_id": "00000000-0000-0000-0000-000000000001",
                 "request_id": "req-1",
@@ -130,6 +127,10 @@ class _StubTraceRepository:
                 "finished_at": "2026-08-20T10:00:01",
             }
         ]
+
+    async def list_traces(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.list_calls = kwargs
+        return self.rows
 
 
 AUTH = {"Authorization": "Bearer test-token"}
@@ -276,6 +277,38 @@ class TestTraceFilters:
             response = client.get("/api/v1/traces?response_type=DOCUMENT_DELIVERED", headers=AUTH)
             assert response.status_code == 200
             assert stub.list_calls["response_type"] == "DOCUMENT_DELIVERED"
+        finally:
+            client.app.dependency_overrides.clear()
+
+    def test_traces_endpoint_passes_error_code_and_conversation_filters(
+        self, client: TestClient
+    ) -> None:
+        stub = _StubTraceRepository()
+        client.app.dependency_overrides[get_rag_repository] = lambda: stub
+        try:
+            response = client.get(
+                "/api/v1/traces?status=FAILED&error_code=INVALID_EVIDENCE"
+                "&conversation_id=00000000-0000-0000-0000-000000000009",
+                headers=AUTH,
+            )
+            assert response.status_code == 200
+            call = stub.list_calls
+            assert call["status"] == "FAILED"
+            assert call["error_code"] == "INVALID_EVIDENCE"
+            assert str(call["conversation_id"]) == "00000000-0000-0000-0000-000000000009"
+        finally:
+            client.app.dependency_overrides.clear()
+
+    def test_trace_response_models_accept_need_more_information(self, client: TestClient) -> None:
+        # regression: 0018 introduced NEED_MORE_INFORMATION but the response
+        # Literals missed it, so reading such a trace failed with a 500.
+        stub = _StubTraceRepository()
+        stub.rows = [dict(stub.rows[0], response_type="NEED_MORE_INFORMATION", status="COMPLETED")]
+        client.app.dependency_overrides[get_rag_repository] = lambda: stub
+        try:
+            response = client.get("/api/v1/traces", headers=AUTH)
+            assert response.status_code == 200
+            assert response.json()[0]["response_type"] == "NEED_MORE_INFORMATION"
         finally:
             client.app.dependency_overrides.clear()
 

@@ -9,6 +9,7 @@ import {
   Odometer,
   Operation,
   Setting,
+  Tickets,
 } from "@element-plus/icons-vue";
 import { computed, ref, type Component } from "vue";
 
@@ -55,6 +56,7 @@ const menuGroups: MenuGroup[] = [
   {
     label: "Diagnostics",
     items: [
+      { key: "logs", label: "Logs & Errors", subtitle: "失败请求、轮次与任务排查", icon: Tickets },
       { key: "playground", label: "RAG Playground", subtitle: "检索、Prompt 与答案调试", icon: Operation },
       { key: "traces", label: "Trace", subtitle: "完整 RAG 链路追踪", icon: DataLine },
     ],

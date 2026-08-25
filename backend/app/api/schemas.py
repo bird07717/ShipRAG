@@ -236,6 +236,9 @@ class MessageResponse(BaseModel):
     content: str
     sources: list[dict[str, Any]]
     status: Literal["STREAMING", "COMPLETED", "FAILED", "CANCELLED"]
+    content_blocks: list[dict[str, Any]] = []
+    response_type: str | None = None
+    support_mode: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -269,6 +272,7 @@ class RagTraceResponse(BaseModel):
             "DOC_DELIVERED",
             "DOCUMENT_DELIVERED",
             "CLARIFICATION_REQUIRED",
+            "NEED_MORE_INFORMATION",
             "NO_MATCH",
             "ESCALATION_REQUIRED",
         ]
@@ -322,6 +326,7 @@ class TraceSummaryResponse(BaseModel):
             "DOC_DELIVERED",
             "DOCUMENT_DELIVERED",
             "CLARIFICATION_REQUIRED",
+            "NEED_MORE_INFORMATION",
             "NO_MATCH",
             "ESCALATION_REQUIRED",
         ]
@@ -430,6 +435,59 @@ class SupportMetricsResponse(BaseModel):
     first_turn_latency: MetricsLatencySummary
     followup_latency: MetricsLatencySummary
     tokens: dict[str, int]
+
+
+class RequestErrorLogSummary(BaseModel):
+    id: UUID
+    request_id: str
+    method: str
+    path: str
+    status_code: int
+    error_code: str
+    message: str
+    created_at: datetime
+
+
+class RequestErrorLogResponse(RequestErrorLogSummary):
+    detail: dict[str, Any]
+
+
+class RequestErrorLogListResponse(BaseModel):
+    items: list[RequestErrorLogSummary]
+    total: int
+    limit: int
+    offset: int
+
+
+class TraceFailureGroup(BaseModel):
+    error_code: str
+    count: int
+    last_seen: datetime
+
+
+class RequestErrorGroup(BaseModel):
+    path: str
+    status_code: int
+    count: int
+    last_seen: datetime
+
+
+class RequestErrorsByDay(BaseModel):
+    day: str
+    count: int
+
+
+class FailureSummaryResponse(BaseModel):
+    """Failure distribution for post-launch review: failed support turns
+    grouped by error code, plus failed HTTP requests grouped by endpoint."""
+
+    from_: datetime = Field(alias="from")
+    to: datetime
+    trace_failures: list[TraceFailureGroup]
+    request_errors: list[RequestErrorGroup]
+    request_errors_by_day: list[RequestErrorsByDay]
+
+    model_config = {"populate_by_name": True}
 
 
 class ModelConfigResponse(BaseModel):

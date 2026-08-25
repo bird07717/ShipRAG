@@ -80,6 +80,7 @@ class DocumentContentBlock:
     mime_type: str | None = None
     width: int | None = None
     height: int | None = None
+    ocr_text: str = ""
 
 
 @dataclass(slots=True)

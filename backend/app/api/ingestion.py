@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated, Any
+from datetime import datetime
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Header, Query, Response, UploadFile, status
@@ -328,6 +329,33 @@ async def list_index_tasks(
     repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
 ) -> list[dict[str, Any]]:
     return await repository.list_index_tasks(index_id)
+
+
+@router.get(
+    "/tasks",
+    response_model=list[TaskResponse],
+    tags=["tasks"],
+)
+async def list_tasks(
+    repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
+    task_status: Annotated[
+        Literal["QUEUED", "RUNNING", "SUCCEEDED", "FAILED"] | None,
+        Query(alias="status"),
+    ] = None,
+    knowledge_id: Annotated[UUID | None, Query()] = None,
+    created_from: Annotated[datetime | None, Query(alias="from")] = None,
+    created_to: Annotated[datetime | None, Query(alias="to")] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[dict[str, Any]]:
+    """Global task list across indexes; `status=FAILED` is the failure-review
+    entry point that previously required knowing the index_id first."""
+    return await repository.list_tasks(
+        status=task_status,
+        knowledge_id=knowledge_id,
+        created_from=created_from,
+        created_to=created_to,
+        limit=limit,
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse, tags=["tasks"])

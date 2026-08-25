@@ -29,11 +29,17 @@ def _sse(event: str, payload: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode()
 
 
-def _failure_trace(turn: SupportTurn, code: str) -> dict[str, Any]:
+def _failure_trace(
+    turn: SupportTurn,
+    code: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     result: dict[str, Any] = {
         "support_version": 1,
         "failure": {"code": code},
     }
+    if details:
+        result["failure"]["details"] = details
     if turn.focus_document_id is not None:
         result["focus_document_id"] = str(turn.focus_document_id)
     if code in {
@@ -501,7 +507,11 @@ class TechnicalSupportService:
                 await provider.aclose()
         except ApiError as exc:
             await self.repository.fail_turn(
-                turn, code=exc.code, message=exc.message, trace=_failure_trace(turn, exc.code)
+                turn,
+                code=exc.code,
+                message=exc.message,
+                trace=_failure_trace(turn, exc.code, details=exc.details or None),
+                detail=exc.details or None,
             )
             raise
         except LlmError as exc:
@@ -509,15 +519,21 @@ class TechnicalSupportService:
                 turn,
                 code=exc.code,
                 message=exc.public_message,
-                trace=_failure_trace(turn, exc.code),
+                trace=_failure_trace(
+                    turn, exc.code, details={"retryable": exc.retryable, "detail": exc.detail}
+                ),
+                stage="llm",
+                retryable=exc.retryable,
+                detail=exc.detail,
             )
             raise ApiError(exc.code, exc.public_message, 502) from exc
-        except Exception:
+        except Exception as exc:
             await self.repository.fail_turn(
                 turn,
                 code="INTERNAL_ERROR",
                 message="技术支持处理失败",
                 trace=_failure_trace(turn, "INTERNAL_ERROR"),
+                detail=f"{type(exc).__name__}: {exc}"[:500],
             )
             raise
 

@@ -285,6 +285,14 @@ async function selectTrace(traceId: string): Promise<void> {
                 用户 {{ activeTraceDetail.user_id }}
               </span>
               <span class="mono muted">{{ activeTraceDetail.trace_id }}</span>
+              <el-button
+                v-if="activeTraceDetail.conversation_id"
+                text
+                size="small"
+                @click="store.openConversation(activeTraceDetail.conversation_id!)"
+              >
+                查看会话回放
+              </el-button>
             </div>
           </div>
         </header>

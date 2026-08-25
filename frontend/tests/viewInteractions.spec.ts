@@ -90,6 +90,136 @@ const model = {
 
 const prompt = { id: "p-1", name: "default", version: 2, content: "SYS PROMPT", active: true };
 
+const failedTraceSummary = {
+  trace_id: "t-fail",
+  mode: "CHAT" as const,
+  kb_id: "kb-1",
+  index_id: "idx-1",
+  conversation_id: "conv-1",
+  question: "为什么升级失败？",
+  status: "FAILED",
+  user_id: "user-1",
+  latency: { total_ms: 900 },
+  error: { code: "INVALID_EVIDENCE", message: "模型引用了当前文档之外的证据" },
+  created_at: "2026-08-17T00:00:00Z",
+};
+
+const failedTraceDetail = {
+  ...failedTraceSummary,
+  request_id: "req-1",
+  retrieval_result: {
+    support_version: 1,
+    failure: { code: "INVALID_EVIDENCE" },
+    focus_document_id: "doc-1",
+    validation_result: { valid: false, code: "INVALID_EVIDENCE" },
+    workflow_after: { current_step: 3, completed_steps: [1, 2] },
+  },
+  rerank_result: {},
+  selected_context: [],
+  prompt: null,
+  answer: null,
+  sources: [],
+  citation_result: {},
+  model_usage: {},
+};
+
+const conversationMessages = [
+  {
+    id: "m-1",
+    conversation_id: "conv-1",
+    role: "USER" as const,
+    content: "为什么升级失败？",
+    sources: [],
+    status: "COMPLETED",
+    content_blocks: [],
+    response_type: null,
+    support_mode: null,
+    created_at: "2026-08-17T00:00:00Z",
+    updated_at: "2026-08-17T00:00:00Z",
+  },
+  {
+    id: "m-2",
+    conversation_id: "conv-1",
+    role: "ASSISTANT" as const,
+    content: "请先检查第一步",
+    sources: [],
+    status: "COMPLETED",
+    content_blocks: [],
+    response_type: "DOCUMENT_DELIVERED",
+    support_mode: "STEP_GUIDANCE",
+    created_at: "2026-08-17T00:00:01Z",
+    updated_at: "2026-08-17T00:00:01Z",
+  },
+];
+
+const requestError = {
+  id: "e-1",
+  request_id: "req-1",
+  method: "POST",
+  path: "/api/v1/support/chat/stream",
+  status_code: 502,
+  error_code: "UPSTREAM_UNAVAILABLE",
+  message: "上游暂时不可用",
+  created_at: "2026-08-17T00:00:00Z",
+};
+
+const escalationTraceSummary = {
+  ...failedTraceSummary,
+  trace_id: "t-esc",
+  question: "设备完全无法启动",
+  status: "COMPLETED",
+  response_type: "ESCALATION_REQUIRED",
+  error: {},
+};
+
+const escalationTraceDetail = {
+  ...escalationTraceSummary,
+  retrieval_result: {
+    support_version: 1,
+    escalation: {
+      required: true,
+      reason: "多次重启后仍然无法进入系统",
+      summary: {
+        problem_code: "VDR600_BOOT_FAILURE",
+        current_step: 4,
+        completed_steps: [1, 2, 3],
+        observations: [],
+        checks_performed: [],
+        missing_information: ["电源指示灯状态"],
+      },
+    },
+  },
+  rerank_result: {},
+  selected_context: [],
+  prompt: null,
+  answer: null,
+  sources: [],
+  citation_result: {},
+  model_usage: {},
+};
+
+const failedTask = {
+  id: "task-1",
+  status: "FAILED",
+  stage: "embedding",
+  progress: 40,
+  attempt: 2,
+  index_id: "idx-1",
+  error_code: "EmbeddingError",
+  error_message: "上游返回 429",
+  metadata: { reason: "MANUAL" },
+  created_at: "2026-08-17T00:00:00Z",
+  updated_at: "2026-08-17T00:00:05Z",
+};
+
+const failureSummary = {
+  from: "2026-08-14T00:00:00Z",
+  to: "2026-08-21T00:00:00Z",
+  trace_failures: [{ error_code: "INVALID_EVIDENCE", count: 2, last_seen: "2026-08-20T10:00:00Z" }],
+  request_errors: [{ path: "/api/v1/support/chat/stream", status_code: 502, count: 3, last_seen: "2026-08-20T10:00:00Z" }],
+  request_errors_by_day: [{ day: "2026-08-20", count: 3 }],
+};
+
 function stubApi() {
   vi.spyOn(adminApi, "listKnowledgeBases").mockResolvedValue([kb]);
   vi.spyOn(adminApi, "listDocuments").mockResolvedValue([doc]);
@@ -128,6 +258,12 @@ describe("view interactions", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     sessionStorage.clear();
+    // shared drawers live in the module-level store and would leak into the
+    // next test's mount (triggering real fetches from the replay drawer)
+    adminStore.conversationDrawerOpen = false;
+    adminStore.conversationId = "";
+    adminStore.traceDrawerOpen = false;
+    adminStore.selectedTrace = null;
   });
 
   it("knowledge: filters, opens detail drawer and rebuilds", async () => {
@@ -185,6 +321,121 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("Timeline");
     expect(wrapper.text()).toContain("LLM Generation");
     expect(wrapper.text()).toContain("答案内容");
+  });
+
+  it("logs: reviews request errors, failed turns and opens conversation replay", async () => {
+    vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
+    vi.spyOn(adminApi, "listRequestErrors").mockResolvedValue({
+      items: [requestError],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.spyOn(adminApi, "getRequestError").mockResolvedValue({
+      ...requestError,
+      detail: { exception_type: "LlmError", stack: "Traceback (most recent call last)" },
+    });
+    vi.spyOn(adminApi, "listTasks").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listTraces").mockResolvedValue([failedTraceSummary]);
+    vi.spyOn(adminApi, "getTrace").mockResolvedValue(failedTraceDetail);
+    vi.spyOn(adminApi, "listConversationMessages").mockResolvedValue(conversationMessages);
+
+    const wrapper = await mountView("logs");
+    // overview: failure distribution from the summary endpoint
+    expect(wrapper.text()).toContain("失败概览");
+    expect(wrapper.text()).toContain("INVALID_EVIDENCE");
+
+    // request errors tab: row click opens the detail drawer with the stack
+    const errorRow = wrapper
+      .findAll(".el-table__row")
+      .find((row) => row.text().includes("上游暂时不可用"));
+    expect(errorRow).toBeDefined();
+    await errorRow!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("请求错误详情");
+    expect(wrapper.text()).toContain("Traceback (most recent call last)");
+
+    // failed turns tab: failed support turn with the full error payload
+    const failedTab = wrapper
+      .findAll(".el-tabs__item")
+      .find((tab) => tab.text().includes("失败轮次"));
+    await failedTab!.trigger("click");
+    await flushPromises();
+    const failedRow = wrapper
+      .findAll(".el-table__row")
+      .find((row) => row.text().includes("为什么升级失败"));
+    expect(failedRow).toBeDefined();
+    await failedRow!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("失败轮次详情");
+    expect(wrapper.text()).toContain("模型引用了当前文档之外的证据");
+
+    // conversation replay: shared drawer renders the multi-turn timeline
+    const replayButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("查看会话回放"));
+    expect(replayButton).toBeDefined();
+    await replayButton!.trigger("click");
+    await flushPromises();
+    expect(adminStore.conversationDrawerOpen).toBe(true);
+    expect(wrapper.text()).toContain("会话回放");
+    expect(wrapper.text()).toContain("请先检查第一步");
+    expect(wrapper.text()).toContain("当前步骤 3");
+  });
+
+  it("logs: reviews failed tasks and escalation records", async () => {
+    vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
+    vi.spyOn(adminApi, "listRequestErrors").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+    });
+    vi.spyOn(adminApi, "listTasks").mockResolvedValue([failedTask]);
+    vi.spyOn(adminApi, "listTraces").mockResolvedValue([escalationTraceSummary]);
+    vi.spyOn(adminApi, "getTrace").mockResolvedValue(escalationTraceDetail);
+
+    const wrapper = await mountView("logs");
+
+    // request-error filter reset keeps working from any tab
+    const resetButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("重置"));
+    await resetButton!.trigger("click");
+    await flushPromises();
+
+    // failed tasks tab: global task list with build failures
+    const tasksTab = wrapper
+      .findAll(".el-tabs__item")
+      .find((tab) => tab.text().includes("任务失败"));
+    await tasksTab!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("EmbeddingError");
+    const taskRow = wrapper
+      .findAll(".el-table__row")
+      .find((row) => row.text().includes("上游返回 429"));
+    expect(taskRow).toBeDefined();
+    await taskRow!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("任务失败详情");
+    expect(wrapper.text()).toContain("MANUAL");
+
+    // escalations tab: read-only escalation records with the handover summary
+    const escalationTab = wrapper
+      .findAll(".el-tabs__item")
+      .find((tab) => tab.text().includes("升级记录"));
+    await escalationTab!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("设备完全无法启动");
+    const escalationRow = wrapper
+      .findAll(".el-table__row")
+      .find((row) => row.text().includes("设备完全无法启动"));
+    await escalationRow!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("升级详情");
+    expect(wrapper.text()).toContain("VDR600_BOOT_FAILURE");
+    expect(wrapper.text()).toContain("电源指示灯状态");
+    expect(wrapper.text()).toContain("多次重启后仍然无法进入系统");
   });
 
   it("configuration: switches tabs and picks a prompt", async () => {

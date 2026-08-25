@@ -44,6 +44,8 @@ export const adminStore = reactive({
   documentDrawerOpen: false,
   selectedTrace: null as RagTrace | null,
   traceDrawerOpen: false,
+  conversationId: "",
+  conversationDrawerOpen: false,
   knowledgeDrawerOpen: false,
   uploadDrawerOpen: false,
   knowledgeSearch: "",
@@ -349,6 +351,12 @@ export const adminStore = reactive({
       this.selectedTrace = await adminApi.getTrace(traceId);
       this.traceDrawerOpen = true;
     });
+  },
+
+  /* Conversation replay drawer (shared by Traces and Logs views). */
+  openConversation(conversationId: string): void {
+    this.conversationId = conversationId;
+    this.conversationDrawerOpen = true;
   },
 
   saveToken(value: string): void {

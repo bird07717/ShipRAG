@@ -79,9 +79,11 @@ export interface IndexTask {
 
 export interface TraceSummary {
   trace_id: string;
+  request_id?: string;
   mode: "CHAT" | "PLAYGROUND";
   kb_id: string;
   index_id: string;
+  conversation_id?: string | null;
   question: string;
   status: string;
   user_id?: string | null;
@@ -258,4 +260,63 @@ export interface SupportMetrics {
   first_turn_latency: MetricsLatencySummary;
   followup_latency: MetricsLatencySummary;
   tokens: { llm_prompt: number; llm_completion: number; llm_total: number };
+}
+
+export interface RequestErrorLog {
+  id: string;
+  request_id: string;
+  method: string;
+  path: string;
+  status_code: number;
+  error_code: string;
+  message: string;
+  detail?: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface RequestErrorLogList {
+  items: RequestErrorLog[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface TraceFailureGroup {
+  error_code: string;
+  count: number;
+  last_seen: string;
+}
+
+export interface RequestErrorGroup {
+  path: string;
+  status_code: number;
+  count: number;
+  last_seen: string;
+}
+
+export interface RequestErrorsByDay {
+  day: string;
+  count: number;
+}
+
+export interface FailureSummary {
+  from: string;
+  to: string;
+  trace_failures: TraceFailureGroup[];
+  request_errors: RequestErrorGroup[];
+  request_errors_by_day: RequestErrorsByDay[];
+}
+
+export interface SupportMessage {
+  id: string;
+  conversation_id: string;
+  role: "USER" | "ASSISTANT";
+  content: string;
+  sources: Array<Record<string, unknown>>;
+  status: string;
+  content_blocks?: Array<Record<string, unknown>>;
+  response_type?: string | null;
+  support_mode?: string | null;
+  created_at: string;
+  updated_at: string;
 }

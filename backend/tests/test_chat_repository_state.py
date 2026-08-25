@@ -22,10 +22,16 @@ class _FakeResult:
     def mappings(self) -> _FakeResult:
         return self
 
+    def __iter__(self) -> Any:
+        return iter(self._rows)
+
     def all(self) -> list[dict[str, Any]]:
         return self._rows
 
     def one_or_none(self) -> dict[str, Any] | None:
+        return self._rows[0] if self._rows else None
+
+    def scalar_one_or_none(self) -> Any:
         return self._rows[0] if self._rows else None
 
 
@@ -260,3 +266,47 @@ def test_turn_focus_defaults_are_backward_compatible() -> None:
     assert turn.focus_document_id is None
     assert turn.chat_context == {}
     assert isinstance(turn.trace_id, UUID)
+
+
+async def test_list_traces_filters_by_error_code_and_conversation() -> None:
+    repo, connection = _repository([])
+    conversation_id = uuid4()
+
+    await repo.list_traces(
+        status="FAILED", error_code="INVALID_EVIDENCE", conversation_id=conversation_id
+    )
+
+    sql, params = connection.executed[0]
+    assert "error ->> 'code' = :error_code" in sql
+    assert "conversation_id = :conversation_id" in sql
+    assert params is not None
+    assert params["error_code"] == "INVALID_EVIDENCE"
+    assert params["conversation_id"] == conversation_id
+
+
+async def test_list_messages_exposes_support_columns() -> None:
+    """Conversation replay needs response_type / support_mode / content_blocks;
+    the columns exist since 0015 but were never selected."""
+    conversation_id = uuid4()
+    row = {
+        "id": str(uuid4()),
+        "conversation_id": str(conversation_id),
+        "role": "ASSISTANT",
+        "content": "请先执行第一步",
+        "sources": [],
+        "status": "COMPLETED",
+        "content_blocks": [],
+        "response_type": "DOCUMENT_DELIVERED",
+        "support_mode": "STEP_GUIDANCE",
+        "created_at": "2026-08-20T10:00:00",
+        "updated_at": "2026-08-20T10:00:01",
+    }
+    repo, connection = _repository([[{"id": conversation_id}], [row]])
+
+    messages = await repo.list_messages(conversation_id)
+
+    sql, _ = connection.executed[1]
+    for column in ("content_blocks", "response_type", "support_mode"):
+        assert column in sql
+    assert messages[0]["response_type"] == "DOCUMENT_DELIVERED"
+    assert messages[0]["support_mode"] == "STEP_GUIDANCE"

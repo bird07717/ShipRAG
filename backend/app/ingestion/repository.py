@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -752,6 +753,41 @@ class IngestionRepository:
                 ),
                 {"index_id": index_id},
             )
+            return [dict(row) for row in result.mappings()]
+
+    async def list_tasks(
+        self,
+        *,
+        status: str | None = None,
+        knowledge_id: UUID | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Cross-index task listing for failure review (worker builds, GC,
+        recovery); backed by ix_task_record_status_created."""
+        clauses = ["1 = 1"]
+        parameters: dict[str, Any] = {"limit": limit}
+        if status is not None:
+            clauses.append("status = :status")
+            parameters["status"] = status
+        if knowledge_id is not None:
+            clauses.append("kb_id = :kb_id")
+            parameters["kb_id"] = knowledge_id
+        if created_from is not None:
+            clauses.append("created_at >= :created_from")
+            parameters["created_from"] = created_from
+        if created_to is not None:
+            clauses.append("created_at < :created_to")
+            parameters["created_to"] = created_to
+        query = f"""
+            SELECT * FROM task_record
+            WHERE {" AND ".join(clauses)}
+            ORDER BY created_at DESC
+            LIMIT :limit
+        """
+        async with self.engine.connect() as connection:
+            result = await connection.execute(text(query), parameters)
             return [dict(row) for row in result.mappings()]
 
     async def activate_index(self, index_id: UUID) -> dict[str, Any]:

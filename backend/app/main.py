@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.health import router as health_router
 from app.api.router import router as api_router
@@ -17,6 +18,7 @@ from app.common.middleware import RequestContextMiddleware
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.resources import AppResources
+from app.observability.recorder import record_request_error, record_unhandled_exception
 
 logger = structlog.get_logger(__name__)
 
@@ -74,6 +76,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
+        await record_request_error(
+            request,
+            status_code=exc.status_code,
+            error_code=exc.code,
+            message=exc.message,
+            detail=exc.details or None,
+        )
         return JSONResponse(
             status_code=exc.status_code,
             content=_error_body(request, exc.code, exc.message, exc.details),
@@ -88,6 +97,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             {"location": list(error["loc"]), "message": error["msg"], "type": error["type"]}
             for error in exc.errors()
         ]
+        await record_request_error(
+            request,
+            status_code=422,
+            error_code="VALIDATION_ERROR",
+            message="请求参数不符合接口约定",
+            detail={"fields": fields},
+        )
         return JSONResponse(
             status_code=422,
             content=_error_body(
@@ -95,9 +111,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         )
 
+    @app.exception_handler(StarletteHTTPException)
+    async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        # Routing failures (404/405) previously bypassed the unified error
+        # body, leaving the integration side without a request_id to report.
+        code = f"HTTP_{exc.status_code}"
+        message = str(exc.detail) if exc.detail else "请求无法处理"
+        await record_request_error(
+            request, status_code=exc.status_code, error_code=code, message=message
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_error_body(request, code, message),
+            headers=getattr(exc, "headers", None),
+        )
+
     @app.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled_error", error_type=type(exc).__name__)
+        await record_unhandled_exception(request, exc)
         return JSONResponse(
             status_code=500,
             content=_error_body(request, "INTERNAL_ERROR", "服务发生内部错误"),

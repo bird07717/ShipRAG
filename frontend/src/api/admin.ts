@@ -17,7 +17,11 @@ import type {
   RagConfig,
   RagConfigUpdatePayload,
   RagTrace,
+  RequestErrorLog,
+  RequestErrorLogList,
+  FailureSummary,
   SupportMetrics,
+  SupportMessage,
   TraceSummary,
 } from "@/types/admin";
 
@@ -119,6 +123,8 @@ export const adminApi = {
       status?: string;
       responseType?: string;
       userId?: string;
+      errorCode?: string;
+      conversationId?: string;
       from?: string;
       to?: string;
       limit?: number;
@@ -129,6 +135,8 @@ export const adminApi = {
     if (filters.status) search.set("status", filters.status);
     if (filters.responseType) search.set("response_type", filters.responseType);
     if (filters.userId) search.set("user_id", filters.userId);
+    if (filters.errorCode) search.set("error_code", filters.errorCode);
+    if (filters.conversationId) search.set("conversation_id", filters.conversationId);
     if (filters.from) search.set("from", filters.from);
     if (filters.to) search.set("to", filters.to);
     if (filters.limit) search.set("limit", String(filters.limit));
@@ -147,6 +155,46 @@ export const adminApi = {
   getSupportMetrics: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
     apiRequest<SupportMetrics>(`/metrics/support${buildMetricsQuery(params)}`),
   getTrace: (traceId: string) => apiRequest<RagTrace>(`/traces/${traceId}`),
+  listRequestErrors: (
+    filters: {
+      requestId?: string;
+      path?: string;
+      statusCode?: number;
+      from?: string;
+      to?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) => {
+    const search = new URLSearchParams();
+    if (filters.requestId) search.set("request_id", filters.requestId.trim());
+    if (filters.path) search.set("path", filters.path.trim());
+    if (filters.statusCode) search.set("status_code", String(filters.statusCode));
+    if (filters.from) search.set("from", filters.from);
+    if (filters.to) search.set("to", filters.to);
+    if (filters.limit) search.set("limit", String(filters.limit));
+    if (filters.offset) search.set("offset", String(filters.offset));
+    const query = search.toString();
+    return apiRequest<RequestErrorLogList>(`/logs/request-errors${query ? `?${query}` : ""}`);
+  },
+  getRequestError: (errorId: string) =>
+    apiRequest<RequestErrorLog>(`/logs/request-errors/${errorId}`),
+  getFailureSummary: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
+    apiRequest<FailureSummary>(`/logs/failure-summary${buildMetricsQuery(params)}`),
+  listTasks: (
+    filters: { status?: string; knowledgeId?: string; from?: string; to?: string; limit?: number } = {},
+  ) => {
+    const search = new URLSearchParams();
+    if (filters.status) search.set("status", filters.status);
+    if (filters.knowledgeId) search.set("knowledge_id", filters.knowledgeId);
+    if (filters.from) search.set("from", filters.from);
+    if (filters.to) search.set("to", filters.to);
+    if (filters.limit) search.set("limit", String(filters.limit));
+    const query = search.toString();
+    return apiRequest<IndexTask[]>(`/tasks${query ? `?${query}` : ""}`);
+  },
+  listConversationMessages: (conversationId: string) =>
+    apiRequest<SupportMessage[]>(`/conversations/${conversationId}/messages`),
   runPlayground: (knowledgeId: string, question: string, options: Record<string, number>) =>
     apiRequest<RagTrace>("/rag/playground", {
       method: "POST",

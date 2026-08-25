@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     index_gc_retention_count: int = 3
     index_gc_retention_days: int = 7
 
+    # Failed-request log retention; 0 disables pruning (keep forever).
+    request_error_log_retention_days: int = 30
+
     siliconflow_embedding_model: str = "Qwen/Qwen3-VL-Embedding-8B"
     siliconflow_rerank_model: str = "Qwen/Qwen3-VL-Reranker-8B"
     siliconflow_ocr_model: str = "deepseek-ai/DeepSeek-OCR"
@@ -142,6 +145,20 @@ class Settings(BaseSettings):
     def validate_readiness_timeout(cls, value: float) -> float:
         if not 0.1 <= value <= 30:
             raise ValueError("readiness timeout must be between 0.1 and 30 seconds")
+        return value
+
+    @field_validator("index_gc_retention_days")
+    @classmethod
+    def validate_index_gc_retention_days(cls, value: int) -> int:
+        if not 1 <= value <= 3_650:
+            raise ValueError("index GC retention days must be between 1 and 3650")
+        return value
+
+    @field_validator("request_error_log_retention_days")
+    @classmethod
+    def validate_request_error_log_retention_days(cls, value: int) -> int:
+        if not 0 <= value <= 3_650:
+            raise ValueError("request error log retention days must be between 0 and 3650")
         return value
 
     @field_validator("rq_index_job_timeout_seconds")

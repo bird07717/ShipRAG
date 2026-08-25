@@ -249,6 +249,10 @@ async def run(
             "m2_embedding_provider": embedding_provider,
             "m3_llm_provider": llm_provider,
             "m5_rerank_provider": rerank_provider,
+            # This smoke verifies the legacy generic-RAG SSE contract
+            # (trace/source/message/done); the runtime default routes /chat to
+            # the technical-support workflow whose stream has no trace event.
+            "chat_execution_mode": "legacy_rag",
         }
     )
     resources = AppResources.create(settings)
@@ -286,7 +290,15 @@ async def run(
                 if not response.headers["content-type"].startswith("text/event-stream"):
                     raise RuntimeError("M3 chat did not return text/event-stream")
                 events = _parse_sse(response.text)
-                trace_payload = next(payload for event, payload in events if event == "trace")
+                # A bare next() raising StopIteration inside asyncio.to_thread
+                # corrupts the future and hangs the whole smoke run, so look
+                # the event up defensively and fail with a clear message.
+                trace_payload = next(
+                    (payload for event, payload in events if event == "trace"), None
+                )
+                if trace_payload is None:
+                    event_names = [event for event, _ in events]
+                    raise RuntimeError(f"M3 SSE stream had no trace event: {event_names}")
                 trace_response = client.get(
                     f"{settings.api_prefix}/traces/{trace_payload['trace_id']}", headers=headers
                 )

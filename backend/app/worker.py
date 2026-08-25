@@ -9,6 +9,7 @@ from rq import Queue, Worker
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.tasks.gc import run_index_gc_sync
+from app.tasks.log_retention import run_request_error_log_retention_sync
 from app.tasks.recovery import reconcile_abandoned_index_builds
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,13 @@ def main() -> None:
         gc_result = run_index_gc_sync(settings)
         if gc_result["deleted_count"]:
             logger.info("GC deleted %s obsolete index(es)", gc_result["deleted_count"])
+    if settings.request_error_log_retention_days > 0:
+        retention_result = run_request_error_log_retention_sync(settings)
+        if retention_result["deleted_count"]:
+            logger.info(
+                "Pruned %s expired request error log row(s)",
+                retention_result["deleted_count"],
+            )
     worker.work(with_scheduler=False)
 
 

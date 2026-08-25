@@ -8,7 +8,12 @@ from app.support.models import FocusedDocument
 def deliver_document(
     document: FocusedDocument, *, include_images: bool
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return original elements in document order; no LLM or chunk reconstruction."""
+    """Return original elements in document order; no LLM or chunk reconstruction.
+
+    Image captions expose only the original DOCX alt text — the ingestion-time
+    vision description is retrieval enrichment, not document content, and
+    showing it under delivered images reads as fabricated commentary.
+    """
     content: list[dict[str, Any]] = []
     images: list[dict[str, Any]] = []
     for block in document.blocks:
@@ -19,7 +24,7 @@ def deliver_document(
                 "type": "image",
                 "sequence_no": block.sequence_no,
                 "image_asset_id": str(block.image_asset_id),
-                "caption": block.caption,
+                "caption": (block.text or "").strip() or None,
                 "mime_type": block.mime_type,
                 "width": block.width,
                 "height": block.height,

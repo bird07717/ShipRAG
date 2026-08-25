@@ -9,11 +9,13 @@ import DashboardView from "@/views/DashboardView.vue";
 import KnowledgeView from "@/views/KnowledgeView.vue";
 import DocumentsView from "@/views/DocumentsView.vue";
 import IndexBuildView from "@/views/IndexBuildView.vue";
+import LogsView from "@/views/LogsView.vue";
 import PlaygroundView from "@/views/PlaygroundView.vue";
 import TracesView from "@/views/TracesView.vue";
 import ConfigurationView from "@/views/ConfigurationView.vue";
 import SettingsView from "@/views/SettingsView.vue";
 import SupportProfilesView from "@/views/SupportProfilesView.vue";
+import ConversationTimeline from "@/components/ConversationTimeline.vue";
 
 const props = defineProps<{ view: string }>();
 
@@ -24,6 +26,7 @@ const views: Record<string, typeof DashboardView> = {
   knowledge: KnowledgeView,
   documents: DocumentsView,
   indexes: IndexBuildView,
+  logs: LogsView,
   playground: PlaygroundView,
   traces: TracesView,
   configuration: ConfigurationView,
@@ -86,6 +89,14 @@ onUnmounted(() => clearInterval(indexPollTimer));
         <h4 class="section-label">Raw JSON</h4>
         <CodeBlock :code="store.formatJson(store.selectedTrace)" max-height="360px" />
       </template>
+    </el-drawer>
+
+    <!-- Shared conversation replay drawer (opened from Trace / Logs views) -->
+    <el-drawer v-model="store.conversationDrawerOpen" title="会话回放" size="640px">
+      <ConversationTimeline
+        v-if="store.conversationDrawerOpen && store.conversationId"
+        :conversation-id="store.conversationId"
+      />
     </el-drawer>
   </section>
 </template>

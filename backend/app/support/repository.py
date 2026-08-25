@@ -486,6 +486,7 @@ class SupportRepository:
                 mime_type=str(row["mime_type"]) if row["mime_type"] else None,
                 width=int(row["width"]) if row["width"] else None,
                 height=int(row["height"]) if row["height"] else None,
+                ocr_text=str(row["ocr_text"] or ""),
             )
             for row in rows
         ]
@@ -582,7 +583,19 @@ class SupportRepository:
         code: str,
         message: str,
         trace: dict[str, Any] | None = None,
+        stage: str | None = None,
+        retryable: bool | None = None,
+        detail: dict[str, Any] | str | None = None,
     ) -> None:
+        # Mirror RagRepository.fail_turn's error payload: code/message plus the
+        # optional stage/retryable/detail diagnostics the review page needs.
+        error: dict[str, Any] = {"code": code, "message": message}
+        if stage is not None:
+            error["stage"] = stage
+        if retryable is not None:
+            error["retryable"] = retryable
+        if detail is not None:
+            error["detail"] = detail
         async with self.engine.begin() as conn:
             await conn.execute(
                 text(
@@ -598,7 +611,7 @@ class SupportRepository:
             """),
                 {
                     "trace_id": turn.trace_id,
-                    "error": json.dumps({"code": code, "message": message}, ensure_ascii=False),
+                    "error": json.dumps(error, ensure_ascii=False),
                     "trace": json.dumps(trace or {}, ensure_ascii=False),
                 },
             )

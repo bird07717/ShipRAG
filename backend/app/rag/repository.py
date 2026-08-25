@@ -959,6 +959,8 @@ class RagRepository:
         mode: str | None = None,
         user_id: str | None = None,
         response_type: str | None = None,
+        error_code: str | None = None,
+        conversation_id: UUID | None = None,
         created_from: datetime | None = None,
         created_to: datetime | None = None,
         limit: int = 50,
@@ -980,6 +982,12 @@ class RagRepository:
         if response_type is not None:
             clauses.append("response_type = :response_type")
             parameters["response_type"] = response_type
+        if error_code is not None:
+            clauses.append("error ->> 'code' = :error_code")
+            parameters["error_code"] = error_code
+        if conversation_id is not None:
+            clauses.append("conversation_id = :conversation_id")
+            parameters["conversation_id"] = conversation_id
         if created_from is not None:
             clauses.append("created_at >= :created_from")
             parameters["created_from"] = created_from
@@ -1344,6 +1352,7 @@ class RagRepository:
                 text(
                     """
                     SELECT id, conversation_id, role, content, sources, status,
+                           content_blocks, response_type, support_mode,
                            created_at, updated_at
                     FROM message WHERE conversation_id = :id
                     ORDER BY sequence_no
