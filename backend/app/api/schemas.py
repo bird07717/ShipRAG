@@ -784,6 +784,7 @@ class ChatResponse(BaseModel):
     escalation: ChatEscalation | None = None
     references: list[ChatReference] = Field(default_factory=list)
     fallback: dict[str, Any] | None = None
+    execution_engine: Literal["SUPPORT", "RAG"] | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int
 

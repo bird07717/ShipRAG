@@ -142,7 +142,7 @@ function formatSize(size: number): string {
           </template>
           <template v-else>
             <b>点击选择 .docx 文件</b>
-            <small>单文件上传，重复文档会生成新版本</small>
+            <small>单文件上传；完全相同的文件会被拒绝，修订文件将作为新的候选文档</small>
           </template>
         </button>
         <input

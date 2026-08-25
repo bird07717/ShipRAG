@@ -2,10 +2,9 @@ import { reactive } from "vue";
 
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
-import type { ExecutionPolicy, ProblemProfile, RuntimePolicy, TraceSummary } from "@/types/admin";
+import type { ProblemProfile, TraceSummary } from "@/types/admin";
 
 export const supportAdminStore = reactive({
-  policy: null as RuntimePolicy | null,
   profiles: [] as ProblemProfile[],
   errors: [] as TraceSummary[],
   loading: false,
@@ -29,22 +28,10 @@ export const supportAdminStore = reactive({
   async loadConfiguration(): Promise<void> {
     const knowledgeId = adminStore.selectedKnowledgeId;
     if (!knowledgeId) {
-      this.policy = null;
       this.profiles = [];
       return;
     }
-    [this.policy, this.profiles] = await Promise.all([
-      adminApi.getRuntimePolicy(knowledgeId),
-      adminApi.listProblemProfiles(knowledgeId),
-    ]);
-  },
-
-  async savePolicy(executionPolicy: ExecutionPolicy): Promise<void> {
-    const knowledgeId = adminStore.selectedKnowledgeId;
-    if (!knowledgeId) return;
-    await this.run(async () => {
-      this.policy = await adminApi.updateRuntimePolicy(knowledgeId, executionPolicy);
-    }, "Support 运行策略已保存，新会话生效");
+    this.profiles = await adminApi.listProblemProfiles(knowledgeId);
   },
 
   async loadErrors(): Promise<void> {
@@ -60,4 +47,3 @@ export const supportAdminStore = reactive({
 export function useSupportAdminStore() {
   return supportAdminStore;
 }
-

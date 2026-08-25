@@ -384,7 +384,7 @@ class SupportRepository:
                    ) AS images_complete
             FROM document_problem_profile p
             JOIN knowledge_base kb ON kb.id = p.kb_id
-            JOIN document_source d ON d.id = p.document_id
+            JOIN document_source d ON d.id = p.document_id AND d.kb_id = p.kb_id
             WHERE p.kb_id = :kb_id
         """
         if enabled_only:

@@ -28,6 +28,7 @@ import type {
   FailureSummary,
   SupportMetrics,
   SupportMessage,
+  SystemInfo,
   TraceSummary,
 } from "@/types/admin";
 
@@ -74,6 +75,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
 }
 
 export const adminApi = {
+  getSystemInfo: () => apiRequest<SystemInfo>("/system/info"),
   listKnowledgeBases: () => apiRequest<KnowledgeBase[]>("/knowledge-bases"),
   createKnowledgeBase: (name: string, description: string) =>
     apiRequest<KnowledgeBase>("/knowledge-bases", {
@@ -151,8 +153,15 @@ export const adminApi = {
     const query = search.toString();
     return apiRequest<TraceSummary[]>(`/traces${query ? `?${query}` : ""}`);
   },
-  listNoAnswerTraces: (limit = 20) =>
-    apiRequest<TraceSummary[]>(`/traces?response_type=UNCONFIRMED&mode=CHAT&limit=${limit}`),
+  listNoAnswerTraces: (knowledgeId?: string, limit = 20) => {
+    const search = new URLSearchParams({
+      response_type: "UNCONFIRMED",
+      mode: "CHAT",
+      limit: String(limit),
+    });
+    if (knowledgeId) search.set("knowledge_id", knowledgeId);
+    return apiRequest<TraceSummary[]>(`/traces?${search.toString()}`);
+  },
   getMetricsOverview: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
     apiRequest<MetricsOverview>(`/metrics/overview${buildMetricsQuery(params)}`),
   getMetricsTimeseries: (

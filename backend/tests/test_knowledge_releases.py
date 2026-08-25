@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from app.common.errors import ApiError
+from app.ingestion.repository import IngestionRepository
 from app.releases.models import GeneratedProfile
+from app.releases.repository import ReleaseRepository
 from app.releases.service import ReleaseService
 from app.support.models import ProblemDecision, ProblemProfile
 from app.support.problem_resolver import ProblemResolver
@@ -100,9 +105,7 @@ def test_replacement_detection_preserves_stable_problem_code() -> None:
         "task_type": "UPGRADE",
     }
 
-    operation, target = ReleaseService._suggest_operation(
-        "如何通过U盘升级PDC", profile, [existing]
-    )
+    operation, target = ReleaseService._suggest_operation("如何通过U盘升级PDC", profile, [existing])
     assert operation == "UPDATE"
     assert target is existing
     merged = ReleaseService._merge_update(profile, existing)
@@ -133,3 +136,83 @@ async def test_model_name_alone_never_directly_selects_a_profile() -> None:
     assert model_only.decision == ProblemDecision.NO_MATCH
     assert product_and_intent.decision == ProblemDecision.MATCHED
     assert product_and_intent.method == "DETERMINISTIC_RULE"
+
+
+class _Result:
+    def __init__(self, *, row: dict[str, Any] | None = None, scalar: Any = None) -> None:
+        self.row = row
+        self.scalar = scalar
+
+    def mappings(self) -> _Result:
+        return self
+
+    def one_or_none(self) -> dict[str, Any] | None:
+        return self.row
+
+    def scalar_one_or_none(self) -> Any:
+        return self.scalar
+
+
+class _Connection:
+    def __init__(self, results: list[_Result] | None = None) -> None:
+        self.results = list(results or [])
+        self.executed: list[tuple[str, dict[str, Any]]] = []
+
+    async def __aenter__(self) -> _Connection:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+    async def execute(self, statement: Any, parameters: dict[str, Any]) -> _Result:
+        self.executed.append((str(statement), parameters))
+        return self.results.pop(0) if self.results else _Result()
+
+
+class _Engine:
+    def __init__(self, connection: _Connection) -> None:
+        self.connection = connection
+
+    def begin(self) -> _Connection:
+        return self.connection
+
+
+@pytest.mark.asyncio
+async def test_new_candidate_cancels_other_open_releases() -> None:
+    knowledge_id = uuid4()
+    connection = _Connection()
+
+    await IngestionRepository._cancel_open_releases(cast(AsyncConnection, connection), knowledge_id)
+
+    sql, parameters = connection.executed[0]
+    assert "SET status = 'CANCELLED'" in sql
+    assert "status NOT IN ('PUBLISHED', 'CANCELLED')" in sql
+    assert parameters == {"kb_id": knowledge_id}
+
+
+@pytest.mark.asyncio
+async def test_publish_rejects_a_release_superseded_by_a_newer_version() -> None:
+    release_id = uuid4()
+    connection = _Connection(
+        [
+            _Result(
+                row={
+                    "id": release_id,
+                    "kb_id": uuid4(),
+                    "index_id": uuid4(),
+                    "status": "READY_TO_PUBLISH",
+                    "index_status": "READY",
+                    "index_version": 2,
+                    "active_index_id": uuid4(),
+                }
+            ),
+            _Result(scalar=1),
+        ]
+    )
+    repository = ReleaseRepository(cast(AsyncEngine, _Engine(connection)))
+
+    with pytest.raises(ApiError) as raised:
+        await repository.publish(release_id)
+
+    assert raised.value.code == "RELEASE_SUPERSEDED"
+    assert "newer_index.version > :index_version" in connection.executed[1][0]

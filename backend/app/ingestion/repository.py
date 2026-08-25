@@ -644,6 +644,10 @@ class IngestionRepository:
             },
         )
         if not activate_on_success:
+            # A knowledge base has exactly one actionable candidate.  A later
+            # build contains a fresher snapshot of every currently stored
+            # document, so older open releases must not remain publishable.
+            await self._cancel_open_releases(connection, knowledge_id)
             await connection.execute(
                 text(
                     """
@@ -665,6 +669,20 @@ class IngestionRepository:
             {"kb_id": knowledge_id},
         )
         return BuildReference(True, False, index_id, task_id, False)
+
+    @staticmethod
+    async def _cancel_open_releases(connection: AsyncConnection, knowledge_id: UUID) -> None:
+        await connection.execute(
+            text(
+                """
+                UPDATE knowledge_release
+                SET status = 'CANCELLED', updated_at = now()
+                WHERE kb_id = :kb_id
+                  AND status NOT IN ('PUBLISHED', 'CANCELLED')
+                """
+            ),
+            {"kb_id": knowledge_id},
+        )
 
     async def create_followup_build_if_needed(self, knowledge_id: UUID) -> BuildReference | None:
         async with self.engine.begin() as connection:

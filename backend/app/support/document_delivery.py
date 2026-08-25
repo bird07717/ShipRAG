@@ -5,6 +5,22 @@ from typing import Any
 from app.support.models import FocusedDocument
 
 
+def _original_image_caption(content: str) -> str | None:
+    """Extract only author-provided DOCX alt text from an enriched image element."""
+    value = content.strip()
+    if not value or value == "文档内图片":
+        return None
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    for line in lines:
+        if line.startswith("图片替代文本："):
+            return line.removeprefix("图片替代文本：").strip() or None
+    if any(line.startswith(("图片描述：", "图片文字：")) for line in lines):
+        return None
+    # Compatibility with indexes created before multimodal enrichment, where
+    # document_element.content contained the original alt text directly.
+    return value
+
+
 def deliver_document(
     document: FocusedDocument, *, include_images: bool
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -24,7 +40,7 @@ def deliver_document(
                 "type": "image",
                 "sequence_no": block.sequence_no,
                 "image_asset_id": str(block.image_asset_id),
-                "caption": (block.text or "").strip() or None,
+                "caption": _original_image_caption(block.text),
                 "mime_type": block.mime_type,
                 "width": block.width,
                 "height": block.height,

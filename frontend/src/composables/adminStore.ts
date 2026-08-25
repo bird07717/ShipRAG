@@ -19,6 +19,7 @@ import type {
   RagConfig,
   RagConfigUpdatePayload,
   RagTrace,
+  SystemInfo,
   TraceSummary,
 } from "@/types/admin";
 
@@ -43,6 +44,7 @@ export const adminStore = reactive({
   elements: [] as Array<Record<string, unknown>>,
   chunks: [] as Array<Record<string, unknown>>,
   latestIndexTasks: {} as Record<string, IndexTask | undefined>,
+  systemInfo: null as SystemInfo | null,
 
   /* selection / ui state */
   selectedKnowledgeId: "",
@@ -57,7 +59,7 @@ export const adminStore = reactive({
   knowledgeSearch: "",
   knowledgeStatusFilter: "",
   documentSearch: "",
-  autoActivate: true,
+  requestedView: "",
   loading: false,
   error: "",
   notice: "",
@@ -81,6 +83,16 @@ export const adminStore = reactive({
   },
   get selectedKnowledge(): KnowledgeBase | null {
     return this.knowledgeBases.find((kb) => kb.id === this.selectedKnowledgeId) ?? null;
+  },
+  get activeIndex(): KnowledgeIndex | null {
+    const activeId = this.selectedKnowledge?.active_index_id;
+    return this.indexes.find((index) => index.id === activeId) ?? null;
+  },
+  get pendingReviewCount(): number {
+    return this.selectedRelease?.drafts?.filter((draft) => draft.status !== "APPROVED").length ?? 0;
+  },
+  get buildingCount(): number {
+    return this.indexes.filter((index) => index.status === "BUILDING").length;
   },
   get filteredKnowledgeBases(): KnowledgeBase[] {
     const keyword = this.knowledgeSearch.trim().toLowerCase();
@@ -114,6 +126,16 @@ export const adminStore = reactive({
     const value = task?.metadata[key];
     return typeof value === "string" || typeof value === "number" ? value : undefined;
   },
+  releaseForIndex(indexId: string): KnowledgeRelease | undefined {
+    return this.knowledgeReleases.find((release) => release.index_id === indexId);
+  },
+  isActionableReleaseIndex(indexId: string): boolean {
+    const release = this.releaseForIndex(indexId);
+    return Boolean(release && !["PUBLISHED", "CANCELLED"].includes(release.status));
+  },
+  navigate(view: string): void {
+    this.requestedView = view;
+  },
 
   /* ---------- core ---------- */
   async run(action: () => Promise<void>, success = ""): Promise<void> {
@@ -137,6 +159,14 @@ export const adminStore = reactive({
     }
   },
 
+  async loadSystemInfo(): Promise<void> {
+    try {
+      this.systemInfo = await adminApi.getSystemInfo();
+    } catch {
+      this.systemInfo = null;
+    }
+  },
+
   async loadKnowledgeDetails(): Promise<void> {
     if (!this.selectedKnowledgeId) {
       this.documents = [];
@@ -146,43 +176,63 @@ export const adminStore = reactive({
       this.profileFeedback = [];
       return;
     }
-    [this.documents, this.indexes] = await Promise.all([
-      adminApi.listDocuments(this.selectedKnowledgeId),
-      adminApi.listIndexes(this.selectedKnowledgeId),
+    const knowledgeId = this.selectedKnowledgeId;
+    const [documents, indexes] = await Promise.all([
+      adminApi.listDocuments(knowledgeId),
+      adminApi.listIndexes(knowledgeId),
     ]);
-    await this.loadIndexTasks();
+    if (this.selectedKnowledgeId !== knowledgeId) return;
+    this.documents = documents;
+    this.indexes = indexes;
+    await this.loadIndexTasks(indexes, knowledgeId);
   },
 
-  async loadIndexTasks(): Promise<void> {
-    const entries = await Promise.all(
-      this.indexes.map(async (index) => {
+  async loadIndexTasks(
+    indexes?: KnowledgeIndex[],
+    knowledgeId?: string,
+  ): Promise<void> {
+    const targetIndexes = indexes ?? this.indexes;
+    const targetKnowledgeId = knowledgeId ?? this.selectedKnowledgeId;
+    const results = await Promise.allSettled(
+      targetIndexes.map(async (index) => {
         const tasks = await adminApi.listIndexTasks(index.id);
         return [index.id, tasks[0]] as const;
       }),
+    );
+    if (this.selectedKnowledgeId !== targetKnowledgeId) return;
+    const entries = results.flatMap((result) =>
+      result.status === "fulfilled" ? [result.value] : [],
     );
     this.latestIndexTasks = Object.fromEntries(entries);
   },
 
   async refreshAll(): Promise<void> {
     await this.loadKnowledgeBases();
-    await Promise.all([
-      this.loadKnowledgeDetails(),
+    await this.loadKnowledgeDetails();
+    await Promise.allSettled([
       adminApi.listTraces().then((value) => (this.traces = value)),
       adminApi.listModels().then((value) => (this.models = value)),
       adminApi.listPrompts().then((value) => (this.prompts = value)),
+      this.loadProblemProfiles(),
+      this.loadReleaseWorkspace(),
+      this.loadSystemInfo(),
     ]);
   },
 
   async selectKnowledge(): Promise<void> {
+    const knowledgeId = this.selectedKnowledgeId;
     this.selectedDocument = null;
     this.selectedTrace = null;
     await this.run(async () => {
-      await this.loadKnowledgeDetails();
-      this.traces = await adminApi.listTraces(this.selectedKnowledgeId || undefined);
-      this.problemProfiles = this.selectedKnowledgeId
-        ? await adminApi.listProblemProfiles(this.selectedKnowledgeId)
-        : [];
-      await this.loadReleaseWorkspace();
+      const [, traces, profiles] = await Promise.all([
+        this.loadKnowledgeDetails(),
+        adminApi.listTraces(knowledgeId || undefined),
+        knowledgeId ? adminApi.listProblemProfiles(knowledgeId) : Promise.resolve([]),
+        this.loadReleaseWorkspace(),
+      ]);
+      if (this.selectedKnowledgeId !== knowledgeId) return;
+      this.traces = traces;
+      this.problemProfiles = profiles;
     });
   },
 
@@ -204,12 +254,14 @@ export const adminStore = reactive({
 
   async upload(file: File): Promise<void> {
     if (!this.selectedKnowledgeId) return;
+    const knowledgeId = this.selectedKnowledgeId;
     await this.run(async () => {
-      await adminApi.uploadDocument(this.selectedKnowledgeId, file);
+      await adminApi.uploadDocument(knowledgeId, file);
       await Promise.all([
         this.loadKnowledgeBases(),
         this.loadKnowledgeDetails(),
       ]);
+      await this.loadReleaseWorkspace().catch(() => undefined);
     }, "文档已上传，候选索引构建已提交；完成后请审核 Profile 草稿");
     if (!this.error) this.uploadDrawerOpen = false;
   },
@@ -255,9 +307,10 @@ export const adminStore = reactive({
   async buildIndex(): Promise<void> {
     if (!this.selectedKnowledgeId) return;
     await this.run(async () => {
-      await adminApi.buildIndex(this.selectedKnowledgeId, this.autoActivate);
+      await adminApi.buildIndex(this.selectedKnowledgeId, false);
       await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
-    }, "索引构建已提交");
+      await this.loadReleaseWorkspace().catch(() => undefined);
+    }, "候选索引构建已提交，完成后需要审核发布");
   },
 
   async activateIndex(indexId: string): Promise<void> {
@@ -328,18 +381,29 @@ export const adminStore = reactive({
       this.profileFeedback = [];
       return;
     }
+    const knowledgeId = this.selectedKnowledgeId;
     const [releases, feedback] = await Promise.all([
-      adminApi.listKnowledgeReleases(this.selectedKnowledgeId),
-      adminApi.listProfileFeedback(this.selectedKnowledgeId),
+      adminApi.listKnowledgeReleases(knowledgeId),
+      adminApi.listProfileFeedback(knowledgeId),
     ]);
+    if (this.selectedKnowledgeId !== knowledgeId) return;
     this.knowledgeReleases = releases;
     this.profileFeedback = feedback;
     const candidate = releases.find(
       (release) => !["PUBLISHED", "CANCELLED"].includes(release.status),
     );
-    this.selectedRelease = candidate
-      ? await adminApi.getKnowledgeRelease(candidate.id)
-      : null;
+    const selected = candidate ? await adminApi.getKnowledgeRelease(candidate.id) : null;
+    if (this.selectedKnowledgeId !== knowledgeId) return;
+    this.selectedRelease = selected;
+  },
+
+  async refreshOperationalState(): Promise<void> {
+    if (!this.selectedKnowledgeId) return;
+    await Promise.allSettled([
+      this.loadKnowledgeBases(),
+      this.loadKnowledgeDetails(),
+      this.loadReleaseWorkspace(),
+    ]);
   },
 
   async refreshSelectedRelease(): Promise<void> {
@@ -371,6 +435,13 @@ export const adminStore = reactive({
       await adminApi.regenerateProfileDraft(draftId);
       await this.refreshSelectedRelease();
     }, "Profile 草稿已重新生成");
+  },
+
+  async rejectProfileDraft(draftId: string): Promise<void> {
+    await this.run(async () => {
+      await adminApi.updateProfileDraft(draftId, { status: "REJECTED" });
+      await this.refreshSelectedRelease();
+    }, "草稿已退回；修改、重新生成或改为仅参考后可再次审核");
   },
 
   async validateKnowledgeRelease(): Promise<void> {

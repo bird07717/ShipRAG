@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -71,6 +72,7 @@ class ChatGatewayService:
                 user_id=user_id,
             )
             await self._freeze(response, policy, ChatEngine.RAG)
+            response["execution_engine"] = ChatEngine.RAG.value
             return response
 
         support_response = await self.support.handle(
@@ -88,6 +90,7 @@ class ChatGatewayService:
         response_type = str(support_response.get("response_type", ""))
         if not policy.allows_fallback(response_type):
             await self._freeze(support_response, policy, ChatEngine.SUPPORT)
+            support_response["execution_engine"] = ChatEngine.SUPPORT.value
             return support_response
 
         rag_response = await self._rag_generate(
@@ -108,6 +111,7 @@ class ChatGatewayService:
             "reason": response_type,
             "support_trace_id": str(support_response["trace_id"]),
         }
+        rag_response["execution_engine"] = ChatEngine.RAG.value
         return rag_response
 
     async def stream(self, **kwargs: Any) -> AsyncIterator[bytes]:
@@ -122,10 +126,23 @@ class ChatGatewayService:
                     yield frame
                 return
 
+            yield _sse("status", {"stage": "support_processing", "engine": "SUPPORT"})
             support_response = await self.support.handle(**kwargs)
             response_type = str(support_response.get("response_type", ""))
             if not policy.allows_fallback(response_type):
                 await self._freeze(support_response, policy, ChatEngine.SUPPORT)
+                support_response["execution_engine"] = ChatEngine.SUPPORT.value
+                yield _sse(
+                    "trace",
+                    {
+                        "trace_id": support_response["trace_id"],
+                        "conversation_id": support_response["conversation_id"],
+                    },
+                )
+                answer = str(support_response.get("answer", ""))
+                for offset in range(0, len(answer), 24):
+                    yield _sse("message", {"delta": answer[offset : offset + 24]})
+                    await asyncio.sleep(0)
                 yield _sse("done", support_response)
                 return
 
@@ -138,6 +155,7 @@ class ChatGatewayService:
                     "support_trace_id": str(support_response["trace_id"]),
                 },
             )
+            yield _sse("status", {"stage": "rag_processing", "engine": "RAG"})
             async for frame in self._rag_stream(
                 policy=policy,
                 parent_trace_id=UUID(str(support_response["trace_id"])),
@@ -178,14 +196,22 @@ class ChatGatewayService:
         ):
             done = _event_payload(frame, "done")
             if done is not None:
+                done["execution_engine"] = ChatEngine.RAG.value
                 if parent_trace_id is not None and done.get("trace_id"):
                     await self.repository.link_fallback(
                         support_trace_id=parent_trace_id,
                         rag_trace_id=UUID(str(done["trace_id"])),
                         reason=fallback_reason or "NO_MATCH",
                     )
+                    done["fallback"] = {
+                        "from": "SUPPORT",
+                        "reason": fallback_reason or "NO_MATCH",
+                        "support_trace_id": str(parent_trace_id),
+                    }
                 await self._freeze(done, policy, ChatEngine.RAG)
-            yield frame
+                yield _sse("done", done)
+            else:
+                yield frame
 
     async def _rag_generate(self, **kwargs: Any) -> dict[str, Any]:
         return await self.rag.generate(

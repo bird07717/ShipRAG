@@ -377,7 +377,8 @@ class ReleaseRepository:
                         await connection.execute(
                             text(
                                 """
-                                SELECT r.*, i.status AS index_status, kb.active_index_id
+                                SELECT r.*, i.status AS index_status,
+                                       i.version AS index_version, kb.active_index_id
                                 FROM knowledge_release r
                                 JOIN knowledge_index i ON i.id = r.index_id
                                 JOIN knowledge_base kb ON kb.id = r.kb_id
@@ -396,6 +397,31 @@ class ReleaseRepository:
                     raise ApiError("RELEASE_NOT_VALIDATED", "发布候选尚未通过验证", 409)
                 if release["index_status"] != "READY":
                     raise ApiError("INDEX_NOT_READY", "候选索引不是 READY 状态", 409)
+                newer_release = await connection.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM knowledge_release newer
+                        JOIN knowledge_index newer_index ON newer_index.id = newer.index_id
+                        WHERE newer.kb_id = :kb_id
+                          AND newer.id <> :release_id
+                          AND newer.status <> 'CANCELLED'
+                          AND newer_index.version > :index_version
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "kb_id": release["kb_id"],
+                        "release_id": release_id,
+                        "index_version": release["index_version"],
+                    },
+                )
+                if newer_release.scalar_one_or_none() is not None:
+                    raise ApiError(
+                        "RELEASE_SUPERSEDED",
+                        "该候选已被更新版本取代，请审核最新发布候选",
+                        409,
+                    )
                 drafts = (
                     (
                         await connection.execute(

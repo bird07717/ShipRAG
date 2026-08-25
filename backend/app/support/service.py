@@ -1,6 +1,7 @@
 # ruff: noqa: E501
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
@@ -367,6 +368,7 @@ class TechnicalSupportService:
                     max_tokens=self.settings.support_llm_max_tokens,
                     temperature=self.settings.support_llm_temperature,
                     timeout_seconds=self.settings.m3_provider_timeout_seconds,
+                    prompt_token_budget=self.settings.m3_prompt_token_budget,
                 )
                 draft, evidence, images = await assistant.answer(
                     question=clean_question,
@@ -374,6 +376,7 @@ class TechnicalSupportService:
                     workflow=turn.chat_context,
                     history=turn.history,
                 )
+                prompt_usage = assistant.prompt_usage
                 # The model can only propose a query. Resolve it again and
                 # require an explicit subsequent choice before changing focus.
                 if draft.document_switch and draft.document_switch.get("query"):
@@ -449,9 +452,15 @@ class TechnicalSupportService:
                         },
                         "references": [self._reference(document.id, document.title)],
                         "workflow": read_workflow(context).model_dump(mode="json"),
+                        "usage": {**provider.usage, "support_prompt": prompt_usage},
                         "latency_ms": _elapsed(started),
                     }
                 )
+                if prompt_usage["truncated"]:
+                    response["disclaimer"] = (
+                        "当前文档超过模型上下文预算，本轮仅使用与问题最相关的完整文档元素；"
+                        "未覆盖部分不会作为回答依据。"
+                    )
                 if draft.escalation.required:
                     response["escalation"] = build_escalation(
                         reason=draft.escalation.reason or "当前文档不足以安全处理该问题",
@@ -478,6 +487,7 @@ class TechnicalSupportService:
                         "workflow_before": turn.chat_context,
                         "workflow_after": context,
                         "validation_result": {"valid": True},
+                        "prompt_context": prompt_usage,
                         "general_guidance_count": sum(
                             section.type.value == "GENERAL_GUIDANCE" for section in draft.sections
                         ),
@@ -500,7 +510,7 @@ class TechnicalSupportService:
                             0, int(provider.usage.get("structured_attempts", 1)) - 1
                         ),
                     },
-                    usage=provider.usage,
+                    usage=response["usage"],
                 )
                 return response
             finally:
@@ -550,4 +560,15 @@ class TechnicalSupportService:
         except Exception:
             yield _sse("error", {"code": "INTERNAL_ERROR", "message": "技术支持处理失败"})
             return
+        yield _sse(
+            "trace",
+            {
+                "trace_id": result["trace_id"],
+                "conversation_id": result["conversation_id"],
+            },
+        )
+        answer = str(result.get("answer", ""))
+        for offset in range(0, len(answer), 24):
+            yield _sse("message", {"delta": answer[offset : offset + 24]})
+            await asyncio.sleep(0)
         yield _sse("done", result)

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
+import { ElMessageBox } from "element-plus";
 
 import EmptyState from "@/components/ui/EmptyState.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
@@ -7,21 +8,8 @@ import { useAdminStore } from "@/composables/adminStore";
 import type { ProblemProfile, ProfileDraft, ProfileDraftOperation } from "@/types/admin";
 
 const store = useAdminStore();
-const editingProfile = ref<ProblemProfile | null>(null);
-const dialogOpen = ref(false);
 const draftDialogOpen = ref(false);
 const editingDraft = ref<ProfileDraft | null>(null);
-const form = reactive({
-  document_id: "",
-  problem_code: "",
-  canonical_question: "",
-  aliases: [] as string[],
-  keywords: [] as string[],
-  product_name: "",
-  model_names: [] as string[],
-  task_type: "",
-  enabled: true,
-});
 const draftForm = reactive({
   operation: "CREATE" as ProfileDraftOperation,
   target_profile_id: "",
@@ -41,6 +29,17 @@ const readyCount = computed(
 const documentNames = computed(
   () => new Map(store.documents.map((document) => [document.id, document.display_name])),
 );
+const targetProfile = computed(() =>
+  store.problemProfiles.find((profile) => profile.id === draftForm.target_profile_id),
+);
+const operationCounts = computed(() => {
+  const drafts = store.selectedRelease?.drafts ?? [];
+  return {
+    create: drafts.filter((draft) => draft.operation === "CREATE").length,
+    update: drafts.filter((draft) => draft.operation === "UPDATE").length,
+    none: drafts.filter((draft) => draft.operation === "NONE").length,
+  };
+});
 
 const reasonLabels: Record<string, string> = {
   PROFILE_DISABLED: "Profile 未启用",
@@ -52,35 +51,6 @@ const reasonLabels: Record<string, string> = {
 
 function readinessText(profile: ProblemProfile): string {
   return profile.readiness_reasons.map((reason) => reasonLabels[reason] ?? reason).join("；");
-}
-
-function openProfile(profile?: ProblemProfile): void {
-  editingProfile.value = profile ?? null;
-  form.document_id = profile?.document_id ?? store.documents[0]?.id ?? "";
-  form.problem_code = profile?.problem_code ?? "";
-  form.canonical_question = profile?.canonical_question ?? "";
-  form.aliases = [...(profile?.aliases ?? [])];
-  form.keywords = [...(profile?.keywords ?? [])];
-  form.product_name = profile?.product_name ?? "";
-  form.model_names = [...(profile?.model_names ?? [])];
-  form.task_type = profile?.task_type ?? "";
-  form.enabled = profile?.enabled ?? true;
-  dialogOpen.value = true;
-}
-
-async function saveProfile(): Promise<void> {
-  await store.saveProblemProfile({
-    document_id: form.document_id,
-    problem_code: form.problem_code.trim(),
-    canonical_question: form.canonical_question.trim(),
-    aliases: form.aliases.map((item) => item.trim()).filter(Boolean),
-    keywords: form.keywords.map((item) => item.trim()).filter(Boolean),
-    product_name: form.product_name.trim() || null,
-    model_names: form.model_names.map((item) => item.trim()).filter(Boolean),
-    task_type: form.task_type.trim() || null,
-    enabled: form.enabled,
-  });
-  if (!store.error) dialogOpen.value = false;
 }
 
 function openDraft(draft: ProfileDraft): void {
@@ -121,20 +91,73 @@ async function approveDraft(draft: ProfileDraft): Promise<void> {
   await store.saveProfileDraft(draft.id, { status: "APPROVED" });
 }
 
+async function rejectDraft(draft: ProfileDraft): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `退回“${draft.document_name}”的草稿？退回后必须修改、重新生成或改为仅参考，才能再次审核。`,
+      "退回修改",
+      { type: "warning", confirmButtonText: "退回", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  await store.rejectProfileDraft(draft.id);
+}
+
+async function regenerateDraft(draft: ProfileDraft): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `重新生成“${draft.document_name}”会覆盖当前未发布内容，是否继续？`,
+      "重新生成草稿",
+      { type: "warning", confirmButtonText: "重新生成", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  await store.regenerateProfileDraft(draft.id);
+}
+
+async function regenerateAll(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      "重新生成会覆盖当前候选中的未发布草稿，人工修改也可能被替换。是否继续？",
+      "重新生成全部草稿",
+      { type: "warning", confirmButtonText: "重新生成", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  await store.generateProfileDrafts();
+}
+
+async function publishRelease(): Promise<void> {
+  const release = store.selectedRelease;
+  if (!release) return;
+  const warnings = release.validation_result?.warnings?.length ?? 0;
+  try {
+    await ElMessageBox.confirm(
+      `将为“${store.selectedKnowledge?.name ?? "当前知识库"}”发布 Index v${release.index_version}：新增 ${operationCounts.value.create}、更新 ${operationCounts.value.update}、仅参考 ${operationCounts.value.none}，质量提示 ${warnings} 项。发布后新请求将使用该版本。`,
+      "确认原子发布",
+      { type: warnings ? "warning" : "success", confirmButtonText: "确认发布", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  await store.publishKnowledgeRelease();
+}
+
+async function loadWorkspace(): Promise<void> {
+  await store.run(async () => {
+    await Promise.all([store.loadProblemProfiles(), store.loadReleaseWorkspace()]);
+  });
+}
+
 watch(
   () => store.selectedKnowledgeId,
-  () =>
-    void Promise.all([store.loadProblemProfiles(), store.loadReleaseWorkspace()]).catch(
-      () => undefined,
-    ),
+  () => void loadWorkspace(),
 );
 
-onMounted(
-  () =>
-    void Promise.all([store.loadProblemProfiles(), store.loadReleaseWorkspace()]).catch(
-      () => undefined,
-    ),
-);
+onMounted(() => void loadWorkspace());
 </script>
 
 <template>
@@ -153,9 +176,9 @@ onMounted(
           <span class="sub">候选索引和 Profile 草稿审核通过后同时发布，审核过程不影响线上问答。</span>
         </div>
         <div class="release-actions">
-          <el-button @click="store.loadReleaseWorkspace()">刷新</el-button>
+          <el-button @click="loadWorkspace">刷新</el-button>
           <template v-if="store.selectedRelease">
-            <el-button :loading="store.loading" @click="store.generateProfileDrafts()">
+            <el-button :loading="store.loading" @click="regenerateAll">
               重新生成草稿
             </el-button>
             <el-button :loading="store.loading" @click="store.validateKnowledgeRelease()">
@@ -165,7 +188,7 @@ onMounted(
               type="primary"
               :loading="store.loading"
               :disabled="store.selectedRelease.status !== 'READY_TO_PUBLISH'"
-              @click="store.publishKnowledgeRelease()"
+              @click="publishRelease"
             >
               原子发布
             </el-button>
@@ -194,24 +217,35 @@ onMounted(
           </el-table-column>
           <el-table-column prop="problem_code" label="问题编号" min-width="170" />
           <el-table-column prop="canonical_question" label="标准问题" min-width="230" />
-          <el-table-column label="生成" width="100">
-            <template #default="scope">{{ scope.row.generation_source }}</template>
+          <el-table-column label="生成" width="105">
+            <template #default="scope"><StatusBadge :status="scope.row.generation_source" /></template>
+          </el-table-column>
+          <el-table-column label="置信度" width="90">
+            <template #default="scope">{{ Math.round(scope.row.confidence * 100) }}%</template>
           </el-table-column>
           <el-table-column label="审核" width="110">
             <template #default="scope"><StatusBadge :status="scope.row.status" /></template>
           </el-table-column>
-          <el-table-column label="操作" width="210" fixed="right">
+          <el-table-column label="操作" width="260" fixed="right">
             <template #default="scope">
               <el-button link type="primary" @click="openDraft(scope.row)">编辑</el-button>
               <el-button
-                v-if="scope.row.status !== 'APPROVED'"
+                v-if="scope.row.status === 'DRAFT'"
                 link
                 type="success"
                 @click="approveDraft(scope.row)"
               >
                 审核通过
               </el-button>
-              <el-button link @click="store.regenerateProfileDraft(scope.row.id)">重新生成</el-button>
+              <el-button
+                v-if="scope.row.status === 'DRAFT'"
+                link
+                type="danger"
+                @click="rejectDraft(scope.row)"
+              >
+                退回
+              </el-button>
+              <el-button link @click="regenerateDraft(scope.row)">重新生成</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -248,16 +282,10 @@ onMounted(
     <section class="panel">
       <header class="panel-header">
         <div>
-          <h3>问题与完整文档映射</h3>
-          <span class="sub">每篇文档描述一个完整问题，首轮命中后按原顺序返回全文和图片。</span>
+          <h3>线上问题与完整文档映射</h3>
+          <span class="sub">此处只读展示当前线上配置；修改必须通过上方候选草稿审核发布。</span>
         </div>
-        <el-button
-          type="primary"
-          :disabled="!store.selectedKnowledgeId || !store.documents.length"
-          @click="openProfile()"
-        >
-          新建问题文档
-        </el-button>
+        <StatusBadge status="ACTIVE" />
       </header>
 
       <el-table v-if="store.problemProfiles.length" :data="store.problemProfiles">
@@ -279,17 +307,39 @@ onMounted(
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90" fixed="right">
-          <template #default="scope">
-            <el-button link type="primary" @click="openProfile(scope.row)">编辑</el-button>
-          </template>
-        </el-table-column>
       </el-table>
       <EmptyState
         v-else
         title="暂无问题文档配置"
-        description="先上传并发布文档，再为每篇文档填写问题编号和标准问题。Alias 可以留空。"
+        description="上传文档后审核自动生成的 Profile 草稿，发布成功后会出现在这里。"
       />
+    </section>
+
+    <section class="panel">
+      <header class="panel-header">
+        <div>
+          <h3>发布历史</h3>
+          <span class="sub">已发布、已取消和当前候选均保留记录；只有当前开放候选可以操作。</span>
+        </div>
+      </header>
+      <el-table v-if="store.knowledgeReleases.length" :data="store.knowledgeReleases">
+        <el-table-column label="索引版本" width="120">
+          <template #default="scope">Index v{{ scope.row.index_version }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="140">
+          <template #default="scope"><StatusBadge :status="scope.row.status" /></template>
+        </el-table-column>
+        <el-table-column label="草稿" width="130">
+          <template #default="scope">{{ scope.row.approved_count }}/{{ scope.row.draft_count }} 已审核</template>
+        </el-table-column>
+        <el-table-column label="创建时间" min-width="180">
+          <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="发布时间" min-width="180">
+          <template #default="scope">{{ store.formatDate(scope.row.published_at) }}</template>
+        </el-table-column>
+      </el-table>
+      <EmptyState v-else title="暂无发布记录" description="第一个候选构建提交后会在这里出现。" />
     </section>
 
     <section v-if="store.profileFeedback.length" class="panel">
@@ -309,78 +359,13 @@ onMounted(
       </el-table>
     </section>
 
-    <el-dialog v-model="dialogOpen" :title="editingProfile ? '编辑问题文档' : '新建问题文档'" width="600px">
-      <div class="dialog-form">
-        <div class="dialog-field">
-          <label>完整技术文档</label>
-          <el-select v-model="form.document_id" style="width: 100%">
-            <el-option
-              v-for="document in store.documents"
-              :key="document.id"
-              :label="document.display_name"
-              :value="document.id"
-            />
-          </el-select>
-        </div>
-        <div class="dialog-field">
-          <label>问题编号</label>
-          <el-input v-model="form.problem_code" placeholder="例如 PDC_UPDATE_UPGRADE" />
-        </div>
-        <div class="dialog-field">
-          <label>标准问题</label>
-          <el-input v-model="form.canonical_question" placeholder="例如 如何通过U盘升级PDC？" />
-        </div>
-        <div class="dialog-field">
-          <label>常用问法 Alias（可选）</label>
-          <el-select
-            v-model="form.aliases"
-            multiple
-            filterable
-            allow-create
-            default-first-option
-            placeholder="仅添加已经确认的高频问法，可以留空"
-            style="width: 100%"
-          />
-        </div>
-        <div class="dialog-field">
-          <label>辅助关键词（可选）</label>
-          <el-select
-            v-model="form.keywords"
-            multiple
-            filterable
-            allow-create
-            style="width: 100%"
-          />
-        </div>
-        <div class="dialog-field"><label>产品名称（可选）</label><el-input v-model="form.product_name" /></div>
-        <div class="dialog-field">
-          <label>型号（可选）</label>
-          <el-select
-            v-model="form.model_names"
-            multiple
-            filterable
-            allow-create
-            style="width: 100%"
-          />
-        </div>
-        <div class="dialog-field"><label>任务类型（可选）</label><el-input v-model="form.task_type" /></div>
-        <div class="dialog-field"><label>启用</label><el-switch v-model="form.enabled" /></div>
-      </div>
-      <template #footer>
-        <el-button @click="dialogOpen = false">取消</el-button>
-        <el-button
-          type="primary"
-          :loading="store.loading"
-          :disabled="!form.document_id || !form.problem_code.trim() || !form.canonical_question.trim()"
-          @click="saveProfile"
-        >
-          保存
-        </el-button>
-      </template>
-    </el-dialog>
-
     <el-dialog v-model="draftDialogOpen" title="审核 Profile 草稿" width="680px">
       <div v-if="editingDraft" class="dialog-form">
+        <div class="draft-origin">
+          <div><span>生成来源</span><StatusBadge :status="editingDraft.generation_source" /></div>
+          <div><span>置信度</span><strong>{{ Math.round(editingDraft.confidence * 100) }}%</strong></div>
+          <div><span>当前状态</span><StatusBadge :status="editingDraft.status" /></div>
+        </div>
         <el-alert
           v-if="editingDraft.reasoning"
           :title="editingDraft.reasoning"
@@ -406,21 +391,50 @@ onMounted(
             />
           </el-select>
         </div>
+        <div v-if="draftForm.operation === 'UPDATE' && targetProfile" class="profile-compare">
+          <h4>当前线上值</h4>
+          <dl>
+            <dt>问题编号</dt><dd>{{ targetProfile.problem_code }}</dd>
+            <dt>标准问题</dt><dd>{{ targetProfile.canonical_question }}</dd>
+            <dt>Alias</dt><dd>{{ targetProfile.aliases.join("、") || "—" }}</dd>
+            <dt>关键词</dt><dd>{{ targetProfile.keywords.join("、") || "—" }}</dd>
+            <dt>文档</dt><dd>{{ documentNames.get(targetProfile.document_id) ?? targetProfile.document_id }}</dd>
+          </dl>
+          <p>下方为候选值；保存修改后需要重新审核。</p>
+        </div>
         <template v-if="draftForm.operation !== 'NONE'">
           <div class="dialog-field"><label>问题编号</label><el-input v-model="draftForm.problem_code" /></div>
           <div class="dialog-field"><label>标准问题</label><el-input v-model="draftForm.canonical_question" /></div>
           <div class="dialog-field">
             <label>Alias</label>
-            <el-select v-model="draftForm.aliases" multiple filterable allow-create style="width: 100%" />
+            <el-select
+              v-model="draftForm.aliases"
+              multiple
+              filterable
+              allow-create
+              style="width: 100%"
+            />
           </div>
           <div class="dialog-field">
             <label>区分关键词</label>
-            <el-select v-model="draftForm.keywords" multiple filterable allow-create style="width: 100%" />
+            <el-select
+              v-model="draftForm.keywords"
+              multiple
+              filterable
+              allow-create
+              style="width: 100%"
+            />
           </div>
           <div class="dialog-field"><label>产品</label><el-input v-model="draftForm.product_name" /></div>
           <div class="dialog-field">
             <label>型号</label>
-            <el-select v-model="draftForm.model_names" multiple filterable allow-create style="width: 100%" />
+            <el-select
+              v-model="draftForm.model_names"
+              multiple
+              filterable
+              allow-create
+              style="width: 100%"
+            />
           </div>
           <div class="dialog-field"><label>任务类型</label><el-input v-model="draftForm.task_type" /></div>
           <div class="dialog-field"><label>发布后启用</label><el-switch v-model="draftForm.enabled" /></div>
@@ -459,5 +473,13 @@ onMounted(
 .readiness-strip strong { color: var(--text-primary); font-size: 24px; }
 .readiness-strip p { margin: 0; line-height: 1.6; }
 .reason { margin-top: 5px; line-height: 1.45; }
+.draft-origin { display: flex; flex-wrap: wrap; gap: 18px; padding: 12px; border-radius: var(--radius-md); background: var(--bg-subtle); }
+.draft-origin > div { display: flex; align-items: center; gap: 8px; }
+.draft-origin span, .profile-compare dt, .profile-compare p { color: var(--text-tertiary); font-size: 12px; }
+.profile-compare { padding: 14px; border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-subtle); }
+.profile-compare h4 { margin-bottom: 10px; font-size: 13px; }
+.profile-compare dl { display: grid; grid-template-columns: 90px 1fr; gap: 7px 12px; margin: 0; }
+.profile-compare dd { margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
+.profile-compare p { margin-top: 10px; }
 @media (max-width: 900px) { .readiness-strip { grid-template-columns: 1fr 1fr 1fr; } .readiness-strip p { grid-column: 1 / -1; } }
 </style>

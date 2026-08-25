@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 
-import { adminApi } from "@/api/admin";
 import { fetchImageBlobUrl, fetchWelcome, streamChat, downloadDocument } from "@/api/chat";
-import type { KnowledgeBase } from "@/types/admin";
-import type { ChatContentBlock, ChatReference, ChatSupportSection } from "@/api/chat";
+import type {
+  ChatContentBlock,
+  ChatFallbackEvent,
+  ChatReference,
+  ChatSupportSection,
+} from "@/api/chat";
+import { useAdminStore } from "@/composables/adminStore";
 import { renderMarkdown } from "@/utils/markdown";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import ChatComposer from "@/components/ui/ChatComposer.vue";
@@ -23,12 +27,23 @@ interface UiMessage {
   clarification?: { type: string; message: string; choices: Array<{ choice_id: string; title: string }> } | null;
   escalation?: { required: boolean; reason: string | null } | null;
   latency_ms?: number;
+  execution_engine?: "SUPPORT" | "RAG" | null;
+  route_stage?: string;
+  fallback?: ChatFallbackEvent | null;
   streaming?: boolean;
   stopped?: boolean;
 }
 
-const knowledgeBases = ref<KnowledgeBase[]>([]);
-const selectedKb = ref("");
+const store = useAdminStore();
+const knowledgeBases = computed(() => store.knowledgeBases);
+const selectedKb = computed({
+  get: () => store.selectedKnowledgeId,
+  set: (value: string) => {
+    if (store.selectedKnowledgeId === value) return;
+    store.selectedKnowledgeId = value;
+    void store.selectKnowledge();
+  },
+});
 const messages = ref<UiMessage[]>([]);
 const welcomeMessage = ref("你好！我是文档助手，请描述你的问题开始对话。");
 const suggestions = ref<string[]>([]);
@@ -71,6 +86,11 @@ const modeTones: Record<string, string> = {
   UNCONFIRMED: "neutral",
   OUT_OF_SCOPE: "danger",
 };
+const stageLabels: Record<string, string> = {
+  gateway_routing: "正在解析引擎路由",
+  support_processing: "Support 正在匹配 Profile / 处理文档",
+  rag_processing: "RAG 正在检索并生成回答",
+};
 
 const visibleMessages = computed(() =>
   messages.value.filter((message) => !message.id.startsWith("welcome-")),
@@ -98,6 +118,9 @@ function formatLatency(ms: number | undefined): string {
   if (!ms) return "";
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 }
+function fallbackReason(reason: string): string {
+  return reason === "NO_MATCH" ? "Support 未匹配到 Profile（NO_MATCH）" : reason;
+}
 
 // 切换知识库：清空会话并拉取欢迎引导词（虚拟消息，不入会话历史）
 async function loadWelcome(kbId: string) {
@@ -120,6 +143,8 @@ async function loadWelcome(kbId: string) {
 
 watch(selectedKb, (kbId) => {
   streamGeneration += 1;
+  abortController.value?.abort();
+  abortController.value = null;
   loading.value = false;
   messages.value = [];
   conversationId.value = undefined;
@@ -167,20 +192,42 @@ async function send(choiceId?: string) {
         if (!conversationId.value) conversationId.value = convId;
       },
       onDelta: (text) => {
+        if (generation !== streamGeneration) return;
         const target = messages.value.find((m) => m.id === pid);
         if (target) {
           target.text = (target.text || "") + text;
         }
         scrollToBottomDebounce();
       },
+      onStatus: (event) => {
+        if (generation !== streamGeneration) return;
+        const target = messages.value.find((m) => m.id === pid);
+        if (target) {
+          target.route_stage = event.stage;
+          if (event.engine) target.execution_engine = event.engine;
+        }
+        streamingHint.value = stageLabels[event.stage] ?? "正在处理请求...";
+      },
+      onFallback: (event) => {
+        if (generation !== streamGeneration) return;
+        const target = messages.value.find((m) => m.id === pid);
+        if (target) {
+          target.fallback = event;
+          target.execution_engine = event.to;
+          target.route_stage = "rag_processing";
+        }
+        streamingHint.value = "Support 未匹配到文档，已自动降级到 RAG...";
+      },
       onDone: (event) => {
+        if (generation !== streamGeneration) return;
         const idx = messages.value.findIndex((m) => m.id === pid);
         if (idx >= 0) {
+          const current = messages.value[idx]!;
           messages.value[idx] = {
             id: event.message_id,
             role: "assistant",
             text: event.answer,
-            content: event.content,
+            content: event.content.length ? event.content : undefined,
             answer_mode: event.answer_mode,
             support_mode: event.support_mode,
             response_type: event.response_type,
@@ -189,6 +236,16 @@ async function send(choiceId?: string) {
             sections: event.sections,
             clarification: event.clarification,
             escalation: event.escalation,
+            execution_engine: event.execution_engine ?? current.execution_engine,
+            fallback: event.fallback
+              ? {
+                  from: event.fallback.from,
+                  to: event.execution_engine ?? "RAG",
+                  reason: event.fallback.reason,
+                  support_trace_id: event.fallback.support_trace_id,
+                }
+              : current.fallback,
+            route_stage: "completed",
             latency_ms: event.latency_ms,
             streaming: false,
           };
@@ -209,6 +266,7 @@ async function send(choiceId?: string) {
         scrollToBottomDebounce();
       },
       onError: (msg) => {
+        if (generation !== streamGeneration) return;
         const idx = messages.value.findIndex((m) => m.id === pid);
         if (idx >= 0) {
           messages.value[idx] = {
@@ -283,10 +341,10 @@ function clearChat() {
 
 onMounted(async () => {
   try {
-    const kbs = await adminApi.listKnowledgeBases();
-    knowledgeBases.value = kbs;
-    const first = kbs[0];
-    if (first) selectedKb.value = first.id;
+    if (!store.knowledgeBases.length) await store.loadKnowledgeBases();
+    const first = store.knowledgeBases[0];
+    if (!selectedKb.value && first) selectedKb.value = first.id;
+    else if (selectedKb.value) void loadWelcome(selectedKb.value);
   } catch {
     // ignore
   }
@@ -295,7 +353,7 @@ onMounted(async () => {
 
 <template>
   <div class="demo-page">
-    <PageHeader title="Support 问答测试" description="验证首轮完整文档交付和后续文档约束回答。">
+    <PageHeader title="DemoChat 问答测试" description="通过统一 Gateway 验证当前知识库的真实对外问答能力。">
       <template #actions>
         <el-button :disabled="!visibleMessages.length" @click="clearChat">新会话</el-button>
       </template>
@@ -319,15 +377,15 @@ onMounted(async () => {
         </el-select>
       </div>
       <span class="muted context-hint">
-        首轮返回匹配问题的完整技术文档；后续回答以该文档为事实边界
+        实际执行引擎由 Engine Routing 决定；切换知识库将开始新会话
       </span>
     </div>
 
     <div class="chat-panel">
       <!-- Centered empty / welcome state -->
       <div v-if="showHero" ref="messagesContainer" class="chat-hero">
-        <div class="hero-mark">S</div>
-        <h2>测试技术支持问答</h2>
+        <div class="hero-mark">D</div>
+        <h2>测试统一问答接口</h2>
         <p>{{ welcomeMessage }}</p>
         <div v-if="suggestions.length" class="hero-suggestions">
           <span class="suggestion-label">Suggested Questions</span>
@@ -358,7 +416,16 @@ onMounted(async () => {
             <div class="assistant-avatar">S</div>
             <div class="assistant-body">
               <div class="assistant-head">
-                <span class="assistant-name">技术支持助手</span>
+                <span class="assistant-name">
+                  {{ msg.execution_engine === "RAG" ? "RAG 助手" : msg.execution_engine === "SUPPORT" ? "Support 助手" : "问答助手" }}
+                </span>
+                <span
+                  v-if="msg.execution_engine"
+                  class="engine-tag"
+                  :class="msg.execution_engine.toLowerCase()"
+                >
+                  {{ msg.execution_engine }} Engine
+                </span>
                 <span v-if="msg.answer_mode" class="mode-tag" :class="modeTone(msg.answer_mode)">
                   {{ modeLabel(msg.answer_mode) }}
                 </span>
@@ -400,6 +467,10 @@ onMounted(async () => {
               </div>
               <div v-if="msg.streaming && streamingHint" class="streaming-hint">
                 {{ streamingHint }}
+              </div>
+              <div v-if="msg.fallback" class="route-notice">
+                <b>自动降级：{{ msg.fallback.from }} → {{ msg.fallback.to }}</b>
+                <span>{{ fallbackReason(msg.fallback.reason) }}</span>
               </div>
               <div v-if="msg.disclaimer" class="disclaimer-box">{{ msg.disclaimer }}</div>
               <div v-if="msg.sections?.length" class="support-sections">
@@ -668,6 +739,25 @@ onMounted(async () => {
   line-height: 18px;
 }
 
+.engine-tag {
+  padding: 0 7px;
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+  font-family: "JetBrains Mono Variable", monospace;
+  font-size: 10px;
+  line-height: 18px;
+}
+
+.engine-tag.support {
+  color: var(--brand-primary);
+  background: var(--brand-subtle);
+}
+
+.engine-tag.rag {
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
 .mode-tag.success {
   color: var(--success);
   background: var(--success-bg);
@@ -692,6 +782,22 @@ onMounted(async () => {
 .ai-bubble {
   color: var(--text-primary);
   background: var(--bg-subtle);
+}
+
+.route-notice {
+  display: grid;
+  gap: 2px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  background: var(--warning-bg);
+  font-size: 12px;
+}
+
+.route-notice b {
+  color: var(--warning);
 }
 
 .content-block {

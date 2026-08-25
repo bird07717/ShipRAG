@@ -68,11 +68,7 @@ function formatDuration(index: KnowledgeIndex): string {
               :value="kb.id"
             />
           </el-select>
-          <el-switch
-            v-model="store.autoActivate"
-            active-text="完成后自动激活"
-            inactive-text="人工验证"
-          />
+          <span class="muted candidate-note">新构建统一进入候选审核，不自动影响线上</span>
           <div class="spacer" />
           <el-button :disabled="!store.selectedKnowledgeId" @click="store.gcIndexes()">
             回收旧索引
@@ -129,12 +125,26 @@ function formatDuration(index: KnowledgeIndex): string {
         <el-table-column label="" width="90" align="right">
           <template #default="scope">
             <el-button
-              v-if="scope.row.status === 'READY'"
+              v-if="scope.row.status === 'READY' && store.isActionableReleaseIndex(scope.row.id)"
+              link
+              type="primary"
+              @click.stop="store.navigate('support-profiles')"
+            >
+              审核发布
+            </el-button>
+            <span
+              v-else-if="scope.row.status === 'READY' && store.releaseForIndex(scope.row.id)"
+              class="muted superseded-label"
+            >
+              已被取代
+            </span>
+            <el-button
+              v-else-if="scope.row.status === 'READY' && !store.releaseForIndex(scope.row.id)"
               link
               type="primary"
               @click.stop="store.activateIndex(scope.row.id)"
             >
-              激活
+              激活旧式快照
             </el-button>
             <el-button
               v-if="scope.row.status === 'DEPRECATED' || scope.row.status === 'FAILED'"
@@ -244,11 +254,24 @@ function formatDuration(index: KnowledgeIndex): string {
 
         <div class="detail-actions">
           <el-button
-            v-if="detailIndex.status === 'READY'"
+            v-if="detailIndex.status === 'READY' && store.isActionableReleaseIndex(detailIndex.id)"
+            type="primary"
+            @click="store.navigate('support-profiles'); detailOpen = false"
+          >
+            进入发布审核
+          </el-button>
+          <el-alert
+            v-else-if="detailIndex.status === 'READY' && store.releaseForIndex(detailIndex.id)"
+            title="该候选已被更新版本取代，不能再发布"
+            type="info"
+            :closable="false"
+          />
+          <el-button
+            v-else-if="detailIndex.status === 'READY' && !store.releaseForIndex(detailIndex.id)"
             type="primary"
             @click="store.activateIndex(detailIndex.id)"
           >
-            激活此快照
+            激活旧式快照
           </el-button>
           <el-button
             v-if="detailIndex.status === 'DEPRECATED' || detailIndex.status === 'FAILED'"
@@ -267,6 +290,14 @@ function formatDuration(index: KnowledgeIndex): string {
 <style scoped>
 .toolbar-row {
   padding-bottom: 0;
+}
+
+.candidate-note {
+  font-size: 12px;
+}
+
+.superseded-label {
+  font-size: 12px;
 }
 
 :deep(.el-table__row) {

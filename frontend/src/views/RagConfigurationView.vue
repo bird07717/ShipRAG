@@ -1,13 +1,9 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from "vue";
+import { onMounted, reactive } from "vue";
 
-import { useAdminStore } from "@/composables/adminStore";
 import { useRagAdminStore } from "@/composables/ragAdminStore";
-import type { ExecutionPolicy } from "@/types/admin";
 
-const shared = useAdminStore();
 const rag = useRagAdminStore();
-const selectedPolicy = ref<ExecutionPolicy>("SUPPORT_ONLY");
 
 const fields = [
   { key: "vector_top_k", label: "向量召回 Top K" },
@@ -28,13 +24,11 @@ const form = reactive<Record<FieldKey, number>>({
 
 async function load(): Promise<void> {
   await rag.run(() => rag.loadConfiguration());
-  if (rag.policy) selectedPolicy.value = rag.policy.execution_policy;
   if (rag.config) {
     for (const field of fields) form[field.key] = rag.config[field.key];
   }
 }
 
-watch(() => shared.selectedKnowledgeId, () => void load());
 onMounted(() => void load());
 </script>
 
@@ -53,37 +47,27 @@ onMounted(() => void load());
       type="success"
       show-icon
     />
+    <el-alert
+      title="这是系统级全局 RAG 配置，影响所有进入 RAG 的知识库和下一轮 RAG 请求。总引擎策略请在 Engine Routing 页面管理。"
+      type="warning"
+      :closable="false"
+      show-icon
+    />
     <section class="panel">
       <header class="panel-header">
         <div>
-          <h3>Generic RAG 配置</h3>
-          <span class="sub">独立管理 RAG 启用策略、召回、融合、重排和上下文规模</span>
+          <h3>Generic RAG 全局配置</h3>
+          <span class="sub">独立管理召回、融合、重排和上下文规模</span>
         </div>
       </header>
       <div class="panel-body config-grid">
-        <div class="field">
-          <label>知识库运行策略</label>
-          <el-select v-model="selectedPolicy">
-            <el-option label="仅 Profile Support" value="SUPPORT_ONLY" />
-            <el-option label="Support 优先，RAG 降级" value="SUPPORT_WITH_RAG_FALLBACK" />
-            <el-option label="仅通用 RAG" value="RAG_ONLY" />
-          </el-select>
-          <el-button
-            :disabled="!shared.selectedKnowledgeId"
-            :loading="rag.loading"
-            @click="rag.savePolicy(selectedPolicy)"
-          >
-            保存引擎策略
-          </el-button>
-        </div>
-        <el-divider />
         <div v-for="field in fields" :key="field.key" class="param-row">
           <label>{{ field.label }}</label>
           <el-input-number v-model="form[field.key]" :min="1" :max="100" />
         </div>
         <div class="actions">
           <el-button type="primary" :loading="rag.loading" @click="rag.saveConfig({ ...form })">
-            保存 RAG 检索配置
+            保存全局 RAG 检索配置
           </el-button>
         </div>
       </div>
@@ -93,10 +77,7 @@ onMounted(() => void load());
 
 <style scoped>
 .config-grid { display: grid; gap: 16px; max-width: 680px; }
-.field { display: grid; grid-template-columns: 180px minmax(240px, 1fr) auto; align-items: center; gap: 12px; }
 .param-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
-.field label, .param-row label { color: var(--text-secondary); font-size: 13px; font-weight: 600; }
+.param-row label { color: var(--text-secondary); font-size: 13px; font-weight: 600; }
 .actions { display: flex; justify-content: flex-end; }
-@media (max-width: 760px) { .field { grid-template-columns: 1fr; } }
 </style>
-

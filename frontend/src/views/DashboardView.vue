@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { Box, ChatDotRound, Clock, Files, Notebook, Warning } from "@element-plus/icons-vue";
 
 import { adminApi } from "@/api/admin";
@@ -53,14 +53,20 @@ const chartPoints = computed<TrendPoint[]>(() => {
 });
 
 async function loadMetrics() {
+  const knowledgeId = store.selectedKnowledgeId;
   metricsError.value = "";
-  const params = { knowledgeId: store.selectedKnowledgeId || undefined };
+  overview.value = null;
+  supportMetrics.value = null;
+  timeseries.value = [];
+  noAnswerTraces.value = [];
+  const params = { knowledgeId: knowledgeId || undefined };
   const results = await Promise.allSettled([
     adminApi.getMetricsOverview(params),
     adminApi.getMetricsTimeseries(params),
-    adminApi.listNoAnswerTraces(),
+    adminApi.listNoAnswerTraces(knowledgeId || undefined),
     adminApi.getSupportMetrics(params),
   ]);
+  if (store.selectedKnowledgeId !== knowledgeId) return;
   // Shape guards: an older backend (pre-metrics) or a gateway returning a
   // JSON error array must not crash the dashboard render.
   if (
@@ -106,10 +112,36 @@ async function openBucketDrilldown(point: TrendPoint) {
 }
 
 onMounted(loadMetrics);
+watch(() => store.selectedKnowledgeId, () => void loadMetrics());
 </script>
 
 <template>
   <div class="dashboard">
+    <section class="panel workflow-panel">
+      <header class="panel-header">
+        <div>
+          <h3>管理待办</h3>
+          <span class="sub">当前知识库的构建、审核和发布状态</span>
+        </div>
+        <el-button @click="store.refreshOperationalState()">刷新状态</el-button>
+      </header>
+      <div class="workflow-grid">
+        <button type="button" @click="store.navigate('indexes')">
+          <span>构建中</span><strong>{{ store.buildingCount }}</strong>
+          <small>查看索引任务</small>
+        </button>
+        <button type="button" @click="store.navigate('support-profiles')">
+          <span>待审核草稿</span><strong>{{ store.pendingReviewCount }}</strong>
+          <small>{{ store.selectedRelease ? `候选 v${store.selectedRelease.index_version}` : "没有开放候选" }}</small>
+        </button>
+        <button type="button" @click="store.navigate('support-profiles')">
+          <span>发布状态</span>
+          <StatusBadge v-if="store.selectedRelease" :status="store.selectedRelease.status" />
+          <strong v-else class="state-text">无候选</strong>
+          <small>验证并原子发布</small>
+        </button>
+      </div>
+    </section>
     <div v-if="overview" class="metric-grid">
       <MetricCard
         label="Queries (7d)"
@@ -334,6 +366,40 @@ onMounted(loadMetrics);
   min-width: 0;
 }
 
+.workflow-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.workflow-grid button {
+  display: grid;
+  gap: 3px;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  text-align: left;
+  cursor: pointer;
+}
+
+.workflow-grid span,
+.workflow-grid small {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.workflow-grid strong {
+  color: var(--text-primary);
+  font-size: 22px;
+}
+
+.workflow-grid .state-text {
+  color: var(--brand-primary);
+  font-size: 14px;
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -342,5 +408,11 @@ onMounted(loadMetrics);
 
 :deep(.clickable-table .el-table__row) {
   cursor: pointer;
+}
+
+@media (max-width: 760px) {
+  .workflow-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

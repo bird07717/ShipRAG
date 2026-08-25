@@ -165,7 +165,7 @@ describe("adminStore", () => {
       .mockResolvedValue({ deleted_index_ids: ["x"], deleted_count: 1 });
 
     await adminStore.buildIndex();
-    expect(build).toHaveBeenCalledWith("kb-1", true);
+    expect(build).toHaveBeenCalledWith("kb-1", false);
     await adminStore.activateIndex("idx-1");
     expect(activate).toHaveBeenCalledWith("idx-1");
     await adminStore.gcIndexes();

@@ -2,16 +2,9 @@ import { reactive } from "vue";
 
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
-import type {
-  ExecutionPolicy,
-  RagConfig,
-  RagConfigUpdatePayload,
-  RuntimePolicy,
-  TraceSummary,
-} from "@/types/admin";
+import type { RagConfig, RagConfigUpdatePayload, TraceSummary } from "@/types/admin";
 
 export const ragAdminStore = reactive({
-  policy: null as RuntimePolicy | null,
   config: null as RagConfig | null,
   errors: [] as TraceSummary[],
   loading: false,
@@ -33,19 +26,7 @@ export const ragAdminStore = reactive({
   },
 
   async loadConfiguration(): Promise<void> {
-    const knowledgeId = adminStore.selectedKnowledgeId;
-    const policyPromise = knowledgeId
-      ? adminApi.getRuntimePolicy(knowledgeId)
-      : Promise.resolve(null);
-    [this.policy, this.config] = await Promise.all([policyPromise, adminApi.getRagConfig()]);
-  },
-
-  async savePolicy(executionPolicy: ExecutionPolicy): Promise<void> {
-    const knowledgeId = adminStore.selectedKnowledgeId;
-    if (!knowledgeId) return;
-    await this.run(async () => {
-      this.policy = await adminApi.updateRuntimePolicy(knowledgeId, executionPolicy);
-    }, "RAG 运行策略已保存，新会话生效");
+    this.config = await adminApi.getRagConfig();
   },
 
   async saveConfig(payload: RagConfigUpdatePayload): Promise<void> {
@@ -67,4 +48,3 @@ export const ragAdminStore = reactive({
 export function useRagAdminStore() {
   return ragAdminStore;
 }
-

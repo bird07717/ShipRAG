@@ -159,6 +159,43 @@ def test_document_delivery_keeps_original_alt_text_as_caption() -> None:
     assert content[0]["caption"] == "出厂设置界面"
 
 
+def test_document_delivery_never_exposes_ai_description_or_ocr_below_image() -> None:
+    with_alt = DocumentContentBlock(
+        uuid4(),
+        1,
+        "image",
+        "图片替代文本：作者提供的界面名称\n图片描述：AI 生成的界面说明\n图片文字：STATUS OK",
+        image_asset_id=uuid4(),
+        caption="AI 生成的界面说明",
+        ocr_text="STATUS OK",
+    )
+    enrichment_only = DocumentContentBlock(
+        uuid4(),
+        2,
+        "image",
+        "图片描述：AI 生成的第二段说明\n图片文字：ERROR 12",
+        image_asset_id=uuid4(),
+        caption="AI 生成的第二段说明",
+        ocr_text="ERROR 12",
+    )
+    document = FocusedDocument(
+        id=uuid4(),
+        title="t",
+        problem_code=None,
+        index_id=uuid4(),
+        blocks=[with_alt, enrichment_only],
+    )
+
+    content, images = deliver_document(document, include_images=True)
+
+    assert content[0]["caption"] == "作者提供的界面名称"
+    assert content[1]["caption"] is None
+    assert images[0]["caption"] == "作者提供的界面名称"
+    assert images[1]["caption"] is None
+    assert "AI 生成" not in str(content)
+    assert "STATUS OK" not in str(content)
+
+
 def test_focused_prompt_includes_image_ocr_text() -> None:
     """Screenshot text is often the only evidence for a fact; the registry
     line must carry both the vision description and the OCR content."""
@@ -185,6 +222,38 @@ def test_focused_prompt_image_without_content_falls_back() -> None:
     )
     _, _, content = document_registry(document)
     assert "（无可识别内容）" in content
+
+
+def test_focused_prompt_enforces_budget_and_keeps_question_relevant_elements() -> None:
+    from app.support.prompt import build_budgeted_focused_prompt
+
+    blocks = [
+        DocumentContentBlock(uuid4(), number, "text", f"普通说明{number}" * 120)
+        for number in range(1, 8)
+    ]
+    blocks.append(DocumentContentBlock(uuid4(), 8, "text", "ZX-900 紧急复位步骤" * 20))
+    document = FocusedDocument(
+        id=uuid4(),
+        title="超长维护手册",
+        problem_code="RESET",
+        index_id=uuid4(),
+        blocks=blocks,
+    )
+
+    context = build_budgeted_focused_prompt(
+        question="ZX-900 如何复位？",
+        document=document,
+        workflow={},
+        history=[{"role": "USER", "content": "较早历史" * 200}],
+        token_budget=1_000,
+    )
+
+    assert context.usage["estimated_tokens"] <= 1_000
+    assert context.usage["truncated"] is True
+    assert context.usage["strategy"] == "QUESTION_RELEVANT_COMPLETE_ELEMENTS"
+    assert context.usage["document_elements_included"] < len(blocks)
+    assert "E8" in context.evidence_registry
+    assert "ZX-900 紧急复位步骤" in context.prompt
 
 
 def test_validator_accepts_ip_from_image_ocr_text() -> None:
@@ -550,6 +619,26 @@ class _ScriptedEngine:
     async def begin(self) -> AsyncIterator[_ScriptedConnection]:
         yield self.connection
 
+    @asynccontextmanager
+    async def connect(self) -> AsyncIterator[_ScriptedConnection]:
+        yield self.connection
+
+
+@pytest.mark.asyncio
+async def test_profile_query_is_scoped_to_knowledge_base_and_document_owner() -> None:
+    knowledge_id = uuid4()
+    engine = _ScriptedEngine([_ScriptedResult([])])
+    repository = SupportRepository(
+        cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
+    )
+
+    assert await repository.list_profiles(knowledge_id, enabled_only=True) == []
+
+    sql, parameters = engine.connection.executed[0]
+    assert "WHERE p.kb_id = :kb_id" in sql
+    assert "d.id = p.document_id AND d.kb_id = p.kb_id" in sql
+    assert parameters == {"kb_id": knowledge_id}
+
 
 @pytest.mark.asyncio
 async def test_begin_turn_uses_pinned_index_for_focused_conversation() -> None:
@@ -733,7 +822,8 @@ class _SupportServiceRepository:
             idempotency_key=kwargs.get("idempotency_key"),
         )
 
-    async def list_profiles(self, *_: Any, **__: Any) -> list[ProblemProfile]:
+    async def list_profiles(self, knowledge_id: Any, **__: Any) -> list[ProblemProfile]:
+        assert knowledge_id == self.knowledge_id
         return self.profiles
 
     async def get_profile_by_code(self, *_: Any, **__: Any) -> ProblemProfile | None:
@@ -784,6 +874,75 @@ async def test_support_service_delivers_complete_document_without_llm() -> None:
     assert repository.finished is not None
     assert repository.finished["focus_document_id"] == document.id
     assert repository.finished["context"]["focus"]["index_id"] == str(document.index_id)
+
+
+@pytest.mark.asyncio
+async def test_support_service_uses_only_profiles_from_selected_knowledge_base() -> None:
+    selected_knowledge_id = uuid4()
+    other_knowledge_id = uuid4()
+    selected_profile = _profile(alias="相同入口问题")
+    other_profile = _profile(alias="相同入口问题")
+    selected_profile.knowledge_id = selected_knowledge_id
+    other_profile.knowledge_id = other_knowledge_id
+    selected_document = _document()
+    other_document = _document()
+    selected_document.title = "知识库 A 文档"
+    other_document.title = "知识库 B 文档"
+    selected_profile.document_id = selected_document.id
+    other_profile.document_id = other_document.id
+
+    class _MultiKnowledgeRepository(_SupportServiceRepository):
+        async def list_profiles(self, knowledge_id: Any, **__: Any) -> list[ProblemProfile]:
+            return {
+                selected_knowledge_id: [selected_profile],
+                other_knowledge_id: [other_profile],
+            }[knowledge_id]
+
+        async def get_document(self, **kwargs: Any) -> FocusedDocument:
+            assert kwargs["knowledge_id"] == selected_knowledge_id
+            assert kwargs["document_id"] == selected_document.id
+            return selected_document
+
+    repository = _MultiKnowledgeRepository(
+        knowledge_id=selected_knowledge_id,
+        profile=selected_profile,
+        document=selected_document,
+    )
+    service = TechnicalSupportService(
+        cast(SupportRepository, repository), Settings(_env_file=None, app_env="test")
+    )
+
+    response = await service.handle(
+        knowledge_id=selected_knowledge_id,
+        conversation_id=None,
+        question="相同入口问题",
+        request_id="request-kb-isolation",
+    )
+
+    assert response["document"]["id"] == str(selected_document.id)
+    assert response["document"]["title"] == "知识库 A 文档"
+
+
+@pytest.mark.asyncio
+async def test_support_stream_emits_trace_and_incremental_validated_answer() -> None:
+    service = TechnicalSupportService(None, Settings(_env_file=None, app_env="test"))  # type: ignore[arg-type]
+    result = {
+        "trace_id": str(uuid4()),
+        "conversation_id": str(uuid4()),
+        "answer": "这是一个经过校验并分段发送的 Support 回答。" * 3,
+    }
+
+    async def succeed(**_: object) -> dict[str, object]:
+        return result
+
+    service.handle = succeed  # type: ignore[method-assign]
+    frames = [frame.decode() async for frame in service.stream(question="测试")]
+
+    assert frames[0].startswith("event: status")
+    assert frames[1].startswith("event: trace")
+    message_frames = [frame for frame in frames if frame.startswith("event: message")]
+    assert len(message_frames) >= 2
+    assert frames[-1].startswith("event: done")
 
 
 @pytest.mark.asyncio

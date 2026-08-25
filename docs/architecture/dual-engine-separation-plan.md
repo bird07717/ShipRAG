@@ -4,6 +4,8 @@
 基线：`02b520e`  
 目标版本：双引擎解耦 V1
 
+管理页面中的运行策略入口已在后续的[问答引擎路由控制面收敛计划](./engine-routing-control-plane-plan.md)中统一；若本文 V1 页面描述与该计划冲突，以后者为准。
+
 ## 1. 背景与问题
 
 当前系统同时承载两条问答链路：
@@ -71,8 +73,9 @@
 | Shared | `app/observability/*`、`rag_trace` | 通用 Trace、错误和指标存储 | 以 `engine`/`stage` 区分领域 |
 | Admin Shell | `App.vue`、`AdminStudio.vue` | 统一导航、知识库上下文、页面装配 | 不保存引擎业务状态 |
 | Shared Admin | `adminStore.ts`、共享 Views | 知识库、文档、索引、模型、共享日志 | V1 保留少量旧兼容字段 |
-| Support Admin | `supportAdminStore.ts`、Support Views | Profile、Support 策略、就绪状态、Support Errors | 查询固定 `engine=SUPPORT` |
-| RAG Admin | `ragAdminStore.ts`、RAG Views | RAG 策略、检索参数、Playground、RAG Errors | 查询固定 `engine=RAG` |
+| Routing Admin | `engineRoutingStore.ts`、Engine Routing View | 唯一运行策略入口、双引擎就绪摘要 | 写入知识库 Runtime Policy |
+| Support Admin | `supportAdminStore.ts`、Support Views | Profile、就绪状态、Support Errors | 查询固定 `engine=SUPPORT` |
+| RAG Admin | `ragAdminStore.ts`、RAG Views | 全局 RAG Config、Playground、RAG Errors | 查询固定 `engine=RAG` |
 | Chat Client | `api/chat.ts` | 只调用 Gateway，并正确处理任意 SSE 网络分片 | 不在浏览器内复制路由策略 |
 
 ## 3. 运行策略
@@ -179,11 +182,12 @@ Gateway 必须转发引擎原始事件。Support 降级场景先执行 Support�
 - Index Build
 - Models & Credentials
 - Shared Logs
+- Engine Routing
+- DemoChat
 
 Support 区域：
 
 - Problem Profiles
-- Support Chat
 - Support Configuration
 - Support Errors
 
@@ -197,8 +201,9 @@ RAG 区域：
 
 ```text
 shared adminStore       知识库、文档、索引、模型、共享 Drawer
-supportAdminStore       Profile、运行策略、Support Trace/Error
-ragAdminStore           RAG Config、运行策略、RAG Trace/Error
+engineRoutingStore      唯一知识库运行策略、Support/RAG 就绪摘要
+supportAdminStore       Profile、Support Trace/Error
+ragAdminStore           全局 RAG Config、RAG Trace/Error
 ```
 
 V1 允许旧 Store 暂时保留兼容字段，但新增页面不得再向其中加入新的 Support/RAG 状态。完成页面迁移后再删除重复字段。

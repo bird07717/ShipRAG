@@ -176,3 +176,43 @@ async def test_frozen_rag_conversation_ignores_support_primary_policy() -> None:
     assert response["answer"] == "rag"
     assert support.calls == 0
     assert rag.calls == 1
+
+
+async def test_support_stream_exposes_engine_trace_and_message_events() -> None:
+    repository = FakeGatewayRepository()
+    support = FakeSupport("ANSWERED")
+    resolved = policy(ExecutionPolicy.SUPPORT_ONLY)
+    service = ChatGatewayService(repository, support, FakeRag())  # type: ignore[arg-type]
+
+    frames = [
+        frame.decode()
+        async for frame in service.stream(policy=resolved, **kwargs(resolved.knowledge_id))
+    ]
+
+    assert '"stage":"gateway_routing","engine":"SUPPORT"' in frames[0]
+    assert any('"stage":"support_processing","engine":"SUPPORT"' in frame for frame in frames)
+    assert any(frame.startswith("event: trace") for frame in frames)
+    assert any(frame.startswith("event: message") for frame in frames)
+    done = next(frame for frame in frames if frame.startswith("event: done"))
+    assert '"execution_engine":"SUPPORT"' in done
+
+
+async def test_fallback_stream_exposes_transition_and_final_rag_metadata() -> None:
+    repository = FakeGatewayRepository()
+    support = FakeSupport("NO_MATCH")
+    rag = FakeRag()
+    resolved = policy(ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK)
+    service = ChatGatewayService(repository, support, rag)  # type: ignore[arg-type]
+
+    frames = [
+        frame.decode()
+        async for frame in service.stream(policy=resolved, **kwargs(resolved.knowledge_id))
+    ]
+
+    fallback = next(frame for frame in frames if frame.startswith("event: fallback"))
+    assert '"from":"SUPPORT","to":"RAG","reason":"NO_MATCH"' in fallback
+    assert any('"stage":"rag_processing","engine":"RAG"' in frame for frame in frames)
+    done = next(frame for frame in frames if frame.startswith("event: done"))
+    assert '"execution_engine":"RAG"' in done
+    assert '"fallback":{"from":"SUPPORT","reason":"NO_MATCH"' in done
+    assert repository.links == [(support.trace_id, rag.trace_id, "NO_MATCH")]

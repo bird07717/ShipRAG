@@ -13,6 +13,12 @@ export interface KnowledgeBase {
   updated_at: string;
 }
 
+export interface SystemInfo {
+  name: string;
+  environment: string;
+  version: string;
+}
+
 export interface DocumentItem {
   id: string;
   knowledge_id: string;

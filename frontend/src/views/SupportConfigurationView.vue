@@ -1,35 +1,21 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { computed, onMounted, watch } from "vue";
 
+import StatusBadge from "@/components/ui/StatusBadge.vue";
 import { useAdminStore } from "@/composables/adminStore";
 import { useSupportAdminStore } from "@/composables/supportAdminStore";
-import type { ExecutionPolicy } from "@/types/admin";
 
 const shared = useAdminStore();
 const support = useSupportAdminStore();
-const selectedPolicy = ref<ExecutionPolicy>("SUPPORT_ONLY");
-
-const options: Array<{ value: ExecutionPolicy; label: string; description: string }> = [
-  {
-    value: "SUPPORT_ONLY",
-    label: "仅 Profile Support",
-    description: "未匹配时要求补充信息，不自动进入通用 RAG。",
-  },
-  {
-    value: "SUPPORT_WITH_RAG_FALLBACK",
-    label: "Support 优先，RAG 降级",
-    description: "当前仅允许 NO_MATCH 自动降级，安全错误不会绕过门禁。",
-  },
-  {
-    value: "RAG_ONLY",
-    label: "仅通用 RAG",
-    description: "新会话跳过 Profile 和完整文档交付。",
-  },
-];
+const readyProfiles = computed(() => support.profiles.filter((item) => item.support_ready));
+const readinessPercentage = computed(() =>
+  support.profiles.length
+    ? Math.round((readyProfiles.value.length / support.profiles.length) * 100)
+    : 0,
+);
 
 async function load(): Promise<void> {
   await support.run(() => support.loadConfiguration());
-  if (support.policy) selectedPolicy.value = support.policy.execution_policy;
 }
 
 watch(() => shared.selectedKnowledgeId, () => void load());
@@ -46,53 +32,53 @@ onMounted(() => void load());
       show-icon
     />
     <el-alert
-      v-if="support.notice"
-      :title="support.notice"
-      type="success"
+      title="该页面只检查 Profile Support 能力。总引擎策略请在 Engine Routing 页面管理。"
+      type="info"
+      :closable="false"
       show-icon
     />
     <section class="panel">
       <header class="panel-header">
         <div>
-          <h3>Profile Support 运行配置</h3>
-          <span class="sub">策略按知识库保存，并在新会话创建时冻结</span>
+          <h3>Profile Support 配置状态</h3>
+          <span class="sub">检查问题 Profile、完整文档映射和发布就绪状态</span>
         </div>
       </header>
       <div v-if="shared.selectedKnowledgeId" class="panel-body config-body">
-        <div class="field">
-          <label>当前知识库</label>
-          <strong>{{ shared.selectedKnowledge?.name }}</strong>
+        <div class="summary">
+          <div>
+            <span>当前知识库</span>
+            <strong>{{ shared.selectedKnowledge?.name }}</strong>
+          </div>
+          <div>
+            <span>已发布就绪</span>
+            <strong>{{ readyProfiles.length }} / {{ support.profiles.length }}</strong>
+          </div>
         </div>
-        <div class="field">
-          <label>问答运行策略</label>
-          <el-select v-model="selectedPolicy" class="policy-select">
-            <el-option
-              v-for="option in options"
-              :key="option.value"
-              :label="option.label"
-              :value="option.value"
-            />
-          </el-select>
-          <p>{{ options.find((item) => item.value === selectedPolicy)?.description }}</p>
-        </div>
-        <div class="policy-meta">
-          <span>配置版本：{{ support.policy?.config_version ?? 0 }}</span>
-          <span>来源：{{ support.policy?.source ?? "DEFAULT" }}</span>
-          <span>自动降级白名单：{{ support.policy?.fallback_conditions?.join(", ") || "无" }}</span>
-        </div>
-        <div class="readiness">
-          <strong>{{ support.profiles.filter((item) => item.support_ready).length }}</strong>
-          <span>/ {{ support.profiles.length }} 个 Profile 已发布就绪</span>
-        </div>
-        <div class="actions">
-          <el-button
-            type="primary"
-            :loading="support.loading"
-            @click="support.savePolicy(selectedPolicy)"
-          >
-            保存 Support 策略
-          </el-button>
-        </div>
+        <el-progress
+          :percentage="readinessPercentage"
+          :status="readinessPercentage === 100 ? 'success' : undefined"
+        />
+        <el-table v-if="support.profiles.length" :data="support.profiles">
+          <el-table-column prop="problem_code" label="Problem Code" width="180" />
+          <el-table-column
+            prop="canonical_question"
+            label="标准问题"
+            min-width="260"
+            show-overflow-tooltip
+          />
+          <el-table-column label="发布状态" width="130">
+            <template #default="scope">
+              <StatusBadge :status="scope.row.support_ready ? 'READY' : 'NOT_READY'" />
+            </template>
+          </el-table-column>
+          <el-table-column label="未就绪原因" min-width="280">
+            <template #default="scope">
+              {{ scope.row.readiness_reasons?.join("；") || "—" }}
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-else description="当前知识库尚未配置 Problem Profile" />
       </div>
       <el-empty v-else description="请先选择知识库" />
     </section>
@@ -100,13 +86,10 @@ onMounted(() => void load());
 </template>
 
 <style scoped>
-.config-body { display: grid; gap: 18px; max-width: 680px; }
-.field { display: grid; gap: 7px; }
-.field label { color: var(--text-secondary); font-size: 13px; font-weight: 600; }
-.field p, .policy-meta { color: var(--text-tertiary); font-size: 12px; }
-.policy-select { width: 100%; }
-.policy-meta { display: flex; flex-wrap: wrap; gap: 16px; }
-.readiness { display: flex; align-items: baseline; gap: 6px; }
-.readiness strong { color: var(--success); font-size: 24px; }
-.actions { display: flex; justify-content: flex-end; }
+.config-body { display: grid; gap: 18px; }
+.summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.summary > div { display: grid; gap: 5px; padding: 14px; border-radius: 9px; background: var(--bg-subtle); }
+.summary span { color: var(--text-tertiary); font-size: 12px; }
+.summary strong { color: var(--text-primary); font-size: 18px; }
+@media (max-width: 760px) { .summary { grid-template-columns: 1fr; } }
 </style>

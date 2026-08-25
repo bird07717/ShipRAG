@@ -167,6 +167,7 @@ describe("view smoke", () => {
       "playground",
       "traces",
       "configuration",
+      "engine-routing",
       "support-profiles",
       "support-configuration",
       "support-errors",
@@ -220,7 +221,7 @@ describe("view smoke", () => {
     const wrapper = mount(DemoChat, { global: { plugins: [ElementPlus] } });
     await flushPromises();
     await flushPromises();
-    expect(wrapper.text()).toContain("测试技术支持问答");
+    expect(wrapper.text()).toContain("测试统一问答接口");
     expect(wrapper.text()).toContain("问题一");
     wrapper.unmount();
   });
