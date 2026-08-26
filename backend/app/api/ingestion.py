@@ -8,8 +8,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, Header, Query, Response, UploadFile, status
 
 from app.api.dependencies import get_app_settings, get_resources
+from app.api.releases import get_release_repository
 from app.api.schemas import (
     DocumentDeleteResponse,
+    DocumentProfileContextResponse,
     DocumentResponse,
     DocumentUploadResponse,
     GarbageCollectionResponse,
@@ -18,13 +20,15 @@ from app.api.schemas import (
     IndexBuildResponse,
     IndexResponse,
     KnowledgeBaseCreate,
-    KnowledgeBaseDeleteResponse,
     KnowledgeBaseResponse,
     TaskResponse,
+    TaskSubmissionResponse,
 )
+from app.common.errors import ApiError
 from app.core.config import Settings
 from app.core.resources import AppResources
 from app.ingestion.repository import IngestionRepository
+from app.releases.repository import ReleaseRepository
 from app.services.ingestion import IngestionService
 
 router = APIRouter()
@@ -83,14 +87,44 @@ async def get_knowledge_base(
 
 @router.delete(
     "/knowledge-bases/{knowledge_id}",
-    response_model=KnowledgeBaseDeleteResponse,
+    response_model=TaskSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
     tags=["knowledge-bases"],
 )
 async def delete_knowledge_base(
     knowledge_id: UUID,
     service: Annotated[IngestionService, Depends(get_ingestion_service)],
 ) -> dict[str, Any]:
-    return await service.delete_knowledge_base(knowledge_id)
+    return await service.request_knowledge_base_deletion(knowledge_id)
+
+
+@router.post(
+    "/knowledge-bases/{knowledge_id}/profiles/rebuild",
+    response_model=TaskSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["knowledge-bases"],
+)
+async def rebuild_knowledge_profiles(
+    knowledge_id: UUID,
+    service: Annotated[IngestionService, Depends(get_ingestion_service)],
+    idempotency_key: Annotated[
+        str | None, Header(alias="Idempotency-Key", min_length=1, max_length=200)
+    ] = None,
+) -> dict[str, Any]:
+    """Knowledge-level Profile rebuild shortcut.
+
+    Never writes live Profiles: resolves to the same candidate pipeline as
+    Index Build — a deduplicated PROFILE_REFRESH on the editable candidate, a
+    build-then-refresh orchestration, or an intent merged into a running
+    build.  Repeated submissions return the already active task.
+    """
+    resolution = await service.request_profile_rebuild(knowledge_id, idempotency_key)
+    return {
+        "task_id": resolution["task_id"],
+        "task_type": resolution["task_type"],
+        "status": resolution["status"],
+        "replayed": resolution["replayed"],
+    }
 
 
 @router.post(
@@ -137,6 +171,24 @@ async def get_document(
     repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
 ) -> dict[str, Any]:
     return await repository.get_document(document_id)
+
+
+@router.get(
+    "/documents/{document_id}/profile-context",
+    response_model=DocumentProfileContextResponse,
+    tags=["documents"],
+)
+async def get_document_profile_context(
+    document_id: UUID,
+    repository: Annotated[ReleaseRepository, Depends(get_release_repository)],
+) -> dict[str, Any]:
+    """Published Profile plus the current unpublished candidate draft for one
+    document, so the Documents view never guesses candidate ownership from the
+    knowledge-wide Profile list."""
+    context = await repository.document_profile_context(document_id)
+    if context is None:
+        raise ApiError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
+    return context
 
 
 @router.delete(

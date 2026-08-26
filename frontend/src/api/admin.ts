@@ -1,6 +1,8 @@
 import type {
   DocumentItem,
   DocumentDeleteResult,
+  DocumentProfileContext,
+  BuildRequestResult,
   GarbageCollectionResult,
   KnowledgeBase,
   KnowledgeIndex,
@@ -28,6 +30,8 @@ import type {
   SupportMetrics,
   SupportMessage,
   SystemInfo,
+  TaskRecord,
+  TaskSubmission,
   TraceSummary,
 } from "@/types/admin";
 
@@ -82,7 +86,7 @@ export const adminApi = {
       body: JSON.stringify({ name, description: description || null }),
     }),
   deleteKnowledgeBase: (knowledgeId: string) =>
-    apiRequest<{ knowledge_id: string; deleted: boolean; cleanup_failed_count: number }>(
+    apiRequest<TaskSubmission>(
       `/knowledge-bases/${knowledgeId}`,
       { method: "DELETE" },
     ),
@@ -110,6 +114,13 @@ export const adminApi = {
     apiRequest<{ index_id: string; items: Array<Record<string, unknown>> }>(
       `/documents/${documentId}/elements${indexId ? `?index_id=${indexId}` : ""}`,
     ),
+  getDocumentProfileContext: (documentId: string) =>
+    apiRequest<DocumentProfileContext>(`/documents/${documentId}/profile-context`),
+  rebuildKnowledgeProfiles: (knowledgeId: string, idempotencyKey: string = crypto.randomUUID()) =>
+    apiRequest<TaskSubmission>(`/knowledge-bases/${knowledgeId}/profiles/rebuild`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+    }),
   listChunks: (documentId: string, indexId?: string) =>
     apiRequest<{ index_id: string; items: Array<Record<string, unknown>> }>(
       `/documents/${documentId}/chunks${indexId ? `?index_id=${indexId}` : ""}`,
@@ -117,8 +128,9 @@ export const adminApi = {
   listIndexes: (knowledgeId: string) =>
     apiRequest<KnowledgeIndex[]>(`/knowledge-bases/${knowledgeId}/indexes`),
   listIndexTasks: (indexId: string) => apiRequest<IndexTask[]>(`/indexes/${indexId}/tasks`),
+  getTask: (taskId: string) => apiRequest<TaskRecord>(`/tasks/${taskId}`),
   buildIndex: (knowledgeId: string) =>
-    apiRequest(`/knowledge-bases/${knowledgeId}/indexes/build`, {
+    apiRequest<BuildRequestResult>(`/knowledge-bases/${knowledgeId}/indexes/build`, {
       method: "POST",
       headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify({ reason: "MANUAL", activate_on_success: false }),
@@ -265,19 +277,19 @@ export const adminApi = {
   getKnowledgeRelease: (releaseId: string) =>
     apiRequest<KnowledgeRelease>(`/releases/${releaseId}`),
   generateProfileDrafts: (indexId: string) =>
-    apiRequest<ProfileDraft[]>(`/indexes/${indexId}/profile-drafts/generate`, {
+    apiRequest<TaskSubmission>(`/indexes/${indexId}/profile-drafts/generate`, {
       method: "POST",
     }),
   backfillProfileDrafts: (indexId: string) =>
-    apiRequest<ProfileDraft[]>(`/indexes/${indexId}/profile-drafts/backfill`, {
+    apiRequest<TaskSubmission>(`/indexes/${indexId}/profile-drafts/backfill`, {
       method: "POST",
     }),
   refreshProfileDrafts: (indexId: string) =>
-    apiRequest<ProfileDraft[]>(`/indexes/${indexId}/profile-drafts/refresh`, {
+    apiRequest<TaskSubmission>(`/indexes/${indexId}/profile-drafts/refresh`, {
       method: "POST",
     }),
   regenerateProfileDraft: (draftId: string) =>
-    apiRequest<ProfileDraft>(`/profile-drafts/${draftId}/regenerate`, { method: "POST" }),
+    apiRequest<TaskSubmission>(`/profile-drafts/${draftId}/regenerate`, { method: "POST" }),
   createProfileEditDraft: (releaseId: string, profileId: string) =>
     apiRequest<ProfileDraft>(`/releases/${releaseId}/profiles/${profileId}/draft`, {
       method: "POST",

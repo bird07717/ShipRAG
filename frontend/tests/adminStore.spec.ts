@@ -103,6 +103,8 @@ describe("adminStore", () => {
     adminStore.selectedKnowledgeId = "";
     adminStore.notice = "";
     adminStore.error = "";
+    adminStore.trackedTasks = [];
+    adminStore.actionLoading = {};
     adminStore.knowledgeSearch = "";
     adminStore.knowledgeStatusFilter = "";
     localStorage.clear();
@@ -162,11 +164,12 @@ describe("adminStore", () => {
       action: "confirm",
     } as never);
     const remove = vi.spyOn(adminApi, "deleteKnowledgeBase").mockResolvedValue({
-      knowledge_id: kb.id,
-      deleted: true,
-      cleanup_failed_count: 0,
+      task_id: "task-delete",
+      task_type: "KNOWLEDGE_BASE_DELETE",
+      status: "QUEUED",
+      replayed: false,
     });
-    vi.mocked(adminApi.listKnowledgeBases).mockResolvedValueOnce([]);
+    vi.mocked(adminApi.listKnowledgeBases).mockResolvedValueOnce([{ ...kb, status: "DELETING" }]);
 
     await adminStore.deleteKnowledgeBase(kb);
 
@@ -176,9 +179,42 @@ describe("adminStore", () => {
       expect.objectContaining({ inputPlaceholder: kb.name, confirmButtonText: "永久删除" }),
     );
     expect(remove).toHaveBeenCalledWith(kb.id);
-    expect(adminStore.selectedKnowledgeId).toBe("");
-    expect(adminStore.knowledgeBases).toEqual([]);
-    expect(adminStore.notice).toBe("知识库已删除");
+    expect(adminStore.selectedKnowledgeId).toBe(kb.id);
+    expect(adminStore.trackedTasks).toEqual([
+      expect.objectContaining({ taskId: "task-delete", taskType: "KNOWLEDGE_BASE_DELETE" }),
+    ]);
+    expect(adminStore.notice).toBe("知识库删除任务已提交；完成后将弹出提醒");
+  });
+
+  it("notifies once when a tracked background task completes", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.trackTask(
+      { task_id: "task-done", task_type: "PROFILE_REFRESH", status: "QUEUED", replayed: false },
+      { successMessage: "Profile 重建已完成", knowledgeId: kb.id },
+    );
+    vi.spyOn(adminApi, "getTask").mockResolvedValue({
+      id: "task-done",
+      task_type: "PROFILE_REFRESH",
+      status: "SUCCEEDED",
+      stage: "COMPLETED",
+      progress: 100,
+      attempt: 1,
+      kb_id: kb.id,
+      index_id: "idx-1",
+      document_id: null,
+      error_code: null,
+      error_message: null,
+      metadata: {},
+      created_at: "2026-08-26T00:00:00Z",
+      started_at: "2026-08-26T00:00:01Z",
+      finished_at: "2026-08-26T00:00:02Z",
+      updated_at: "2026-08-26T00:00:02Z",
+    });
+    await adminStore.pollTrackedTasks();
+
+    expect(adminStore.trackedTasks).toEqual([]);
+    expect(adminStore.notice).toBe("Profile 重建已完成");
   });
 
   it("uploads a document for the selected knowledge base", async () => {
@@ -192,10 +228,148 @@ describe("adminStore", () => {
     expect(adminStore.notice).toBe("文档已上传，RAG 索引构建已提交；完成后请在 Index Build 审核发布");
   });
 
+  it("submits a knowledge profile rebuild and tracks the returned task", async () => {
+    stubApi();
+    adminStore.knowledgeBases = [kb];
+    vi.spyOn(ElMessageBox, "confirm").mockResolvedValue({ action: "confirm" } as never);
+    const rebuild = vi.spyOn(adminApi, "rebuildKnowledgeProfiles").mockResolvedValue({
+      task_id: "task-rebuild",
+      task_type: "PROFILE_REFRESH",
+      status: "QUEUED",
+      replayed: false,
+    });
+
+    await adminStore.rebuildKnowledgeProfiles(kb);
+
+    expect(rebuild).toHaveBeenCalledWith(kb.id);
+    expect(adminStore.trackedTasks).toEqual([
+      expect.objectContaining({
+        taskId: "task-rebuild",
+        taskType: "PROFILE_REFRESH",
+        knowledgeId: kb.id,
+      }),
+    ]);
+    expect(adminStore.notice).toBe("Profile 重建任务已提交；完成后将弹出提醒");
+  });
+
+  it("skips the profile rebuild when the confirmation is dismissed", async () => {
+    stubApi();
+    vi.spyOn(ElMessageBox, "confirm").mockRejectedValue(new Error("cancel"));
+    const rebuild = vi.spyOn(adminApi, "rebuildKnowledgeProfiles");
+
+    await adminStore.rebuildKnowledgeProfiles(kb);
+
+    expect(rebuild).not.toHaveBeenCalled();
+    expect(adminStore.trackedTasks).toEqual([]);
+  });
+
+  it("keeps tracking the chained profile refresh after an orchestrated build", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.trackTask(
+      { task_id: "task-build", task_type: "INDEX_BUILD", status: "QUEUED", replayed: false },
+      { successMessage: "候选索引构建完成", knowledgeId: kb.id },
+    );
+    vi.spyOn(adminApi, "getTask").mockResolvedValue({
+      id: "task-build",
+      task_type: "INDEX_BUILD",
+      status: "SUCCEEDED",
+      stage: "COMPLETED",
+      progress: 100,
+      attempt: 1,
+      kb_id: kb.id,
+      index_id: "idx-1",
+      document_id: null,
+      error_code: null,
+      error_message: null,
+      metadata: { profile_task_id: "task-refresh" },
+      created_at: "2026-08-26T00:00:00Z",
+      started_at: "2026-08-26T00:00:01Z",
+      finished_at: "2026-08-26T00:00:02Z",
+      updated_at: "2026-08-26T00:00:02Z",
+    });
+
+    await adminStore.pollTrackedTasks();
+
+    expect(adminStore.trackedTasks).toEqual([
+      expect.objectContaining({
+        taskId: "task-refresh",
+        taskType: "PROFILE_REFRESH",
+        knowledgeId: kb.id,
+      }),
+    ]);
+  });
+
+  it("loads document profile context in parallel and drops stale responses", async () => {
+    stubApi();
+    adminStore.knowledgeBases = [kb];
+    adminStore.indexes = [index];
+    adminStore.selectedKnowledgeId = kb.id;
+    vi.spyOn(adminApi, "listElements").mockResolvedValue({
+      index_id: "idx-1",
+      items: [{ id: 1, content: "el" }],
+    });
+    vi.spyOn(adminApi, "listChunks").mockResolvedValue({
+      index_id: "idx-1",
+      items: [{ id: 2, content: "chunk" }],
+    });
+    const getProfileContext = vi
+      .spyOn(adminApi, "getDocumentProfileContext")
+      .mockResolvedValue({
+        document_id: "doc-1",
+        published_profile: null,
+        candidate_draft: null,
+      });
+
+    const document = {
+      id: "doc-1",
+      knowledge_id: "kb-1",
+      filename: "manual.docx",
+      display_name: "操作手册",
+      file_size: 2048,
+      status: "INDEXED",
+      created_at: "2026-08-17T00:00:00Z",
+      updated_at: "2026-08-17T00:00:00Z",
+    };
+    await adminStore.inspectDocument(document);
+
+    expect(getProfileContext).toHaveBeenCalledWith("doc-1");
+    expect(adminStore.documentProfileContext).toEqual({
+      document_id: "doc-1",
+      published_profile: null,
+      candidate_draft: null,
+    });
+
+    // A slow response for the previous document must not leak onto a newly
+    // opened document while the first inspection is still in flight.
+    let resolveContext!: (value: {
+      document_id: string;
+      published_profile: null;
+      candidate_draft: null;
+    }) => void;
+    getProfileContext.mockReturnValue(
+      new Promise((resolve) => {
+        resolveContext = resolve;
+      }),
+    );
+    adminStore.documentProfileContext = null;
+    const inspection = adminStore.loadDocumentInspection();
+    adminStore.selectedDocument = { ...document, id: "doc-2" };
+    resolveContext({ document_id: "doc-1", published_profile: null, candidate_draft: null });
+    await inspection;
+    expect(adminStore.documentProfileContext).toBeNull();
+  });
+
   it("builds, activates, gc's and deletes indexes", async () => {
     stubApi();
     adminStore.selectedKnowledgeId = "kb-1";
-    const build = vi.spyOn(adminApi, "buildIndex").mockResolvedValue(undefined);
+    const build = vi.spyOn(adminApi, "buildIndex").mockResolvedValue({
+      requested: true,
+      coalesced: false,
+      index_id: "idx-new",
+      task_id: "task-new",
+      rebuild_required: false,
+    });
     const activate = vi.spyOn(adminApi, "activateIndex").mockResolvedValue(index);
     vi
       .spyOn(adminApi, "gcIndexes")

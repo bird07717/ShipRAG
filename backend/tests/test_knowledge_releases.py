@@ -59,10 +59,36 @@ def test_release_validation_blocks_unapproved_and_conflicting_profiles() -> None
 
     assert report.valid is False
     assert {item["code"] for item in report.errors} >= {
-        "DRAFT_NOT_APPROVED",
         "PROBLEM_CODE_CONFLICT",
         "CANONICAL_QUESTION_CONFLICT",
     }
+    assert report.review_required_count == 1
+    assert report.publishable is False
+
+
+def test_release_validation_marks_unapproved_drafts_for_review_not_as_hard_failure() -> None:
+    report = ReleaseService._validate_snapshot(
+        {"index_status": "READY", "drafts": [_draft(status="DRAFT")], "live_profiles": []}
+    )
+
+    assert report.valid is True
+    assert report.publishable is False
+    assert report.review_required_count == 1
+    assert report.errors == []
+
+
+def test_quality_review_requirement_blocks_publication_even_after_approval() -> None:
+    report = ReleaseService._validate_snapshot(
+        {
+            "index_status": "READY",
+            "drafts": [_draft(quality_status="REVIEW_REQUIRED")],
+            "live_profiles": [],
+        }
+    )
+
+    assert report.valid is True
+    assert report.publishable is False
+    assert report.review_required_count == 1
 
 
 def test_release_validation_allows_explicit_reference_only_document() -> None:
@@ -109,12 +135,57 @@ def test_replacement_detection_preserves_stable_problem_code() -> None:
         "task_type": "UPGRADE",
     }
 
-    operation, target = ReleaseService._suggest_operation("如何通过U盘升级PDC", profile, [existing])
+    operation, target = ReleaseService._suggest_operation(
+        uuid4(), "如何通过U盘升级PDC", profile, [existing]
+    )
     assert operation == "UPDATE"
     assert target is existing
     merged = ReleaseService._merge_update(profile, existing)
     assert merged.problem_code == "PDC_UPDATE_UPGRADE"
     assert merged.aliases == ["PDC刷版本"]
+
+
+def test_same_document_always_generates_update_even_when_question_is_rewritten() -> None:
+    document_id = uuid4()
+    existing = {
+        "id": uuid4(),
+        "document_id": document_id,
+        "problem_code": "PDC_UPGRADE",
+        "canonical_question": "PDC 固件升级后无法启动怎么办？",
+    }
+    profile = GeneratedProfile(
+        problem_code="NEW_TITLE_CODE",
+        canonical_question="如何从 USB 介质执行控制器软件更新？",
+    )
+
+    operation, target = ReleaseService._suggest_operation(
+        document_id, "设备软件维护指引", profile, [existing]
+    )
+
+    assert operation == "UPDATE"
+    assert target is existing
+
+
+def test_preflight_excludes_update_target_but_flags_other_live_collisions() -> None:
+    target = {
+        "id": uuid4(),
+        "problem_code": "PDC_UPGRADE",
+        "canonical_question": "如何升级 PDC？",
+        "aliases": ["PDC 怎么升级"],
+    }
+    profile = GeneratedProfile(
+        problem_code="PDC_UPGRADE",
+        canonical_question="如何升级 PDC？",
+        aliases=["PDC 怎么升级"],
+    )
+
+    assert ReleaseService._preflight_quality_notes(profile, [target], target) == []
+    notes = ReleaseService._preflight_quality_notes(
+        profile,
+        [target, {**target, "id": uuid4()}],
+        target,
+    )
+    assert len(notes) == 3
 
 
 def test_backfill_selects_only_missing_or_outdated_profiles_without_drafts() -> None:
@@ -219,7 +290,7 @@ class _Engine:
 
 
 @pytest.mark.asyncio
-async def test_ready_index_publishes_without_legacy_profile_release_approval() -> None:
+async def test_ready_legacy_index_without_release_can_still_activate() -> None:
     index_id = uuid4()
     knowledge_id = uuid4()
     connection = _Connection(
@@ -230,6 +301,7 @@ async def test_ready_index_publishes_without_legacy_profile_release_approval() -
                     "kb_id": knowledge_id,
                     "status": "READY",
                     "active_index_id": None,
+                    "release_status": None,
                 }
             ),
             _Result(row={"id": index_id, "kb_id": knowledge_id, "status": "ACTIVE"}),
@@ -243,8 +315,33 @@ async def test_ready_index_publishes_without_legacy_profile_release_approval() -
 
     assert published["status"] == "ACTIVE"
     statements = "\n".join(statement for statement, _ in connection.executed)
-    assert "RELEASE_REQUIRED" not in statements
-    assert "UPDATE knowledge_release" in statements
+    assert "LEFT JOIN knowledge_release" in statements
+
+
+@pytest.mark.asyncio
+async def test_candidate_index_cannot_bypass_release_publication() -> None:
+    index_id = uuid4()
+    connection = _Connection(
+        [
+            _Result(
+                row={
+                    "id": index_id,
+                    "kb_id": uuid4(),
+                    "status": "READY",
+                    "active_index_id": None,
+                    "release_status": "DRAFT",
+                }
+            )
+        ]
+    )
+    repository = IngestionRepository(
+        cast(AsyncEngine, _Engine(connection)), Settings(_env_file=None, app_env="test")
+    )
+
+    with pytest.raises(ApiError) as raised:
+        await repository.activate_index(index_id)
+
+    assert raised.value.code == "RELEASE_REQUIRED"
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,213 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+
+
+class TaskRecordRepository:
+    """Small shared writer for the durable task status exposed by the API."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self.engine = engine
+
+    @staticmethod
+    async def create_in_connection(
+        connection: AsyncConnection,
+        *,
+        task_type: str,
+        kb_id: UUID | None,
+        index_id: UUID | None = None,
+        document_id: UUID | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> UUID:
+        task_id = uuid4()
+        await connection.execute(
+            text(
+                """
+                INSERT INTO task_record (
+                    id, task_type, status, stage, progress, kb_id, index_id, document_id, metadata
+                ) VALUES (
+                    :id, :task_type, 'QUEUED', 'QUEUED', 0,
+                    :kb_id, :index_id, :document_id, CAST(:metadata AS jsonb)
+                )
+                """
+            ),
+            {
+                "id": task_id,
+                "task_type": task_type,
+                "kb_id": kb_id,
+                "index_id": index_id,
+                "document_id": document_id,
+                "metadata": json.dumps(metadata or {}, ensure_ascii=False),
+            },
+        )
+        return task_id
+
+    async def create(
+        self,
+        *,
+        task_type: str,
+        kb_id: UUID | None,
+        index_id: UUID | None = None,
+        document_id: UUID | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> UUID:
+        async with self.engine.begin() as connection:
+            return await self.create_in_connection(
+                connection,
+                task_type=task_type,
+                kb_id=kb_id,
+                index_id=index_id,
+                document_id=document_id,
+                metadata=metadata,
+            )
+
+    @staticmethod
+    async def create_profile_task_in_connection(
+        connection: AsyncConnection,
+        *,
+        task_type: str,
+        kb_id: UUID | None,
+        index_id: UUID,
+        metadata: dict[str, Any] | None = None,
+    ) -> UUID | None:
+        """Insert a PROFILE_* task guarded by uq_task_record_active_profile_per_index.
+
+        Returns None when a concurrent submission already won the single
+        active-Profile-task slot for the index; the caller then replays the
+        winning task instead of creating a parallel generation.
+        """
+        task_id = uuid4()
+        result = await connection.execute(
+            text(
+                """
+                INSERT INTO task_record (
+                    id, task_type, status, stage, progress, kb_id, index_id, document_id, metadata
+                ) VALUES (
+                    :id, :task_type, 'QUEUED', 'QUEUED', 0,
+                    :kb_id, :index_id, NULL, CAST(:metadata AS jsonb)
+                )
+                ON CONFLICT (index_id) WHERE (
+                    task_type IN ('PROFILE_GENERATE', 'PROFILE_BACKFILL',
+                                  'PROFILE_REFRESH', 'PROFILE_REGENERATE')
+                    AND status IN ('QUEUED', 'RUNNING')
+                ) DO NOTHING
+                RETURNING id
+                """
+            ),
+            {
+                "id": task_id,
+                "task_type": task_type,
+                "kb_id": kb_id,
+                "index_id": index_id,
+                "metadata": json.dumps(metadata or {}, ensure_ascii=False),
+            },
+        )
+        inserted = result.scalar_one_or_none()
+        return UUID(str(inserted)) if inserted is not None else None
+
+    async def merge_metadata(self, task_id: UUID, metadata: dict[str, Any]) -> None:
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE task_record
+                    SET metadata = metadata || CAST(:metadata AS jsonb), updated_at = now()
+                    WHERE id = :id
+                    """
+                ),
+                {"id": task_id, "metadata": json.dumps(metadata, ensure_ascii=False)},
+            )
+
+    async def get(self, task_id: UUID) -> dict[str, Any] | None:
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text("SELECT * FROM task_record WHERE id = :id"), {"id": task_id}
+            )
+            row = result.mappings().one_or_none()
+        return dict(row) if row is not None else None
+
+    async def start(self, task_id: UUID, *, stage: str) -> bool:
+        async with self.engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE task_record
+                    SET status = 'RUNNING', stage = :stage, progress = GREATEST(progress, 1),
+                        attempt = attempt + 1, started_at = COALESCE(started_at, now()),
+                        updated_at = now(), error_code = NULL, error_message = NULL
+                    WHERE id = :id AND status IN ('QUEUED', 'FAILED')
+                    RETURNING id
+                    """
+                ),
+                {"id": task_id, "stage": stage},
+            )
+            return result.scalar_one_or_none() is not None
+
+    async def progress(
+        self,
+        task_id: UUID,
+        *,
+        stage: str,
+        progress: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE task_record
+                    SET stage = :stage, progress = :progress, updated_at = now(),
+                        metadata = metadata || CAST(:metadata AS jsonb)
+                    WHERE id = :id AND status = 'RUNNING'
+                    """
+                ),
+                {
+                    "id": task_id,
+                    "stage": stage,
+                    "progress": max(0, min(progress, 99)),
+                    "metadata": json.dumps(metadata or {}, ensure_ascii=False),
+                },
+            )
+
+    async def succeed(self, task_id: UUID, *, metadata: dict[str, Any] | None = None) -> None:
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE task_record
+                    SET status = 'SUCCEEDED', stage = 'COMPLETED', progress = 100,
+                        finished_at = now(), updated_at = now(), error_code = NULL,
+                        error_message = NULL, metadata = metadata || CAST(:metadata AS jsonb)
+                    WHERE id = :id
+                    """
+                ),
+                {"id": task_id, "metadata": json.dumps(metadata or {}, ensure_ascii=False)},
+            )
+
+    async def fail(self, task_id: UUID, error: Exception) -> None:
+        # ApiError carries a structured, admin-readable message; raw exceptions
+        # degrade to their class name + str().
+        api_message = getattr(error, "message", None)
+        error_code = str(getattr(error, "code", None) or type(error).__name__)[:100]
+        error_message = (api_message or str(error))[:500] or "后台任务执行失败"
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE task_record
+                    SET status = 'FAILED', stage = 'FAILED', error_code = :error_code,
+                        error_message = :error_message, finished_at = now(), updated_at = now()
+                    WHERE id = :id
+                    """
+                ),
+                {
+                    "id": task_id,
+                    "error_code": error_code,
+                    "error_message": error_message,
+                },
+            )

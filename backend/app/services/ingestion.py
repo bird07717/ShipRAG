@@ -18,6 +18,8 @@ from app.core.config import Settings
 from app.ingestion.repository import BuildReference, DocumentCreateResult, IngestionRepository
 from app.ingestion.validation import DocxLimits, DocxValidationError, validate_docx_package
 from app.tasks.ingestion import enqueue_index_build
+from app.tasks.maintenance import enqueue_maintenance_task
+from app.tasks.repository import TaskRecordRepository
 
 logger = logging.getLogger(__name__)
 
@@ -202,23 +204,88 @@ class IngestionService:
             },
         }
 
-    async def delete_knowledge_base(self, knowledge_id: UUID) -> dict[str, Any]:
-        result = await self.repository.delete_knowledge_base(knowledge_id)
-        cleanup_failed_count = 0
-        for bucket, object_key in result.storage_objects:
+    async def request_knowledge_base_deletion(self, knowledge_id: UUID) -> dict[str, Any]:
+        submission = await self.repository.request_knowledge_base_deletion(knowledge_id)
+        if submission["replayed"]:
+            return submission
+        task_id = UUID(str(submission["task_id"]))
+        try:
+            await asyncio.to_thread(enqueue_maintenance_task, self.settings, task_id)
+        except Exception as exc:
+            await TaskRecordRepository(self.repository.engine).fail(task_id, exc)
+            raise ApiError("UPSTREAM_UNAVAILABLE", "异步任务队列不可用", 503) from exc
+        return submission
+
+    async def request_profile_rebuild(
+        self, knowledge_id: UUID, idempotency_key: str | None = None
+    ) -> dict[str, Any]:
+        """Submit the Knowledge-level Profile rebuild shortcut.
+
+        The repository resolves the target candidate atomically; this layer
+        only delivers the resulting task to its RQ queue and mirrors the
+        existing enqueue-failure bookkeeping (queue failures must not leave a
+        QUEUED task that no worker will ever pick up).
+        """
+        resolution = await self.repository.resolve_profile_rebuild(knowledge_id, idempotency_key)
+        if resolution["queue"] is None:
+            # Replayed or intent-merged task: it is already enqueued.
+            return resolution
+        task_id = UUID(str(resolution["task_id"]))
+        index_id = UUID(str(resolution["index_id"]))
+        try:
+            if resolution["queue"] == "index_build":
+                await asyncio.to_thread(enqueue_index_build, self.settings, index_id, task_id)
+            else:
+                await asyncio.to_thread(enqueue_maintenance_task, self.settings, task_id)
+        except Exception as exc:
+            if resolution["queue"] == "index_build":
+                await self.repository.mark_build_enqueue_failed(index_id, task_id)
+            else:
+                await TaskRecordRepository(self.repository.engine).fail(task_id, exc)
+            raise ApiError("UPSTREAM_UNAVAILABLE", "异步任务队列不可用", 503) from exc
+        return resolution
+
+    async def execute_knowledge_base_deletion(
+        self, task: dict[str, Any], task_records: TaskRecordRepository
+    ) -> dict[str, Any]:
+        task_id = UUID(str(task["id"]))
+        metadata = dict(task.get("metadata") or {})
+        knowledge_id = UUID(str(metadata["knowledge_id"]))
+        storage_objects = await self.repository.list_knowledge_base_cleanup_objects(task_id)
+        total = int(metadata.get("cleanup_total") or len(storage_objects))
+        completed = max(0, total - len(storage_objects))
+        for item in storage_objects:
+            bucket = str(item["minio_bucket"])
+            object_key = str(item["minio_object_key"])
             try:
                 await self._remove_minio_object(bucket, object_key)
-            except Exception:
-                cleanup_failed_count += 1
+            except Exception as exc:
+                await self.repository.mark_knowledge_base_cleanup_object_failed(
+                    task_id, bucket, object_key, exc
+                )
                 logger.warning(
                     "Failed to remove object while deleting knowledge base %s",
                     knowledge_id,
                     exc_info=True,
                 )
+                raise
+            await self.repository.mark_knowledge_base_cleanup_object_deleted(
+                task_id, bucket, object_key
+            )
+            completed += 1
+            await task_records.progress(
+                task_id,
+                stage="DELETING_STORAGE",
+                progress=(5 + int(85 * completed / total)) if total else 90,
+                metadata={"cleanup_completed": completed, "cleanup_total": total},
+            )
+        await task_records.progress(task_id, stage="PURGING_DATABASE", progress=95)
+        deleted = await self.repository.finalize_knowledge_base_deletion(knowledge_id)
         return {
-            "knowledge_id": result.knowledge_id,
-            "deleted": True,
-            "cleanup_failed_count": cleanup_failed_count,
+            "knowledge_id": str(knowledge_id),
+            "deleted": deleted,
+            "cleanup_completed": completed,
+            "cleanup_total": total,
         }
 
     async def collect_garbage(self, kb_id: UUID | None = None) -> dict[str, Any]:

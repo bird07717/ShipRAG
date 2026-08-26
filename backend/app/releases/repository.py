@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -9,6 +10,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.common.errors import ApiError
+
+logger = logging.getLogger(__name__)
 
 
 class ReleaseRepository:
@@ -235,6 +238,9 @@ class ReleaseRepository:
         profile: dict[str, Any],
         generation_source: str,
         profile_enrichment_version: int = 1,
+        quality_status: str = "PASS",
+        quality_notes: list[str] | None = None,
+        quality_evidence: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         parameters = {
             "id": uuid4(),
@@ -258,6 +264,9 @@ class ReleaseRepository:
             "confidence": float(profile.get("confidence", 0)),
             "reasoning": profile.get("reasoning"),
             "generation_source": generation_source,
+            "quality_status": quality_status,
+            "quality_notes": json.dumps(quality_notes or [], ensure_ascii=False),
+            "quality_evidence": json.dumps(quality_evidence or [], ensure_ascii=False),
         }
         async with self.engine.begin() as connection:
             row = (
@@ -272,7 +281,8 @@ class ReleaseRepository:
                                 enabled,
                                 routing_summary, symptoms, exclusions,
                                 profile_enrichment_version,
-                                generation_source, confidence, reasoning
+                                generation_source, confidence, reasoning,
+                                quality_status, quality_notes, quality_evidence
                             ) VALUES (
                                 :id, :release_id, :kb_id, :document_id, :operation,
                                 :target_profile_id, :problem_code, :canonical_question,
@@ -282,7 +292,9 @@ class ReleaseRepository:
                                 :routing_summary, CAST(:symptoms AS jsonb),
                                 CAST(:exclusions AS jsonb),
                                 :profile_enrichment_version,
-                                :generation_source, :confidence, :reasoning
+                                :generation_source, :confidence, :reasoning,
+                                :quality_status, CAST(:quality_notes AS jsonb),
+                                CAST(:quality_evidence AS jsonb)
                             )
                             ON CONFLICT (release_id, document_id) DO UPDATE
                             SET operation = EXCLUDED.operation,
@@ -301,6 +313,9 @@ class ReleaseRepository:
                                 generation_source = EXCLUDED.generation_source,
                                 confidence = EXCLUDED.confidence,
                                 reasoning = EXCLUDED.reasoning,
+                                quality_status = EXCLUDED.quality_status,
+                                quality_notes = EXCLUDED.quality_notes,
+                                quality_evidence = EXCLUDED.quality_evidence,
                                 status = 'DRAFT', validation_result = '{}'::jsonb,
                                 updated_at = now()
                             RETURNING *
@@ -330,6 +345,7 @@ class ReleaseRepository:
             "exclusions",
             "enabled",
             "status",
+            "quality_status",
         }
         selected = {key: value for key, value in changes.items() if key in allowed}
         if not selected:
@@ -579,7 +595,13 @@ class ReleaseRepository:
         return release
 
     async def save_validation(self, release_id: UUID, report: dict[str, Any]) -> dict[str, Any]:
-        status = "READY_TO_PUBLISH" if report["valid"] else "VALIDATION_FAILED"
+        status = (
+            "READY_TO_PUBLISH"
+            if report["publishable"]
+            else "VALIDATION_FAILED"
+            if not report["valid"]
+            else "DRAFT"
+        )
         async with self.engine.begin() as connection:
             updated = await connection.execute(
                 text(
@@ -682,7 +704,9 @@ class ReleaseRepository:
                     .all()
                 )
                 if any(row["status"] != "APPROVED" for row in drafts):
-                    raise ApiError("PROFILE_DRAFT_NOT_APPROVED", "所有草稿都必须先审核通过", 409)
+                    raise ApiError(
+                        "RELEASE_REVIEW_REQUIRED", "所有 Profile 草稿都必须先审核通过", 409
+                    )
                 for row in drafts:
                     if row["operation"] == "NONE":
                         continue
@@ -812,6 +836,132 @@ class ReleaseRepository:
             {**parameters, "new_id": uuid4()},
         )
 
+    async def document_profile_context(self, document_id: UUID) -> dict[str, Any] | None:
+        """Deterministic single-document Profile context for the Documents view.
+
+        Returns None when the document does not exist.  The response pairs the
+        live published Profile (if any) with the newest unpublished candidate
+        draft; multiple open candidates are a data anomaly, so the newest wins
+        and a warning is logged instead of picking silently.  LLM reasoning and
+        storage locations stay out of the payload — this is a read-only view.
+        """
+        async with self.engine.connect() as connection:
+            document_result = await connection.execute(
+                text("SELECT 1 FROM document_source WHERE id = :id"),
+                {"id": document_id},
+            )
+            if document_result.scalar_one_or_none() is None:
+                return None
+            published = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT id, problem_code, canonical_question, aliases,
+                                   keywords, product_name, model_names, task_type,
+                                   routing_summary, symptoms, exclusions, enabled,
+                                   profile_enrichment_version, updated_at
+                            FROM document_problem_profile
+                            WHERE document_id = :document_id
+                            ORDER BY updated_at DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {"document_id": document_id},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            draft_rows = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT d.id, d.release_id, d.operation, d.target_profile_id,
+                                   d.problem_code, d.canonical_question, d.aliases,
+                                   d.keywords, d.product_name, d.model_names, d.task_type,
+                                   d.enabled, d.routing_summary, d.status, d.quality_status,
+                                   d.quality_notes, d.generation_source, d.updated_at,
+                                   r.index_id, i.version AS index_version,
+                                   r.status AS release_status
+                            FROM problem_profile_draft d
+                            JOIN knowledge_release r ON r.id = d.release_id
+                            JOIN knowledge_index i ON i.id = r.index_id
+                            WHERE d.document_id = :document_id
+                              AND r.status NOT IN ('PUBLISHED', 'CANCELLED')
+                            ORDER BY r.created_at DESC, d.created_at DESC
+                            """
+                        ),
+                        {"document_id": document_id},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        if len(draft_rows) > 1:
+            logger.warning(
+                "Document %s has %d open candidate Profile drafts; returning the newest",
+                document_id,
+                len(draft_rows),
+            )
+        return {
+            "document_id": str(document_id),
+            "published_profile": (
+                self._profile_context_summary(dict(published)) if published else None
+            ),
+            "candidate_draft": (
+                self._draft_context_summary(dict(draft_rows[0])) if draft_rows else None
+            ),
+        }
+
+    @staticmethod
+    def _profile_context_summary(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "problem_code": row["problem_code"],
+            "canonical_question": row["canonical_question"],
+            "aliases": list(row.get("aliases") or []),
+            "keywords": list(row.get("keywords") or []),
+            "product_name": row.get("product_name"),
+            "model_names": list(row.get("model_names") or []),
+            "task_type": row.get("task_type"),
+            "routing_summary": str(row.get("routing_summary") or ""),
+            "symptoms": list(row.get("symptoms") or []),
+            "exclusions": list(row.get("exclusions") or []),
+            "enabled": bool(row.get("enabled", True)),
+            "profile_enrichment_version": int(row.get("profile_enrichment_version") or 0),
+            "updated_at": row.get("updated_at"),
+        }
+
+    @staticmethod
+    def _draft_context_summary(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "release_id": str(row["release_id"]),
+            "index_id": str(row["index_id"]),
+            "index_version": int(row["index_version"]),
+            "release_status": row["release_status"],
+            "status": row["status"],
+            "operation": row["operation"],
+            "target_profile_id": (
+                str(row["target_profile_id"]) if row.get("target_profile_id") else None
+            ),
+            "problem_code": row["problem_code"],
+            "canonical_question": row["canonical_question"],
+            "aliases": list(row.get("aliases") or []),
+            "keywords": list(row.get("keywords") or []),
+            "product_name": row.get("product_name"),
+            "model_names": list(row.get("model_names") or []),
+            "task_type": row.get("task_type"),
+            "routing_summary": str(row.get("routing_summary") or ""),
+            "enabled": bool(row.get("enabled", True)),
+            "quality_status": row.get("quality_status") or "PASS",
+            "quality_notes": list(row.get("quality_notes") or []),
+            "generation_source": row.get("generation_source"),
+            "updated_at": row.get("updated_at"),
+        }
+
     async def feedback(self, knowledge_id: UUID, limit: int) -> list[dict[str, Any]]:
         async with self.engine.connect() as connection:
             rows = (
@@ -878,5 +1028,7 @@ class ReleaseRepository:
             "model_names": list(row.get("model_names") or []),
             "symptoms": list(row.get("symptoms") or []),
             "exclusions": list(row.get("exclusions") or []),
+            "quality_notes": list(row.get("quality_notes") or []),
+            "quality_evidence": list(row.get("quality_evidence") or []),
             "validation_result": dict(row.get("validation_result") or {}),
         }

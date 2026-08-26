@@ -37,21 +37,28 @@ const viewProps = computed(() =>
 );
 
 let indexPollTimer: ReturnType<typeof setInterval> | undefined;
+let taskPollTimer: ReturnType<typeof setInterval> | undefined;
 
 onMounted(() => {
+  store.restoreTrackedTasks();
   void store.run(() => store.refreshAll());
   indexPollTimer = setInterval(() => {
     if (store.indexes.some((index) => index.status === "BUILDING")) {
       void store.refreshOperationalState();
     }
   }, 5_000);
+  taskPollTimer = setInterval(() => void store.pollTrackedTasks(), 3_000);
+  void store.pollTrackedTasks();
 });
 
-onUnmounted(() => clearInterval(indexPollTimer));
+onUnmounted(() => {
+  clearInterval(indexPollTimer);
+  clearInterval(taskPollTimer);
+});
 </script>
 
 <template>
-  <section v-loading="store.loading" class="studio-content">
+  <section class="studio-content">
     <el-alert
       v-if="store.error"
       :title="store.error"
