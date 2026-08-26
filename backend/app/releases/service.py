@@ -8,15 +8,25 @@ from uuid import UUID
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.rag.llm import LlmError, LlmProvider, create_llm_provider
-from app.releases.models import GeneratedProfile, ProfileDraftPatch, ValidationReport
+from app.releases.models import (
+    PROFILE_ENRICHMENT_VERSION,
+    GeneratedProfile,
+    ProfileDraftPatch,
+    ValidationReport,
+)
 from app.releases.repository import ReleaseRepository
 from app.support.problem_resolver import normalize_for_match
 from app.support.repository import SupportRepository
 
-_PROFILE_SYSTEM = """你是企业技术文档目录编辑。根据单篇文档生成一个可审核的问题 Profile 草稿。
-只描述文档实际解决的一个核心问题，不得编造文档没有的产品、型号或步骤。
-problem_code 使用简短稳定的英文大写下划线；Alias 是用户可能使用的完整问法；
-keywords 只保留具有区分度的动作或故障词，不能只放宽泛产品名。输出严格 JSON。"""
+_PROFILE_SYSTEM = """你是企业技术文档目录编辑。根据单篇文档正文生成一个可审核的问题 Profile 草稿。
+只描述该文档实际解决的一个核心问题；不得编造文档没有的产品、型号、版本、错误码或步骤。
+正文是事实来源，标题只可用作辅助。problem_code 使用简短稳定的英文大写下划线。
+canonical_question 是一个稳定的标准问题；aliases 提供 5 到 10 条用户可能使用的完整问法，
+至少覆盖任务问法、口语改写，以及正文确有依据时的故障现象或错误码问法。
+keywords 只保留具有区分度的动作、故障、部件或错误码，不能只放宽泛产品名。
+routing_summary 用 100 到 300 字说明文档解决什么问题、适用对象和关键前提；
+symptoms 仅列正文支持的故障现象、错误码或任务目标；exclusions 仅列正文明确不适用或易混淆的情况。
+输出严格 JSON。"""
 
 
 class ReleaseService:
@@ -25,12 +35,60 @@ class ReleaseService:
         self.settings = settings
 
     async def generate_for_index(self, index_id: UUID) -> list[dict[str, Any]]:
+        """Generate drafts for newly rebuilt documents during an index build."""
+        return await self._generate_for_index(index_id, include_reused=False)
+
+    async def refresh_profiles_for_index(self, index_id: UUID) -> list[dict[str, Any]]:
+        """Regenerate every candidate document's draft from its current content."""
+        return await self._generate_for_index(
+            index_id,
+            include_reused=True,
+            require_editable=True,
+        )
+
+    async def backfill_profiles_for_index(self, index_id: UUID) -> list[dict[str, Any]]:
+        """Fill only absent or older-enrichment Profiles without overwriting drafts."""
         release = await self.repository.get_release_for_index(index_id)
-        if release is None or release["status"] in {"PUBLISHED", "CANCELLED"}:
-            return []
+        release = self._ensure_editable_release(release)
         release_id = UUID(str(release["id"]))
         knowledge_id = UUID(str(release["kb_id"]))
-        documents = await self.repository.generation_documents(index_id)
+        documents = await self.repository.generation_documents(index_id, include_reused=True)
+        live_profiles = await self.repository.list_live_profiles(knowledge_id)
+        existing_drafts = await self.repository.existing_draft_document_ids(release_id)
+        document_ids = self._backfill_document_ids(documents, live_profiles, existing_drafts)
+        return await self._generate_for_index(
+            index_id,
+            include_reused=True,
+            document_ids=document_ids,
+            require_editable=True,
+        )
+
+    async def _generate_for_index(
+        self,
+        index_id: UUID,
+        *,
+        include_reused: bool,
+        document_ids: set[UUID] | None = None,
+        require_editable: bool = False,
+    ) -> list[dict[str, Any]]:
+        release = await self.repository.get_release_for_index(index_id)
+        if release is None or release["status"] in {"PUBLISHED", "CANCELLED"}:
+            if require_editable:
+                self._ensure_editable_release(release)
+            return []
+        if require_editable:
+            self._ensure_editable_release(release)
+        release_id = UUID(str(release["id"]))
+        knowledge_id = UUID(str(release["kb_id"]))
+        documents = await self.repository.generation_documents(
+            index_id, include_reused=include_reused
+        )
+        if document_ids is not None:
+            documents = [
+                document
+                for document in documents
+                if UUID(str(document["document_id"])) in document_ids
+            ]
         live_profiles = await self.repository.list_live_profiles(knowledge_id)
         provider: LlmProvider | None = None
         provider_error: str | None = None
@@ -60,6 +118,7 @@ class ReleaseService:
                         target_profile_id=(UUID(str(target["id"])) if target is not None else None),
                         profile=profile.model_dump(mode="json"),
                         generation_source=source,
+                        profile_enrichment_version=PROFILE_ENRICHMENT_VERSION,
                     )
                 )
         finally:
@@ -72,8 +131,8 @@ class ReleaseService:
         return generated
 
     async def regenerate_draft(self, draft_id: UUID) -> dict[str, Any]:
-        # Resolve the containing index through the ordinary release response so
-        # regeneration follows the same generation and replacement rules.
+        # A single-document regeneration must include REUSE documents too: old
+        # documents are normally excluded from the automatic build-time pass.
         async with self.repository.engine.connect() as connection:
             from sqlalchemy import text
 
@@ -96,7 +155,12 @@ class ReleaseService:
             )
         if row is None:
             raise ApiError("PROFILE_DRAFT_NOT_FOUND", "Profile 草稿不存在", 404)
-        drafts = await self.generate_for_index(UUID(str(row["index_id"])))
+        drafts = await self._generate_for_index(
+            UUID(str(row["index_id"])),
+            include_reused=True,
+            document_ids={UUID(str(row["document_id"]))},
+            require_editable=True,
+        )
         selected = next(
             (item for item in drafts if item["document_id"] == str(row["document_id"])), None
         )
@@ -104,8 +168,41 @@ class ReleaseService:
             raise ApiError("PROFILE_DRAFT_GENERATION_FAILED", "草稿重新生成失败", 500)
         return selected
 
+    @staticmethod
+    def _ensure_editable_release(release: dict[str, Any] | None) -> dict[str, Any]:
+        if release is None:
+            raise ApiError("RELEASE_NOT_FOUND", "发布候选不存在", 404)
+        if release["status"] in {"PUBLISHED", "CANCELLED"}:
+            raise ApiError("RELEASE_NOT_EDITABLE", "发布候选已发布或已取消", 409)
+        if release.get("index_status") != "READY":
+            raise ApiError("INDEX_NOT_READY", "候选索引尚未完成，暂不能维护 Profile", 409)
+        return release
+
+    @staticmethod
+    def _backfill_document_ids(
+        documents: list[dict[str, Any]],
+        live_profiles: list[dict[str, Any]],
+        existing_drafts: set[UUID],
+    ) -> set[UUID]:
+        live_by_document = {
+            UUID(str(profile["document_id"])): profile for profile in live_profiles
+        }
+        eligible: set[UUID] = set()
+        for document in documents:
+            document_id = UUID(str(document["document_id"]))
+            if document_id in existing_drafts:
+                continue
+            profile = live_by_document.get(document_id)
+            if profile is None or int(profile.get("profile_enrichment_version") or 0) < (
+                PROFILE_ENRICHMENT_VERSION
+            ):
+                eligible.add(document_id)
+        return eligible
+
     async def update_draft(self, draft_id: UUID, patch: ProfileDraftPatch) -> dict[str, Any]:
         changes = patch.changes()
+        if "routing_summary" in changes and changes["routing_summary"] is None:
+            changes["routing_summary"] = ""
         profile_fields = {
             "operation",
             "target_profile_id",
@@ -116,6 +213,9 @@ class ReleaseService:
             "product_name",
             "model_names",
             "task_type",
+            "routing_summary",
+            "symptoms",
+            "exclusions",
             "enabled",
         }
         if profile_fields.intersection(changes) and "status" not in changes:
@@ -199,6 +299,11 @@ class ReleaseService:
             product_name=product,
             model_names=model_names[:5],
             task_type=task_type,
+            routing_summary=(
+                f"《{title}》的保守路由摘要：模型不可用，需由管理员根据正文确认适用问题。"
+            ),
+            symptoms=[],
+            exclusions=[],
             confidence=0.35,
             reasoning="模型不可用，按文档标题生成的保守草稿，需要管理员审核。",
         )
@@ -242,6 +347,10 @@ class ReleaseService:
         aliases = list(dict.fromkeys([*list(target.get("aliases") or []), *profile.aliases]))
         keywords = list(dict.fromkeys([*list(target.get("keywords") or []), *profile.keywords]))
         models = list(dict.fromkeys([*list(target.get("model_names") or []), *profile.model_names]))
+        symptoms = list(dict.fromkeys([*list(target.get("symptoms") or []), *profile.symptoms]))
+        exclusions = list(
+            dict.fromkeys([*list(target.get("exclusions") or []), *profile.exclusions])
+        )
         return profile.model_copy(
             update={
                 "problem_code": str(target["problem_code"]),
@@ -250,6 +359,11 @@ class ReleaseService:
                 "model_names": models[:10],
                 "product_name": profile.product_name or target.get("product_name"),
                 "task_type": profile.task_type or target.get("task_type"),
+                "routing_summary": profile.routing_summary or str(
+                    target.get("routing_summary") or ""
+                ),
+                "symptoms": symptoms[:12],
+                "exclusions": exclusions[:8],
                 "reasoning": (
                     (profile.reasoning + " " if profile.reasoning else "")
                     + f"与现有问题 {target['problem_code']} 高度相似，建议替换文档版本。"

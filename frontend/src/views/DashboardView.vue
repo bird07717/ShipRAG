@@ -143,15 +143,14 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
           <span>构建中</span><strong>{{ store.buildingCount }}</strong>
           <small>查看索引任务</small>
         </button>
-        <button type="button" @click="store.navigate('support-profiles')">
-          <span>待审核草稿</span><strong>{{ store.pendingReviewCount }}</strong>
-          <small>{{ store.selectedRelease ? `候选 v${store.selectedRelease.index_version}` : "没有开放候选" }}</small>
+        <button type="button" @click="store.navigate('indexes')">
+          <span>待审核发布</span><strong>{{ store.indexes.filter((index) => index.status === 'READY').length }}</strong>
+          <small>在 Index Build 审核 RAG 索引</small>
         </button>
-        <button type="button" @click="store.navigate('support-profiles')">
-          <span>发布状态</span>
-          <StatusBadge v-if="store.selectedRelease" :status="store.selectedRelease.status" />
-          <strong v-else class="state-text">无候选</strong>
-          <small>验证并原子发布</small>
+        <button type="button" @click="store.navigate('indexes')">
+          <span>线上索引</span>
+          <strong class="state-text">{{ store.activeIndex ? `v${store.activeIndex.version}` : "未发布" }}</strong>
+          <small>当前新会话使用的 RAG 版本</small>
         </button>
       </div>
     </section>

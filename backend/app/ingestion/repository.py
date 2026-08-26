@@ -730,20 +730,9 @@ class IngestionRepository:
             },
         )
         if not activate_on_success:
-            # A knowledge base has exactly one actionable candidate.  A later
-            # build contains a fresher snapshot of every currently stored
-            # document, so older open releases must not remain publishable.
+            # Clean up legacy Profile-release candidates.  New RAG builds are
+            # reviewed and published directly from Index Build instead.
             await self._cancel_open_releases(connection, knowledge_id)
-            await connection.execute(
-                text(
-                    """
-                    INSERT INTO knowledge_release (id, kb_id, index_id, status)
-                    VALUES (:id, :kb_id, :index_id, 'DRAFT')
-                    ON CONFLICT (index_id) DO NOTHING
-                    """
-                ),
-                {"id": uuid4(), "kb_id": knowledge_id, "index_id": index_id},
-            )
         await connection.execute(
             text(
                 """
@@ -911,10 +900,9 @@ class IngestionRepository:
             target_result = await connection.execute(
                 text(
                     """
-                    SELECT i.*, kb.active_index_id, r.status AS release_status
+                    SELECT i.*, kb.active_index_id
                     FROM knowledge_index i
                     JOIN knowledge_base kb ON kb.id = i.kb_id
-                    LEFT JOIN knowledge_release r ON r.index_id = i.id
                     WHERE i.id = :index_id
                     FOR UPDATE OF kb, i
                     """
@@ -926,12 +914,6 @@ class IngestionRepository:
                 raise ApiError("INDEX_NOT_FOUND", "索引不存在", 404)
             if target["status"] == "ACTIVE" and target["active_index_id"] == index_id:
                 return dict(target)
-            if target["release_status"] is not None and target["release_status"] != "PUBLISHED":
-                raise ApiError(
-                    "RELEASE_REQUIRED",
-                    "该索引包含待审核 Profile，请通过发布候选完成原子发布",
-                    409,
-                )
             if target["status"] != "READY":
                 raise ApiError("INDEX_NOT_READY", "只有 READY 索引可以激活", 409)
 
@@ -967,6 +949,20 @@ class IngestionRepository:
                     """
                 ),
                 {"index_id": index_id, "kb_id": target["kb_id"]},
+            )
+            # Releases created by earlier versions contained optional Support
+            # Profile drafts.  Publishing a RAG snapshot no longer depends on
+            # those drafts, so retire any old open release for this index.
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_release
+                    SET status = 'CANCELLED', updated_at = now()
+                    WHERE index_id = :index_id
+                      AND status NOT IN ('PUBLISHED', 'CANCELLED')
+                    """
+                ),
+                {"index_id": index_id},
             )
             return dict(activated)
 

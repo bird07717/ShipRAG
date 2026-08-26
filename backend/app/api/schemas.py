@@ -808,9 +808,12 @@ class ProblemProfileUpsert(BaseModel):
     product_name: str | None = Field(default=None, max_length=200)
     model_names: list[str] = Field(default_factory=list)
     task_type: str | None = Field(default=None, max_length=50)
+    routing_summary: str = Field(default="", max_length=1_000)
+    symptoms: list[str] = Field(default_factory=list, max_length=12)
+    exclusions: list[str] = Field(default_factory=list, max_length=8)
     enabled: bool = True
 
-    @field_validator("aliases", "keywords", "model_names")
+    @field_validator("aliases", "keywords", "model_names", "symptoms", "exclusions")
     @classmethod
     def non_empty_string_items(cls, value: list[str]) -> list[str]:
         if any(not item.strip() for item in value):
@@ -821,6 +824,7 @@ class ProblemProfileUpsert(BaseModel):
 class ProblemProfileResponse(ProblemProfileUpsert):
     id: UUID
     knowledge_id: UUID
+    profile_enrichment_version: int = Field(default=0, ge=0)
     support_ready: bool
     readiness_reasons: list[str] = Field(default_factory=list)
     created_at: datetime

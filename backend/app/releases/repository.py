@@ -63,6 +63,23 @@ class ReleaseRepository:
         return [self._release_response(dict(row)) for row in rows]
 
     async def get_release(self, release_id: UUID) -> dict[str, Any]:
+        # A schema migration can invalidate asyncpg's prepared statement plan
+        # in an already-running API worker.  Release detail is a read-only
+        # operation, so dispose that stale pool and retry once instead of
+        # making the first post-migration review request fail with a 500.
+        for attempt in range(2):
+            try:
+                return await self._get_release_once(release_id)
+            except SQLAlchemyError as error:
+                stale_plan = (
+                    type(getattr(error, "orig", None)).__name__ == "InvalidCachedStatementError"
+                )
+                if not stale_plan or attempt:
+                    raise
+                await self.engine.dispose()
+        raise AssertionError("release detail retry loop unexpectedly completed")
+
+    async def _get_release_once(self, release_id: UUID) -> dict[str, Any]:
         async with self.engine.connect() as connection:
             release = (
                 (
@@ -109,7 +126,13 @@ class ReleaseRepository:
         response["approved_count"] = sum(row["status"] == "APPROVED" for row in drafts)
         return response
 
-    async def generation_documents(self, index_id: UUID) -> list[dict[str, Any]]:
+    async def generation_documents(
+        self,
+        index_id: UUID,
+        *,
+        include_reused: bool = False,
+        document_id: UUID | None = None,
+    ) -> list[dict[str, Any]]:
         async with self.engine.connect() as connection:
             rows = (
                 (
@@ -127,12 +150,23 @@ class ReleaseRepository:
                         LEFT JOIN document_element e
                           ON e.index_id = idoc.index_id AND e.document_id = d.id
                         WHERE idoc.index_id = :index_id
-                          AND COALESCE(idoc.metadata ->> 'build_mode', 'REBUILD') = 'REBUILD'
+                          AND (
+                              :include_reused
+                              OR COALESCE(idoc.metadata ->> 'build_mode', 'REBUILD') = 'REBUILD'
+                          )
+                          AND (
+                              CAST(:document_id AS uuid) IS NULL
+                              OR d.id = CAST(:document_id AS uuid)
+                          )
                         GROUP BY d.id, d.kb_id, d.display_name, d.filename
                         ORDER BY d.created_at, d.id
                         """
                         ),
-                        {"index_id": index_id},
+                        {
+                            "index_id": index_id,
+                            "include_reused": include_reused,
+                            "document_id": document_id,
+                        },
                     )
                 )
                 .mappings()
@@ -148,7 +182,9 @@ class ReleaseRepository:
                         text(
                             """
                         SELECT id, document_id, kb_id, problem_code, canonical_question,
-                               aliases, keywords, product_name, model_names, task_type, enabled
+                               aliases, keywords, product_name, model_names, task_type,
+                               routing_summary, symptoms, exclusions, profile_enrichment_version,
+                               enabled
                         FROM document_problem_profile
                         WHERE kb_id = :kb_id
                         ORDER BY canonical_question
@@ -162,6 +198,32 @@ class ReleaseRepository:
             )
         return [dict(row) for row in rows]
 
+    async def existing_draft_document_ids(self, release_id: UUID) -> set[UUID]:
+        """Return documents already represented in a candidate.
+
+        Backfill must never replace an administrator's in-progress candidate
+        change.  Full refresh deliberately uses ``upsert_generated_draft`` and
+        therefore does replace those drafts.
+        """
+        async with self.engine.connect() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT document_id
+                            FROM problem_profile_draft
+                            WHERE release_id = :release_id
+                            """
+                        ),
+                        {"release_id": release_id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return {UUID(str(document_id)) for document_id in rows}
+
     async def upsert_generated_draft(
         self,
         *,
@@ -172,6 +234,7 @@ class ReleaseRepository:
         target_profile_id: UUID | None,
         profile: dict[str, Any],
         generation_source: str,
+        profile_enrichment_version: int = 1,
     ) -> dict[str, Any]:
         parameters = {
             "id": uuid4(),
@@ -187,6 +250,11 @@ class ReleaseRepository:
             "product_name": profile.get("product_name"),
             "model_names": json.dumps(profile.get("model_names", []), ensure_ascii=False),
             "task_type": profile.get("task_type"),
+            "enabled": bool(profile.get("enabled", True)),
+            "routing_summary": profile.get("routing_summary", ""),
+            "symptoms": json.dumps(profile.get("symptoms", []), ensure_ascii=False),
+            "exclusions": json.dumps(profile.get("exclusions", []), ensure_ascii=False),
+            "profile_enrichment_version": profile_enrichment_version,
             "confidence": float(profile.get("confidence", 0)),
             "reasoning": profile.get("reasoning"),
             "generation_source": generation_source,
@@ -201,12 +269,19 @@ class ReleaseRepository:
                                 id, release_id, kb_id, document_id, operation,
                                 target_profile_id, problem_code, canonical_question,
                                 aliases, keywords, product_name, model_names, task_type,
+                                enabled,
+                                routing_summary, symptoms, exclusions,
+                                profile_enrichment_version,
                                 generation_source, confidence, reasoning
                             ) VALUES (
                                 :id, :release_id, :kb_id, :document_id, :operation,
                                 :target_profile_id, :problem_code, :canonical_question,
                                 CAST(:aliases AS jsonb), CAST(:keywords AS jsonb),
                                 :product_name, CAST(:model_names AS jsonb), :task_type,
+                                :enabled,
+                                :routing_summary, CAST(:symptoms AS jsonb),
+                                CAST(:exclusions AS jsonb),
+                                :profile_enrichment_version,
                                 :generation_source, :confidence, :reasoning
                             )
                             ON CONFLICT (release_id, document_id) DO UPDATE
@@ -219,6 +294,10 @@ class ReleaseRepository:
                                 product_name = EXCLUDED.product_name,
                                 model_names = EXCLUDED.model_names,
                                 task_type = EXCLUDED.task_type,
+                                routing_summary = EXCLUDED.routing_summary,
+                                symptoms = EXCLUDED.symptoms,
+                                exclusions = EXCLUDED.exclusions,
+                                profile_enrichment_version = EXCLUDED.profile_enrichment_version,
                                 generation_source = EXCLUDED.generation_source,
                                 confidence = EXCLUDED.confidence,
                                 reasoning = EXCLUDED.reasoning,
@@ -246,6 +325,9 @@ class ReleaseRepository:
             "product_name",
             "model_names",
             "task_type",
+            "routing_summary",
+            "symptoms",
+            "exclusions",
             "enabled",
             "status",
         }
@@ -255,7 +337,7 @@ class ReleaseRepository:
         assignments: list[str] = []
         parameters: dict[str, Any] = {"id": draft_id}
         for key, value in selected.items():
-            if key in {"aliases", "keywords", "model_names"}:
+            if key in {"aliases", "keywords", "model_names", "symptoms", "exclusions"}:
                 assignments.append(f"{key} = CAST(:{key} AS jsonb)")
                 parameters[key] = json.dumps(value, ensure_ascii=False)
             else:
@@ -296,6 +378,167 @@ class ReleaseRepository:
                 {"release_id": row["release_id"]},
             )
         return self._draft_response(dict(row))
+
+    async def create_draft_from_live(self, *, release_id: UUID, profile_id: UUID) -> dict[str, Any]:
+        """Copy one live Profile into the current candidate as an UPDATE draft.
+
+        This is the safe editing boundary: published routing data remains
+        immutable until the candidate is reviewed and published atomically.
+        An existing draft for the same document is returned unchanged so a
+        repeated click cannot erase in-progress edits.
+        """
+        async with self.engine.begin() as connection:
+            release = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT id, kb_id, index_id, status
+                            FROM knowledge_release
+                            WHERE id = :release_id
+                            FOR UPDATE
+                            """
+                        ),
+                        {"release_id": release_id},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if release is None:
+                raise ApiError("RELEASE_NOT_FOUND", "发布候选不存在", 404)
+            if release["status"] in {"PUBLISHED", "CANCELLED"}:
+                raise ApiError("RELEASE_NOT_EDITABLE", "发布候选已发布或已取消", 409)
+
+            profile = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT *
+                            FROM document_problem_profile
+                            WHERE id = :profile_id AND kb_id = :kb_id
+                            FOR UPDATE
+                            """
+                        ),
+                        {"profile_id": profile_id, "kb_id": release["kb_id"]},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if profile is None:
+                raise ApiError("PROBLEM_PROFILE_NOT_FOUND", "线上 Profile 不存在", 404)
+
+            present = await connection.execute(
+                text(
+                    """
+                    SELECT 1 FROM index_document
+                    WHERE index_id = :index_id AND document_id = :document_id
+                    LIMIT 1
+                    """
+                ),
+                {"index_id": release["index_id"], "document_id": profile["document_id"]},
+            )
+            if present.scalar_one_or_none() is None:
+                raise ApiError("DOCUMENT_NOT_IN_CANDIDATE", "文档不在当前候选索引中", 409)
+
+            existing = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT * FROM problem_profile_draft
+                            WHERE release_id = :release_id AND document_id = :document_id
+                            FOR UPDATE
+                            """
+                        ),
+                        {
+                            "release_id": release_id,
+                            "document_id": profile["document_id"],
+                        },
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if existing is not None:
+                return self._draft_response(dict(existing))
+
+            created = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO problem_profile_draft (
+                                id, release_id, kb_id, document_id, operation,
+                                target_profile_id, problem_code, canonical_question,
+                                aliases, keywords, product_name, model_names, task_type,
+                                enabled,
+                                routing_summary, symptoms, exclusions,
+                                profile_enrichment_version,
+                                generation_source, confidence, reasoning
+                            ) VALUES (
+                                :id, :release_id, :kb_id, :document_id, 'UPDATE',
+                                :target_profile_id, :problem_code, :canonical_question,
+                                CAST(:aliases AS jsonb), CAST(:keywords AS jsonb),
+                                :product_name, CAST(:model_names AS jsonb), :task_type,
+                                :enabled,
+                                :routing_summary, CAST(:symptoms AS jsonb),
+                                CAST(:exclusions AS jsonb), :profile_enrichment_version,
+                                'MANUAL', 1.0, :reasoning
+                            )
+                            RETURNING *
+                            """
+                        ),
+                        {
+                            "id": uuid4(),
+                            "release_id": release_id,
+                            "kb_id": release["kb_id"],
+                            "document_id": profile["document_id"],
+                            "target_profile_id": profile["id"],
+                            "problem_code": profile["problem_code"],
+                            "canonical_question": profile["canonical_question"],
+                            "aliases": json.dumps(
+                                list(profile["aliases"] or []), ensure_ascii=False
+                            ),
+                            "keywords": json.dumps(
+                                list(profile["keywords"] or []), ensure_ascii=False
+                            ),
+                            "product_name": profile["product_name"],
+                            "model_names": json.dumps(
+                                list(profile["model_names"] or []), ensure_ascii=False
+                            ),
+                            "task_type": profile["task_type"],
+                            "enabled": profile["enabled"],
+                            "routing_summary": str(profile.get("routing_summary") or ""),
+                            "symptoms": json.dumps(
+                                list(profile.get("symptoms") or []), ensure_ascii=False
+                            ),
+                            "exclusions": json.dumps(
+                                list(profile.get("exclusions") or []), ensure_ascii=False
+                            ),
+                            "profile_enrichment_version": int(
+                                profile.get("profile_enrichment_version") or 0
+                            ),
+                            "reasoning": "从线上 Profile 创建的人工编辑草稿。",
+                        },
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_release
+                    SET status = 'DRAFT', validation_result = '{}'::jsonb, updated_at = now()
+                    WHERE id = :release_id
+                    """
+                ),
+                {"release_id": release_id},
+            )
+        return self._draft_response(dict(created))
 
     async def validation_snapshot(self, release_id: UUID) -> dict[str, Any]:
         release = await self.get_release(release_id)
@@ -520,6 +763,8 @@ class ReleaseRepository:
             "aliases_json": json.dumps(list(draft["aliases"] or []), ensure_ascii=False),
             "keywords_json": json.dumps(list(draft["keywords"] or []), ensure_ascii=False),
             "models_json": json.dumps(list(draft["model_names"] or []), ensure_ascii=False),
+            "symptoms_json": json.dumps(list(draft.get("symptoms") or []), ensure_ascii=False),
+            "exclusions_json": json.dumps(list(draft.get("exclusions") or []), ensure_ascii=False),
         }
         if draft["operation"] == "UPDATE":
             if draft["target_profile_id"] is None:
@@ -534,7 +779,11 @@ class ReleaseRepository:
                         keywords = CAST(:keywords_json AS jsonb),
                         product_name = :product_name,
                         model_names = CAST(:models_json AS jsonb),
-                        task_type = :task_type, enabled = :enabled, updated_at = now()
+                        task_type = :task_type, routing_summary = :routing_summary,
+                        symptoms = CAST(:symptoms_json AS jsonb),
+                        exclusions = CAST(:exclusions_json AS jsonb),
+                        profile_enrichment_version = :profile_enrichment_version,
+                        enabled = :enabled, updated_at = now()
                     WHERE id = :target_profile_id AND kb_id = :kb_id
                     """
                 ),
@@ -548,11 +797,15 @@ class ReleaseRepository:
                 """
                 INSERT INTO document_problem_profile (
                     id, document_id, kb_id, problem_code, canonical_question,
-                    aliases, keywords, product_name, model_names, task_type, enabled
+                    aliases, keywords, product_name, model_names, task_type, enabled,
+                    routing_summary, symptoms, exclusions, profile_enrichment_version
                 ) VALUES (
                     :new_id, :document_id, :kb_id, :problem_code, :canonical_question,
                     CAST(:aliases_json AS jsonb), CAST(:keywords_json AS jsonb),
-                    :product_name, CAST(:models_json AS jsonb), :task_type, :enabled
+                    :product_name, CAST(:models_json AS jsonb), :task_type, :enabled,
+                    :routing_summary, CAST(:symptoms_json AS jsonb),
+                    CAST(:exclusions_json AS jsonb),
+                    :profile_enrichment_version
                 )
                 """
             ),
@@ -623,5 +876,7 @@ class ReleaseRepository:
             "aliases": list(row.get("aliases") or []),
             "keywords": list(row.get("keywords") or []),
             "model_names": list(row.get("model_names") or []),
+            "symptoms": list(row.get("symptoms") or []),
+            "exclusions": list(row.get("exclusions") or []),
             "validation_result": dict(row.get("validation_result") or {}),
         }

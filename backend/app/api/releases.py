@@ -52,12 +52,43 @@ async def generate_profile_drafts(
     return await service.generate_for_index(index_id)
 
 
+@router.post("/indexes/{index_id}/profile-drafts/backfill")
+async def backfill_profile_drafts(
+    index_id: UUID,
+    service: Annotated[ReleaseService, Depends(get_release_service)],
+) -> list[dict[str, Any]]:
+    """Generate only Profiles that are missing the current enrichment version."""
+    return await service.backfill_profiles_for_index(index_id)
+
+
+@router.post("/indexes/{index_id}/profile-drafts/refresh")
+async def refresh_profile_drafts(
+    index_id: UUID,
+    service: Annotated[ReleaseService, Depends(get_release_service)],
+) -> list[dict[str, Any]]:
+    """Regenerate drafts for all documents in an editable candidate."""
+    return await service.refresh_profiles_for_index(index_id)
+
+
 @router.post("/profile-drafts/{draft_id}/regenerate")
 async def regenerate_profile_draft(
     draft_id: UUID,
     service: Annotated[ReleaseService, Depends(get_release_service)],
 ) -> dict[str, Any]:
     return await service.regenerate_draft(draft_id)
+
+
+@router.post("/releases/{release_id}/profiles/{profile_id}/draft")
+async def create_profile_edit_draft(
+    release_id: UUID,
+    profile_id: UUID,
+    repository: Annotated[ReleaseRepository, Depends(get_release_repository)],
+) -> dict[str, Any]:
+    """Copy a live Profile into an UPDATE draft in the selected candidate."""
+    return await repository.create_draft_from_live(
+        release_id=release_id,
+        profile_id=profile_id,
+    )
 
 
 @router.patch("/profile-drafts/{draft_id}")

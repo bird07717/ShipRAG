@@ -202,6 +202,10 @@ export interface ProblemProfile {
   product_name: string | null;
   model_names: string[];
   task_type: string | null;
+  routing_summary: string;
+  symptoms: string[];
+  exclusions: string[];
+  profile_enrichment_version: number;
   enabled: boolean;
   support_ready: boolean;
   readiness_reasons: string[];
@@ -240,6 +244,10 @@ export interface ProfileDraft {
   product_name: string | null;
   model_names: string[];
   task_type: string | null;
+  routing_summary: string;
+  symptoms: string[];
+  exclusions: string[];
+  profile_enrichment_version: number;
   enabled: boolean;
   status: ProfileDraftStatus;
   generation_source: "LLM" | "FALLBACK" | "MANUAL";
@@ -262,6 +270,9 @@ export type ProfileDraftPatch = Partial<
     | "product_name"
     | "model_names"
     | "task_type"
+    | "routing_summary"
+    | "symptoms"
+    | "exclusions"
     | "enabled"
     | "status"
   >

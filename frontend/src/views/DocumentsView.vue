@@ -110,7 +110,7 @@ function formatSize(size: number): string {
         v-else
         :icon="Document"
         title="暂无文档"
-        description="上传 Word 文档后会构建候选索引并生成 Profile 草稿，审核发布前不影响线上问答。"
+        description="上传 Word 文档后会构建候选 RAG 索引；请在 Index Build 审核发布，发布前不影响线上问答。"
       >
         <template #action>
           <el-button
@@ -135,7 +135,7 @@ function formatSize(size: number): string {
         <h4>选择文件</h4>
         <p class="desc">
           当前知识库：{{ store.selectedKnowledge?.name ?? "未选择" }}。仅支持 .docx
-          文件，上传后将自动构建候选索引并生成待审核 Profile 草稿。
+          文件，上传后将自动构建候选 RAG 索引，审核发布前不影响线上问答。
         </p>
         <button type="button" class="upload-dropzone" @click="openPicker">
           <el-icon :size="22"><UploadFilled /></el-icon>

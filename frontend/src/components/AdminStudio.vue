@@ -13,7 +13,6 @@ import LogsView from "@/views/LogsView.vue";
 import PlaygroundView from "@/views/PlaygroundView.vue";
 import ConfigurationView from "@/views/ConfigurationView.vue";
 import EngineRoutingView from "@/views/EngineRoutingView.vue";
-import SupportProfilesView from "@/views/SupportProfilesView.vue";
 import ConversationTimeline from "@/components/ConversationTimeline.vue";
 
 const props = defineProps<{ view: string; navigationQuery?: string }>();
@@ -29,7 +28,6 @@ const views: Record<string, Component> = {
   playground: PlaygroundView,
   configuration: ConfigurationView,
   "engine-routing": EngineRoutingView,
-  "support-profiles": SupportProfilesView,
 };
 
 const viewProps = computed(() =>
@@ -43,10 +41,7 @@ let indexPollTimer: ReturnType<typeof setInterval> | undefined;
 onMounted(() => {
   void store.run(() => store.refreshAll());
   indexPollTimer = setInterval(() => {
-    const hasOpenWorkflow =
-      store.indexes.some((index) => index.status === "BUILDING") ||
-      Boolean(store.selectedRelease && !["PUBLISHED", "CANCELLED"].includes(store.selectedRelease.status));
-    if (hasOpenWorkflow) {
+    if (store.indexes.some((index) => index.status === "BUILDING")) {
       void store.refreshOperationalState();
     }
   }, 5_000);

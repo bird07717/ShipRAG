@@ -18,7 +18,7 @@ describe("App", () => {
     });
 
     expect(wrapper.text()).toContain("Support Studio");
-    expect(wrapper.text()).toContain("发布管理");
+    expect(wrapper.text()).not.toContain("发布管理");
     expect(wrapper.text()).toContain("DemoChat 问答测试");
     expect(wrapper.text()).toContain("Engine Routing");
     expect(wrapper.text()).toContain("Logs & Traces");
@@ -32,7 +32,7 @@ describe("App", () => {
     expect(wrapper.text()).toContain("DUAL ENGINE");
     expect(wrapper.text()).toContain("admin-studio");
     expect(wrapper.text()).toContain("health-panel");
-    expect(wrapper.findAll("nav button")).toHaveLength(10);
+    expect(wrapper.findAll("nav button")).toHaveLength(9);
     expect(wrapper.find(".management-context").exists()).toBe(false);
 
     const playground = wrapper.findAll("nav button").find((item) => item.text().includes("RAG Playground"));
@@ -44,7 +44,8 @@ describe("App", () => {
   });
 
   it.each([
-    ["support-configuration", "support-profiles", "候选 Profile 审核与原子发布"],
+    ["support-configuration", "indexes", "手工构建、快照与回收诊断"],
+    ["support-profiles", "indexes", "手工构建、快照与回收诊断"],
     ["support-errors", "logs?tab=failed-turns&engine=SUPPORT", "错误、失败任务与完整链路排查"],
     ["rag-errors", "logs?tab=failed-turns&engine=RAG", "错误、失败任务与完整链路排查"],
     ["traces", "logs?tab=traces", "错误、失败任务与完整链路排查"],

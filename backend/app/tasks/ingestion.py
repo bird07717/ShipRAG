@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from uuid import UUID
 
 from redis import Redis
@@ -14,10 +13,6 @@ from app.ingestion.image_understanding import create_ocr_provider, create_vision
 from app.ingestion.model_config import load_build_models
 from app.ingestion.pipeline import IndexPipeline
 from app.ingestion.repository import BuildReference, IngestionRepository
-from app.releases.repository import ReleaseRepository
-from app.releases.service import ReleaseService
-
-logger = logging.getLogger(__name__)
 
 
 def enqueue_index_build(settings: Settings, index_id: UUID, task_id: UUID) -> None:
@@ -60,19 +55,6 @@ async def _run_index_task(index_id: UUID, task_id: UUID) -> dict[str, int | str]
         )
         try:
             result = await pipeline.run(index_id, task_id)
-            release_service = ReleaseService(ReleaseRepository(resources.database), settings)
-            try:
-                await release_service.generate_for_index(result.index_id)
-            except Exception as exc:
-                # Profile drafting is a review aid.  A generation failure must
-                # not retroactively turn a complete, usable candidate index
-                # into a failed ingestion task.
-                logger.exception("Profile draft generation failed for index %s", result.index_id)
-                release = await release_service.repository.get_release_for_index(result.index_id)
-                if release is not None:
-                    await release_service.repository.set_generation_error(
-                        UUID(str(release["id"])), f"{type(exc).__name__}: {exc}"[:500]
-                    )
             _enqueue_followup(settings, result.followup_build)
             return {
                 "index_id": str(result.index_id),

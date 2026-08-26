@@ -47,7 +47,6 @@ const menuGroups: MenuGroup[] = [
     items: [
       { key: "knowledge", label: "Knowledge Base", subtitle: "知识域与目录管理", icon: Notebook },
       { key: "documents", label: "Documents", subtitle: "文档上传、内容与切片检查", icon: Files },
-      { key: "support-profiles", label: "发布管理", subtitle: "候选 Profile 审核与原子发布", icon: Files },
     ],
   },
   {
@@ -75,7 +74,8 @@ const menuGroups: MenuGroup[] = [
 
 const allItems = menuGroups.flatMap((group) => group.items);
 const legacyViewTargets: Record<string, { view: string; query?: string }> = {
-  "support-configuration": { view: "support-profiles" },
+  "support-configuration": { view: "indexes" },
+  "support-profiles": { view: "indexes" },
   "support-errors": { view: "logs", query: "tab=failed-turns&engine=SUPPORT" },
   "rag-errors": { view: "logs", query: "tab=failed-turns&engine=RAG" },
   traces: { view: "logs", query: "tab=traces" },
@@ -121,10 +121,10 @@ function syncHash(): void {
   }
 }
 
-function navigate(view: string): void {
+function navigate(view: string, query = ""): void {
   activeView.value = view;
-  navigationQuery.value = "";
-  const target = `#/${view}`;
+  navigationQuery.value = query;
+  const target = `#/${view}${query ? `?${query}` : ""}`;
   if (window.location.hash !== target) window.history.pushState(null, "", target);
 }
 
@@ -132,8 +132,9 @@ watch(
   () => store.requestedView,
   (view) => {
     if (!view || !allItems.some((item) => item.key === view)) return;
-    navigate(view);
+    navigate(view, store.requestedViewQuery);
     store.requestedView = "";
+    store.requestedViewQuery = "";
   },
 );
 

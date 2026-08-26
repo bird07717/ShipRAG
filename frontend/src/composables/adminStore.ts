@@ -6,15 +6,11 @@ import type {
   DocumentItem,
   KnowledgeBase,
   KnowledgeIndex,
-  KnowledgeRelease,
   IndexTask,
   ModelConfig,
   ModelConfigUpdatePayload,
   ModelProbeResult,
   PromptTemplate,
-  ProblemProfile,
-  ProfileDraftPatch,
-  ProfileFeedback,
   RagConfig,
   RagConfigUpdatePayload,
   RagTrace,
@@ -55,10 +51,6 @@ export const adminStore = reactive({
   models: [] as ModelConfig[],
   ragConfig: null as RagConfig | null,
   prompts: [] as PromptTemplate[],
-  problemProfiles: [] as ProblemProfile[],
-  knowledgeReleases: [] as KnowledgeRelease[],
-  selectedRelease: null as KnowledgeRelease | null,
-  profileFeedback: [] as ProfileFeedback[],
   elements: [] as Array<Record<string, unknown>>,
   chunks: [] as Array<Record<string, unknown>>,
   documentInspectionIndexId: "",
@@ -79,6 +71,7 @@ export const adminStore = reactive({
   knowledgeStatusFilter: "",
   documentSearch: "",
   requestedView: "",
+  requestedViewQuery: "",
   loading: false,
   error: "",
   notice: "",
@@ -109,19 +102,10 @@ export const adminStore = reactive({
   },
   get documentInspectionIndexes(): Array<{ id: string; label: string }> {
     const result: Array<{ id: string; label: string }> = [];
-    if (this.selectedRelease) {
-      result.push({
-        id: this.selectedRelease.index_id,
-        label: `候选 Index v${this.selectedRelease.index_version}`,
-      });
-    }
-    if (this.activeIndex && !result.some((item) => item.id === this.activeIndex!.id)) {
+    if (this.activeIndex) {
       result.push({ id: this.activeIndex.id, label: `线上 Active Index v${this.activeIndex.version}` });
     }
     return result;
-  },
-  get pendingReviewCount(): number {
-    return this.selectedRelease?.drafts?.filter((draft) => draft.status !== "APPROVED").length ?? 0;
   },
   get buildingCount(): number {
     return this.indexes.filter((index) => index.status === "BUILDING").length;
@@ -158,14 +142,8 @@ export const adminStore = reactive({
     const value = task?.metadata[key];
     return typeof value === "string" || typeof value === "number" ? value : undefined;
   },
-  releaseForIndex(indexId: string): KnowledgeRelease | undefined {
-    return this.knowledgeReleases.find((release) => release.index_id === indexId);
-  },
-  isActionableReleaseIndex(indexId: string): boolean {
-    const release = this.releaseForIndex(indexId);
-    return Boolean(release && !["PUBLISHED", "CANCELLED"].includes(release.status));
-  },
-  navigate(view: string): void {
+  navigate(view: string, query = ""): void {
+    this.requestedViewQuery = query;
     this.requestedView = view;
   },
 
@@ -209,9 +187,6 @@ export const adminStore = reactive({
     if (!this.selectedKnowledgeId) {
       this.documents = [];
       this.indexes = [];
-      this.knowledgeReleases = [];
-      this.selectedRelease = null;
-      this.profileFeedback = [];
       return;
     }
     const knowledgeId = this.selectedKnowledgeId;
@@ -251,8 +226,6 @@ export const adminStore = reactive({
       adminApi.listTraces().then((value) => (this.traces = value)),
       adminApi.listModels().then((value) => (this.models = value)),
       adminApi.listPrompts().then((value) => (this.prompts = value)),
-      this.loadProblemProfiles(),
-      this.loadReleaseWorkspace(),
       this.loadSystemInfo(),
     ]);
   },
@@ -263,15 +236,12 @@ export const adminStore = reactive({
     this.selectedDocument = null;
     this.selectedTrace = null;
     await this.run(async () => {
-      const [, traces, profiles] = await Promise.all([
+      const [, traces] = await Promise.all([
         this.loadKnowledgeDetails(),
         adminApi.listTraces(knowledgeId || undefined),
-        knowledgeId ? adminApi.listProblemProfiles(knowledgeId) : Promise.resolve([]),
-        this.loadReleaseWorkspace(),
       ]);
       if (this.selectedKnowledgeId !== knowledgeId) return;
       this.traces = traces;
-      this.problemProfiles = profiles;
     });
   },
 
@@ -337,8 +307,7 @@ export const adminStore = reactive({
         this.loadKnowledgeBases(),
         this.loadKnowledgeDetails(),
       ]);
-      await this.loadReleaseWorkspace().catch(() => undefined);
-    }, "文档已上传，候选索引构建已提交；完成后请审核 Profile 草稿");
+    }, "文档已上传，RAG 索引构建已提交；完成后请在 Index Build 审核发布");
     if (!this.error) this.uploadDrawerOpen = false;
   },
 
@@ -370,8 +339,7 @@ export const adminStore = reactive({
   async inspectDocument(document: DocumentItem): Promise<void> {
     this.selectedDocument = document;
     this.documentDrawerOpen = true;
-    this.documentInspectionIndexId =
-      this.selectedRelease?.index_id ?? this.activeIndex?.id ?? "";
+    this.documentInspectionIndexId = this.activeIndex?.id ?? "";
     await this.loadDocumentInspection();
   },
 
@@ -402,8 +370,7 @@ export const adminStore = reactive({
     await this.run(async () => {
       await adminApi.buildIndex(this.selectedKnowledgeId);
       await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
-      await this.loadReleaseWorkspace().catch(() => undefined);
-    }, "候选索引构建已提交，完成后需要审核发布");
+    }, "RAG 索引构建已提交，完成后请在 Index Build 审核发布");
   },
 
   async activateIndex(indexId: string): Promise<void> {
@@ -461,101 +428,12 @@ export const adminStore = reactive({
   }, "RAG 检索配置已保存，下一轮对话生效");
   },
 
-  async loadProblemProfiles(): Promise<void> {
-    this.problemProfiles = this.selectedKnowledgeId
-      ? await adminApi.listProblemProfiles(this.selectedKnowledgeId)
-      : [];
-  },
-
-  async loadReleaseWorkspace(): Promise<void> {
-    if (!this.selectedKnowledgeId) {
-      this.knowledgeReleases = [];
-      this.selectedRelease = null;
-      this.profileFeedback = [];
-      return;
-    }
-    const knowledgeId = this.selectedKnowledgeId;
-    const [releases, feedback] = await Promise.all([
-      adminApi.listKnowledgeReleases(knowledgeId),
-      adminApi.listProfileFeedback(knowledgeId),
-    ]);
-    if (this.selectedKnowledgeId !== knowledgeId) return;
-    this.knowledgeReleases = releases;
-    this.profileFeedback = feedback;
-    const candidate = releases.find(
-      (release) => !["PUBLISHED", "CANCELLED"].includes(release.status),
-    );
-    const selected = candidate ? await adminApi.getKnowledgeRelease(candidate.id) : null;
-    if (this.selectedKnowledgeId !== knowledgeId) return;
-    this.selectedRelease = selected;
-  },
-
   async refreshOperationalState(): Promise<void> {
     if (!this.selectedKnowledgeId) return;
     await Promise.allSettled([
       this.loadKnowledgeBases(),
       this.loadKnowledgeDetails(),
-      this.loadReleaseWorkspace(),
     ]);
-  },
-
-  async refreshSelectedRelease(): Promise<void> {
-    if (!this.selectedRelease) {
-      await this.loadReleaseWorkspace();
-      return;
-    }
-    this.selectedRelease = await adminApi.getKnowledgeRelease(this.selectedRelease.id);
-  },
-
-  async generateProfileDrafts(): Promise<void> {
-    const release = this.selectedRelease;
-    if (!release) return;
-    await this.run(async () => {
-      await adminApi.generateProfileDrafts(release.index_id);
-      await this.refreshSelectedRelease();
-    }, "Profile 草稿已重新生成，请审核后发布");
-  },
-
-  async saveProfileDraft(draftId: string, payload: ProfileDraftPatch): Promise<void> {
-    await this.run(async () => {
-      await adminApi.updateProfileDraft(draftId, payload);
-      await this.refreshSelectedRelease();
-    }, "Profile 草稿已保存，尚未影响线上问答");
-  },
-
-  async regenerateProfileDraft(draftId: string): Promise<void> {
-    await this.run(async () => {
-      await adminApi.regenerateProfileDraft(draftId);
-      await this.refreshSelectedRelease();
-    }, "Profile 草稿已重新生成");
-  },
-
-  async rejectProfileDraft(draftId: string): Promise<void> {
-    await this.run(async () => {
-      await adminApi.updateProfileDraft(draftId, { status: "REJECTED" });
-      await this.refreshSelectedRelease();
-    }, "草稿已退回；修改、重新生成或改为仅参考后可再次审核");
-  },
-
-  async validateKnowledgeRelease(): Promise<void> {
-    if (!this.selectedRelease) return;
-    await this.run(async () => {
-      await adminApi.validateKnowledgeRelease(this.selectedRelease!.id);
-      await this.refreshSelectedRelease();
-    }, "发布前验证已完成");
-  },
-
-  async publishKnowledgeRelease(): Promise<void> {
-    if (!this.selectedRelease) return;
-    await this.run(async () => {
-      await adminApi.publishKnowledgeRelease(this.selectedRelease!.id);
-      await Promise.all([
-        this.loadKnowledgeBases(),
-        this.loadKnowledgeDetails(),
-        this.loadProblemProfiles(),
-      ]);
-      await this.loadReleaseWorkspace();
-    }, "候选索引与 Profile 已原子发布");
   },
 
   async saveModelConfig(modelId: string, payload: ModelConfigUpdatePayload): Promise<void> {

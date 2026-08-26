@@ -357,6 +357,35 @@ class SupportRepository:
             api_key=self._decrypt_api_key(data),
         )
 
+    async def get_rerank_model(self) -> ModelSnapshot | None:
+        """Return the currently enabled reranker for the optional Support fallback."""
+        async with self.engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            """
+                SELECT provider, model_name, parameters, base_url,
+                       api_key_ciphertext, api_key_nonce, api_key_key_version
+                FROM model_config WHERE model_type = 'RERANK' AND enabled
+            """
+                        )
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            return None
+        data = dict(row)
+        return ModelSnapshot(
+            provider=str(data["provider"]),
+            model_name=str(data["model_name"]),
+            parameters=dict(data["parameters"] or {}),
+            base_url=str(data["base_url"]) if data["base_url"] else None,
+            api_key=self._decrypt_api_key(data),
+        )
+
     async def list_profiles(
         self,
         knowledge_id: UUID,
@@ -433,6 +462,10 @@ class SupportRepository:
             product_name=row["product_name"],
             model_names=list(row["model_names"] or []),
             task_type=row["task_type"],
+            routing_summary=str(row.get("routing_summary") or ""),
+            symptoms=list(row.get("symptoms") or []),
+            exclusions=list(row.get("exclusions") or []),
+            profile_enrichment_version=int(row.get("profile_enrichment_version") or 0),
             enabled=bool(row["enabled"]),
             support_ready=not readiness_reasons,
             readiness_reasons=readiness_reasons,

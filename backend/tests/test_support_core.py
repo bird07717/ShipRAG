@@ -14,6 +14,7 @@ from app.api.schemas import ChatResponse
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.support.document_delivery import deliver_document
+from app.support.document_router import SupportDocumentRoute
 from app.support.models import (
     DocumentContentBlock,
     EvidenceType,
@@ -845,6 +846,16 @@ class _SupportServiceRepository:
         return None
 
 
+class _StubDocumentRouter:
+    def __init__(self, route: SupportDocumentRoute) -> None:
+        self.route = route
+        self.calls: list[dict[str, Any]] = []
+
+    async def resolve(self, **kwargs: Any) -> SupportDocumentRoute:
+        self.calls.append(kwargs)
+        return self.route
+
+
 @pytest.mark.asyncio
 async def test_support_service_delivers_complete_document_without_llm() -> None:
     knowledge_id = uuid4()
@@ -871,7 +882,11 @@ async def test_support_service_delivers_complete_document_without_llm() -> None:
 
     assert response["response_type"] == "DOCUMENT_DELIVERED"
     ChatResponse.model_validate(response)
-    assert response["routing"] == {"method": "PROBLEM_CODE", "confidence": 1.0}
+    assert response["routing"] == {
+        "method": "PROBLEM_CODE",
+        "confidence": 1.0,
+        "source": "EXPLICIT",
+    }
     assert [block["sequence_no"] for block in response["content"]] == [1, 2, 3]
     assert response["images"][0]["image_asset_id"] == str(document.blocks[2].image_asset_id)
     assert repository.finished is not None
@@ -1011,6 +1026,124 @@ async def test_support_service_returns_no_match_without_fabricating_document() -
     assert response["clarification"]["type"] == "NEED_MORE_INFORMATION"
     assert repository.finished is not None
     assert repository.finished["focus_document_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_support_service_uses_rag_document_fallback_after_profile_miss() -> None:
+    knowledge_id = uuid4()
+    document = _document()
+    route = SupportDocumentRoute(
+        action="DELIVER",
+        document_id=document.id,
+        document_title=document.title,
+        confidence=0.91,
+        trace={"source": "RAG_FALLBACK", "document_routing": {"decision": "DELIVER"}},
+    )
+    router = _StubDocumentRouter(route)
+    repository = _SupportServiceRepository(
+        knowledge_id=knowledge_id,
+        profile=None,
+        document=document,
+    )
+    service = TechnicalSupportService(
+        cast(SupportRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        document_router=cast(Any, router),
+    )
+
+    response = await service.handle(
+        knowledge_id=knowledge_id,
+        conversation_id=None,
+        question="升级中断后应该怎么恢复？",
+        request_id="request-rag-delivery",
+    )
+
+    assert len(router.calls) == 1
+    assert response["response_type"] == "DOCUMENT_DELIVERED"
+    assert response["document"]["id"] == str(document.id)
+    assert response["routing"]["method"] == "RAG_FALLBACK"
+    assert response["routing"]["source"] == "RAG_FALLBACK"
+    assert repository.finished is not None
+    assert repository.finished["focus_document_id"] == document.id
+
+
+@pytest.mark.asyncio
+async def test_support_service_rag_fallback_requests_and_accepts_document_choice() -> None:
+    knowledge_id = uuid4()
+    document = _document()
+    router = _StubDocumentRouter(
+        SupportDocumentRoute(
+            action="CLARIFY",
+            confidence=0.62,
+            options=[{"document_id": str(document.id), "title": document.title}],
+            trace={"source": "RAG_FALLBACK", "document_routing": {"decision": "CLARIFY"}},
+        )
+    )
+    repository = _SupportServiceRepository(
+        knowledge_id=knowledge_id,
+        profile=None,
+        document=document,
+    )
+    service = TechnicalSupportService(
+        cast(SupportRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        document_router=cast(Any, router),
+    )
+
+    clarification = await service.handle(
+        knowledge_id=knowledge_id,
+        conversation_id=None,
+        question="设备出错了",
+        request_id="request-rag-clarify",
+    )
+
+    assert clarification["response_type"] == "CLARIFICATION_REQUIRED"
+    assert clarification["clarification"]["choices"][0]["document_id"] == str(document.id)
+    assert repository.finished is not None
+    repository.chat_context = repository.finished["context"]
+    delivered = await service.handle(
+        knowledge_id=knowledge_id,
+        conversation_id=uuid4(),
+        question="选择第一个",
+        request_id="request-rag-choice",
+        choice_id="rag_1",
+    )
+
+    assert delivered["response_type"] == "DOCUMENT_DELIVERED"
+    assert delivered["routing"]["method"] == "RAG_FALLBACK_CHOICE"
+    assert len(router.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_support_service_preserves_profile_fast_path_without_rag() -> None:
+    knowledge_id = uuid4()
+    profile = _profile(alias="PDC 怎么升级")
+    profile.knowledge_id = knowledge_id
+    document = _document()
+    profile.document_id = document.id
+    router = _StubDocumentRouter(
+        SupportDocumentRoute(action="NO_MATCH", trace={"source": "RAG_FALLBACK"})
+    )
+    repository = _SupportServiceRepository(
+        knowledge_id=knowledge_id,
+        profile=profile,
+        document=document,
+    )
+    service = TechnicalSupportService(
+        cast(SupportRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        document_router=cast(Any, router),
+    )
+
+    response = await service.handle(
+        knowledge_id=knowledge_id,
+        conversation_id=None,
+        question="PDC 怎么升级",
+        request_id="request-profile-fast-path",
+    )
+
+    assert response["routing"]["source"] == "PROFILE"
+    assert router.calls == []
 
 
 @pytest.mark.asyncio

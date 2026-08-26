@@ -53,6 +53,10 @@ class ProblemProfile:
     product_name: str | None = None
     model_names: list[str] = field(default_factory=list)
     task_type: str | None = None
+    routing_summary: str = ""
+    symptoms: list[str] = field(default_factory=list)
+    exclusions: list[str] = field(default_factory=list)
+    profile_enrichment_version: int = 0
     enabled: bool = True
     support_ready: bool = True
     readiness_reasons: list[str] = field(default_factory=list)

@@ -172,7 +172,6 @@ describe("view smoke", () => {
       "playground",
       "configuration",
       "engine-routing",
-      "support-profiles",
     ]) {
       const wrapper = mount(AdminStudio, {
         props: { view },

@@ -15,6 +15,7 @@ ReleaseStatus = Literal[
 ]
 DraftOperation = Literal["CREATE", "UPDATE", "NONE"]
 DraftStatus = Literal["DRAFT", "APPROVED", "REJECTED", "PUBLISHED"]
+PROFILE_ENRICHMENT_VERSION = 1
 
 
 class GeneratedProfile(BaseModel):
@@ -27,10 +28,13 @@ class GeneratedProfile(BaseModel):
     product_name: str | None = Field(default=None, max_length=200)
     model_names: list[str] = Field(default_factory=list, max_length=10)
     task_type: str | None = Field(default=None, max_length=50)
+    routing_summary: str = Field(default="", max_length=1_000)
+    symptoms: list[str] = Field(default_factory=list, max_length=12)
+    exclusions: list[str] = Field(default_factory=list, max_length=8)
     confidence: float = Field(default=0.5, ge=0, le=1)
     reasoning: str | None = Field(default=None, max_length=1_000)
 
-    @field_validator("aliases", "keywords", "model_names")
+    @field_validator("aliases", "keywords", "model_names", "symptoms", "exclusions")
     @classmethod
     def clean_items(cls, value: list[str]) -> list[str]:
         cleaned: list[str] = []
@@ -51,10 +55,13 @@ class ProfileDraftPatch(BaseModel):
     product_name: str | None = Field(default=None, max_length=200)
     model_names: list[str] | None = None
     task_type: str | None = Field(default=None, max_length=50)
+    routing_summary: str | None = Field(default=None, max_length=1_000)
+    symptoms: list[str] | None = None
+    exclusions: list[str] | None = None
     enabled: bool | None = None
     status: Literal["DRAFT", "APPROVED", "REJECTED"] | None = None
 
-    @field_validator("aliases", "keywords", "model_names")
+    @field_validator("aliases", "keywords", "model_names", "symptoms", "exclusions")
     @classmethod
     def clean_optional_items(cls, value: list[str] | None) -> list[str] | None:
         if value is None:
