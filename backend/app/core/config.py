@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     support_history_max_messages: int = 8
     support_llm_max_tokens: int = 2_048
     support_llm_temperature: float = 0.1
+    support_rag_fallback_enabled: bool = True
 
     m3_doc_agg_t_high: float = 0.9
     m3_doc_agg_t_low: float = 0.5

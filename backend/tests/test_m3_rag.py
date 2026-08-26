@@ -341,6 +341,9 @@ async def test_sse_stream_order_and_citation_validation() -> None:
     assert repository.completed["sources"] == [source.public_dict()]
     assert repository.completed["citation_result"]["invalid_source_ids"] == ["S99"]
     assert repository.failed is None
+    done_payload = json.loads(frames[-1].splitlines()[1].removeprefix("data: "))
+    assert done_payload["trace_id"] == str(prepared.turn.trace_id)
+    assert done_payload["index_id"] == str(prepared.turn.index_id)
 
 
 class _FailingLlmProvider:
@@ -380,6 +383,44 @@ async def test_sse_stream_converts_llm_failure_to_terminal_error() -> None:
     assert '"code":"UPSTREAM_TIMEOUT"' in frames[-1]
     assert repository.failed is not None
     assert repository.failed["status"] == "FAILED"
+
+
+class _UnexpectedFailingLlmProvider:
+    usage: ClassVar[dict[str, Any]] = {}
+
+    async def stream(self, prompt: str) -> Any:
+        del prompt
+        if False:
+            yield ""
+        raise RuntimeError("provider protocol broke")
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_sse_stream_persists_unexpected_exception_detail() -> None:
+    repository = _StreamRepository()
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        llm_factory=lambda settings, snapshot: cast(LlmProvider, _UnexpectedFailingLlmProvider()),
+    )
+    prepared = PreparedRag(
+        turn=_turn(),
+        prompt="prompt",
+        candidates=[],
+        selected_candidates=[],
+        sources=[],
+        timings={},
+        started_at=time.perf_counter(),
+    )
+
+    frames = [frame.decode() async for frame in service.stream(prepared)]
+
+    assert frames[-1].startswith("event: error")
+    assert repository.failed is not None
+    assert repository.failed["detail"] == "RuntimeError: provider protocol broke"
 
 
 class _FailingEmbeddingProvider:

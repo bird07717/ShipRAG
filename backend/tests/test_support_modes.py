@@ -10,6 +10,7 @@ from fastapi import Request
 
 import app.support.service as support_service_module
 from app.api.schemas import ChatRequest
+from app.api.support import router as support_router
 from app.api.support import support_chat
 from app.core.config import Settings
 from app.gateway.models import ExecutionPolicy
@@ -27,7 +28,7 @@ def test_compatibility_route_has_only_formal_and_manual_rollback_modes() -> None
         Settings(_env_file=None, app_env="test", chat_execution_mode="legacy_rag"),
     )
 
-    assert support_repository._default_policy() == ExecutionPolicy.SUPPORT_ONLY
+    assert support_repository._default_policy() == ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK
     assert rag_repository._default_policy() == ExecutionPolicy.RAG_ONLY
 
 
@@ -40,6 +41,14 @@ def test_formal_support_module_does_not_import_generic_retrieval_stack() -> None
         "app.rag.doc_router",
     ):
         assert forbidden not in source
+
+
+def test_problem_profiles_are_read_only_outside_release_workflow() -> None:
+    profile_routes = [
+        route for route in support_router.routes if route.path == "/support/problem-profiles"
+    ]
+    assert profile_routes
+    assert all("PUT" not in route.methods for route in profile_routes)
 
 
 class _FormalSupportService:

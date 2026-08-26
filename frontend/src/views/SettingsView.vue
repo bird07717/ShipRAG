@@ -4,16 +4,28 @@ import { ref } from "vue";
 import { useAdminStore } from "@/composables/adminStore";
 
 const store = useAdminStore();
+const credential = ref(sessionStorage.getItem("rag_service_token") ?? "");
+const credentialConfigured = ref(Boolean(sessionStorage.getItem("rag_service_token")));
 
 const sections = [
-  { key: "api", label: "API 访问" },
+  { key: "api", label: "服务凭证" },
   { key: "danger", label: "危险操作" },
 ];
 const activeSection = ref("api");
 
+async function saveCredential(): Promise<void> {
+  const token = credential.value.trim();
+  store.serviceToken = token;
+  store.saveToken(token);
+  credentialConfigured.value = Boolean(token);
+  await store.run(() => store.refreshAll(), "服务凭证已保存，管理数据已重新加载");
+}
+
 async function clearCredential(): Promise<void> {
   await store.run(async () => {
     store.clearToken();
+    credential.value = "";
+    credentialConfigured.value = false;
   });
 }
 </script>
@@ -36,24 +48,32 @@ async function clearCredential(): Promise<void> {
       <section v-show="activeSection === 'api'" class="panel">
         <header class="panel-header">
           <div>
-            <h3>API 访问</h3>
-            <span class="sub">管理台调用后端服务的访问凭据</span>
+            <h3>服务凭证</h3>
+            <span class="sub">管理台调用后端 API 时使用的 Bearer Token</span>
           </div>
+          <el-tag :type="credentialConfigured ? 'success' : 'info'" effect="plain">
+            {{ credentialConfigured ? "当前会话已配置" : "当前会话未配置" }}
+          </el-tag>
         </header>
         <div class="panel-body">
           <div class="form-section">
             <h4>Service Token</h4>
             <p class="desc">
-              生产环境应由反向代理注入凭据，不在管理台填写。此处输入的凭据仅保存在当前浏览器会话（sessionStorage），关闭标签页后自动失效。
+              如果部署环境已由反向代理统一注入凭据，无需在此配置；其他环境可在这里添加。凭据仅保存在当前浏览器会话（sessionStorage），关闭标签页后自动失效。
             </p>
             <el-input
-              v-model="store.serviceToken"
+              v-model="credential"
               type="password"
               show-password
-              placeholder="粘贴访问凭据，留空提交即清除"
+              placeholder="粘贴服务凭证"
               style="max-width: 420px"
-              @change="store.saveToken(store.serviceToken)"
+              @keyup.enter="saveCredential"
             />
+            <div class="credential-actions">
+              <el-button type="primary" :disabled="!credential.trim()" @click="saveCredential">
+                保存并重新加载
+              </el-button>
+            </div>
           </div>
         </div>
       </section>
@@ -126,6 +146,10 @@ async function clearCredential(): Promise<void> {
 
 .danger-zone {
   border-color: #eecfcd;
+}
+
+.credential-actions {
+  margin-top: 14px;
 }
 
 .danger-zone .panel-header {

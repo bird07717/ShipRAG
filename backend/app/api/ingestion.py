@@ -18,6 +18,7 @@ from app.api.schemas import (
     IndexBuildResponse,
     IndexResponse,
     KnowledgeBaseCreate,
+    KnowledgeBaseDeleteResponse,
     KnowledgeBaseResponse,
     TaskResponse,
 )
@@ -78,6 +79,18 @@ async def get_knowledge_base(
     repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
 ) -> dict[str, Any]:
     return await repository.get_knowledge_base(knowledge_id)
+
+
+@router.delete(
+    "/knowledge-bases/{knowledge_id}",
+    response_model=KnowledgeBaseDeleteResponse,
+    tags=["knowledge-bases"],
+)
+async def delete_knowledge_base(
+    knowledge_id: UUID,
+    service: Annotated[IngestionService, Depends(get_ingestion_service)],
+) -> dict[str, Any]:
+    return await service.delete_knowledge_base(knowledge_id)
 
 
 @router.post(
@@ -307,9 +320,8 @@ async def delete_index(
 async def retry_index(
     index_id: UUID,
     service: Annotated[IngestionService, Depends(get_ingestion_service)],
-    activate_on_success: Annotated[bool, Query()] = True,
 ) -> dict[str, Any]:
-    build = await service.retry_build(index_id, activate_on_success=activate_on_success)
+    build = await service.retry_build(index_id, activate_on_success=False)
     return {
         "requested": build.requested,
         "coalesced": build.coalesced,

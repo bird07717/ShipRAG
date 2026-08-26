@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.common.errors import ApiError
 from app.core.config import Settings
+from app.releases.repository import ReleaseRepository
 from app.support.repository import SupportRepository
 
 pytestmark = pytest.mark.asyncio
@@ -144,6 +145,24 @@ async def test_postgres_failed_idempotency_can_retry() -> None:
         assert retried.trace_id != first.trace_id
         assert retried.idempotency_key == first.idempotency_key
         await repository.fail_turn(retried, code="TEST_CLEANUP", message="测试清理")
+
+
+async def test_profile_generation_lists_all_documents_without_a_document_id() -> None:
+    """A NULL optional UUID must be explicitly typed for asyncpg."""
+    async with _repository() as (repository, knowledge_id):
+        async with repository.engine.connect() as connection:
+            index_id = (
+                await connection.execute(
+                    text("SELECT active_index_id FROM knowledge_base WHERE id = :id"),
+                    {"id": knowledge_id},
+                )
+            ).scalar_one()
+
+        documents = await ReleaseRepository(repository.engine).generation_documents(index_id)
+
+        assert len(documents) == 1
+        assert documents[0]["display_name"] == "并发测试文档"
+        assert documents[0]["content"] == "集成测试内容"
 
 
 async def test_postgres_workflow_optimistic_lock_rejects_stale_turn() -> None:

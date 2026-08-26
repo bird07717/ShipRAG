@@ -132,6 +132,10 @@ describe("view smoke", () => {
             config_version: 1,
             fallback_conditions: ["NO_MATCH"],
             source: "DATABASE",
+            readiness: {
+              support: { ready: true, blockers: [], profile_count: 1, ready_profile_count: 1 },
+              rag: { ready: true, blockers: [] },
+            },
           };
         else if (path.includes("/rag-config"))
           body = {
@@ -149,6 +153,7 @@ describe("view smoke", () => {
           body = {
             from: "2026-08-14T00:00:00Z",
             to: "2026-08-21T00:00:00Z",
+            scope: { trace_failures: "GLOBAL", request_errors: "GLOBAL", knowledge_id: null },
             trace_failures: [],
             request_errors: [],
             request_errors_by_day: [],
@@ -165,15 +170,8 @@ describe("view smoke", () => {
       "indexes",
       "logs",
       "playground",
-      "traces",
       "configuration",
       "engine-routing",
-      "support-profiles",
-      "support-configuration",
-      "support-errors",
-      "rag-configuration",
-      "rag-errors",
-      "settings",
     ]) {
       const wrapper = mount(AdminStudio, {
         props: { view },

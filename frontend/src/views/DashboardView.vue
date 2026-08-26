@@ -67,8 +67,7 @@ async function loadMetrics() {
     adminApi.getSupportMetrics(params),
   ]);
   if (store.selectedKnowledgeId !== knowledgeId) return;
-  // Shape guards: an older backend (pre-metrics) or a gateway returning a
-  // JSON error array must not crash the dashboard render.
+  // Shape guards prevent an unexpected gateway payload from crashing the dashboard.
   if (
     results[0].status === "fulfilled" &&
     results[0].value &&
@@ -90,7 +89,7 @@ async function loadMetrics() {
     supportMetrics.value = results[3].value;
   }
   if (overview.value === null || results.some((result) => result.status === "rejected")) {
-    metricsError.value = "质量指标加载失败，可能是后端尚未提供 /metrics 接口（需迁移 0014）。";
+    metricsError.value = "部分质量指标暂时无法加载，请稍后重试；其他管理功能不受影响。";
   }
 }
 
@@ -123,22 +122,35 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
           <h3>管理待办</h3>
           <span class="sub">当前知识库的构建、审核和发布状态</span>
         </div>
-        <el-button @click="store.refreshOperationalState()">刷新状态</el-button>
+        <div class="scope-actions">
+          <el-select
+            v-model="store.selectedKnowledgeId"
+            placeholder="选择知识库"
+            @change="store.selectKnowledge()"
+          >
+            <el-option
+              v-for="kb in store.knowledgeBases"
+              :key="kb.id"
+              :label="kb.name"
+              :value="kb.id"
+            />
+          </el-select>
+          <el-button @click="store.refreshOperationalState()">刷新状态</el-button>
+        </div>
       </header>
       <div class="workflow-grid">
         <button type="button" @click="store.navigate('indexes')">
           <span>构建中</span><strong>{{ store.buildingCount }}</strong>
           <small>查看索引任务</small>
         </button>
-        <button type="button" @click="store.navigate('support-profiles')">
-          <span>待审核草稿</span><strong>{{ store.pendingReviewCount }}</strong>
-          <small>{{ store.selectedRelease ? `候选 v${store.selectedRelease.index_version}` : "没有开放候选" }}</small>
+        <button type="button" @click="store.navigate('indexes')">
+          <span>待审核发布</span><strong>{{ store.indexes.filter((index) => index.status === 'READY').length }}</strong>
+          <small>在 Index Build 审核 RAG 索引</small>
         </button>
-        <button type="button" @click="store.navigate('support-profiles')">
-          <span>发布状态</span>
-          <StatusBadge v-if="store.selectedRelease" :status="store.selectedRelease.status" />
-          <strong v-else class="state-text">无候选</strong>
-          <small>验证并原子发布</small>
+        <button type="button" @click="store.navigate('indexes')">
+          <span>线上索引</span>
+          <strong class="state-text">{{ store.activeIndex ? `v${store.activeIndex.version}` : "未发布" }}</strong>
+          <small>当前新会话使用的 RAG 版本</small>
         </button>
       </div>
     </section>
@@ -364,6 +376,16 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
 
 .dashboard > * {
   min-width: 0;
+}
+
+.scope-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scope-actions .el-select {
+  width: 220px;
 }
 
 .workflow-grid {

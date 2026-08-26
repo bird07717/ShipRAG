@@ -13,7 +13,6 @@ import type {
   ModelProbeResult,
   PromptTemplate,
   ProblemProfile,
-  ProblemProfilePayload,
   KnowledgeRelease,
   ProfileDraft,
   ProfileDraftPatch,
@@ -82,19 +81,28 @@ export const adminApi = {
       method: "POST",
       body: JSON.stringify({ name, description: description || null }),
     }),
+  deleteKnowledgeBase: (knowledgeId: string) =>
+    apiRequest<{ knowledge_id: string; deleted: boolean; cleanup_failed_count: number }>(
+      `/knowledge-bases/${knowledgeId}`,
+      { method: "DELETE" },
+    ),
   listDocuments: (knowledgeId: string) =>
     apiRequest<DocumentItem[]>(`/knowledge-bases/${knowledgeId}/documents`),
   deleteDocument: (documentId: string) =>
     apiRequest<DocumentDeleteResult>(`/documents/${documentId}?request_build=true`, {
       method: "DELETE",
     }),
-  uploadDocument: (knowledgeId: string, file: File) => {
+  uploadDocument: (
+    knowledgeId: string,
+    file: File,
+    idempotencyKey: string = crypto.randomUUID(),
+  ) => {
     const data = new FormData();
     data.append("file", file);
     data.append("request_build", "true");
     return apiRequest(`/knowledge-bases/${knowledgeId}/documents`, {
       method: "POST",
-      headers: { "Idempotency-Key": crypto.randomUUID() },
+      headers: { "Idempotency-Key": idempotencyKey },
       body: data,
     });
   },
@@ -109,11 +117,11 @@ export const adminApi = {
   listIndexes: (knowledgeId: string) =>
     apiRequest<KnowledgeIndex[]>(`/knowledge-bases/${knowledgeId}/indexes`),
   listIndexTasks: (indexId: string) => apiRequest<IndexTask[]>(`/indexes/${indexId}/tasks`),
-  buildIndex: (knowledgeId: string, activateOnSuccess: boolean) =>
+  buildIndex: (knowledgeId: string) =>
     apiRequest(`/knowledge-bases/${knowledgeId}/indexes/build`, {
       method: "POST",
       headers: { "Idempotency-Key": crypto.randomUUID() },
-      body: JSON.stringify({ reason: "MANUAL", activate_on_success: activateOnSuccess }),
+      body: JSON.stringify({ reason: "MANUAL", activate_on_success: false }),
     }),
   activateIndex: (indexId: string) =>
     apiRequest<KnowledgeIndex>(`/indexes/${indexId}/activate`, { method: "POST" }),
@@ -252,11 +260,6 @@ export const adminApi = {
   listPrompts: () => apiRequest<PromptTemplate[]>("/prompts"),
   listProblemProfiles: (knowledgeId: string) =>
     apiRequest<ProblemProfile[]>(`/support/problem-profiles?knowledge_id=${knowledgeId}`),
-  upsertProblemProfile: (knowledgeId: string, payload: ProblemProfilePayload) =>
-    apiRequest<ProblemProfile>(`/support/problem-profiles?knowledge_id=${knowledgeId}`, {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    }),
   listKnowledgeReleases: (knowledgeId: string) =>
     apiRequest<KnowledgeRelease[]>(`/knowledge-bases/${knowledgeId}/releases`),
   getKnowledgeRelease: (releaseId: string) =>
@@ -265,8 +268,20 @@ export const adminApi = {
     apiRequest<ProfileDraft[]>(`/indexes/${indexId}/profile-drafts/generate`, {
       method: "POST",
     }),
+  backfillProfileDrafts: (indexId: string) =>
+    apiRequest<ProfileDraft[]>(`/indexes/${indexId}/profile-drafts/backfill`, {
+      method: "POST",
+    }),
+  refreshProfileDrafts: (indexId: string) =>
+    apiRequest<ProfileDraft[]>(`/indexes/${indexId}/profile-drafts/refresh`, {
+      method: "POST",
+    }),
   regenerateProfileDraft: (draftId: string) =>
     apiRequest<ProfileDraft>(`/profile-drafts/${draftId}/regenerate`, { method: "POST" }),
+  createProfileEditDraft: (releaseId: string, profileId: string) =>
+    apiRequest<ProfileDraft>(`/releases/${releaseId}/profiles/${profileId}/draft`, {
+      method: "POST",
+    }),
   updateProfileDraft: (draftId: string, payload: ProfileDraftPatch) =>
     apiRequest<ProfileDraft>(`/profile-drafts/${draftId}`, {
       method: "PATCH",

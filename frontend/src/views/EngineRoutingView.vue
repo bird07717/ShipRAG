@@ -32,20 +32,17 @@ const policies: Array<{
 ];
 
 const selectedKnowledge = computed(() => shared.selectedKnowledge);
-const readyProfiles = computed(() => routing.profiles.filter((item) => item.support_ready));
-const supportReady = computed(() => readyProfiles.value.length > 0);
-const ragReady = computed(
-  () =>
-    selectedKnowledge.value?.runtime_state === "READY" &&
-    Boolean(selectedKnowledge.value?.active_index_id),
-);
+const supportReadiness = computed(() => routing.policy?.readiness.support);
+const ragReadiness = computed(() => routing.policy?.readiness.rag);
+const supportReady = computed(() => Boolean(supportReadiness.value?.ready));
+const ragReady = computed(() => Boolean(ragReadiness.value?.ready));
 const blockers = computed(() => {
   const result: string[] = [];
   const needsSupport = selectedPolicy.value !== "RAG_ONLY";
   const needsRag = selectedPolicy.value !== "SUPPORT_ONLY";
-  if (needsSupport && !supportReady.value) result.push("没有已发布就绪的 Problem Profile");
-  if (needsRag && !ragReady.value) result.push("知识库没有可用的 Active Index");
-  return result;
+  if (needsSupport) result.push(...(supportReadiness.value?.blockers ?? []));
+  if (needsRag) result.push(...(ragReadiness.value?.blockers ?? []));
+  return [...new Set(result)];
 });
 const changed = computed(() => routing.policy?.execution_policy !== selectedPolicy.value);
 
@@ -113,11 +110,13 @@ onMounted(() => void load());
             <article :class="['readiness-card', { ready: supportReady }]">
               <span>Profile Support</span>
               <strong>{{ supportReady ? "READY" : "NOT READY" }}</strong>
-              <small>{{ readyProfiles.length }} / {{ routing.profiles.length }} 个 Profile 已发布就绪</small>
+              <small>{{ supportReadiness?.ready_profile_count ?? 0 }} / {{ supportReadiness?.profile_count ?? 0 }} 个 Profile 已发布就绪</small>
+              <small v-if="supportReadiness?.blockers.length">{{ supportReadiness.blockers.join("；") }}</small>
             </article>
             <article :class="['readiness-card', { ready: ragReady }]">
               <span>Generic RAG</span>
               <strong>{{ ragReady ? "READY" : "NOT READY" }}</strong>
+              <small v-if="ragReadiness?.blockers.length">{{ ragReadiness.blockers.join("；") }}</small>
               <small>Active Index：{{ selectedKnowledge?.active_index_id || "无" }}</small>
             </article>
           </div>
@@ -125,6 +124,14 @@ onMounted(() => void load());
           <el-alert
             title="策略修改只影响新会话；已有会话继续使用已冻结的执行引擎。"
             type="info"
+            :closable="false"
+            show-icon
+          />
+          <el-alert
+            v-if="routing.policy?.source === 'DEFAULT'"
+            title="当前显示的是系统默认策略，尚未为此知识库保存独立路由配置。"
+            description="选择策略后点击“保存路由策略”，刷新页面仍会使用保存后的配置。"
+            type="warning"
             :closable="false"
             show-icon
           />

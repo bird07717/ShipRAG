@@ -18,6 +18,7 @@ from app.api.schemas import (
 from app.gateway.models import ExecutionPolicy
 from app.gateway.repository import GatewayRepository
 from app.gateway.service import ChatGatewayService
+from app.observability.recorder import observe_stream_errors
 from app.rag.repository import RagRepository
 from app.rag.welcome import build_welcome
 
@@ -74,18 +75,21 @@ async def chat_stream(
         conversation_id=payload.conversation_id,
     )
     return StreamingResponse(
-        gateway.stream(
-            policy=policy,
-            knowledge_id=payload.knowledge_id,
-            conversation_id=payload.conversation_id,
-            question=payload.question,
-            request_id=payload.request_id or str(request.state.request_id),
-            user_id=payload.user_id,
-            problem_code=payload.problem_code,
-            document_id=payload.document_id,
-            choice_id=payload.choice_id,
-            include_images=payload.include_images,
-            idempotency_key=idempotency_key,
+        observe_stream_errors(
+            request,
+            gateway.stream(
+                policy=policy,
+                knowledge_id=payload.knowledge_id,
+                conversation_id=payload.conversation_id,
+                question=payload.question,
+                request_id=payload.request_id or str(request.state.request_id),
+                user_id=payload.user_id,
+                problem_code=payload.problem_code,
+                document_id=payload.document_id,
+                choice_id=payload.choice_id,
+                include_images=payload.include_images,
+                idempotency_key=idempotency_key,
+            ),
         ),
         media_type="text/event-stream",
         headers={

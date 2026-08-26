@@ -67,10 +67,21 @@ class RagRepository:
         request_id: str,
         mode: str = "CHAT",
         user_id: str | None = None,
+        reuse_user_message_id: UUID | None = None,
+        reuse_assistant_message_id: UUID | None = None,
+        parent_trace_id: UUID | None = None,
+        fallback_reason: str | None = None,
     ) -> Turn:
         trace_id = uuid4()
-        user_message_id = uuid4()
-        assistant_message_id = uuid4()
+        if (reuse_user_message_id is None) != (reuse_assistant_message_id is None):
+            raise ValueError("fallback message IDs must be provided together")
+        if (parent_trace_id is None) != (fallback_reason is None):
+            raise ValueError("fallback trace metadata must be provided together")
+        if parent_trace_id is not None and reuse_user_message_id is None:
+            raise ValueError("fallback trace metadata requires reusable messages")
+        reuse_messages = reuse_user_message_id is not None
+        user_message_id = reuse_user_message_id or uuid4()
+        assistant_message_id = reuse_assistant_message_id or uuid4()
         async with self.engine.begin() as connection:
             kb_result = await connection.execute(
                 text(
@@ -134,6 +145,33 @@ class RagRepository:
                 if isinstance(raw_context, dict):
                     chat_context = dict(raw_context)
 
+            if reuse_messages:
+                if conversation_id is None:
+                    raise ApiError("CONVERSATION_NOT_FOUND", "降级消息缺少所属会话", 409)
+                pair_result = await connection.execute(
+                    text(
+                        """
+                        SELECT id, role, status FROM message
+                        WHERE conversation_id = :conversation_id
+                          AND id IN (:user_message_id, :assistant_message_id)
+                        FOR UPDATE
+                        """
+                    ),
+                    {
+                        "conversation_id": resolved_conversation_id,
+                        "user_message_id": user_message_id,
+                        "assistant_message_id": assistant_message_id,
+                    },
+                )
+                pair = {UUID(str(row["id"])): dict(row) for row in pair_result.mappings()}
+                if (
+                    pair.get(user_message_id, {}).get("role") != "USER"
+                    or pair.get(assistant_message_id, {}).get("role") != "ASSISTANT"
+                    or pair.get(assistant_message_id, {}).get("status")
+                    not in {"COMPLETED", "FAILED"}
+                ):
+                    raise ApiError("FALLBACK_MESSAGE_CONFLICT", "降级消息状态不一致", 409)
+
             history_result = await connection.execute(
                 text(
                     """
@@ -141,6 +179,10 @@ class RagRepository:
                         SELECT role, content, sequence_no
                         FROM message
                         WHERE conversation_id = :conversation_id AND status = 'COMPLETED'
+                          AND (
+                              :reuse_messages = false
+                              OR id NOT IN (:user_message_id, :assistant_message_id)
+                          )
                         ORDER BY sequence_no DESC
                         LIMIT :history_limit
                     ) recent
@@ -150,6 +192,9 @@ class RagRepository:
                 {
                     "conversation_id": resolved_conversation_id,
                     "history_limit": self.settings.m3_history_max_messages,
+                    "reuse_messages": reuse_messages,
+                    "user_message_id": user_message_id,
+                    "assistant_message_id": assistant_message_id,
                 },
             )
             history = self._budget_history([dict(row) for row in history_result.mappings()])
@@ -214,50 +259,91 @@ class RagRepository:
                     context_max_chunks=int(config_row["context_max_chunks"]),
                 )
 
-            sequence_result = await connection.execute(
-                text(
-                    """
-                    SELECT COALESCE(max(sequence_no), 0)
-                    FROM message WHERE conversation_id = :conversation_id
-                    """
-                ),
-                {"conversation_id": resolved_conversation_id},
-            )
-            first_sequence = int(sequence_result.scalar_one()) + 1
-
-            await connection.execute(
-                text(
-                    """
-                    INSERT INTO message (
-                        id, conversation_id, sequence_no, role, content, status
-                    ) VALUES (
-                        :user_id, :conversation_id, :user_sequence,
-                        'USER', :question, 'COMPLETED'
-                    ), (
-                        :assistant_id, :conversation_id, :assistant_sequence,
-                        'ASSISTANT', '', 'STREAMING'
+            if reuse_messages:
+                if parent_trace_id is not None:
+                    parent_result = await connection.execute(
+                        text(
+                            """
+                            UPDATE rag_trace
+                            SET message_id = NULL
+                            WHERE trace_id = :parent_trace_id AND engine = 'SUPPORT'
+                              AND conversation_id = :conversation_id
+                              AND (
+                                  message_id = :assistant_message_id OR message_id IS NULL
+                              )
+                            RETURNING trace_id
+                            """
+                        ),
+                        {
+                            "parent_trace_id": parent_trace_id,
+                            "conversation_id": resolved_conversation_id,
+                            "assistant_message_id": assistant_message_id,
+                        },
                     )
-                    """
-                ),
-                {
-                    "user_id": user_message_id,
-                    "assistant_id": assistant_message_id,
-                    "conversation_id": resolved_conversation_id,
-                    "question": question,
-                    "user_sequence": first_sequence,
-                    "assistant_sequence": first_sequence + 1,
-                },
-            )
+                    if parent_result.scalar_one_or_none() is None:
+                        raise ApiError("FALLBACK_TRACE_CONFLICT", "降级 Trace 状态不一致", 409)
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE message
+                        SET content = '', sources = '[]'::jsonb,
+                            content_blocks = '[]'::jsonb, response_type = NULL,
+                            support_mode = NULL, status = 'STREAMING', updated_at = now()
+                        WHERE id = :assistant_id
+                        """
+                    ),
+                    {"assistant_id": assistant_message_id},
+                )
+            else:
+                sequence_result = await connection.execute(
+                    text(
+                        """
+                        SELECT COALESCE(max(sequence_no), 0)
+                        FROM message WHERE conversation_id = :conversation_id
+                        """
+                    ),
+                    {"conversation_id": resolved_conversation_id},
+                )
+                first_sequence = int(sequence_result.scalar_one()) + 1
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO message (
+                            id, conversation_id, sequence_no, role, content, status
+                        ) VALUES (
+                            :user_id, :conversation_id, :user_sequence,
+                            'USER', :question, 'COMPLETED'
+                        ), (
+                            :assistant_id, :conversation_id, :assistant_sequence,
+                            'ASSISTANT', '', 'STREAMING'
+                        )
+                        """
+                    ),
+                    {
+                        "user_id": user_message_id,
+                        "assistant_id": assistant_message_id,
+                        "conversation_id": resolved_conversation_id,
+                        "question": question,
+                        "user_sequence": first_sequence,
+                        "assistant_sequence": first_sequence + 1,
+                    },
+                )
             await connection.execute(
                 text(
                     """
                     INSERT INTO rag_trace (
                         id, trace_id, request_id, kb_id, index_id, conversation_id,
-                        message_id, question, mode, status, user_id, engine, stage
+                        message_id, question, mode, status, user_id, engine, stage,
+                        parent_trace_id, fallback_from, fallback_reason
                     ) VALUES (
                         :id, :trace_id, :request_id, :kb_id, :index_id, :conversation_id,
                         :message_id, :question, :mode, 'RUNNING', :user_id,
-                        'RAG', 'PREPARE'
+                        'RAG', 'PREPARE', :parent_trace_id,
+                        CASE
+                            WHEN CAST(:parent_trace_id AS uuid) IS NULL THEN NULL
+                            ELSE 'SUPPORT'
+                        END,
+                        :fallback_reason
                     )
                     """
                 ),
@@ -272,6 +358,8 @@ class RagRepository:
                     "question": question,
                     "mode": mode,
                     "user_id": user_id,
+                    "parent_trace_id": parent_trace_id,
+                    "fallback_reason": fallback_reason,
                 },
             )
             await connection.execute(

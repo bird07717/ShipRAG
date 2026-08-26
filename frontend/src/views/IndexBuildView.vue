@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { ElMessageBox } from "element-plus";
 
 import { useAdminStore } from "@/composables/adminStore";
 import type { IndexTask, KnowledgeIndex } from "@/types/admin";
@@ -24,6 +25,20 @@ const STAGE_LABELS: Record<string, string> = {
 function openDetail(index: KnowledgeIndex): void {
   detailIndex.value = index;
   detailOpen.value = true;
+}
+
+async function reviewAndPublish(index: KnowledgeIndex): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `请确认已检查 Index v${index.version} 的 ${index.document_count} 份文档、${index.chunk_count} 个切片及构建状态。发布后，新会话将立即使用该 RAG 索引。`,
+      "审核并发布 RAG 索引",
+      { type: "warning", confirmButtonText: "审核通过并发布", cancelButtonText: "继续检查" },
+    );
+  } catch {
+    return;
+  }
+  await store.activateIndex(index.id);
+  detailOpen.value = false;
 }
 
 const detailTask = computed<IndexTask | undefined>(() => {
@@ -68,7 +83,7 @@ function formatDuration(index: KnowledgeIndex): string {
               :value="kb.id"
             />
           </el-select>
-          <span class="muted candidate-note">新构建统一进入候选审核，不自动影响线上</span>
+          <span class="muted candidate-note">构建完成后须在此审核发布，不自动影响线上</span>
           <div class="spacer" />
           <el-button :disabled="!store.selectedKnowledgeId" @click="store.gcIndexes()">
             回收旧索引
@@ -88,18 +103,18 @@ function formatDuration(index: KnowledgeIndex): string {
         :data="store.indexes"
         @row-click="(row: any) => openDetail(row)"
       >
-        <el-table-column label="Task" min-width="190">
+        <el-table-column label="索引" min-width="145">
           <template #default="scope">
             <div class="cell-primary">
               <b>Index v{{ scope.row.version }}</b>
-              <small class="mono">{{ scope.row.id }}</small>
+              <small>{{ scope.row.document_count }} 份文档 · {{ scope.row.chunk_count }} 个切片</small>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="Status" width="120">
+        <el-table-column label="状态" width="110">
           <template #default="scope"><StatusBadge :status="scope.row.status" /></template>
         </el-table-column>
-        <el-table-column label="Progress" width="150">
+        <el-table-column label="进度" width="120">
           <template #default="scope">
             <el-progress
               v-if="scope.row.status === 'BUILDING' && store.latestIndexTasks[scope.row.id]"
@@ -109,42 +124,18 @@ function formatDuration(index: KnowledgeIndex): string {
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column prop="document_count" label="Docs" width="80" />
-        <el-table-column prop="chunk_count" label="Chunks" width="90" />
-        <el-table-column label="Embedding" min-width="130" show-overflow-tooltip>
-          <template #default="scope">
-            <span class="mono">{{ scope.row.embedding_model_name }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="Started" min-width="150">
-          <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
-        </el-table-column>
-        <el-table-column label="Duration" width="90">
+        <el-table-column label="耗时" width="80">
           <template #default="scope">{{ formatDuration(scope.row) }}</template>
         </el-table-column>
-        <el-table-column label="" width="90" align="right">
+        <el-table-column label="审核发布" width="120" align="right">
           <template #default="scope">
             <el-button
-              v-if="scope.row.status === 'READY' && store.isActionableReleaseIndex(scope.row.id)"
+              v-if="scope.row.status === 'READY'"
               link
               type="primary"
-              @click.stop="store.navigate('support-profiles')"
+              @click.stop="reviewAndPublish(scope.row)"
             >
-              审核发布
-            </el-button>
-            <span
-              v-else-if="scope.row.status === 'READY' && store.releaseForIndex(scope.row.id)"
-              class="muted superseded-label"
-            >
-              已被取代
-            </span>
-            <el-button
-              v-else-if="scope.row.status === 'READY' && !store.releaseForIndex(scope.row.id)"
-              link
-              type="primary"
-              @click.stop="store.activateIndex(scope.row.id)"
-            >
-              激活旧式快照
+              审核并发布
             </el-button>
             <el-button
               v-if="scope.row.status === 'DEPRECATED' || scope.row.status === 'FAILED'"
@@ -254,24 +245,11 @@ function formatDuration(index: KnowledgeIndex): string {
 
         <div class="detail-actions">
           <el-button
-            v-if="detailIndex.status === 'READY' && store.isActionableReleaseIndex(detailIndex.id)"
+            v-if="detailIndex.status === 'READY'"
             type="primary"
-            @click="store.navigate('support-profiles'); detailOpen = false"
+            @click="reviewAndPublish(detailIndex)"
           >
-            进入发布审核
-          </el-button>
-          <el-alert
-            v-else-if="detailIndex.status === 'READY' && store.releaseForIndex(detailIndex.id)"
-            title="该候选已被更新版本取代，不能再发布"
-            type="info"
-            :closable="false"
-          />
-          <el-button
-            v-else-if="detailIndex.status === 'READY' && !store.releaseForIndex(detailIndex.id)"
-            type="primary"
-            @click="store.activateIndex(detailIndex.id)"
-          >
-            激活旧式快照
+            审核并发布 RAG 索引
           </el-button>
           <el-button
             v-if="detailIndex.status === 'DEPRECATED' || detailIndex.status === 'FAILED'"
@@ -288,15 +266,14 @@ function formatDuration(index: KnowledgeIndex): string {
 </template>
 
 <style scoped>
+.index-build { min-width: 0; }
+.index-build > .panel { min-width: 0; overflow: hidden; }
+.index-build :deep(.el-table) { width: 100%; max-width: 100%; }
 .toolbar-row {
   padding-bottom: 0;
 }
 
 .candidate-note {
-  font-size: 12px;
-}
-
-.superseded-label {
   font-size: 12px;
 }
 
@@ -331,6 +308,12 @@ function formatDuration(index: KnowledgeIndex): string {
 .detail-metric span {
   color: var(--text-tertiary);
   font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .toolbar { flex-wrap: wrap; }
+  .toolbar .spacer { display: none; }
+  .candidate-note { width: 100%; order: 3; }
 }
 
 .detail-metric strong {

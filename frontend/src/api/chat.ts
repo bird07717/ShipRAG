@@ -72,11 +72,19 @@ export interface ChatFallbackEvent {
   support_trace_id?: string;
 }
 
+export interface ChatErrorEvent {
+  code: string;
+  message: string;
+  request_id?: string;
+  trace_id?: string;
+  retryable?: boolean;
+}
+
 export interface ChatStreamCallbacks {
   onTrace: (traceId: string, conversationId: string) => void;
   onDelta: (text: string) => void;
   onDone: (event: ChatDoneEvent) => void;
-  onError: (message: string) => void;
+  onError: (message: string, event?: ChatErrorEvent) => void;
   onStatus?: (event: ChatStatusEvent) => void;
   onFallback?: (event: ChatFallbackEvent) => void;
 }
@@ -201,7 +209,14 @@ export async function streamChat(
         callbacks.onFallback?.(payload as ChatFallbackEvent);
       } else if (evt.event === "error") {
         terminalReceived = true;
-        callbacks.onError(payload.message ?? "未知错误");
+        const error = payload as ChatErrorEvent;
+        const suffix = [error.code, error.request_id ? `Request ID: ${error.request_id}` : ""]
+          .filter(Boolean)
+          .join(" · ");
+        callbacks.onError(
+          `${error.message ?? "未知错误"}${suffix ? `（${suffix}）` : ""}`,
+          error,
+        );
       }
     } catch {
       protocolErrorReported = true;

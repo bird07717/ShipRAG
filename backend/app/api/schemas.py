@@ -27,6 +27,12 @@ class KnowledgeBaseResponse(BaseModel):
     building_index_id: UUID | None = None
 
 
+class KnowledgeBaseDeleteResponse(BaseModel):
+    knowledge_id: UUID
+    deleted: bool
+    cleanup_failed_count: int = 0
+
+
 class DocumentResponse(BaseModel):
     id: UUID
     knowledge_id: UUID
@@ -49,7 +55,9 @@ class BuildRequestResponse(BaseModel):
 
 class IndexBuildRequest(BaseModel):
     reason: Literal["MANUAL", "REPROCESS", "MODEL_CHANGED"] = "MANUAL"
-    activate_on_success: bool = True
+    # All new builds are staged candidates.  Index/Profile publication is
+    # owned by the knowledge-release transaction.
+    activate_on_success: Literal[False] = False
 
 
 class IndexBuildResponse(BaseModel):
@@ -228,6 +236,7 @@ class RuntimePolicyResponse(BaseModel):
     fallback_conditions: list[str]
     source: Literal["DATABASE", "DEFAULT"]
     updated_at: datetime | None = None
+    readiness: dict[str, Any]
 
 
 class PromptResponse(BaseModel):
@@ -506,6 +515,7 @@ class FailureSummaryResponse(BaseModel):
 
     from_: datetime = Field(alias="from")
     to: datetime
+    scope: dict[str, Any]
     trace_failures: list[TraceFailureGroup]
     request_errors: list[RequestErrorGroup]
     request_errors_by_day: list[RequestErrorsByDay]
@@ -798,9 +808,12 @@ class ProblemProfileUpsert(BaseModel):
     product_name: str | None = Field(default=None, max_length=200)
     model_names: list[str] = Field(default_factory=list)
     task_type: str | None = Field(default=None, max_length=50)
+    routing_summary: str = Field(default="", max_length=1_000)
+    symptoms: list[str] = Field(default_factory=list, max_length=12)
+    exclusions: list[str] = Field(default_factory=list, max_length=8)
     enabled: bool = True
 
-    @field_validator("aliases", "keywords", "model_names")
+    @field_validator("aliases", "keywords", "model_names", "symptoms", "exclusions")
     @classmethod
     def non_empty_string_items(cls, value: list[str]) -> list[str]:
         if any(not item.strip() for item in value):
@@ -811,6 +824,7 @@ class ProblemProfileUpsert(BaseModel):
 class ProblemProfileResponse(ProblemProfileUpsert):
     id: UUID
     knowledge_id: UUID
+    profile_enrichment_version: int = Field(default=0, ge=0)
     support_ready: bool
     readiness_reasons: list[str] = Field(default_factory=list)
     created_at: datetime

@@ -86,8 +86,13 @@ class ChatGatewayService:
             choice_id=choice_id,
             include_images=include_images,
             idempotency_key=idempotency_key,
+            return_internal_ids=True,
         )
         response_type = str(support_response.get("response_type", ""))
+        replayed_gateway = support_response.pop("_gateway_response", None)
+        message_pair = support_response.pop("_fallback_message_pair", {})
+        if isinstance(replayed_gateway, dict):
+            return dict(replayed_gateway)
         if not policy.allows_fallback(response_type):
             await self._freeze(support_response, policy, ChatEngine.SUPPORT)
             support_response["execution_engine"] = ChatEngine.SUPPORT.value
@@ -99,6 +104,18 @@ class ChatGatewayService:
             question=question,
             request_id=request_id,
             user_id=user_id,
+            reuse_user_message_id=(
+                UUID(str(message_pair["user_message_id"]))
+                if message_pair.get("user_message_id")
+                else None
+            ),
+            reuse_assistant_message_id=(
+                UUID(str(message_pair["assistant_message_id"]))
+                if message_pair.get("assistant_message_id")
+                else None
+            ),
+            parent_trace_id=UUID(str(support_response["trace_id"])),
+            fallback_reason=response_type,
         )
         await self.repository.link_fallback(
             support_trace_id=UUID(str(support_response["trace_id"])),
@@ -112,6 +129,13 @@ class ChatGatewayService:
             "support_trace_id": str(support_response["trace_id"]),
         }
         rag_response["execution_engine"] = ChatEngine.RAG.value
+        if idempotency_key is not None:
+            await self.support.save_gateway_response(
+                knowledge_id=knowledge_id,
+                idempotency_key=idempotency_key,
+                support_trace_id=UUID(str(support_response["trace_id"])),
+                response=rag_response,
+            )
         return rag_response
 
     async def stream(self, **kwargs: Any) -> AsyncIterator[bytes]:
@@ -127,8 +151,35 @@ class ChatGatewayService:
                 return
 
             yield _sse("status", {"stage": "support_processing", "engine": "SUPPORT"})
-            support_response = await self.support.handle(**kwargs)
+            support_response = await self.support.handle(**kwargs, return_internal_ids=True)
             response_type = str(support_response.get("response_type", ""))
+            replayed_gateway = support_response.pop("_gateway_response", None)
+            message_pair = support_response.pop("_fallback_message_pair", {})
+            if isinstance(replayed_gateway, dict):
+                fallback = replayed_gateway.get("fallback")
+                if isinstance(fallback, dict):
+                    yield _sse(
+                        "fallback",
+                        {
+                            "from": fallback.get("from", "SUPPORT"),
+                            "to": replayed_gateway.get("execution_engine", "RAG"),
+                            "reason": fallback.get("reason", "NO_MATCH"),
+                            "support_trace_id": fallback.get("support_trace_id"),
+                        },
+                    )
+                yield _sse(
+                    "trace",
+                    {
+                        "trace_id": replayed_gateway["trace_id"],
+                        "conversation_id": replayed_gateway["conversation_id"],
+                    },
+                )
+                answer = str(replayed_gateway.get("answer", ""))
+                for offset in range(0, len(answer), 24):
+                    yield _sse("message", {"delta": answer[offset : offset + 24]})
+                    await asyncio.sleep(0)
+                yield _sse("done", dict(replayed_gateway))
+                return
             if not policy.allows_fallback(response_type):
                 await self._freeze(support_response, policy, ChatEngine.SUPPORT)
                 support_response["execution_engine"] = ChatEngine.SUPPORT.value
@@ -165,12 +216,16 @@ class ChatGatewayService:
                 question=kwargs["question"],
                 request_id=kwargs["request_id"],
                 user_id=kwargs.get("user_id"),
+                reuse_user_message_id=message_pair.get("user_message_id"),
+                reuse_assistant_message_id=message_pair.get("assistant_message_id"),
+                fallback_idempotency_key=kwargs.get("idempotency_key"),
             ):
                 yield frame
         except ApiError as exc:
-            yield _sse("error", {"code": exc.code, "message": exc.message})
-        except Exception:
-            yield _sse("error", {"code": "INTERNAL_ERROR", "message": "问答网关处理失败"})
+            yield _sse(
+                "error",
+                {"code": exc.code, "message": exc.message, "status_code": exc.status_code},
+            )
 
     async def _rag_stream(
         self,
@@ -181,8 +236,11 @@ class ChatGatewayService:
         question: str,
         request_id: str,
         user_id: str | None,
+        reuse_user_message_id: str | UUID | None = None,
+        reuse_assistant_message_id: str | UUID | None = None,
         parent_trace_id: UUID | None = None,
         fallback_reason: str | None = None,
+        fallback_idempotency_key: str | None = None,
         **_unused: Any,
     ) -> AsyncIterator[bytes]:
         async for frame in self.rag.chat_stream(
@@ -193,6 +251,14 @@ class ChatGatewayService:
             product_name="",
             scope_description=_PRODUCT_SCOPE,
             user_id=user_id,
+            reuse_user_message_id=(
+                UUID(str(reuse_user_message_id)) if reuse_user_message_id else None
+            ),
+            reuse_assistant_message_id=(
+                UUID(str(reuse_assistant_message_id)) if reuse_assistant_message_id else None
+            ),
+            parent_trace_id=parent_trace_id,
+            fallback_reason=fallback_reason,
         ):
             done = _event_payload(frame, "done")
             if done is not None:
@@ -209,6 +275,13 @@ class ChatGatewayService:
                         "support_trace_id": str(parent_trace_id),
                     }
                 await self._freeze(done, policy, ChatEngine.RAG)
+                if parent_trace_id is not None and fallback_idempotency_key is not None:
+                    await self.support.save_gateway_response(
+                        knowledge_id=knowledge_id,
+                        idempotency_key=fallback_idempotency_key,
+                        support_trace_id=parent_trace_id,
+                        response=done,
+                    )
                 yield _sse("done", done)
             else:
                 yield frame

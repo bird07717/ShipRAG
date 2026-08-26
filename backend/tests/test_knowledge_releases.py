@@ -4,11 +4,12 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.common.errors import ApiError
+from app.core.config import Settings
 from app.ingestion.repository import IngestionRepository
-from app.releases.models import GeneratedProfile
+from app.releases.models import PROFILE_ENRICHMENT_VERSION, GeneratedProfile
 from app.releases.repository import ReleaseRepository
 from app.releases.service import ReleaseService
 from app.support.models import ProblemDecision, ProblemProfile
@@ -86,6 +87,9 @@ def test_fallback_profile_is_conservative_and_editable() -> None:
     assert profile.canonical_question.endswith("？")
     assert "升级" in profile.keywords
     assert profile.task_type == "UPGRADE"
+    assert profile.routing_summary
+    assert profile.symptoms == []
+    assert profile.exclusions == []
     assert profile.confidence < 0.5
 
 
@@ -111,6 +115,39 @@ def test_replacement_detection_preserves_stable_problem_code() -> None:
     merged = ReleaseService._merge_update(profile, existing)
     assert merged.problem_code == "PDC_UPDATE_UPGRADE"
     assert merged.aliases == ["PDC刷版本"]
+
+
+def test_backfill_selects_only_missing_or_outdated_profiles_without_drafts() -> None:
+    missing_document = uuid4()
+    outdated_document = uuid4()
+    current_document = uuid4()
+    editing_document = uuid4()
+
+    selected = ReleaseService._backfill_document_ids(
+        [
+            {"document_id": missing_document},
+            {"document_id": outdated_document},
+            {"document_id": current_document},
+            {"document_id": editing_document},
+        ],
+        [
+            {
+                "document_id": outdated_document,
+                "profile_enrichment_version": PROFILE_ENRICHMENT_VERSION - 1,
+            },
+            {
+                "document_id": current_document,
+                "profile_enrichment_version": PROFILE_ENRICHMENT_VERSION,
+            },
+            {
+                "document_id": editing_document,
+                "profile_enrichment_version": 0,
+            },
+        ],
+        {editing_document},
+    )
+
+    assert selected == {missing_document, outdated_document}
 
 
 @pytest.mark.asyncio
@@ -149,6 +186,10 @@ class _Result:
     def one_or_none(self) -> dict[str, Any] | None:
         return self.row
 
+    def one(self) -> dict[str, Any]:
+        assert self.row is not None
+        return self.row
+
     def scalar_one_or_none(self) -> Any:
         return self.scalar
 
@@ -178,16 +219,32 @@ class _Engine:
 
 
 @pytest.mark.asyncio
-async def test_new_candidate_cancels_other_open_releases() -> None:
+async def test_ready_index_publishes_without_legacy_profile_release_approval() -> None:
+    index_id = uuid4()
     knowledge_id = uuid4()
-    connection = _Connection()
+    connection = _Connection(
+        [
+            _Result(
+                row={
+                    "id": index_id,
+                    "kb_id": knowledge_id,
+                    "status": "READY",
+                    "active_index_id": None,
+                }
+            ),
+            _Result(row={"id": index_id, "kb_id": knowledge_id, "status": "ACTIVE"}),
+        ]
+    )
+    repository = IngestionRepository(
+        cast(AsyncEngine, _Engine(connection)), Settings(_env_file=None, app_env="test")
+    )
 
-    await IngestionRepository._cancel_open_releases(cast(AsyncConnection, connection), knowledge_id)
+    published = await repository.activate_index(index_id)
 
-    sql, parameters = connection.executed[0]
-    assert "SET status = 'CANCELLED'" in sql
-    assert "status NOT IN ('PUBLISHED', 'CANCELLED')" in sql
-    assert parameters == {"kb_id": knowledge_id}
+    assert published["status"] == "ACTIVE"
+    statements = "\n".join(statement for statement, _ in connection.executed)
+    assert "RELEASE_REQUIRED" not in statements
+    assert "UPDATE knowledge_release" in statements
 
 
 @pytest.mark.asyncio

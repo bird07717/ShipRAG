@@ -30,6 +30,22 @@ async function selectAndOpen(kb: KnowledgeBase): Promise<void> {
   openDetail(kb);
 }
 
+async function deleteKnowledge(kb: KnowledgeBase): Promise<void> {
+  await store.deleteKnowledgeBase(kb);
+  if (!store.error && !store.knowledgeBases.some((item) => item.id === kb.id)) {
+    if (detailTarget.value?.id === kb.id) detailOpen.value = false;
+  }
+}
+
+function handleCommand(command: string, kb: KnowledgeBase): void {
+  if (command === "detail") void selectAndOpen(kb);
+  if (command === "rebuild") {
+    store.selectedKnowledgeId = kb.id;
+    rebuild();
+  }
+  if (command === "delete") void deleteKnowledge(kb);
+}
+
 function rebuild(): void {
   void store.buildIndex();
 }
@@ -93,10 +109,7 @@ function rebuild(): void {
           <template #default="scope">
             <el-dropdown
               trigger="click"
-              @command="(cmd: string) => {
-                if (cmd === 'detail') selectAndOpen(scope.row);
-                if (cmd === 'rebuild') { store.selectedKnowledgeId = scope.row.id; rebuild(); }
-              }"
+              @command="(cmd: string) => handleCommand(cmd, scope.row)"
             >
               <el-button
                 link
@@ -110,6 +123,13 @@ function rebuild(): void {
                 <el-dropdown-menu>
                   <el-dropdown-item command="detail">查看详情</el-dropdown-item>
                   <el-dropdown-item command="rebuild">重建索引</el-dropdown-item>
+                  <el-dropdown-item
+                    command="delete"
+                    divided
+                    :disabled="Boolean(scope.row.building_index_id)"
+                  >
+                    {{ scope.row.building_index_id ? "构建中不可删除" : "删除知识库" }}
+                  </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -220,6 +240,15 @@ function rebuild(): void {
         </el-descriptions>
 
         <div class="drawer-footer">
+          <el-button
+            type="danger"
+            plain
+            :disabled="Boolean(detailTarget.building_index_id)"
+            @click="deleteKnowledge(detailTarget)"
+          >
+            {{ detailTarget.building_index_id ? "构建中不可删除" : "删除知识库" }}
+          </el-button>
+          <span class="spacer" />
           <el-button @click="rebuild">重建索引</el-button>
           <el-button
             type="primary"

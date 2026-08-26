@@ -616,6 +616,8 @@ async def test_chat_stream_delivers_document_without_message_events():
     source_payload = events[1][1]
     assert source_payload["sources"][0]["source_id"] == "S1"
     done_payload = events[2][1]
+    assert done_payload["trace_id"] == str(repo.turn.trace_id)
+    assert done_payload["index_id"] == str(repo.turn.index_id)
     assert done_payload["response_type"] == "DOC_DELIVERED"
     assert [block["type"] for block in done_payload["content"]] == [
         "text",

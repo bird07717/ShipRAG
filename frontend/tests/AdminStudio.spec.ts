@@ -19,17 +19,21 @@ describe("AdminStudio settings", () => {
     );
 
     const wrapper = mount(AdminStudio, {
-      props: { view: "settings" },
+      props: { view: "configuration", navigationQuery: "tab=credentials" },
       global: { plugins: [ElementPlus] },
     });
     await flushPromises();
 
+    expect(wrapper.find(".el-tabs__item.is-active").text()).toContain("服务凭证");
     const input = wrapper.get("input");
     await input.setValue("session-token");
     expect(input.element.value).toBe("session-token");
 
-    await input.trigger("change");
+    const saveButton = wrapper.findAll("button").find((button) => button.text() === "保存并重新加载");
+    await saveButton!.trigger("click");
+    await flushPromises();
     expect(sessionStorage.getItem("rag_service_token")).toBe("session-token");
+    expect(wrapper.text()).toContain("当前会话已配置");
     wrapper.unmount();
   });
 

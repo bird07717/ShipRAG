@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { Refresh, Search, WarningFilled } from "@element-plus/icons-vue";
 
 import { adminApi } from "@/api/admin";
@@ -15,8 +15,32 @@ import StatusBadge from "@/components/ui/StatusBadge.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
 import MetricCard from "@/components/ui/MetricCard.vue";
+import TracesView from "@/views/TracesView.vue";
 
+const props = defineProps<{ navigationQuery?: string }>();
 const store = useAdminStore();
+const loadError = ref("");
+
+const LOG_TABS = new Set(["request-errors", "failed-turns", "task-failures", "escalations", "traces"]);
+
+function navigationState(query = ""): {
+  tab: string;
+  engine: "" | "SUPPORT" | "RAG";
+} {
+  const params = new URLSearchParams(query);
+  const requestedTab = params.get("tab") ?? "request-errors";
+  const requestedEngine = params.get("engine");
+  return {
+    tab: LOG_TABS.has(requestedTab) ? requestedTab : "request-errors",
+    engine: requestedEngine === "SUPPORT" || requestedEngine === "RAG" ? requestedEngine : "",
+  };
+}
+
+const initialNavigation = navigationState(props.navigationQuery);
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "管理日志加载失败";
+}
 
 /* ---------------- overview ---------------- */
 
@@ -27,7 +51,7 @@ const totalTraceFailures = computed(() =>
   summary.value?.trace_failures.reduce((total, group) => total + group.count, 0) ?? 0,
 );
 const totalRequestErrors = computed(() =>
-  summary.value?.request_errors.reduce((total, group) => total + group.count, 0) ?? 0,
+  summary.value?.request_errors_by_day.reduce((total, item) => total + item.count, 0) ?? 0,
 );
 const topErrorCodes = computed(() => {
   const groups = summary.value?.trace_failures ?? [];
@@ -41,10 +65,14 @@ const topErrorCodes = computed(() => {
 
 async function loadSummary(): Promise<void> {
   loadingSummary.value = true;
+  loadError.value = "";
   try {
     summary.value = await adminApi.getFailureSummary({
       knowledgeId: store.selectedKnowledgeId || undefined,
     });
+  } catch (error) {
+    summary.value = null;
+    loadError.value = errorMessage(error);
   } finally {
     loadingSummary.value = false;
   }
@@ -62,11 +90,13 @@ const requestErrorTotal = ref(0);
 const requestErrorPage = ref(1);
 const requestErrorPageSize = 20;
 const loadingRequestErrors = ref(false);
+const loadingRequestErrorDetail = ref(false);
 const selectedRequestError = ref<RequestErrorLog | null>(null);
 const requestErrorDrawerOpen = ref(false);
 
 async function loadRequestErrors(): Promise<void> {
   loadingRequestErrors.value = true;
+  loadError.value = "";
   try {
     const result = await adminApi.listRequestErrors({
       requestId: requestErrorFilter.value.requestId || undefined,
@@ -79,6 +109,10 @@ async function loadRequestErrors(): Promise<void> {
     });
     requestErrors.value = result.items;
     requestErrorTotal.value = result.total;
+  } catch (error) {
+    requestErrors.value = [];
+    requestErrorTotal.value = 0;
+    loadError.value = errorMessage(error);
   } finally {
     loadingRequestErrors.value = false;
   }
@@ -93,10 +127,14 @@ function resetRequestErrorFilter(): void {
 async function openRequestError(row: RequestErrorLog): Promise<void> {
   selectedRequestError.value = row;
   requestErrorDrawerOpen.value = true;
+  loadingRequestErrorDetail.value = true;
+  loadError.value = "";
   try {
     selectedRequestError.value = await adminApi.getRequestError(row.id);
-  } catch {
-    /* keep the list-row copy; detail JSON is best-effort */
+  } catch (error) {
+    loadError.value = errorMessage(error);
+  } finally {
+    loadingRequestErrorDetail.value = false;
   }
 }
 
@@ -107,7 +145,10 @@ const requestErrorDetailText = computed(() => {
 
 /* ---------------- failed support turns ---------------- */
 
-const failedTraceFilter = ref<{ errorCode: string }>({ errorCode: "" });
+const failedTraceFilter = ref<{ engine: "" | "SUPPORT" | "RAG"; errorCode: string }>({
+  engine: initialNavigation.engine,
+  errorCode: "",
+});
 const failedTraces = ref<TraceSummary[]>([]);
 const loadingFailedTraces = ref(false);
 const selectedFailedTrace = ref<RagTrace | null>(null);
@@ -120,12 +161,17 @@ const failedTraceCodes = computed(() =>
 
 async function loadFailedTraces(): Promise<void> {
   loadingFailedTraces.value = true;
+  loadError.value = "";
   try {
     failedTraces.value = await adminApi.listTraces(store.selectedKnowledgeId || undefined, {
       status: "FAILED",
+      engine: failedTraceFilter.value.engine || undefined,
       errorCode: failedTraceFilter.value.errorCode || undefined,
       limit: 200,
     });
+  } catch (error) {
+    failedTraces.value = [];
+    loadError.value = errorMessage(error);
   } finally {
     loadingFailedTraces.value = false;
   }
@@ -134,8 +180,12 @@ async function loadFailedTraces(): Promise<void> {
 async function openFailedTrace(traceId: string): Promise<void> {
   loadingFailedDetail.value = true;
   failedTraceDrawerOpen.value = true;
+  loadError.value = "";
   try {
     selectedFailedTrace.value = await adminApi.getTrace(traceId);
+  } catch (error) {
+    selectedFailedTrace.value = null;
+    loadError.value = errorMessage(error);
   } finally {
     loadingFailedDetail.value = false;
   }
@@ -171,12 +221,16 @@ const taskDrawerOpen = ref(false);
 
 async function loadFailedTasks(): Promise<void> {
   loadingFailedTasks.value = true;
+  loadError.value = "";
   try {
     failedTasks.value = await adminApi.listTasks({
       status: "FAILED",
       knowledgeId: store.selectedKnowledgeId || undefined,
       limit: 100,
     });
+  } catch (error) {
+    failedTasks.value = [];
+    loadError.value = errorMessage(error);
   } finally {
     loadingFailedTasks.value = false;
   }
@@ -192,11 +246,15 @@ const loadingEscalationDetail = ref(false);
 
 async function loadEscalations(): Promise<void> {
   loadingEscalations.value = true;
+  loadError.value = "";
   try {
     escalations.value = await adminApi.listTraces(store.selectedKnowledgeId || undefined, {
       responseType: "ESCALATION_REQUIRED",
       limit: 200,
     });
+  } catch (error) {
+    escalations.value = [];
+    loadError.value = errorMessage(error);
   } finally {
     loadingEscalations.value = false;
   }
@@ -205,8 +263,12 @@ async function loadEscalations(): Promise<void> {
 async function openEscalation(traceId: string): Promise<void> {
   loadingEscalationDetail.value = true;
   escalationDrawerOpen.value = true;
+  loadError.value = "";
   try {
     selectedEscalation.value = await adminApi.getTrace(traceId);
+  } catch (error) {
+    selectedEscalation.value = null;
+    loadError.value = errorMessage(error);
   } finally {
     loadingEscalationDetail.value = false;
   }
@@ -236,7 +298,7 @@ const escalationSummary = computed(() => escalationRecord.value?.summary ?? null
 
 /* ---------------- tabs ---------------- */
 
-const activeTab = ref("request-errors");
+const activeTab = ref(initialNavigation.tab);
 
 function handleTabChange(tab: string | number): void {
   const name = String(tab);
@@ -248,22 +310,65 @@ function handleTabChange(tab: string | number): void {
 
 onMounted(() => {
   void loadSummary();
-  void loadRequestErrors();
+  handleTabChange(activeTab.value);
 });
+
+watch(
+  () => props.navigationQuery,
+  (query) => {
+    const next = navigationState(query);
+    activeTab.value = next.tab;
+    failedTraceFilter.value.engine = next.engine;
+    if (next.tab === "failed-turns") void loadFailedTraces();
+  },
+);
+
+watch(
+  () => store.selectedKnowledgeId,
+  () => {
+    void loadSummary();
+    if (activeTab.value === "failed-turns") void loadFailedTraces();
+    if (activeTab.value === "task-failures") void loadFailedTasks();
+    if (activeTab.value === "escalations") void loadEscalations();
+  },
+);
 </script>
 
 <template>
   <div class="logs-view">
+    <el-alert
+      v-if="loadError"
+      :title="loadError"
+      type="error"
+      show-icon
+      @close="loadError = ''"
+    />
     <!-- Overview: failure distribution for the review window -->
     <section v-loading="loadingSummary" class="panel">
       <header class="panel-header">
         <div>
           <h3>失败概览</h3>
           <span class="sub">
-            最近 7 天 · 失败轮次 {{ totalTraceFailures }} · 请求错误 {{ totalRequestErrors }}
+            最近 7 天 · 失败轮次 {{ totalTraceFailures }}（{{ summary?.scope.trace_failures === "KNOWLEDGE_BASE" ? "当前知识库" : "全局" }}）
+            · 请求错误 {{ totalRequestErrors }}（全局）
           </span>
         </div>
-        <el-button :icon="Refresh" :loading="loadingSummary" @click="loadSummary">刷新</el-button>
+        <div class="scope-actions">
+          <el-select
+            v-model="store.selectedKnowledgeId"
+            placeholder="全部知识库"
+            clearable
+            @change="store.selectKnowledge()"
+          >
+            <el-option
+              v-for="kb in store.knowledgeBases"
+              :key="kb.id"
+              :label="kb.name"
+              :value="kb.id"
+            />
+          </el-select>
+          <el-button :icon="Refresh" :loading="loadingSummary" @click="loadSummary">刷新</el-button>
+        </div>
       </header>
       <div class="panel-body overview-body">
         <div class="metric-row">
@@ -320,6 +425,12 @@ onMounted(() => {
         <el-tabs v-model="activeTab" @tab-change="handleTabChange">
           <!-- 1. Request errors -->
           <el-tab-pane label="请求错误" name="request-errors">
+            <el-alert
+              title="请求错误日志为全局口径，不随当前知识库筛选；请使用 Request ID 或路径定位。"
+              type="info"
+              :closable="false"
+              show-icon
+            />
             <div class="tab-toolbar">
               <el-input
                 v-model="requestErrorFilter.requestId"
@@ -417,7 +528,7 @@ onMounted(() => {
               />
             </div>
             <EmptyState
-              v-if="!loadingRequestErrors && !requestErrors.length"
+              v-if="!loadingRequestErrors && !loadError && !requestErrors.length"
               title="没有请求错误"
               description="指定条件与时间范围内没有失败的 API 请求。"
             />
@@ -426,6 +537,16 @@ onMounted(() => {
           <!-- 2. Failed support turns -->
           <el-tab-pane label="失败轮次" name="failed-turns">
             <div class="tab-toolbar">
+              <el-select
+                v-model="failedTraceFilter.engine"
+                placeholder="全部引擎"
+                clearable
+                class="tool-select-wide"
+                @change="loadFailedTraces"
+              >
+                <el-option label="Profile Support" value="SUPPORT" />
+                <el-option label="Generic RAG" value="RAG" />
+              </el-select>
               <el-select
                 v-model="failedTraceFilter.errorCode"
                 placeholder="错误码"
@@ -454,6 +575,9 @@ onMounted(() => {
               <el-table-column label="时间" width="160">
                 <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
               </el-table-column>
+              <el-table-column label="引擎" width="100">
+                <template #default="scope"><StatusBadge :status="scope.row.engine ?? 'RAG'" /></template>
+              </el-table-column>
               <el-table-column
                 prop="question"
                 label="问题"
@@ -475,9 +599,9 @@ onMounted(() => {
               </el-table-column>
             </el-table>
             <EmptyState
-              v-if="!loadingFailedTraces && !failedTraces.length"
+              v-if="!loadingFailedTraces && !loadError && !failedTraces.length"
               title="没有失败轮次"
-              description="指定条件下没有失败的技术支持轮次。"
+              description="指定条件下没有失败的 Support 或 RAG 轮次。"
             />
           </el-tab-pane>
 
@@ -523,7 +647,7 @@ onMounted(() => {
               </el-table-column>
             </el-table>
             <EmptyState
-              v-if="!loadingFailedTasks && !failedTasks.length"
+              v-if="!loadingFailedTasks && !loadError && !failedTasks.length"
               title="没有失败任务"
               description="后台任务全部执行成功。"
             />
@@ -570,10 +694,13 @@ onMounted(() => {
               </el-table-column>
             </el-table>
             <EmptyState
-              v-if="!loadingEscalations && !escalations.length"
+              v-if="!loadingEscalations && !loadError && !escalations.length"
               title="没有升级记录"
               description="指定条件下没有触发升级人工的轮次。"
             />
+          </el-tab-pane>
+          <el-tab-pane label="全量 Trace" name="traces" lazy>
+            <TracesView />
           </el-tab-pane>
         </el-tabs>
       </div>
@@ -581,98 +708,101 @@ onMounted(() => {
 
     <!-- Request error detail drawer -->
     <el-drawer v-model="requestErrorDrawerOpen" title="请求错误详情" size="600px">
-      <template v-if="selectedRequestError">
-        <el-descriptions
-          :column="1"
-          border
-          size="small"
-          class="drawer-descriptions"
-        >
-          <el-descriptions-item label="Request ID">
-            <span class="mono">{{ selectedRequestError.request_id }}</span>
-          </el-descriptions-item>
-          <el-descriptions-item label="时间">
-            {{ store.formatDate(selectedRequestError.created_at) }}
-          </el-descriptions-item>
-          <el-descriptions-item label="请求">
-            <span class="mono">{{ selectedRequestError.method }} {{ selectedRequestError.path }}</span>
-          </el-descriptions-item>
-          <el-descriptions-item label="状态码">
-            {{ selectedRequestError.status_code }}
-          </el-descriptions-item>
-          <el-descriptions-item label="错误码">
-            {{ selectedRequestError.error_code }}
-          </el-descriptions-item>
-          <el-descriptions-item label="信息">
-            {{ selectedRequestError.message }}
-          </el-descriptions-item>
-        </el-descriptions>
-        <template v-if="requestErrorDetailText">
-          <h4 class="section-label">详情（含异常堆栈 / 参数校验字段）</h4>
-          <CodeBlock :code="requestErrorDetailText" max-height="420px" />
+      <div v-loading="loadingRequestErrorDetail" class="drawer-loading-body">
+        <template v-if="selectedRequestError">
+          <el-descriptions
+            :column="1"
+            border
+            size="small"
+            class="drawer-descriptions"
+          >
+            <el-descriptions-item label="Request ID">
+              <span class="mono">{{ selectedRequestError.request_id }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="时间">
+              {{ store.formatDate(selectedRequestError.created_at) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="请求">
+              <span class="mono">{{ selectedRequestError.method }} {{ selectedRequestError.path }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="状态码">
+              {{ selectedRequestError.status_code }}
+            </el-descriptions-item>
+            <el-descriptions-item label="错误码">
+              {{ selectedRequestError.error_code }}
+            </el-descriptions-item>
+            <el-descriptions-item label="信息">
+              {{ selectedRequestError.message }}
+            </el-descriptions-item>
+          </el-descriptions>
+          <template v-if="requestErrorDetailText">
+            <h4 class="section-label">详情（含异常堆栈 / 参数校验字段）</h4>
+            <CodeBlock :code="requestErrorDetailText" max-height="420px" />
+          </template>
         </template>
-      </template>
+      </div>
     </el-drawer>
 
     <!-- Failed turn detail drawer -->
     <el-drawer
       v-model="failedTraceDrawerOpen"
-      v-loading="loadingFailedDetail"
       title="失败轮次详情"
       size="600px"
     >
-      <template v-if="selectedFailedTrace">
-        <el-alert
-          :title="`错误：${failedTraceError?.code ?? 'UNKNOWN'}`"
-          :description="[
-            failedTraceError?.message,
-            failedTraceError?.stage ? `失败阶段：${failedTraceError.stage}` : '',
-            failedTraceError?.retryable != null
-              ? failedTraceError.retryable ? '可重试' : '不可重试'
-              : '',
-            typeof failedTraceError?.detail === 'string'
-              ? `上游详情：${failedTraceError.detail}`
-              : '',
-          ].filter(Boolean).join(' · ')"
-          type="error"
-          :closable="false"
-          show-icon
-        />
-        <el-descriptions
-          :column="1"
-          border
-          size="small"
-          class="drawer-descriptions"
-        >
-          <el-descriptions-item label="问题">
-            {{ selectedFailedTrace.question }}
-          </el-descriptions-item>
-          <el-descriptions-item label="Request ID">
-            <span class="mono">{{ selectedFailedTrace.request_id }}</span>
-          </el-descriptions-item>
-          <el-descriptions-item label="时间">
-            {{ store.formatDate(selectedFailedTrace.created_at) }}
-          </el-descriptions-item>
-          <el-descriptions-item v-if="failedSupportTrace?.focus_document_id" label="聚焦文档">
-            <span class="mono">{{ failedSupportTrace.focus_document_id }}</span>
-          </el-descriptions-item>
-          <el-descriptions-item v-if="failedSupportTrace?.validation_result?.code" label="校验失败码">
-            {{ failedSupportTrace.validation_result.code }}
-          </el-descriptions-item>
-        </el-descriptions>
-        <div v-if="selectedFailedTrace.conversation_id" class="drawer-actions">
-          <el-button
-            type="primary"
-            @click="store.openConversation(selectedFailedTrace.conversation_id!)"
+      <div v-loading="loadingFailedDetail" class="drawer-loading-body">
+        <template v-if="selectedFailedTrace">
+          <el-alert
+            :title="`错误：${failedTraceError?.code ?? 'UNKNOWN'}`"
+            :description="[
+              failedTraceError?.message,
+              failedTraceError?.stage ? `失败阶段：${failedTraceError.stage}` : '',
+              failedTraceError?.retryable != null
+                ? failedTraceError.retryable ? '可重试' : '不可重试'
+                : '',
+              typeof failedTraceError?.detail === 'string'
+                ? `上游详情：${failedTraceError.detail}`
+                : '',
+            ].filter(Boolean).join(' · ')"
+            type="error"
+            :closable="false"
+            show-icon
+          />
+          <el-descriptions
+            :column="1"
+            border
+            size="small"
+            class="drawer-descriptions"
           >
-            查看会话回放
-          </el-button>
-        </div>
-        <h4 class="section-label">失败 Trace（含被拒草案摘要）</h4>
-        <CodeBlock :code="store.formatJson(selectedFailedTrace.retrieval_result)" max-height="420px" />
-        <h4 class="section-label">完整错误 JSON</h4>
-        <CodeBlock :code="store.formatJson(selectedFailedTrace.error)" max-height="200px" />
-      </template>
+            <el-descriptions-item label="问题">
+              {{ selectedFailedTrace.question }}
+            </el-descriptions-item>
+            <el-descriptions-item label="Request ID">
+              <span class="mono">{{ selectedFailedTrace.request_id }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="时间">
+              {{ store.formatDate(selectedFailedTrace.created_at) }}
+            </el-descriptions-item>
+            <el-descriptions-item v-if="failedSupportTrace?.focus_document_id" label="聚焦文档">
+              <span class="mono">{{ failedSupportTrace.focus_document_id }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item v-if="failedSupportTrace?.validation_result?.code" label="校验失败码">
+              {{ failedSupportTrace.validation_result.code }}
+            </el-descriptions-item>
+          </el-descriptions>
+          <div v-if="selectedFailedTrace.conversation_id" class="drawer-actions">
+            <el-button
+              type="primary"
+              @click="store.openConversation(selectedFailedTrace.conversation_id!)"
+            >
+              查看会话回放
+            </el-button>
+          </div>
+          <h4 class="section-label">失败 Trace（含被拒草案摘要）</h4>
+          <CodeBlock :code="store.formatJson(selectedFailedTrace.retrieval_result)" max-height="420px" />
+          <h4 class="section-label">完整错误 JSON</h4>
+          <CodeBlock :code="store.formatJson(selectedFailedTrace.error)" max-height="200px" />
+        </template>
+      </div>
     </el-drawer>
 
     <!-- Failed task detail drawer -->
@@ -710,59 +840,60 @@ onMounted(() => {
     <!-- Escalation detail drawer -->
     <el-drawer
       v-model="escalationDrawerOpen"
-      v-loading="loadingEscalationDetail"
       title="升级详情"
       size="600px"
     >
-      <template v-if="selectedEscalation">
-        <h3 class="drawer-question">{{ selectedEscalation.question }}</h3>
-        <div class="drawer-meta">
-          <StatusBadge :status="selectedEscalation.status" />
-          <span class="muted">{{ store.formatDate(selectedEscalation.created_at) }}</span>
-          <span v-if="selectedEscalation.user_id" class="muted">
-            用户 {{ selectedEscalation.user_id }}
-          </span>
-        </div>
-        <el-alert
-          v-if="escalationRecord?.reason"
-          :title="escalationRecord.reason"
-          type="warning"
-          :closable="false"
-          show-icon
-          class="drawer-alert"
-        />
-        <template v-if="escalationSummary">
-          <el-descriptions
-            :column="1"
-            border
-            size="small"
-            class="drawer-descriptions"
-          >
-            <el-descriptions-item label="问题编码">
-              {{ escalationSummary.problem_code ?? "—" }}
-            </el-descriptions-item>
-            <el-descriptions-item label="当前步骤">
-              {{ escalationSummary.current_step ?? "—" }}
-            </el-descriptions-item>
-            <el-descriptions-item label="已完成步骤">
-              {{ (escalationSummary.completed_steps ?? []).join("、") || "—" }}
-            </el-descriptions-item>
-            <el-descriptions-item label="缺失信息">
-              {{ (escalationSummary.missing_information ?? []).join("；") || "—" }}
-            </el-descriptions-item>
-          </el-descriptions>
-          <h4 class="section-label">升级摘要 JSON</h4>
-          <CodeBlock :code="store.formatJson(escalationSummary)" max-height="360px" />
+      <div v-loading="loadingEscalationDetail" class="drawer-loading-body">
+        <template v-if="selectedEscalation">
+          <h3 class="drawer-question">{{ selectedEscalation.question }}</h3>
+          <div class="drawer-meta">
+            <StatusBadge :status="selectedEscalation.status" />
+            <span class="muted">{{ store.formatDate(selectedEscalation.created_at) }}</span>
+            <span v-if="selectedEscalation.user_id" class="muted">
+              用户 {{ selectedEscalation.user_id }}
+            </span>
+          </div>
+          <el-alert
+            v-if="escalationRecord?.reason"
+            :title="escalationRecord.reason"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="drawer-alert"
+          />
+          <template v-if="escalationSummary">
+            <el-descriptions
+              :column="1"
+              border
+              size="small"
+              class="drawer-descriptions"
+            >
+              <el-descriptions-item label="问题编码">
+                {{ escalationSummary.problem_code ?? "—" }}
+              </el-descriptions-item>
+              <el-descriptions-item label="当前步骤">
+                {{ escalationSummary.current_step ?? "—" }}
+              </el-descriptions-item>
+              <el-descriptions-item label="已完成步骤">
+                {{ (escalationSummary.completed_steps ?? []).join("、") || "—" }}
+              </el-descriptions-item>
+              <el-descriptions-item label="缺失信息">
+                {{ (escalationSummary.missing_information ?? []).join("；") || "—" }}
+              </el-descriptions-item>
+            </el-descriptions>
+            <h4 class="section-label">升级摘要 JSON</h4>
+            <CodeBlock :code="store.formatJson(escalationSummary)" max-height="360px" />
+          </template>
+          <div v-if="selectedEscalation.conversation_id" class="drawer-actions">
+            <el-button
+              type="primary"
+              @click="store.openConversation(selectedEscalation.conversation_id!)"
+            >
+              查看会话回放
+            </el-button>
+          </div>
         </template>
-        <div v-if="selectedEscalation.conversation_id" class="drawer-actions">
-          <el-button
-            type="primary"
-            @click="store.openConversation(selectedEscalation.conversation_id!)"
-          >
-            查看会话回放
-          </el-button>
-        </div>
-      </template>
+      </div>
     </el-drawer>
   </div>
 </template>
@@ -773,6 +904,16 @@ onMounted(() => {
   gap: var(--space-content-gap);
   align-content: start;
   min-width: 0;
+}
+
+.scope-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scope-actions .el-select {
+  width: 220px;
 }
 
 .overview-body {
@@ -841,6 +982,10 @@ onMounted(() => {
 
 .drawer-descriptions {
   margin-bottom: 14px;
+}
+
+.drawer-loading-body {
+  min-height: 180px;
 }
 
 .drawer-alert {

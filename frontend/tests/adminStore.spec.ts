@@ -105,12 +105,14 @@ describe("adminStore", () => {
     adminStore.error = "";
     adminStore.knowledgeSearch = "";
     adminStore.knowledgeStatusFilter = "";
+    localStorage.clear();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     sessionStorage.clear();
+    localStorage.clear();
   });
 
   it("aggregates totals and filters knowledge bases", () => {
@@ -128,6 +130,16 @@ describe("adminStore", () => {
     expect(adminStore.filteredKnowledgeBases[0]!.name).toBe("手册库");
   });
 
+  it("restores the previously selected knowledge base after a refresh", async () => {
+    const secondKnowledgeBase = { ...kb, id: "kb-2", name: "手册库" };
+    localStorage.setItem("rag_admin_selected_knowledge_id", secondKnowledgeBase.id);
+    vi.spyOn(adminApi, "listKnowledgeBases").mockResolvedValue([kb, secondKnowledgeBase]);
+
+    await adminStore.loadKnowledgeBases();
+
+    expect(adminStore.selectedKnowledgeId).toBe(secondKnowledgeBase.id);
+  });
+
   it("creates a knowledge base and closes the drawer on success", async () => {
     stubApi();
     const created = { ...kb, id: "kb-9", name: "新库" };
@@ -141,15 +153,43 @@ describe("adminStore", () => {
     expect(adminStore.notice).toBe("知识库已创建");
   });
 
+  it("requires the knowledge name and deletes the selected knowledge base", async () => {
+    stubApi();
+    adminStore.knowledgeBases = [kb];
+    adminStore.selectedKnowledgeId = kb.id;
+    vi.spyOn(ElMessageBox, "prompt").mockResolvedValue({
+      value: kb.name,
+      action: "confirm",
+    } as never);
+    const remove = vi.spyOn(adminApi, "deleteKnowledgeBase").mockResolvedValue({
+      knowledge_id: kb.id,
+      deleted: true,
+      cleanup_failed_count: 0,
+    });
+    vi.mocked(adminApi.listKnowledgeBases).mockResolvedValueOnce([]);
+
+    await adminStore.deleteKnowledgeBase(kb);
+
+    expect(ElMessageBox.prompt).toHaveBeenCalledWith(
+      expect.stringContaining("文档、索引、Profile、会话与 Trace"),
+      "删除知识库",
+      expect.objectContaining({ inputPlaceholder: kb.name, confirmButtonText: "永久删除" }),
+    );
+    expect(remove).toHaveBeenCalledWith(kb.id);
+    expect(adminStore.selectedKnowledgeId).toBe("");
+    expect(adminStore.knowledgeBases).toEqual([]);
+    expect(adminStore.notice).toBe("知识库已删除");
+  });
+
   it("uploads a document for the selected knowledge base", async () => {
     stubApi();
     adminStore.selectedKnowledgeId = "kb-1";
     const upload = vi.spyOn(adminApi, "uploadDocument").mockResolvedValue(undefined);
     adminStore.uploadDrawerOpen = true;
     await adminStore.upload(new File(["x"], "a.docx"));
-    expect(upload).toHaveBeenCalledWith("kb-1", expect.any(File));
+    expect(upload).toHaveBeenCalledWith("kb-1", expect.any(File), expect.any(String));
     expect(adminStore.uploadDrawerOpen).toBe(false);
-    expect(adminStore.notice).toBe("文档已上传，候选索引构建已提交；完成后请审核 Profile 草稿");
+    expect(adminStore.notice).toBe("文档已上传，RAG 索引构建已提交；完成后请在 Index Build 审核发布");
   });
 
   it("builds, activates, gc's and deletes indexes", async () => {
@@ -165,7 +205,7 @@ describe("adminStore", () => {
       .mockResolvedValue({ deleted_index_ids: ["x"], deleted_count: 1 });
 
     await adminStore.buildIndex();
-    expect(build).toHaveBeenCalledWith("kb-1", false);
+    expect(build).toHaveBeenCalledWith("kb-1");
     await adminStore.activateIndex("idx-1");
     expect(activate).toHaveBeenCalledWith("idx-1");
     await adminStore.gcIndexes();

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import tempfile
 from pathlib import PurePath
 from typing import Any
@@ -17,6 +18,8 @@ from app.core.config import Settings
 from app.ingestion.repository import BuildReference, DocumentCreateResult, IngestionRepository
 from app.ingestion.validation import DocxLimits, DocxValidationError, validate_docx_package
 from app.tasks.ingestion import enqueue_index_build
+
+logger = logging.getLogger(__name__)
 
 
 class IngestionService:
@@ -83,6 +86,23 @@ class IngestionService:
                 operation, idempotency_key, request_hash
             )
             if replay is not None:
+                build_data = replay.get("build_request")
+                if isinstance(build_data, dict):
+                    build = BuildReference(
+                        requested=bool(build_data.get("requested")),
+                        coalesced=bool(build_data.get("coalesced")),
+                        index_id=(
+                            UUID(str(build_data["index_id"]))
+                            if build_data.get("index_id")
+                            else None
+                        ),
+                        task_id=(
+                            UUID(str(build_data["task_id"])) if build_data.get("task_id") else None
+                        ),
+                        rebuild_required=bool(build_data.get("rebuild_required")),
+                        replayed=True,
+                    )
+                    await self._enqueue_reference(build)
                 return replay
 
             document_id = uuid4()
@@ -182,6 +202,25 @@ class IngestionService:
             },
         }
 
+    async def delete_knowledge_base(self, knowledge_id: UUID) -> dict[str, Any]:
+        result = await self.repository.delete_knowledge_base(knowledge_id)
+        cleanup_failed_count = 0
+        for bucket, object_key in result.storage_objects:
+            try:
+                await self._remove_minio_object(bucket, object_key)
+            except Exception:
+                cleanup_failed_count += 1
+                logger.warning(
+                    "Failed to remove object while deleting knowledge base %s",
+                    knowledge_id,
+                    exc_info=True,
+                )
+        return {
+            "knowledge_id": result.knowledge_id,
+            "deleted": True,
+            "cleanup_failed_count": cleanup_failed_count,
+        }
+
     async def collect_garbage(self, kb_id: UUID | None = None) -> dict[str, Any]:
         """Collect garbage for obsolete indexes.
 
@@ -230,7 +269,16 @@ class IngestionService:
         return {"deleted_index_ids": [str(index_id)], "deleted_count": 1}
 
     async def _enqueue_reference(self, build: BuildReference) -> None:
-        if build.replayed or build.coalesced or build.index_id is None or build.task_id is None:
+        if (
+            not build.requested
+            or build.coalesced
+            or build.index_id is None
+            or build.task_id is None
+        ):
+            return
+        if build.replayed and not await self.repository.recover_failed_enqueue(
+            build.index_id, build.task_id
+        ):
             return
         try:
             await asyncio.to_thread(

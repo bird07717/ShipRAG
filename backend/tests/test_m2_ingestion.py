@@ -7,8 +7,11 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi import UploadFile
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.api.schemas import IndexBuildRequest
+from app.common.errors import ApiError
 from app.core.config import Settings
 from app.ingestion.chunker import build_chunks, build_parent_chunks
 from app.ingestion.embedding import FakeEmbeddingProvider, SiliconFlowEmbeddingProvider
@@ -19,6 +22,7 @@ from app.ingestion.repository import (
     DocumentCreateResult,
     DocumentDeleteResult,
     IngestionRepository,
+    KnowledgeBaseDeleteResult,
 )
 from app.ingestion.validation import DocxLimits, DocxValidationError, validate_docx_package
 from app.m0.fixtures import create_docx_fixture
@@ -33,6 +37,12 @@ def _limits() -> DocxLimits:
         max_entry_bytes=10_000_000,
         max_compression_ratio=100,
     )
+
+
+def test_index_build_contract_rejects_auto_activation() -> None:
+    assert IndexBuildRequest().activate_on_success is False
+    with pytest.raises(ValidationError):
+        IndexBuildRequest(activate_on_success=True)  # type: ignore[arg-type]
 
 
 def test_docx_validation_and_parser_preserve_order(tmp_path) -> None:
@@ -228,6 +238,7 @@ class _FakeUploadRepository:
     def __init__(self, replay: dict[str, Any] | None = None) -> None:
         self.replay = replay
         self.created = False
+        self.recovered: list[tuple[Any, Any]] = []
 
     async def find_idempotent_response(
         self, operation: str, idempotency_key: str, request_hash: str
@@ -255,6 +266,13 @@ class _FakeUploadRepository:
             build=BuildReference(False, False, None, None, False),
         )
 
+    async def recover_failed_enqueue(self, index_id: Any, task_id: Any) -> bool:
+        self.recovered.append((index_id, task_id))
+        return True
+
+    async def mark_build_enqueue_failed(self, *_: Any) -> None:
+        raise AssertionError("replayed enqueue should succeed in this test")
+
 
 class _FakeDeleteRepository:
     def __init__(self) -> None:
@@ -271,6 +289,62 @@ class _FakeDeleteRepository:
         )
 
 
+class _FakeKnowledgeDeleteRepository:
+    def __init__(self) -> None:
+        self.knowledge_id = uuid4()
+
+    async def delete_knowledge_base(self, knowledge_id: Any) -> KnowledgeBaseDeleteResult:
+        assert knowledge_id == self.knowledge_id
+        return KnowledgeBaseDeleteResult(
+            knowledge_id=self.knowledge_id,
+            storage_objects=(("rag-documents", "one.docx"), ("rag-images", "one.png")),
+        )
+
+
+class _RepositoryResult:
+    def __init__(
+        self,
+        *,
+        row: dict[str, Any] | None = None,
+        rows: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.row = row
+        self.rows = rows or []
+
+    def mappings(self) -> _RepositoryResult:
+        return self
+
+    def one_or_none(self) -> dict[str, Any] | None:
+        return self.row
+
+    def __iter__(self) -> Any:
+        return iter(self.rows)
+
+
+class _RepositoryConnection:
+    def __init__(self, results: list[_RepositoryResult]) -> None:
+        self.results = list(results)
+        self.executed: list[str] = []
+
+    async def __aenter__(self) -> _RepositoryConnection:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+    async def execute(self, statement: Any, _parameters: dict[str, Any]) -> _RepositoryResult:
+        self.executed.append(str(statement))
+        return self.results.pop(0) if self.results else _RepositoryResult()
+
+
+class _RepositoryEngine:
+    def __init__(self, results: list[_RepositoryResult]) -> None:
+        self.connection = _RepositoryConnection(results)
+
+    def begin(self) -> _RepositoryConnection:
+        return self.connection
+
+
 class _FakeMinio:
     def __init__(self) -> None:
         self.uploaded = b""
@@ -282,6 +356,17 @@ class _FakeMinio:
 
     def remove_object(self, bucket: str, object_key: str) -> None:
         raise AssertionError(f"unexpected removal: {bucket}/{object_key}")
+
+
+class _RecordingMinio:
+    def __init__(self, *, fail_object_key: str | None = None) -> None:
+        self.fail_object_key = fail_object_key
+        self.removed: list[tuple[str, str]] = []
+
+    def remove_object(self, bucket: str, object_key: str) -> None:
+        self.removed.append((bucket, object_key))
+        if object_key == self.fail_object_key:
+            raise RuntimeError("storage unavailable")
 
 
 @pytest.mark.asyncio
@@ -311,6 +396,53 @@ async def test_upload_service_stores_valid_docx_without_build(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_upload_idempotency_replay_retries_failed_queue_enqueue(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "upload.docx"
+    create_docx_fixture(path)
+    index_id = uuid4()
+    task_id = uuid4()
+    replay = {
+        "document": {"id": str(uuid4())},
+        "build_request": {
+            "requested": True,
+            "coalesced": False,
+            "index_id": str(index_id),
+            "task_id": str(task_id),
+            "rebuild_required": False,
+        },
+    }
+    repository = _FakeUploadRepository(replay)
+    minio = _FakeMinio()
+    enqueued: list[tuple[Any, Any]] = []
+
+    def fake_enqueue(_: Any, queued_index_id: Any, queued_task_id: Any) -> None:
+        enqueued.append((queued_index_id, queued_task_id))
+
+    monkeypatch.setattr("app.services.ingestion.enqueue_index_build", fake_enqueue)
+    service = IngestionService(
+        cast(IngestionRepository, repository),
+        cast(Any, minio),
+        Settings(_env_file=None, app_env="test", m2_embedding_provider="fake"),
+    )
+
+    response = await service.upload_document(
+        knowledge_id=uuid4(),
+        upload=UploadFile(filename=path.name, file=BytesIO(path.read_bytes())),
+        display_name="上传测试",
+        request_build=True,
+        idempotency_key="same-upload-key",
+    )
+
+    assert response == replay
+    assert not repository.created
+    assert not minio.uploaded
+    assert repository.recovered == [(index_id, task_id)]
+    assert enqueued == [(index_id, task_id)]
+
+
+@pytest.mark.asyncio
 async def test_delete_service_returns_soft_delete_result_without_build() -> None:
     repository = _FakeDeleteRepository()
     service = IngestionService(
@@ -332,3 +464,93 @@ async def test_delete_service_returns_soft_delete_result_without_build() -> None
             "rebuild_required": False,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_delete_knowledge_base_removes_storage_objects_after_database_cleanup() -> None:
+    repository = _FakeKnowledgeDeleteRepository()
+    minio = _RecordingMinio()
+    service = IngestionService(
+        cast(IngestionRepository, repository),
+        cast(Any, minio),
+        Settings(_env_file=None, app_env="test"),
+    )
+
+    response = await service.delete_knowledge_base(repository.knowledge_id)
+
+    assert response == {
+        "knowledge_id": repository.knowledge_id,
+        "deleted": True,
+        "cleanup_failed_count": 0,
+    }
+    assert minio.removed == [
+        ("rag-documents", "one.docx"),
+        ("rag-images", "one.png"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_knowledge_base_reports_best_effort_storage_cleanup_failure() -> None:
+    repository = _FakeKnowledgeDeleteRepository()
+    minio = _RecordingMinio(fail_object_key="one.png")
+    service = IngestionService(
+        cast(IngestionRepository, repository),
+        cast(Any, minio),
+        Settings(_env_file=None, app_env="test"),
+    )
+
+    response = await service.delete_knowledge_base(repository.knowledge_id)
+
+    assert response["deleted"] is True
+    assert response["cleanup_failed_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_knowledge_base_repository_cleans_restricting_rows_in_order() -> None:
+    knowledge_id = uuid4()
+    engine = _RepositoryEngine(
+        [
+            _RepositoryResult(row={"id": knowledge_id, "has_building_index": False}),
+            _RepositoryResult(
+                rows=[
+                    {"minio_bucket": "rag-documents", "minio_object_key": "one.docx"},
+                    {"minio_bucket": "rag-images", "minio_object_key": "one.png"},
+                ]
+            ),
+        ]
+    )
+    repository = IngestionRepository(
+        cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
+    )
+
+    result = await repository.delete_knowledge_base(knowledge_id)
+
+    assert result.storage_objects == (
+        ("rag-documents", "one.docx"),
+        ("rag-images", "one.png"),
+    )
+    sql = engine.connection.executed
+    assert "DELETE FROM rag_trace" in sql[2]
+    assert "DELETE FROM conversation" in sql[3]
+    assert "active_index_id = NULL" in sql[4]
+    assert "DELETE FROM knowledge_index" in sql[5]
+    assert "DELETE FROM document_source" in sql[6]
+    assert "DELETE FROM knowledge_base" in sql[7]
+
+
+@pytest.mark.asyncio
+async def test_delete_knowledge_base_repository_rejects_an_active_build() -> None:
+    knowledge_id = uuid4()
+    engine = _RepositoryEngine(
+        [_RepositoryResult(row={"id": knowledge_id, "has_building_index": True})]
+    )
+    repository = IngestionRepository(
+        cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
+    )
+
+    with pytest.raises(ApiError) as raised:
+        await repository.delete_knowledge_base(knowledge_id)
+
+    assert raised.value.code == "KNOWLEDGE_BASE_BUILD_IN_PROGRESS"
+    assert raised.value.status_code == 409
+    assert len(engine.connection.executed) == 1
