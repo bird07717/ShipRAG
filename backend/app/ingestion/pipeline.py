@@ -1079,7 +1079,7 @@ class IndexPipeline:
                     SET status = :status, stage = :stage, progress = :progress,
                         attempt = attempt + CASE WHEN :increment_attempt THEN 1 ELSE 0 END,
                         started_at = COALESCE(started_at, now()), updated_at = now(),
-                        metadata = COALESCE(CAST(:metadata AS jsonb), metadata)
+                        metadata = COALESCE(metadata || CAST(:metadata AS jsonb), metadata)
                     WHERE id = :id
                     """
                 ),

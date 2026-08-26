@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
+import type { DocumentProfileContext } from "@/types/admin";
 import AdminStudio from "@/components/AdminStudio.vue";
 
 const kb = {
@@ -221,6 +222,49 @@ const failureSummary = {
   request_errors_by_day: [{ day: "2026-08-20", count: 3 }],
 };
 
+const profileContext: DocumentProfileContext = {
+  document_id: "doc-1",
+  published_profile: {
+    id: "pp-1",
+    problem_code: "PDC_UPGRADE",
+    canonical_question: "如何升级 PDC？",
+    aliases: ["PDC 怎么升级"],
+    keywords: ["升级"],
+    product_name: "PDC",
+    model_names: ["VDR600"],
+    task_type: "UPGRADE",
+    routing_summary: "解决 PDC 升级问题",
+    symptoms: [],
+    exclusions: [],
+    enabled: true,
+    profile_enrichment_version: 1,
+    updated_at: "2026-08-17T00:00:00Z",
+  },
+  candidate_draft: {
+    id: "draft-1",
+    release_id: "rel-1",
+    index_id: "idx-2",
+    index_version: 4,
+    release_status: "DRAFT",
+    status: "DRAFT",
+    operation: "UPDATE",
+    target_profile_id: "pp-1",
+    problem_code: "PDC_UPGRADE",
+    canonical_question: "如何升级 PDC？",
+    aliases: [],
+    keywords: ["升级"],
+    product_name: "PDC",
+    model_names: ["VDR600"],
+    task_type: "UPGRADE",
+    routing_summary: "候选路由摘要",
+    enabled: true,
+    quality_status: "REVIEW_REQUIRED",
+    quality_notes: ["需人工核对"],
+    generation_source: "LLM",
+    updated_at: "2026-08-17T00:00:00Z",
+  },
+};
+
 function stubApi() {
   vi.spyOn(adminApi, "listKnowledgeBases").mockResolvedValue([kb]);
   vi.spyOn(adminApi, "listDocuments").mockResolvedValue([doc]);
@@ -246,7 +290,20 @@ function stubApi() {
     index_id: "idx-1",
     items: [{ id: 2, chunk_type: "text", content: "chunk" }],
   });
-  vi.spyOn(adminApi, "buildIndex").mockResolvedValue(undefined);
+  vi.spyOn(adminApi, "buildIndex").mockResolvedValue({
+    requested: true,
+    coalesced: false,
+    index_id: "idx-2",
+    task_id: "task-2",
+    rebuild_required: false,
+  });
+  vi.spyOn(adminApi, "getDocumentProfileContext").mockResolvedValue(profileContext);
+  vi.spyOn(adminApi, "rebuildKnowledgeProfiles").mockResolvedValue({
+    task_id: "task-rebuild",
+    task_type: "PROFILE_REFRESH",
+    status: "QUEUED",
+    replayed: false,
+  });
 }
 
 async function mountView(view: string, navigationQuery = "") {
@@ -272,6 +329,15 @@ describe("view interactions", () => {
     adminStore.conversationId = "";
     adminStore.traceDrawerOpen = false;
     adminStore.selectedTrace = null;
+    adminStore.documentDrawerOpen = false;
+    adminStore.selectedDocument = null;
+    adminStore.documentProfileContext = null;
+    adminStore.requestedIndexDetailId = "";
+    adminStore.requestedView = "";
+    adminStore.requestedViewQuery = "";
+    adminStore.trackedTasks = [];
+    adminStore.notice = "";
+    adminStore.error = "";
   });
 
   it("knowledge: filters, opens detail drawer and rebuilds", async () => {
@@ -298,6 +364,7 @@ describe("view interactions", () => {
     await flushPromises();
     expect(adminApi.listElements).toHaveBeenLastCalledWith("doc-1", "idx-1");
     expect(adminApi.listChunks).toHaveBeenLastCalledWith("doc-1", "idx-1");
+    expect(adminApi.getDocumentProfileContext).toHaveBeenCalledWith("doc-1");
     expect(wrapper.text()).toContain("Elements · 1");
     expect(wrapper.text()).toContain("Chunks · 1");
 
@@ -305,6 +372,64 @@ describe("view interactions", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("暂无文档");
     adminStore.documentSearch = "";
+  });
+
+  it("documents: Profile & Alias tab separates published profile from candidate draft", async () => {
+    const wrapper = await mountView("documents");
+    await wrapper.get(".el-table__row").trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll(".el-tabs__item")
+      .find((tab) => tab.text().includes("Profile & Alias"))!
+      .trigger("click");
+    await flushPromises();
+
+    const text = wrapper.text();
+    expect(text).toContain("已发布 Profile");
+    expect(text).toContain("PDC_UPGRADE");
+    expect(text).toContain("PDC 怎么升级");
+    expect(text).toContain("已发布 · 影响线上 Support");
+    expect(text).toContain("候选草稿 · 未发布");
+    expect(text).toContain("不影响线上 Support");
+    expect(text).toContain("v4");
+    expect(text).toContain("REVIEW_REQUIRED");
+    expect(text).toContain("空 Alias（无用户改写）");
+    expect(text).toContain("前往候选审核");
+
+    await wrapper
+      .findAll("button")
+      .find((b) => b.text().includes("前往候选审核"))!
+      .trigger("click");
+    await flushPromises();
+    expect(adminStore.requestedIndexDetailId).toBe("idx-2");
+    expect(adminStore.requestedView).toBe("indexes");
+    expect(adminStore.documentDrawerOpen).toBe(false);
+  });
+
+  it("knowledge: detail drawer submits a profile rebuild behind confirmation", async () => {
+    const { ElMessageBox } = await import("element-plus");
+    const confirm = vi.spyOn(ElMessageBox, "confirm").mockResolvedValue({
+      action: "confirm",
+    } as never);
+    const wrapper = await mountView("knowledge");
+    await wrapper.get(".el-table__row").trigger("click");
+    await flushPromises();
+
+    const button = wrapper.findAll("button").find((b) => b.text().includes("重建 Profile"));
+    expect(button).toBeDefined();
+    await button!.trigger("click");
+    await flushPromises();
+
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("不会直接修改线上 Profile"),
+      "重建 Profile",
+      expect.objectContaining({ confirmButtonText: "提交重建任务" }),
+    );
+    expect(adminApi.rebuildKnowledgeProfiles).toHaveBeenCalledWith("kb-1");
+    expect(adminStore.trackedTasks).toEqual([
+      expect.objectContaining({ taskId: "task-rebuild", taskType: "PROFILE_REFRESH" }),
+    ]);
+    expect(adminStore.notice).toBe("Profile 重建任务已提交；完成后将弹出提醒");
   });
 
   it("playground: runs a query and renders answer, sources and context", async () => {

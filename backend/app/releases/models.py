@@ -16,6 +16,23 @@ ReleaseStatus = Literal[
 DraftOperation = Literal["CREATE", "UPDATE", "NONE"]
 DraftStatus = Literal["DRAFT", "APPROVED", "REJECTED", "PUBLISHED"]
 PROFILE_ENRICHMENT_VERSION = 1
+ProfileQualityStatus = Literal["PASS", "REVIEW_REQUIRED", "FALLBACK", "MANUAL_REVIEWED"]
+
+
+class ProfileEvidence(BaseModel):
+    field: str = Field(min_length=1, max_length=80)
+    excerpt: str = Field(min_length=1, max_length=1_000)
+    element_hint: str | None = Field(default=None, max_length=120)
+
+
+class ProfileScope(BaseModel):
+    """Document-grounded constraints for a generated Profile."""
+
+    core_subject: str = Field(min_length=1, max_length=300)
+    task: str | None = Field(default=None, max_length=300)
+    symptoms: list[str] = Field(default_factory=list, max_length=12)
+    exclusions: list[str] = Field(default_factory=list, max_length=8)
+    evidence: list[ProfileEvidence] = Field(default_factory=list, max_length=12)
 
 
 class GeneratedProfile(BaseModel):
@@ -43,6 +60,15 @@ class GeneratedProfile(BaseModel):
             if normalized and normalized not in cleaned:
                 cleaned.append(normalized)
         return cleaned
+
+
+class ProfileQualityReview(BaseModel):
+    """Second offline LLM pass.  Its output remains a reviewable draft."""
+
+    profile: GeneratedProfile
+    quality_status: Literal["PASS", "REVIEW_REQUIRED"]
+    quality_notes: list[str] = Field(default_factory=list, max_length=12)
+    evidence: list[ProfileEvidence] = Field(default_factory=list, max_length=16)
 
 
 class ProfileDraftPatch(BaseModel):
@@ -79,6 +105,9 @@ class ProfileDraftPatch(BaseModel):
 
 class ValidationReport(BaseModel):
     valid: bool
+    publishable: bool = False
     errors: list[dict[str, str]] = Field(default_factory=list)
     warnings: list[dict[str, str]] = Field(default_factory=list)
+    review_required_count: int = 0
+    review_required: list[dict[str, str]] = Field(default_factory=list)
     checked_draft_count: int = 0

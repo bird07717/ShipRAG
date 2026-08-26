@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 
 from app.api.dependencies import get_app_settings, get_resources
+from app.api.schemas import TaskSubmissionResponse
 from app.core.config import Settings
 from app.core.resources import AppResources
 from app.releases.models import ProfileDraftPatch
@@ -44,38 +45,54 @@ async def get_release(
     return await repository.get_release(release_id)
 
 
-@router.post("/indexes/{index_id}/profile-drafts/generate")
+@router.post(
+    "/indexes/{index_id}/profile-drafts/generate",
+    response_model=TaskSubmissionResponse,
+    status_code=202,
+)
 async def generate_profile_drafts(
     index_id: UUID,
     service: Annotated[ReleaseService, Depends(get_release_service)],
-) -> list[dict[str, Any]]:
-    return await service.generate_for_index(index_id)
+) -> dict[str, Any]:
+    return await service.request_profile_task(index_id, task_type="PROFILE_GENERATE")
 
 
-@router.post("/indexes/{index_id}/profile-drafts/backfill")
+@router.post(
+    "/indexes/{index_id}/profile-drafts/backfill",
+    response_model=TaskSubmissionResponse,
+    status_code=202,
+)
 async def backfill_profile_drafts(
     index_id: UUID,
     service: Annotated[ReleaseService, Depends(get_release_service)],
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Generate only Profiles that are missing the current enrichment version."""
-    return await service.backfill_profiles_for_index(index_id)
+    return await service.request_profile_task(index_id, task_type="PROFILE_BACKFILL")
 
 
-@router.post("/indexes/{index_id}/profile-drafts/refresh")
+@router.post(
+    "/indexes/{index_id}/profile-drafts/refresh",
+    response_model=TaskSubmissionResponse,
+    status_code=202,
+)
 async def refresh_profile_drafts(
     index_id: UUID,
     service: Annotated[ReleaseService, Depends(get_release_service)],
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Regenerate drafts for all documents in an editable candidate."""
-    return await service.refresh_profiles_for_index(index_id)
+    return await service.request_profile_task(index_id, task_type="PROFILE_REFRESH")
 
 
-@router.post("/profile-drafts/{draft_id}/regenerate")
+@router.post(
+    "/profile-drafts/{draft_id}/regenerate",
+    response_model=TaskSubmissionResponse,
+    status_code=202,
+)
 async def regenerate_profile_draft(
     draft_id: UUID,
     service: Annotated[ReleaseService, Depends(get_release_service)],
 ) -> dict[str, Any]:
-    return await service.regenerate_draft(draft_id)
+    return await service.request_regenerate_profile_task(draft_id)
 
 
 @router.post("/releases/{release_id}/profiles/{profile_id}/draft")

@@ -38,6 +38,13 @@ export interface BuildRequestResult {
   rebuild_required: boolean;
 }
 
+export interface TaskSubmission {
+  task_id: string;
+  task_type: string;
+  status: "QUEUED" | "RUNNING";
+  replayed: boolean;
+}
+
 export interface GarbageCollectionResult {
   deleted_index_ids: string[];
   deleted_count: number;
@@ -71,6 +78,7 @@ export interface KnowledgeIndex {
 
 export interface IndexTask {
   id: string;
+  task_type?: string;
   status: string;
   stage: string;
   progress: number;
@@ -80,6 +88,25 @@ export interface IndexTask {
   error_message: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
+  updated_at: string;
+}
+
+export interface TaskRecord {
+  id: string;
+  task_type: string;
+  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  stage: string;
+  progress: number;
+  attempt: number;
+  kb_id: string | null;
+  index_id: string | null;
+  document_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
   updated_at: string;
 }
 
@@ -215,6 +242,54 @@ export interface ProblemProfile {
 
 export type ProfileDraftOperation = "CREATE" | "UPDATE" | "NONE";
 export type ProfileDraftStatus = "DRAFT" | "APPROVED" | "REJECTED" | "PUBLISHED";
+export type ProfileQualityStatus = "PASS" | "REVIEW_REQUIRED" | "FALLBACK" | "MANUAL_REVIEWED";
+
+export interface PublishedProfileSummary {
+  id: string;
+  problem_code: string;
+  canonical_question: string;
+  aliases: string[];
+  keywords: string[];
+  product_name: string | null;
+  model_names: string[];
+  task_type: string | null;
+  routing_summary: string;
+  symptoms: string[];
+  exclusions: string[];
+  enabled: boolean;
+  profile_enrichment_version: number;
+  updated_at: string | null;
+}
+
+export interface CandidateProfileDraftSummary {
+  id: string;
+  release_id: string;
+  index_id: string;
+  index_version: number;
+  release_status: string;
+  status: ProfileDraftStatus;
+  operation: ProfileDraftOperation;
+  target_profile_id: string | null;
+  problem_code: string;
+  canonical_question: string;
+  aliases: string[];
+  keywords: string[];
+  product_name: string | null;
+  model_names: string[];
+  task_type: string | null;
+  routing_summary: string;
+  enabled: boolean;
+  quality_status: ProfileQualityStatus;
+  quality_notes: string[];
+  generation_source: "LLM" | "FALLBACK" | "MANUAL" | null;
+  updated_at: string | null;
+}
+
+export interface DocumentProfileContext {
+  document_id: string;
+  published_profile: PublishedProfileSummary | null;
+  candidate_draft: CandidateProfileDraftSummary | null;
+}
 
 export interface ValidationIssue {
   code: string;
@@ -223,8 +298,16 @@ export interface ValidationIssue {
 
 export interface ReleaseValidation {
   valid?: boolean;
+  publishable?: boolean;
   errors?: ValidationIssue[];
   warnings?: ValidationIssue[];
+  review_required_count?: number;
+  review_required?: Array<{
+    id: string;
+    document_name: string;
+    status: string;
+    quality_status: string;
+  }>;
   checked_draft_count?: number;
 }
 
@@ -251,6 +334,9 @@ export interface ProfileDraft {
   enabled: boolean;
   status: ProfileDraftStatus;
   generation_source: "LLM" | "FALLBACK" | "MANUAL";
+  quality_status: "PASS" | "REVIEW_REQUIRED" | "FALLBACK" | "MANUAL_REVIEWED";
+  quality_notes: string[];
+  quality_evidence: Array<{ field: string; excerpt: string; element_hint?: string | null }>;
   confidence: number;
   reasoning: string | null;
   validation_result: ReleaseValidation;

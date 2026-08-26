@@ -49,6 +49,22 @@ function handleCommand(command: string, kb: KnowledgeBase): void {
 function rebuild(): void {
   void store.buildIndex();
 }
+
+function rebuildProfile(): void {
+  const kb = detailTarget.value;
+  if (!kb || kb.status !== "ENABLED") return;
+  void store.rebuildKnowledgeProfiles(kb);
+}
+
+function profileRebuildDisabledReason(kb: KnowledgeBase): string {
+  if (kb.status === "DELETING") return "知识库正在删除";
+  if (kb.status !== "ENABLED") return "知识库已停用";
+  return "";
+}
+
+function isDeleting(kb: KnowledgeBase): boolean {
+  return kb.status === "DELETING";
+}
 </script>
 
 <template>
@@ -126,9 +142,9 @@ function rebuild(): void {
                   <el-dropdown-item
                     command="delete"
                     divided
-                    :disabled="Boolean(scope.row.building_index_id)"
+                    :disabled="Boolean(scope.row.building_index_id) || isDeleting(scope.row)"
                   >
-                    {{ scope.row.building_index_id ? "构建中不可删除" : "删除知识库" }}
+                    {{ scope.row.status === "DELETING" ? "删除任务处理中" : scope.row.building_index_id ? "构建中不可删除" : "删除知识库" }}
                   </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -243,13 +259,29 @@ function rebuild(): void {
           <el-button
             type="danger"
             plain
-            :disabled="Boolean(detailTarget.building_index_id)"
+            :disabled="Boolean(detailTarget.building_index_id) || isDeleting(detailTarget)"
+            :loading="store.isActionLoading(`delete-knowledge:${detailTarget.id}`)"
             @click="deleteKnowledge(detailTarget)"
           >
-            {{ detailTarget.building_index_id ? "构建中不可删除" : "删除知识库" }}
+            {{ detailTarget.status === "DELETING" ? "删除任务处理中" : detailTarget.building_index_id ? "构建中不可删除" : "删除知识库" }}
           </el-button>
           <span class="spacer" />
           <el-button @click="rebuild">重建索引</el-button>
+          <el-tooltip
+            :content="profileRebuildDisabledReason(detailTarget)"
+            :disabled="!profileRebuildDisabledReason(detailTarget)"
+            placement="top"
+          >
+            <span>
+              <el-button
+                :disabled="Boolean(profileRebuildDisabledReason(detailTarget))"
+                :loading="store.isActionLoading(`rebuild-profile:${detailTarget.id}`)"
+                @click="rebuildProfile"
+              >
+                重建 Profile
+              </el-button>
+            </span>
+          </el-tooltip>
           <el-button
             type="primary"
             @click="store.selectedKnowledgeId = detailTarget.id; store.selectKnowledge()"

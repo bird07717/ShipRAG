@@ -22,7 +22,6 @@ from app.ingestion.repository import (
     DocumentCreateResult,
     DocumentDeleteResult,
     IngestionRepository,
-    KnowledgeBaseDeleteResult,
 )
 from app.ingestion.validation import DocxLimits, DocxValidationError, validate_docx_package
 from app.m0.fixtures import create_docx_fixture
@@ -292,13 +291,44 @@ class _FakeDeleteRepository:
 class _FakeKnowledgeDeleteRepository:
     def __init__(self) -> None:
         self.knowledge_id = uuid4()
+        self.cleaned: list[tuple[str, str]] = []
+        self.finalized = False
 
-    async def delete_knowledge_base(self, knowledge_id: Any) -> KnowledgeBaseDeleteResult:
+    async def request_knowledge_base_deletion(self, knowledge_id: Any) -> dict[str, Any]:
         assert knowledge_id == self.knowledge_id
-        return KnowledgeBaseDeleteResult(
-            knowledge_id=self.knowledge_id,
-            storage_objects=(("rag-documents", "one.docx"), ("rag-images", "one.png")),
-        )
+        return {
+            "task_id": uuid4(),
+            "task_type": "KNOWLEDGE_BASE_DELETE",
+            "status": "QUEUED",
+            "replayed": False,
+        }
+
+    async def list_knowledge_base_cleanup_objects(self, _task_id: Any) -> list[dict[str, str]]:
+        return [
+            {"minio_bucket": "rag-documents", "minio_object_key": "one.docx"},
+            {"minio_bucket": "rag-images", "minio_object_key": "one.png"},
+        ]
+
+    async def mark_knowledge_base_cleanup_object_deleted(
+        self, _task_id: Any, bucket: str, object_key: str
+    ) -> None:
+        self.cleaned.append((bucket, object_key))
+
+    async def mark_knowledge_base_cleanup_object_failed(self, *_: Any) -> None:
+        return None
+
+    async def finalize_knowledge_base_deletion(self, knowledge_id: Any) -> bool:
+        assert knowledge_id == self.knowledge_id
+        self.finalized = True
+        return True
+
+
+class _FakeTaskRecords:
+    def __init__(self) -> None:
+        self.progress_updates: list[dict[str, Any]] = []
+
+    async def progress(self, _task_id: Any, **kwargs: Any) -> None:
+        self.progress_updates.append(kwargs)
 
 
 class _RepositoryResult:
@@ -467,7 +497,7 @@ async def test_delete_service_returns_soft_delete_result_without_build() -> None
 
 
 @pytest.mark.asyncio
-async def test_delete_knowledge_base_removes_storage_objects_after_database_cleanup() -> None:
+async def test_knowledge_base_delete_worker_removes_storage_before_database_purge() -> None:
     repository = _FakeKnowledgeDeleteRepository()
     minio = _RecordingMinio()
     service = IngestionService(
@@ -476,21 +506,32 @@ async def test_delete_knowledge_base_removes_storage_objects_after_database_clea
         Settings(_env_file=None, app_env="test"),
     )
 
-    response = await service.delete_knowledge_base(repository.knowledge_id)
+    task_id = uuid4()
+    records = _FakeTaskRecords()
+    response = await service.execute_knowledge_base_deletion(
+        {
+            "id": task_id,
+            "metadata": {"knowledge_id": str(repository.knowledge_id), "cleanup_total": 2},
+        },
+        cast(Any, records),
+    )
 
     assert response == {
-        "knowledge_id": repository.knowledge_id,
+        "knowledge_id": str(repository.knowledge_id),
         "deleted": True,
-        "cleanup_failed_count": 0,
+        "cleanup_completed": 2,
+        "cleanup_total": 2,
     }
     assert minio.removed == [
         ("rag-documents", "one.docx"),
         ("rag-images", "one.png"),
     ]
+    assert repository.cleaned == minio.removed
+    assert repository.finalized is True
 
 
 @pytest.mark.asyncio
-async def test_delete_knowledge_base_reports_best_effort_storage_cleanup_failure() -> None:
+async def test_knowledge_base_delete_worker_keeps_database_when_storage_cleanup_fails() -> None:
     repository = _FakeKnowledgeDeleteRepository()
     minio = _RecordingMinio(fail_object_key="one.png")
     service = IngestionService(
@@ -499,18 +540,32 @@ async def test_delete_knowledge_base_reports_best_effort_storage_cleanup_failure
         Settings(_env_file=None, app_env="test"),
     )
 
-    response = await service.delete_knowledge_base(repository.knowledge_id)
+    with pytest.raises(RuntimeError, match="storage unavailable"):
+        await service.execute_knowledge_base_deletion(
+            {
+                "id": uuid4(),
+                "metadata": {"knowledge_id": str(repository.knowledge_id), "cleanup_total": 2},
+            },
+            cast(Any, _FakeTaskRecords()),
+        )
 
-    assert response["deleted"] is True
-    assert response["cleanup_failed_count"] == 1
+    assert repository.finalized is False
 
 
 @pytest.mark.asyncio
-async def test_delete_knowledge_base_repository_cleans_restricting_rows_in_order() -> None:
+async def test_knowledge_base_deletion_request_creates_durable_cleanup_work() -> None:
     knowledge_id = uuid4()
     engine = _RepositoryEngine(
         [
-            _RepositoryResult(row={"id": knowledge_id, "has_building_index": False}),
+            _RepositoryResult(
+                row={
+                    "id": knowledge_id,
+                    "name": "测试库",
+                    "status": "ENABLED",
+                    "has_building_index": False,
+                }
+            ),
+            _RepositoryResult(),
             _RepositoryResult(
                 rows=[
                     {"minio_bucket": "rag-documents", "minio_object_key": "one.docx"},
@@ -523,33 +578,37 @@ async def test_delete_knowledge_base_repository_cleans_restricting_rows_in_order
         cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
     )
 
-    result = await repository.delete_knowledge_base(knowledge_id)
+    result = await repository.request_knowledge_base_deletion(knowledge_id)
 
-    assert result.storage_objects == (
-        ("rag-documents", "one.docx"),
-        ("rag-images", "one.png"),
-    )
+    assert result["task_type"] == "KNOWLEDGE_BASE_DELETE"
+    assert result["status"] == "QUEUED"
     sql = engine.connection.executed
-    assert "DELETE FROM rag_trace" in sql[2]
-    assert "DELETE FROM conversation" in sql[3]
-    assert "active_index_id = NULL" in sql[4]
-    assert "DELETE FROM knowledge_index" in sql[5]
-    assert "DELETE FROM document_source" in sql[6]
-    assert "DELETE FROM knowledge_base" in sql[7]
+    assert "INSERT INTO task_record" in sql[3]
+    assert "INSERT INTO storage_cleanup_object" in sql[4]
+    assert "status = 'DELETING'" in sql[5]
 
 
 @pytest.mark.asyncio
 async def test_delete_knowledge_base_repository_rejects_an_active_build() -> None:
     knowledge_id = uuid4()
     engine = _RepositoryEngine(
-        [_RepositoryResult(row={"id": knowledge_id, "has_building_index": True})]
+        [
+            _RepositoryResult(
+                row={
+                    "id": knowledge_id,
+                    "name": "测试库",
+                    "status": "ENABLED",
+                    "has_building_index": True,
+                }
+            )
+        ]
     )
     repository = IngestionRepository(
         cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
     )
 
     with pytest.raises(ApiError) as raised:
-        await repository.delete_knowledge_base(knowledge_id)
+        await repository.request_knowledge_base_deletion(knowledge_id)
 
     assert raised.value.code == "KNOWLEDGE_BASE_BUILD_IN_PROGRESS"
     assert raised.value.status_code == 409

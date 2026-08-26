@@ -16,7 +16,7 @@ class KnowledgeBaseResponse(BaseModel):
     id: UUID
     name: str
     description: str | None
-    status: Literal["ENABLED", "DISABLED"]
+    status: Literal["ENABLED", "DISABLED", "DELETING"]
     active_index_id: UUID | None
     rebuild_required: bool
     runtime_state: str
@@ -27,10 +27,62 @@ class KnowledgeBaseResponse(BaseModel):
     building_index_id: UUID | None = None
 
 
-class KnowledgeBaseDeleteResponse(BaseModel):
-    knowledge_id: UUID
-    deleted: bool
-    cleanup_failed_count: int = 0
+class TaskSubmissionResponse(BaseModel):
+    task_id: UUID
+    task_type: str
+    status: Literal["QUEUED", "RUNNING"]
+    replayed: bool = False
+
+
+class PublishedProfileSummary(BaseModel):
+    """Live Profile fields shown in the document Profile & Alias tab."""
+
+    id: UUID
+    problem_code: str
+    canonical_question: str
+    aliases: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    product_name: str | None = None
+    model_names: list[str] = Field(default_factory=list)
+    task_type: str | None = None
+    routing_summary: str = ""
+    symptoms: list[str] = Field(default_factory=list)
+    exclusions: list[str] = Field(default_factory=list)
+    enabled: bool = True
+    profile_enrichment_version: int = 0
+    updated_at: datetime | None = None
+
+
+class CandidateProfileDraftSummary(BaseModel):
+    """Unpublished candidate draft fields, explicitly flagged as not live."""
+
+    id: UUID
+    release_id: UUID
+    index_id: UUID
+    index_version: int
+    release_status: str
+    status: Literal["DRAFT", "APPROVED", "REJECTED", "PUBLISHED"]
+    operation: Literal["CREATE", "UPDATE", "NONE"]
+    target_profile_id: UUID | None = None
+    problem_code: str
+    canonical_question: str
+    aliases: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    product_name: str | None = None
+    model_names: list[str] = Field(default_factory=list)
+    task_type: str | None = None
+    routing_summary: str = ""
+    enabled: bool = True
+    quality_status: Literal["PASS", "REVIEW_REQUIRED", "FALLBACK", "MANUAL_REVIEWED"] = "PASS"
+    quality_notes: list[str] = Field(default_factory=list)
+    generation_source: Literal["LLM", "FALLBACK", "MANUAL"] | None = None
+    updated_at: datetime | None = None
+
+
+class DocumentProfileContextResponse(BaseModel):
+    document_id: UUID
+    published_profile: PublishedProfileSummary | None = None
+    candidate_draft: CandidateProfileDraftSummary | None = None
 
 
 class DocumentResponse(BaseModel):

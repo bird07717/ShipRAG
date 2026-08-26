@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.common.errors import ApiError
 from app.core.config import Settings
+from app.tasks.repository import TaskRecordRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,12 +36,6 @@ class DocumentCreateResult:
 class DocumentDeleteResult:
     document_id: UUID
     build: BuildReference
-
-
-@dataclass(frozen=True, slots=True)
-class KnowledgeBaseDeleteResult:
-    knowledge_id: UUID
-    storage_objects: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,12 +116,12 @@ class IngestionRepository:
             raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
         return self._knowledge_response(dict(row))
 
-    async def delete_knowledge_base(self, knowledge_id: UUID) -> KnowledgeBaseDeleteResult:
+    async def request_knowledge_base_deletion(self, knowledge_id: UUID) -> dict[str, Any]:
         async with self.engine.begin() as connection:
             knowledge_result = await connection.execute(
                 text(
                     """
-                    SELECT kb.id,
+                    SELECT kb.id, kb.name, kb.status,
                            EXISTS (
                                SELECT 1 FROM knowledge_index i
                                WHERE i.kb_id = kb.id AND i.status = 'BUILDING'
@@ -145,6 +140,66 @@ class IngestionRepository:
                 raise ApiError(
                     "KNOWLEDGE_BASE_BUILD_IN_PROGRESS",
                     "知识库正在构建索引，请等待任务结束后再删除",
+                    409,
+                )
+
+            existing_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, status FROM task_record
+                    WHERE kb_id = :knowledge_id AND task_type = 'KNOWLEDGE_BASE_DELETE'
+                      AND status IN ('QUEUED', 'RUNNING')
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {"knowledge_id": knowledge_id},
+            )
+            existing = existing_result.mappings().one_or_none()
+            if existing is not None:
+                return {
+                    "task_id": existing["id"],
+                    "task_type": "KNOWLEDGE_BASE_DELETE",
+                    "status": existing["status"],
+                    "replayed": True,
+                }
+            if knowledge["status"] == "DELETING":
+                failed_result = await connection.execute(
+                    text(
+                        """
+                        SELECT id FROM task_record
+                        WHERE kb_id = :knowledge_id AND task_type = 'KNOWLEDGE_BASE_DELETE'
+                          AND status = 'FAILED'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        FOR UPDATE
+                        """
+                    ),
+                    {"knowledge_id": knowledge_id},
+                )
+                failed_task_id = failed_result.scalar_one_or_none()
+                if failed_task_id is not None:
+                    await connection.execute(
+                        text(
+                            """
+                            UPDATE task_record
+                            SET status = 'QUEUED', stage = 'QUEUED', progress = 0,
+                                error_code = NULL, error_message = NULL, finished_at = NULL,
+                                updated_at = now()
+                            WHERE id = :id AND status = 'FAILED'
+                            """
+                        ),
+                        {"id": failed_task_id},
+                    )
+                    return {
+                        "task_id": failed_task_id,
+                        "task_type": "KNOWLEDGE_BASE_DELETE",
+                        "status": "QUEUED",
+                        "replayed": False,
+                    }
+                raise ApiError(
+                    "KNOWLEDGE_BASE_DELETE_FAILED",
+                    "上一次知识库删除任务未完成，请在任务中心查看失败原因",
                     409,
                 )
 
@@ -167,23 +222,310 @@ class IngestionRepository:
                 (str(row["minio_bucket"]), str(row["minio_object_key"]))
                 for row in storage_result.mappings()
             )
+            task_id = await TaskRecordRepository.create_in_connection(
+                connection,
+                task_type="KNOWLEDGE_BASE_DELETE",
+                kb_id=knowledge_id,
+                metadata={
+                    "knowledge_id": str(knowledge_id),
+                    "knowledge_name": str(knowledge["name"]),
+                    "cleanup_total": len(storage_objects),
+                },
+            )
+            if storage_objects:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO storage_cleanup_object (task_id, minio_bucket, minio_object_key)
+                        VALUES (:task_id, :minio_bucket, :minio_object_key)
+                        """
+                    ),
+                    [
+                        {
+                            "task_id": task_id,
+                            "minio_bucket": bucket,
+                            "minio_object_key": object_key,
+                        }
+                        for bucket, object_key in storage_objects
+                    ],
+                )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_base
+                    SET active_index_id = NULL, status = 'DELETING', updated_at = now()
+                    WHERE id = :knowledge_id
+                    """
+                ),
+                {"knowledge_id": knowledge_id},
+            )
+        return {
+            "task_id": task_id,
+            "task_type": "KNOWLEDGE_BASE_DELETE",
+            "status": "QUEUED",
+            "replayed": False,
+        }
 
+    async def resolve_profile_rebuild(
+        self, knowledge_id: UUID, idempotency_key: str | None = None
+    ) -> dict[str, Any]:
+        """Resolve a Knowledge-level Profile rebuild into one durable task.
+
+        The three branches mirror the candidate-resolution rules in
+        docs/architecture/knowledge-profile-visibility-and-async-e2e-verification-plan.md
+        §2.1, all inside a single transaction holding the knowledge base row
+        lock:
+
+        - a BUILDING candidate absorbs the intent into its INDEX_BUILD task;
+        - an editable READY candidate gets a deduplicated PROFILE_REFRESH;
+        - anything else starts a candidate build that refreshes Profiles on
+          completion.
+
+        The returned dict carries an internal ``queue`` key (None when the task
+        is already enqueued) that the service layer strips before responding.
+        """
+        async with self.engine.begin() as connection:
+            kb_result = await connection.execute(
+                text("SELECT status FROM knowledge_base WHERE id = :id FOR UPDATE"),
+                {"id": knowledge_id},
+            )
+            kb_status = kb_result.scalar_one_or_none()
+            if kb_status is None:
+                raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
+            if kb_status == "DELETING":
+                raise ApiError("KNOWLEDGE_BASE_DELETING", "知识库正在删除，无法重建 Profile", 409)
+            if kb_status != "ENABLED":
+                raise ApiError("FORBIDDEN", "知识库已停用", 403)
+
+            building_result = await connection.execute(
+                text(
+                    """
+                    SELECT id FROM knowledge_index
+                    WHERE kb_id = :kb_id AND status = 'BUILDING'
+                    FOR UPDATE
+                    """
+                ),
+                {"kb_id": knowledge_id},
+            )
+            building_index_id = building_result.scalar_one_or_none()
+            if building_index_id is not None:
+                # A candidate build is already running: merge the post-build
+                # refresh intent instead of creating a parallel generation.
+                task_result = await connection.execute(
+                    text(
+                        """
+                        SELECT id, status FROM task_record
+                        WHERE index_id = :index_id AND task_type = 'INDEX_BUILD'
+                          AND status IN ('QUEUED', 'RUNNING')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        FOR UPDATE
+                        """
+                    ),
+                    {"index_id": building_index_id},
+                )
+                building_task = task_result.mappings().one_or_none()
+                if building_task is None:
+                    raise ApiError(
+                        "INDEX_BUILD_STUCK",
+                        "候选索引正在构建但构建任务已中断，请先在 Index Build 处理后再重建 Profile",
+                        409,
+                    )
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE task_record
+                        SET metadata = metadata || '{"profile_refresh_after_build": true}'::jsonb,
+                            updated_at = now()
+                        WHERE id = :task_id
+                        """
+                    ),
+                    {"task_id": building_task["id"]},
+                )
+                return {
+                    "task_id": building_task["id"],
+                    "task_type": "INDEX_BUILD",
+                    "status": building_task["status"],
+                    "replayed": True,
+                    "queue": None,
+                    "index_id": building_index_id,
+                }
+
+            release_result = await connection.execute(
+                text(
+                    """
+                    SELECT r.id AS release_id, r.index_id, i.status AS index_status
+                    FROM knowledge_release r
+                    JOIN knowledge_index i ON i.id = r.index_id
+                    WHERE r.kb_id = :kb_id AND r.status NOT IN ('PUBLISHED', 'CANCELLED')
+                    ORDER BY i.version DESC
+                    LIMIT 1
+                    FOR UPDATE OF r
+                    """
+                ),
+                {"kb_id": knowledge_id},
+            )
+            release = release_result.mappings().one_or_none()
+            if release is not None and release["index_status"] == "READY":
+                index_id = UUID(str(release["index_id"]))
+                active = await self._active_profile_task(connection, index_id)
+                if active is not None:
+                    return {
+                        "task_id": active["id"],
+                        "task_type": active["task_type"],
+                        "status": active["status"],
+                        "replayed": True,
+                        "queue": None,
+                        "index_id": index_id,
+                    }
+                metadata: dict[str, Any] = {
+                    "release_id": str(release["release_id"]),
+                    "knowledge_id": str(knowledge_id),
+                    "source": "KNOWLEDGE_PROFILE_REBUILD",
+                }
+                if idempotency_key is not None:
+                    metadata["idempotency_key"] = idempotency_key
+                task_id = await TaskRecordRepository.create_profile_task_in_connection(
+                    connection,
+                    task_type="PROFILE_REFRESH",
+                    kb_id=knowledge_id,
+                    index_id=index_id,
+                    metadata=metadata,
+                )
+                if task_id is None:
+                    # A concurrent submission won the unique active-task slot.
+                    winner = await self._active_profile_task(connection, index_id)
+                    if winner is None:  # pragma: no cover - index guarantees a row
+                        raise ApiError("INTERNAL_ERROR", "Profile 任务提交冲突无法解析", 500)
+                    return {
+                        "task_id": winner["id"],
+                        "task_type": winner["task_type"],
+                        "status": winner["status"],
+                        "replayed": True,
+                        "queue": None,
+                        "index_id": index_id,
+                    }
+                return {
+                    "task_id": task_id,
+                    "task_type": "PROFILE_REFRESH",
+                    "status": "QUEUED",
+                    "replayed": False,
+                    "queue": "maintenance",
+                    "index_id": index_id,
+                }
+
+            # No editable candidate: create one.  The build task carries the
+            # refresh intent in task_record.metadata so the worker — not the
+            # API process — submits PROFILE_REFRESH after the build succeeds.
+            build = await self._create_build_locked(
+                connection,
+                knowledge_id,
+                "PROFILE_REBUILD",
+                activate_on_success=False,
+                profile_refresh_after_build=True,
+            )
+            return {
+                "task_id": build.task_id,
+                "task_type": "INDEX_BUILD",
+                "status": "QUEUED",
+                "replayed": False,
+                "queue": "index_build",
+                "index_id": build.index_id,
+            }
+
+    @staticmethod
+    async def _active_profile_task(
+        connection: AsyncConnection, index_id: UUID
+    ) -> dict[str, Any] | None:
+        result = await connection.execute(
+            text(
+                """
+                SELECT id, task_type, status FROM task_record
+                WHERE index_id = :index_id
+                  AND task_type IN (
+                      'PROFILE_GENERATE', 'PROFILE_BACKFILL',
+                      'PROFILE_REFRESH', 'PROFILE_REGENERATE'
+                  )
+                  AND status IN ('QUEUED', 'RUNNING')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ),
+            {"index_id": index_id},
+        )
+        active = result.mappings().one_or_none()
+        return dict(active) if active is not None else None
+
+    async def list_knowledge_base_cleanup_objects(self, task_id: UUID) -> list[dict[str, Any]]:
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT minio_bucket, minio_object_key
+                    FROM storage_cleanup_object
+                    WHERE task_id = :task_id AND status <> 'DELETED'
+                    ORDER BY created_at, minio_object_key
+                    """
+                ),
+                {"task_id": task_id},
+            )
+            return [dict(row) for row in result.mappings()]
+
+    async def mark_knowledge_base_cleanup_object_deleted(
+        self, task_id: UUID, bucket: str, object_key: str
+    ) -> None:
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE storage_cleanup_object
+                    SET status = 'DELETED', deleted_at = now(), error_message = NULL
+                    WHERE task_id = :task_id AND minio_bucket = :bucket
+                      AND minio_object_key = :object_key
+                    """
+                ),
+                {"task_id": task_id, "bucket": bucket, "object_key": object_key},
+            )
+
+    async def mark_knowledge_base_cleanup_object_failed(
+        self, task_id: UUID, bucket: str, object_key: str, error: Exception
+    ) -> None:
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE storage_cleanup_object
+                    SET status = 'FAILED', attempts = attempts + 1, error_message = :error_message
+                    WHERE task_id = :task_id AND minio_bucket = :bucket
+                      AND minio_object_key = :object_key
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "bucket": bucket,
+                    "object_key": object_key,
+                    "error_message": str(error)[:500] or "对象删除失败",
+                },
+            )
+
+    async def finalize_knowledge_base_deletion(self, knowledge_id: UUID) -> bool:
+        """Purge only after the durable storage-cleanup phase succeeded."""
+        async with self.engine.begin() as connection:
+            knowledge_result = await connection.execute(
+                text("SELECT status FROM knowledge_base WHERE id = :id FOR UPDATE"),
+                {"id": knowledge_id},
+            )
+            status = knowledge_result.scalar_one_or_none()
+            if status is None:
+                return False
+            if status != "DELETING":
+                raise ApiError("KNOWLEDGE_BASE_DELETE_CONFLICT", "知识库删除状态已变更", 409)
             await connection.execute(
                 text("DELETE FROM rag_trace WHERE kb_id = :knowledge_id"),
                 {"knowledge_id": knowledge_id},
             )
             await connection.execute(
                 text("DELETE FROM conversation WHERE knowledge_id = :knowledge_id"),
-                {"knowledge_id": knowledge_id},
-            )
-            await connection.execute(
-                text(
-                    """
-                    UPDATE knowledge_base
-                    SET active_index_id = NULL, status = 'DISABLED', updated_at = now()
-                    WHERE id = :knowledge_id
-                    """
-                ),
                 {"knowledge_id": knowledge_id},
             )
             await connection.execute(
@@ -198,8 +540,7 @@ class IngestionRepository:
                 text("DELETE FROM knowledge_base WHERE id = :knowledge_id"),
                 {"knowledge_id": knowledge_id},
             )
-
-        return KnowledgeBaseDeleteResult(knowledge_id, storage_objects)
+        return True
 
     async def find_idempotent_response(
         self, operation: str, idempotency_key: str, request_hash: str
@@ -591,6 +932,7 @@ class IngestionRepository:
         reason: str,
         *,
         activate_on_success: bool,
+        profile_refresh_after_build: bool = False,
     ) -> BuildReference:
         version_result = await connection.execute(
             text("SELECT COALESCE(max(version), 0) + 1 FROM knowledge_index WHERE kb_id = :kb_id"),
@@ -726,13 +1068,33 @@ class IngestionRepository:
                 "id": task_id,
                 "kb_id": knowledge_id,
                 "index_id": index_id,
-                "metadata": json.dumps({"document_count": len(documents)}),
+                "metadata": json.dumps(
+                    {
+                        "document_count": len(documents),
+                        **(
+                            {"profile_refresh_after_build": True}
+                            if profile_refresh_after_build
+                            else {}
+                        ),
+                    }
+                ),
             },
         )
         if not activate_on_success:
-            # Clean up legacy Profile-release candidates.  New RAG builds are
-            # reviewed and published directly from Index Build instead.
+            # A staged index and its Profile drafts are one release candidate.
+            # Cancelling older open candidates prevents stale releases from
+            # being published after a newer index has been built.
             await self._cancel_open_releases(connection, knowledge_id)
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO knowledge_release (id, kb_id, index_id, status)
+                    VALUES (:id, :kb_id, :index_id, 'DRAFT')
+                    ON CONFLICT (index_id) DO NOTHING
+                    """
+                ),
+                {"id": uuid4(), "kb_id": knowledge_id, "index_id": index_id},
+            )
         await connection.execute(
             text(
                 """
@@ -900,9 +1262,10 @@ class IngestionRepository:
             target_result = await connection.execute(
                 text(
                     """
-                    SELECT i.*, kb.active_index_id
+                    SELECT i.*, kb.active_index_id, r.status AS release_status
                     FROM knowledge_index i
                     JOIN knowledge_base kb ON kb.id = i.kb_id
+                    LEFT JOIN knowledge_release r ON r.index_id = i.id
                     WHERE i.id = :index_id
                     FOR UPDATE OF kb, i
                     """
@@ -914,6 +1277,12 @@ class IngestionRepository:
                 raise ApiError("INDEX_NOT_FOUND", "索引不存在", 404)
             if target["status"] == "ACTIVE" and target["active_index_id"] == index_id:
                 return dict(target)
+            if target["release_status"] is not None and target["release_status"] != "PUBLISHED":
+                raise ApiError(
+                    "RELEASE_REQUIRED",
+                    "该索引存在未发布的 Profile 候选，请通过发布审核完成原子发布",
+                    409,
+                )
             if target["status"] != "READY":
                 raise ApiError("INDEX_NOT_READY", "只有 READY 索引可以激活", 409)
 
@@ -949,20 +1318,6 @@ class IngestionRepository:
                     """
                 ),
                 {"index_id": index_id, "kb_id": target["kb_id"]},
-            )
-            # Releases created by earlier versions contained optional Support
-            # Profile drafts.  Publishing a RAG snapshot no longer depends on
-            # those drafts, so retire any old open release for this index.
-            await connection.execute(
-                text(
-                    """
-                    UPDATE knowledge_release
-                    SET status = 'CANCELLED', updated_at = now()
-                    WHERE index_id = :index_id
-                      AND status NOT IN ('PUBLISHED', 'CANCELLED')
-                    """
-                ),
-                {"index_id": index_id},
             )
             return dict(activated)
 
@@ -1436,7 +1791,9 @@ class IngestionRepository:
 
     @staticmethod
     def _knowledge_response(knowledge: dict[str, Any]) -> dict[str, Any]:
-        if knowledge["status"] == "DISABLED":
+        if knowledge["status"] == "DELETING":
+            runtime_state = "DELETING"
+        elif knowledge["status"] == "DISABLED":
             runtime_state = "DISABLED"
         elif knowledge.get("active_index_id") is not None:
             if knowledge.get("building_index_id") is not None or knowledge["rebuild_required"]:

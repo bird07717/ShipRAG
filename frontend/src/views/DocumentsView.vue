@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { Document, Search, UploadFilled } from "@element-plus/icons-vue";
 
 import { useAdminStore } from "@/composables/adminStore";
+import type { PublishedProfileSummary, ProfileQualityStatus } from "@/types/admin";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 
@@ -34,6 +35,17 @@ async function confirmUpload(): Promise<void> {
 
 function formatSize(size: number): string {
   return `${Math.max(1, Math.ceil(size / 1024))} KB`;
+}
+
+function formatProductModels(profile: PublishedProfileSummary): string {
+  const parts = [profile.product_name, ...profile.model_names].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "—";
+}
+
+function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "info" {
+  if (status === "PASS" || status === "MANUAL_REVIEWED") return "success";
+  if (status === "FALLBACK") return "info";
+  return "warning";
 }
 </script>
 
@@ -206,6 +218,137 @@ function formatSize(size: number): string {
               <pre v-for="item in store.chunks" :key="String(item.id)">{{ store.formatJson(item) }}</pre>
             </div>
           </el-tab-pane>
+          <el-tab-pane label="Profile & Alias">
+            <div v-if="store.documentProfileContext" class="profile-context">
+              <!-- Published (live) Profile -->
+              <div v-if="store.documentProfileContext.published_profile" class="profile-card">
+                <div class="profile-card-head">
+                  <h4>已发布 Profile</h4>
+                  <el-tag type="success" size="small">已发布 · 影响线上 Support</el-tag>
+                </div>
+                <el-descriptions :column="1" border size="small">
+                  <el-descriptions-item label="问题编码">
+                    <span class="mono">{{ store.documentProfileContext.published_profile.problem_code }}</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="标准问题">
+                    {{ store.documentProfileContext.published_profile.canonical_question }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="产品 / 型号">
+                    {{ formatProductModels(store.documentProfileContext.published_profile) }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="关键词">
+                    <div v-if="store.documentProfileContext.published_profile.keywords.length" class="tag-wrap">
+                      <el-tag
+                        v-for="keyword in store.documentProfileContext.published_profile.keywords"
+                        :key="keyword"
+                        size="small"
+                        type="info"
+                      >
+                        {{ keyword }}
+                      </el-tag>
+                    </div>
+                    <span v-else class="muted">无</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="Alias">
+                    <div v-if="store.documentProfileContext.published_profile.aliases.length" class="tag-wrap">
+                      <el-tag
+                        v-for="alias in store.documentProfileContext.published_profile.aliases"
+                        :key="alias"
+                        size="small"
+                      >
+                        {{ alias }}
+                      </el-tag>
+                    </div>
+                    <span v-else class="muted">空 Alias（无用户改写）</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="路由摘要">
+                    <p class="wrapped-text">
+                      {{ store.documentProfileContext.published_profile.routing_summary || "—" }}
+                    </p>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="启用状态">
+                    <el-tag
+                      :type="store.documentProfileContext.published_profile.enabled ? 'success' : 'info'"
+                      size="small"
+                    >
+                      {{ store.documentProfileContext.published_profile.enabled ? "启用" : "停用" }}
+                    </el-tag>
+                  </el-descriptions-item>
+                </el-descriptions>
+              </div>
+              <div v-else class="profile-card profile-card-empty">
+                <h4>已发布 Profile</h4>
+                <p class="muted">尚未配置 —— 该文档还没有生效的线上 Profile。</p>
+              </div>
+
+              <!-- Unpublished candidate draft -->
+              <div v-if="store.documentProfileContext.candidate_draft" class="profile-card">
+                <div class="profile-card-head">
+                  <h4>候选草稿 · 未发布</h4>
+                  <el-tag type="warning" size="small">不影响线上 Support</el-tag>
+                </div>
+                <el-descriptions :column="1" border size="small">
+                  <el-descriptions-item label="候选 Index 版本">
+                    v{{ store.documentProfileContext.candidate_draft.index_version }}
+                    <span class="muted">（{{ store.documentProfileContext.candidate_draft.release_status }}）</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="草稿操作">
+                    <el-tag size="small" type="info">
+                      {{ store.documentProfileContext.candidate_draft.operation }}
+                    </el-tag>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="审核状态">
+                    <StatusBadge :status="store.documentProfileContext.candidate_draft.status" />
+                  </el-descriptions-item>
+                  <el-descriptions-item label="质量状态">
+                    <el-tag
+                      :type="qualityTagType(store.documentProfileContext.candidate_draft.quality_status)"
+                      size="small"
+                    >
+                      {{ store.documentProfileContext.candidate_draft.quality_status }}
+                    </el-tag>
+                    <p
+                      v-for="note in store.documentProfileContext.candidate_draft.quality_notes"
+                      :key="note"
+                      class="muted quality-note-line"
+                    >
+                      {{ note }}
+                    </p>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="标准问题">
+                    {{ store.documentProfileContext.candidate_draft.canonical_question }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="Alias">
+                    <div v-if="store.documentProfileContext.candidate_draft.aliases.length" class="tag-wrap">
+                      <el-tag
+                        v-for="alias in store.documentProfileContext.candidate_draft.aliases"
+                        :key="alias"
+                        size="small"
+                        type="warning"
+                      >
+                        {{ alias }}
+                      </el-tag>
+                    </div>
+                    <span v-else class="muted">空 Alias（无用户改写）</span>
+                  </el-descriptions-item>
+                </el-descriptions>
+                <div class="draft-actions">
+                  <el-button size="small" @click="store.goToCandidateReview(store.documentProfileContext.candidate_draft!.index_id)">
+                    前往候选审核
+                  </el-button>
+                </div>
+              </div>
+              <div v-else class="profile-card profile-card-empty">
+                <h4>候选草稿</h4>
+                <p class="muted">当前没有未发布的 Profile 草稿。</p>
+              </div>
+            </div>
+            <EmptyState
+              v-else
+              title="Profile 数据加载中"
+              description="正在读取该文档的已发布 Profile 与候选草稿。"
+            />
+          </el-tab-pane>
         </el-tabs>
       </template>
     </el-drawer>
@@ -216,7 +359,6 @@ function formatSize(size: number): string {
 .toolbar-row {
   padding-bottom: 0;
 }
-
 .result-count {
   font-size: 12px;
 }
@@ -323,5 +465,77 @@ function formatSize(size: number): string {
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.profile-context {
+  display: grid;
+  gap: 16px;
+  max-height: 460px;
+  overflow: auto;
+}
+
+.profile-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.profile-card-head h4 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.profile-card-empty {
+  padding: 14px;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+
+.profile-card-empty h4 {
+  margin: 0 0 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.profile-card-empty p {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* Long alias lists and routing summaries must wrap inside the 640px drawer
+ * instead of forcing horizontal overflow. */
+.tag-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.wrapped-text {
+  max-height: 120px;
+  overflow: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.quality-note-line {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.draft-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 </style>
