@@ -984,52 +984,50 @@ class IndexPipeline:
                 ),
                 {"index_id": index_id, **counts},
             )
-            activation_result = await connection.execute(
+            old_result = await connection.execute(
                 text(
                     """
-                    SELECT activate_on_success FROM knowledge_index
-                    WHERE id = :index_id
+                    SELECT COALESCE(rag_active_index_id, active_index_id)
+                    FROM knowledge_base WHERE id = :kb_id FOR UPDATE
+                    """
+                ),
+                {"kb_id": kb_id},
+            )
+            old_index_id = old_result.scalar_one()
+            if old_index_id is not None and old_index_id != index_id:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE knowledge_index SET status = 'DEPRECATED'
+                        WHERE id = :old_index_id AND status = 'ACTIVE'
+                        """
+                    ),
+                    {"old_index_id": old_index_id},
+                )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_index
+                    SET status = 'ACTIVE', activated_at = now()
+                    WHERE id = :index_id AND status = 'READY'
                     """
                 ),
                 {"index_id": index_id},
             )
-            activate_on_success = bool(activation_result.scalar_one())
-            old_result = await connection.execute(
-                text("SELECT active_index_id FROM knowledge_base WHERE id = :kb_id FOR UPDATE"),
-                {"kb_id": kb_id},
+            # active_index_id remains a compatibility alias for the RAG
+            # pointer during the rolling migration.  Support has independent
+            # pointers and is deliberately not changed by ingestion.
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_base
+                    SET rag_active_index_id = :index_id,
+                        active_index_id = :index_id, updated_at = now()
+                    WHERE id = :kb_id
+                    """
+                ),
+                {"index_id": index_id, "kb_id": kb_id},
             )
-            old_index_id = old_result.scalar_one()
-            if activate_on_success:
-                if old_index_id is not None:
-                    await connection.execute(
-                        text(
-                            """
-                            UPDATE knowledge_index SET status = 'DEPRECATED'
-                            WHERE id = :old_index_id AND status = 'ACTIVE'
-                            """
-                        ),
-                        {"old_index_id": old_index_id},
-                    )
-                await connection.execute(
-                    text(
-                        """
-                        UPDATE knowledge_index
-                        SET status = 'ACTIVE', activated_at = now()
-                        WHERE id = :index_id AND status = 'READY'
-                        """
-                    ),
-                    {"index_id": index_id},
-                )
-                await connection.execute(
-                    text(
-                        """
-                        UPDATE knowledge_base
-                        SET active_index_id = :index_id, updated_at = now()
-                        WHERE id = :kb_id
-                        """
-                    ),
-                    {"index_id": index_id, "kb_id": kb_id},
-                )
             await connection.execute(
                 text(
                     """

@@ -125,6 +125,11 @@ class Settings(BaseSettings):
     index_gc_retention_count: int = 3
     index_gc_retention_days: int = 7
 
+    # Frozen conversations keep old indexes alive for GC; conversations idle
+    # longer than this window are purged by the auditable GC step.  0 keeps
+    # them forever.
+    conversation_retention_days: int = 90
+
     # Failed-request log retention; 0 disables pruning (keep forever).
     request_error_log_retention_days: int = 30
 
@@ -153,6 +158,13 @@ class Settings(BaseSettings):
     def validate_index_gc_retention_days(cls, value: int) -> int:
         if not 1 <= value <= 3_650:
             raise ValueError("index GC retention days must be between 1 and 3650")
+        return value
+
+    @field_validator("conversation_retention_days")
+    @classmethod
+    def validate_conversation_retention_days(cls, value: int) -> int:
+        if not 0 <= value <= 3_650:
+            raise ValueError("conversation retention days must be between 0 and 3650")
         return value
 
     @field_validator("request_error_log_retention_days")

@@ -99,7 +99,8 @@ describe("view smoke", () => {
       vi.fn().mockImplementation((url: string) => {
         let body: unknown = [];
         const path = String(url);
-        if (path.includes("/knowledge-bases")) body = [kb];
+        if (path.includes("/releases")) body = [];
+        else if (path.includes("/knowledge-bases")) body = [kb];
         else if (path.includes("/metrics/overview"))
           body = {
             range: { from: "2026-08-14T00:00:00", to: "2026-08-21T00:00:00", mode: "CHAT" },
@@ -137,6 +138,19 @@ describe("view smoke", () => {
               rag: { ready: true, blockers: [] },
             },
           };
+        else if (path.includes("/engine-retrieval-configs"))
+          body = [
+            "SUPPORT_ONLY",
+            "SUPPORT_WITH_RAG_FALLBACK",
+            "RAG_ONLY",
+          ].map((execution_policy) => ({
+            execution_policy,
+            vector_top_k: 10,
+            bm25_top_k: 10,
+            fusion_top_k: 20,
+            rerank_top_n: 10,
+            context_max_chunks: 8,
+          }));
         else if (path.includes("/rag-config"))
           body = {
             vector_top_k: 10,
@@ -172,6 +186,7 @@ describe("view smoke", () => {
       "playground",
       "configuration",
       "engine-routing",
+      "support-review",
     ]) {
       const wrapper = mount(AdminStudio, {
         props: { view },

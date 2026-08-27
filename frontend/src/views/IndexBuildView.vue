@@ -1,36 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { ElMessageBox } from "element-plus";
 
 import { useAdminStore } from "@/composables/adminStore";
-import type { IndexTask, KnowledgeIndex, KnowledgeRelease, ProfileDraft } from "@/types/admin";
+import type { IndexTask, KnowledgeIndex } from "@/types/admin";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
 
 const store = useAdminStore();
 
-onMounted(() => {
-  /* Documents > Profile & Alias sends the reviewer straight to the
-   * candidate's build drawer instead of a raw view switch. */
-  const requested = store.requestedIndexDetailId;
-  if (!requested) return;
-  store.requestedIndexDetailId = "";
-  const target = store.indexes.find((item) => item.id === requested);
-  if (target) void openDetail(target);
-});
-
 const detailIndex = ref<KnowledgeIndex | null>(null);
 const detailOpen = ref(false);
-const editingDraft = ref<ProfileDraft | null>(null);
-const editDraftOpen = ref(false);
-const editForm = ref({
-  problemCode: "",
-  canonicalQuestion: "",
-  aliases: "",
-  keywords: "",
-  routingSummary: "",
-});
 
 const PIPELINE_STAGES = ["PARSING", "PROCESSING_IMAGES", "CHUNKING", "EMBEDDING", "COMPLETED"];
 const STAGE_LABELS: Record<string, string> = {
@@ -44,87 +25,38 @@ const STAGE_LABELS: Record<string, string> = {
 async function openDetail(index: KnowledgeIndex): Promise<void> {
   detailIndex.value = index;
   detailOpen.value = true;
-  await store.loadReleaseForIndex(index.id);
 }
 
-const detailRelease = computed<KnowledgeRelease | undefined>(() => {
-  const index = detailIndex.value;
-  if (!index) return undefined;
-  const release = store.releaseForIndex(index.id);
-  return release ? (store.releaseDetails[release.id] ?? release) : undefined;
-});
-
-async function approveDraft(draft: ProfileDraft): Promise<void> {
-  await store.updateProfileDraft(draft.id, { status: "APPROVED" });
+function isRagActive(index: KnowledgeIndex): boolean {
+  const activeId =
+    store.selectedKnowledge?.rag_active_index_id ?? store.selectedKnowledge?.active_index_id;
+  return Boolean(activeId && activeId === index.id);
 }
 
-function openDraftEditor(draft: ProfileDraft): void {
-  editingDraft.value = draft;
-  editForm.value = {
-    problemCode: draft.problem_code,
-    canonicalQuestion: draft.canonical_question,
-    aliases: draft.aliases.join("\n"),
-    keywords: draft.keywords.join("\n"),
-    routingSummary: draft.routing_summary,
-  };
-  editDraftOpen.value = true;
+function rollbackable(index: KnowledgeIndex): boolean {
+  return (
+    ["READY", "DEPRECATED"].includes(index.status) ||
+    (index.status === "ACTIVE" && !isRagActive(index))
+  );
 }
 
-function splitLines(value: string): string[] {
-  return value
-    .split(/\n|,/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-async function saveDraft(): Promise<void> {
-  const draft = editingDraft.value;
-  if (!draft) return;
-  await store.updateProfileDraft(draft.id, {
-    problem_code: editForm.value.problemCode.trim(),
-    canonical_question: editForm.value.canonicalQuestion.trim(),
-    aliases: splitLines(editForm.value.aliases),
-    keywords: splitLines(editForm.value.keywords),
-    routing_summary: editForm.value.routingSummary.trim(),
-  });
-  if (!store.error) editDraftOpen.value = false;
-}
-
-async function publishRelease(release: KnowledgeRelease): Promise<void> {
+async function rollbackRag(index: KnowledgeIndex): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      "确认后将原子切换 RAG 索引与所有已审核的 Profile，新的会话会立即使用该版本。",
-      "发布候选",
-      { type: "warning", confirmButtonText: "确认发布", cancelButtonText: "继续审核" },
+      `显式将 RAG 在线索引回滚到 Index v${index.version}（${store.formatDate(index.finished_at)} 构建）。` +
+        "新会话将使用该版本；既有会话继续使用各自冻结的版本。Support Release 与 Support 指针不受影响。",
+      "回滚 RAG Index",
+      { type: "warning", confirmButtonText: "确认回滚", cancelButtonText: "取消" },
     );
   } catch {
     return;
   }
-  await store.publishKnowledgeRelease(release.id);
-  detailOpen.value = false;
-}
-
-async function refreshProfiles(index: KnowledgeIndex): Promise<void> {
-  try {
-    await ElMessageBox.confirm(
-      `将为 Index v${index.version} 的候选文档重新生成 Profile 草稿。未发布草稿会被覆盖，完成后请重新审核。`,
-      "重建 Profile 草稿",
-      { type: "warning", confirmButtonText: "提交后台任务", cancelButtonText: "取消" },
-    );
-  } catch {
-    return;
-  }
-  await store.refreshProfileDrafts(index.id);
+  await store.rollbackRagIndex(index.id);
 }
 
 const detailTask = computed<IndexTask | undefined>(() => {
   const index = detailIndex.value;
   return index ? store.latestIndexTasks[index.id] : undefined;
-});
-
-const detailProfileTask = computed<IndexTask | undefined>(() => {
-  const index = detailIndex.value;
-  return index ? store.latestProfileTasks[index.id] : undefined;
 });
 
 const detailStageIndex = computed(() => {
@@ -164,7 +96,7 @@ function formatDuration(index: KnowledgeIndex): string {
               :value="kb.id"
             />
           </el-select>
-          <span class="muted candidate-note">构建完成后须在此审核发布，不自动影响线上</span>
+          <span class="muted candidate-note">这里只处理 RAG 技术构建、任务诊断和回收；Support 审核请前往 Profile Review</span>
           <div class="spacer" />
           <el-button :disabled="!store.selectedKnowledgeId" @click="store.gcIndexes()">
             回收旧索引
@@ -208,15 +140,16 @@ function formatDuration(index: KnowledgeIndex): string {
         <el-table-column label="耗时" width="80">
           <template #default="scope">{{ formatDuration(scope.row) }}</template>
         </el-table-column>
-        <el-table-column label="审核发布" width="120" align="right">
+        <el-table-column label="操作" width="180" align="right">
           <template #default="scope">
             <el-button
-              v-if="scope.row.status === 'READY'"
+              v-if="rollbackable(scope.row)"
               link
-              type="primary"
-              @click.stop="openDetail(scope.row)"
+              type="warning"
+              :loading="store.isActionLoading(`rollback-rag-index:${scope.row.id}`)"
+              @click.stop="rollbackRag(scope.row)"
             >
-              审核并发布
+              回滚 RAG
             </el-button>
             <el-button
               v-if="scope.row.status === 'DEPRECATED' || scope.row.status === 'FAILED'"
@@ -308,8 +241,8 @@ function formatDuration(index: KnowledgeIndex): string {
           <el-descriptions-item label="构建原因">
             {{ detailIndex.build_reason }}
           </el-descriptions-item>
-          <el-descriptions-item label="完成后激活">
-            {{ detailIndex.activate_on_success ? "是" : "否" }}
+          <el-descriptions-item label="RAG 生效策略">
+            构建完成后自动切换
           </el-descriptions-item>
           <el-descriptions-item label="开始时间">
             {{ store.formatDate(detailIndex.created_at) }}
@@ -324,147 +257,23 @@ function formatDuration(index: KnowledgeIndex): string {
           <CodeBlock :code="store.formatJson(detailTask)" max-height="260px" />
         </template>
 
-        <template v-if="detailRelease">
-          <h4 class="section-label">候选发布</h4>
-          <el-descriptions :column="2" border size="small">
-            <el-descriptions-item label="候选状态">
-              <StatusBadge :status="detailRelease.status" />
-            </el-descriptions-item>
-            <el-descriptions-item label="Profile 草稿">
-              {{ detailRelease.approved_count }} / {{ detailRelease.draft_count }} 已审核
-            </el-descriptions-item>
-          </el-descriptions>
-          <el-alert
-            v-if="detailRelease.generation_error"
-            :title="detailRelease.generation_error"
-            type="warning"
-            :closable="false"
-            show-icon
-            class="detail-alert"
-          />
-          <el-descriptions
-            v-if="detailProfileTask"
-            :column="2"
-            border
-            size="small"
-            class="profile-task"
-          >
-            <el-descriptions-item label="Profile 任务">
-              {{ detailProfileTask.task_type ?? "PROFILE" }} · {{ detailProfileTask.status }}
-            </el-descriptions-item>
-            <el-descriptions-item label="生成进度">
-              {{ detailProfileTask.progress }}%
-            </el-descriptions-item>
-          </el-descriptions>
-          <el-alert
-            v-if="detailRelease.validation_result.review_required_count"
-            :title="`仍有 ${detailRelease.validation_result.review_required_count} 条草稿待审核`"
-            type="info"
-            :closable="false"
-            class="detail-alert"
-          />
-          <el-alert
-            v-for="issue in detailRelease.validation_result.errors ?? []"
-            :key="`${issue.code}-${issue.message}`"
-            :title="`${issue.code}: ${issue.message}`"
-            type="error"
-            :closable="false"
-            class="detail-alert"
-          />
-          <el-table
-            v-if="detailRelease.drafts?.length"
-            :data="detailRelease.drafts"
-            size="small"
-            class="draft-table"
-          >
-            <el-table-column
-              prop="document_name"
-              label="文档"
-              min-width="130"
-              show-overflow-tooltip
-            />
-            <el-table-column
-              prop="canonical_question"
-              label="标准问题"
-              min-width="170"
-              show-overflow-tooltip
-            />
-            <el-table-column label="质量" width="120">
-              <template #default="scope">
-                <el-tag
-                  :type="scope.row.quality_status === 'PASS' || scope.row.quality_status === 'MANUAL_REVIEWED' ? 'success' : 'warning'"
-                  size="small"
-                >
-                  {{ scope.row.quality_status }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="审核" width="100" align="right">
-              <template #default="scope">
-                <el-button
-                  v-if="scope.row.status !== 'PUBLISHED'"
-                  link
-                  @click="openDraftEditor(scope.row)"
-                >
-                  编辑
-                </el-button>
-                <el-button
-                  v-if="scope.row.status === 'DRAFT' && scope.row.quality_status !== 'REVIEW_REQUIRED' && scope.row.quality_status !== 'FALLBACK'"
-                  link
-                  type="primary"
-                  :loading="store.isActionLoading(`profile-draft:${scope.row.id}`)"
-                  @click="approveDraft(scope.row)"
-                >
-                  批准
-                </el-button>
-                <span v-else class="muted">{{ scope.row.status }}</span>
-              </template>
-            </el-table-column>
-          </el-table>
-          <p
-            v-if="detailRelease.drafts?.some((draft) => draft.quality_status === 'REVIEW_REQUIRED' || draft.quality_status === 'FALLBACK')"
-            class="muted quality-note"
-          >
-            质量待复核草稿须先编辑并保存，再单独批准；系统不会批量跳过该检查。
-          </p>
-        </template>
         <el-alert
-          v-else-if="detailIndex.status === 'READY'"
-          title="此旧索引没有发布候选，可通过旧式激活接口处理；新建索引将自动创建候选。"
+          title="此页面不处理 Support Profile。构建完成并通过技术校验后，RAG 会自动切换到该索引；请在 Profile Review 审核和发布 Support。"
           type="info"
           :closable="false"
+          show-icon
           class="detail-alert"
         />
 
         <div class="detail-actions">
           <el-button
-            v-if="detailRelease"
-            :loading="store.isActionLoading(`validate-release:${detailRelease.id}`)"
-            @click="store.validateKnowledgeRelease(detailRelease.id)"
+            v-if="rollbackable(detailIndex)"
+            type="warning"
+            plain
+            :loading="store.isActionLoading(`rollback-rag-index:${detailIndex.id}`)"
+            @click="rollbackRag(detailIndex)"
           >
-            发布前验证
-          </el-button>
-          <el-button
-            v-if="detailRelease?.validation_result.publishable"
-            type="primary"
-            :loading="store.isActionLoading(`publish-release:${detailRelease.id}`)"
-            @click="publishRelease(detailRelease)"
-          >
-            发布候选
-          </el-button>
-          <el-button
-            v-if="detailRelease && detailIndex.status === 'READY'"
-            :loading="store.isActionLoading(`refresh-profile:${detailIndex.id}`)"
-            @click="refreshProfiles(detailIndex)"
-          >
-            重建 Profile 草稿
-          </el-button>
-          <el-button
-            v-if="detailIndex.status === 'READY' && !detailRelease"
-            type="primary"
-            @click="store.activateIndex(detailIndex.id)"
-          >
-            激活旧式快照
+            回滚 RAG 到此版本
           </el-button>
           <el-button
             v-if="detailIndex.status === 'DEPRECATED' || detailIndex.status === 'FAILED'"
@@ -477,42 +286,6 @@ function formatDuration(index: KnowledgeIndex): string {
         </div>
       </template>
     </el-drawer>
-
-    <el-dialog v-model="editDraftOpen" title="编辑 Profile 草稿" width="680px">
-      <el-form label-position="top">
-        <el-form-item label="问题编码">
-          <el-input v-model="editForm.problemCode" maxlength="100" show-word-limit />
-        </el-form-item>
-        <el-form-item label="标准问题">
-          <el-input v-model="editForm.canonicalQuestion" maxlength="500" show-word-limit />
-        </el-form-item>
-        <el-form-item label="Alias（每行一条）">
-          <el-input v-model="editForm.aliases" type="textarea" :rows="4" />
-        </el-form-item>
-        <el-form-item label="关键词（每行一条）">
-          <el-input v-model="editForm.keywords" type="textarea" :rows="3" />
-        </el-form-item>
-        <el-form-item label="路由摘要">
-          <el-input
-            v-model="editForm.routingSummary"
-            type="textarea"
-            :rows="4"
-            maxlength="1000"
-            show-word-limit
-          />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="editDraftOpen = false">取消</el-button>
-        <el-button
-          type="primary"
-          :loading="editingDraft ? store.isActionLoading(`profile-draft:${editingDraft.id}`) : false"
-          @click="saveDraft"
-        >
-          保存草稿
-        </el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 

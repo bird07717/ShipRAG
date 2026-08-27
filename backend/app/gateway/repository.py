@@ -122,26 +122,39 @@ class GatewayRepository:
                     await connection.execute(
                         text(
                             """
-                            SELECT kb.status, kb.active_index_id,
-                                   i.status AS index_status, i.embedding_model_name,
-                                   (SELECT count(*) FROM document_problem_profile p
-                                    WHERE p.kb_id = kb.id) AS profile_count,
+                            SELECT kb.status,
+                                   COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                                       AS rag_active_index_id,
+                                   COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                                       AS support_active_index_id,
+                                   ri.status AS rag_index_status,
+                                   ri.embedding_model_name,
+                                   si.status AS support_index_status,
+                                   (SELECT count(*) FROM document_profile p
+                                    WHERE p.kb_id = kb.id AND p.active_payload IS NOT NULL
+                                      AND p.enabled) AS profile_count,
                                    (SELECT count(*)
-                                    FROM document_problem_profile p
+                                    FROM document_profile p
                                     JOIN document_source d
                                       ON d.id = p.document_id AND d.kb_id = p.kb_id
-                                    WHERE p.kb_id = kb.id AND p.enabled
+                                    WHERE p.kb_id = kb.id AND p.active_payload IS NOT NULL
+                                      AND p.enabled
                                       AND d.status = 'STORED'
-                                      AND kb.active_index_id IS NOT NULL
+                                      AND COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                                          IS NOT NULL
                                       AND EXISTS (
                                           SELECT 1 FROM document_element e
-                                          WHERE e.index_id = kb.active_index_id
+                                          WHERE e.index_id = COALESCE(
+                                              kb.rag_active_index_id, kb.active_index_id
+                                          )
                                             AND e.document_id = p.document_id
                                       )
                                       AND NOT EXISTS (
                                           SELECT 1 FROM document_element e
                                           LEFT JOIN image_asset a ON a.element_id = e.id
-                                          WHERE e.index_id = kb.active_index_id
+                                          WHERE e.index_id = COALESCE(
+                                              kb.rag_active_index_id, kb.active_index_id
+                                          )
                                             AND e.document_id = p.document_id
                                             AND e.element_type = 'IMAGE' AND a.id IS NULL
                                       )) AS ready_profile_count,
@@ -149,7 +162,12 @@ class GatewayRepository:
                                        SELECT 1 FROM prompt_template WHERE active
                                    ) AS prompt_ready
                             FROM knowledge_base kb
-                            LEFT JOIN knowledge_index i ON i.id = kb.active_index_id
+                            LEFT JOIN knowledge_index ri ON ri.id = COALESCE(
+                                kb.rag_active_index_id, kb.active_index_id
+                            )
+                            LEFT JOIN knowledge_index si ON si.id = COALESCE(
+                                kb.rag_active_index_id, kb.active_index_id
+                            )
                             WHERE kb.id = :kb_id
                             """
                         ),
@@ -182,6 +200,10 @@ class GatewayRepository:
             rag_blockers.append("知识库已停用")
         if int(kb["ready_profile_count"] or 0) == 0:
             support_blockers.append("没有已发布就绪的 Problem Profile")
+        if kb["support_active_index_id"] is None:
+            support_blockers.append("知识库没有 Active Index")
+        elif kb["support_index_status"] != "ACTIVE":
+            support_blockers.append("Active Index 状态异常")
 
         llm = models.get("LLM")
         if llm is None:
@@ -194,9 +216,9 @@ class GatewayRepository:
             support_blockers.append("LLM API Key 未配置")
             rag_blockers.append("LLM API Key 未配置")
 
-        if kb["active_index_id"] is None:
+        if kb["rag_active_index_id"] is None:
             rag_blockers.append("知识库没有 Active Index")
-        elif kb["index_status"] != "ACTIVE":
+        elif kb["rag_index_status"] != "ACTIVE":
             rag_blockers.append("Active Index 状态异常")
         if not kb["prompt_ready"]:
             rag_blockers.append("Active Prompt 未配置")
@@ -220,7 +242,7 @@ class GatewayRepository:
             else self.settings.siliconflow_embedding_model
         )
         if (
-            kb["active_index_id"] is not None
+            kb["rag_active_index_id"] is not None
             and str(kb["embedding_model_name"]) != query_embedding_model
         ):
             rag_blockers.append("查询 Embedding 模型与 Active Index 快照不一致")

@@ -10,10 +10,10 @@ from uuid import UUID
 
 from app.common.errors import ApiError
 from app.core.config import Settings
-from app.rag.doc_router import ACTION_CLARIFY, ACTION_DELIVER
 from app.rag.llm import LlmError, create_llm_provider
+from app.rag.models import RetrievalConfig
 from app.support.document_delivery import deliver_document
-from app.support.document_router import SupportDocumentRouter
+from app.support.document_router import ACTION_CLARIFY, ACTION_DELIVER, SupportDocumentRouter
 from app.support.escalation import build_escalation
 from app.support.focused_assistant import FocusedSupportAssistant
 from app.support.models import ProblemDecision, ProblemProfile, SupportTurn
@@ -175,6 +175,7 @@ class TechnicalSupportService:
         include_images: bool = True,
         idempotency_key: str | None = None,
         return_internal_ids: bool = False,
+        retrieval_config: RetrievalConfig | None = None,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         clean_question = question.strip()
@@ -235,7 +236,8 @@ class TechnicalSupportService:
                     option = next(
                         (
                             item
-                            for item in pending if isinstance(item, dict)
+                            for item in pending
+                            if isinstance(item, dict)
                             and item.get("choice_id") == choice_id
                             and item.get("document_id")
                         ),
@@ -345,8 +347,13 @@ class TechnicalSupportService:
                                 knowledge_id=knowledge_id,
                                 index_id=turn.index_id,
                                 question=clean_question,
+                                retrieval=retrieval_config,
                             )
-                        if route is not None and route.action == ACTION_DELIVER and route.document_id:
+                        if (
+                            route is not None
+                            and route.action == ACTION_DELIVER
+                            and route.document_id
+                        ):
                             profile = await self.repository.get_profile_by_document(
                                 knowledge_id, route.document_id
                             )
@@ -403,7 +410,9 @@ class TechnicalSupportService:
                                             "method": "RAG_FALLBACK",
                                             "decision": ACTION_CLARIFY,
                                             "confidence": route.confidence,
-                                            "document_routing": route.trace.get("document_routing", {}),
+                                            "document_routing": route.trace.get(
+                                                "document_routing", {}
+                                            ),
                                         },
                                         "latency_ms": _elapsed(started),
                                     }
@@ -432,7 +441,9 @@ class TechnicalSupportService:
                                             "source": "PROFILE",
                                             "method": resolution.method,
                                             "decision": resolution.decision.value,
-                                            "rag_fallback": route.trace if route is not None else None,
+                                            "rag_fallback": route.trace
+                                            if route is not None
+                                            else None,
                                         },
                                         "latency_ms": _elapsed(started),
                                     }
@@ -454,9 +465,13 @@ class TechnicalSupportService:
                                                 if route is not None
                                                 else "PROFILE"
                                             ),
-                                            "method": "RAG_FALLBACK" if route is not None else resolution.method,
+                                            "method": "RAG_FALLBACK"
+                                            if route is not None
+                                            else resolution.method,
                                             "decision": "NO_MATCH",
-                                            "rag_fallback": route.trace if route is not None else None,
+                                            "rag_fallback": route.trace
+                                            if route is not None
+                                            else None,
                                         },
                                         "latency_ms": _elapsed(started),
                                     }

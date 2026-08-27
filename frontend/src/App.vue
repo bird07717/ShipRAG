@@ -57,6 +57,12 @@ const menuGroups: MenuGroup[] = [
     ],
   },
   {
+    label: "Support 管理",
+    items: [
+      { key: "support-review", label: "Profile Review", subtitle: "审核自动生成的 Support Profile 草稿", icon: Notebook },
+    ],
+  },
+  {
     label: "运维",
     items: [
       { key: "logs", label: "Logs & Traces", subtitle: "错误、失败任务与完整链路排查", icon: Tickets },
@@ -66,7 +72,7 @@ const menuGroups: MenuGroup[] = [
   {
     label: "高级工具",
     items: [
-      { key: "indexes", label: "Index Build", subtitle: "手工构建、快照与回收诊断", icon: Box },
+      { key: "indexes", label: "RAG Indexes", subtitle: "技术构建、快照与回收诊断", icon: Box },
       { key: "playground", label: "RAG Playground", subtitle: "检索、Prompt 与答案调试", icon: Operation },
     ],
   },
@@ -75,7 +81,7 @@ const menuGroups: MenuGroup[] = [
 const allItems = menuGroups.flatMap((group) => group.items);
 const legacyViewTargets: Record<string, { view: string; query?: string }> = {
   "support-configuration": { view: "indexes" },
-  "support-profiles": { view: "indexes" },
+  "support-profiles": { view: "support-review" },
   "support-errors": { view: "logs", query: "tab=failed-turns&engine=SUPPORT" },
   "rag-errors": { view: "logs", query: "tab=failed-turns&engine=RAG" },
   traces: { view: "logs", query: "tab=traces" },
@@ -207,8 +213,8 @@ const indexStats = computed(() => {
         <div class="page-body">
           <section v-if="activeView === 'dashboard'" class="panel index-note">
             <div class="index-note-text">
-              <h3>不可变索引发布</h3>
-              <p>构建在后台，切换在瞬间。线上请求始终冻结 Active Index；新快照完成验证后原子发布。</p>
+              <h3>双链路知识发布</h3>
+              <p>RAG 在技术构建成功后自动切换；Support Profile 经人工审核后独立发布。线上会话始终冻结各自使用的版本。</p>
             </div>
             <div class="index-stats">
               <div class="index-stat">

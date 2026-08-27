@@ -5,6 +5,9 @@ export interface KnowledgeBase {
   status: string;
   runtime_state: string;
   active_index_id: string | null;
+  rag_active_index_id?: string | null;
+  support_active_index_id?: string | null;
+  support_active_release_id?: string | null;
   building_index_id: string | null;
   rebuild_required: boolean;
   document_count: number;
@@ -48,6 +51,10 @@ export interface TaskSubmission {
 export interface GarbageCollectionResult {
   deleted_index_ids: string[];
   deleted_count: number;
+  skipped_index_ids?: string[];
+  skipped_count?: number;
+  purged_conversation_ids?: string[];
+  purged_conversation_count?: number;
 }
 
 export interface DocumentDeleteResult {
@@ -188,6 +195,10 @@ export type RagConfigUpdatePayload = Partial<Omit<RagConfig, "updated_at">>;
 
 export type ExecutionPolicy = "SUPPORT_ONLY" | "RAG_ONLY" | "SUPPORT_WITH_RAG_FALLBACK";
 
+export interface EngineRetrievalConfig extends RagConfig {
+  execution_policy: ExecutionPolicy;
+}
+
 export interface RuntimePolicy {
   knowledge_id: string;
   execution_policy: ExecutionPolicy;
@@ -240,7 +251,7 @@ export interface ProblemProfile {
   updated_at: string;
 }
 
-export type ProfileDraftOperation = "CREATE" | "UPDATE" | "NONE";
+export type ProfileDraftOperation = "CREATE" | "UPDATE" | "REMOVE" | "NONE";
 export type ProfileDraftStatus = "DRAFT" | "APPROVED" | "REJECTED" | "PUBLISHED";
 export type ProfileQualityStatus = "PASS" | "REVIEW_REQUIRED" | "FALLBACK" | "MANUAL_REVIEWED";
 
@@ -289,6 +300,72 @@ export interface DocumentProfileContext {
   document_id: string;
   published_profile: PublishedProfileSummary | null;
   candidate_draft: CandidateProfileDraftSummary | null;
+  profile_status?: DocumentProfileStatus;
+  active_profile?: DocumentProfilePayload | null;
+  pending_profile?: DocumentProfilePayload | null;
+  pending_state?: Exclude<DocumentProfileStatus, "ONLINE" | "NOT_GENERATED" | "GENERATING" | "DISABLED"> | null;
+  pending_error_code?: string | null;
+  pending_error_message?: string | null;
+}
+
+export type DocumentProfileStatus =
+  | "NOT_GENERATED"
+  | "GENERATING"
+  | "PENDING_ONLINE"
+  | "ONLINE"
+  | "NEEDS_ATTENTION"
+  | "DISABLED"
+  | "FAILED";
+
+export interface DocumentProfileIntent {
+  problem_code: string;
+  canonical_question: string;
+  aliases: string[];
+  keywords: string[];
+  product_name?: string | null;
+  model_names?: string[];
+  task_type?: string | null;
+  routing_summary?: string;
+  symptoms?: string[];
+  exclusions?: string[];
+  enabled?: boolean;
+  confidence?: number;
+}
+
+export interface DocumentProfilePayload {
+  intents: DocumentProfileIntent[];
+}
+
+export interface DocumentProfileSummary {
+  document_id: string;
+  document_name: string;
+  document_status: string;
+  profile_status: DocumentProfileStatus;
+  active_profile: DocumentProfilePayload | null;
+  pending_profile: DocumentProfilePayload | null;
+  pending_state: string | null;
+  pending_error_code: string | null;
+  pending_error_message: string | null;
+  active_updated_at: string | null;
+  pending_updated_at: string | null;
+}
+
+export interface KnowledgeProfileSummary {
+  knowledge_id: string;
+  online_count: number;
+  pending_count: number;
+  attention_count: number;
+  failed_count: number;
+  generating_count: number;
+  profiles: DocumentProfileSummary[];
+}
+
+export interface ProfilePublishCheck {
+  valid: boolean;
+  publishable: boolean;
+  pending_count: number;
+  errors: ValidationIssue[];
+  warnings: ValidationIssue[];
 }
 
 export interface ValidationIssue {
@@ -379,6 +456,27 @@ export interface KnowledgeRelease {
   created_at: string;
   updated_at: string;
   published_at: string | null;
+}
+
+export interface ReleaseRebaseResult {
+  source_release_id: string;
+  target_release_id: string;
+  target_index_id: string;
+  target_index_version: number;
+  reused_draft_count: number;
+  review_required_draft_count: number;
+  regenerate_document_count: number;
+  remove_suggestion_count: number;
+  create_suggestion_count: number;
+  backfill_submitted: boolean;
+}
+
+export interface SupportReleaseRollbackResult {
+  support_active_release_id: string | null;
+  support_active_index_id: string | null;
+  index_version: number | null;
+  published_at: string | null;
+  rolled_back_to_release_id: string;
 }
 
 export interface ProfileFeedback {

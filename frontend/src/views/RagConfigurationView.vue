@@ -1,9 +1,16 @@
 <script setup lang="ts">
-import { onMounted, reactive } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 
 import { useRagAdminStore } from "@/composables/ragAdminStore";
+import type { ExecutionPolicy } from "@/types/admin";
 
 const rag = useRagAdminStore();
+const activePolicy = ref<ExecutionPolicy>("RAG_ONLY");
+const policies: Array<{ value: ExecutionPolicy; label: string; description: string }> = [
+  { value: "SUPPORT_ONLY", label: "Support only", description: "Profile 未命中时的 Support 内部文档召回。" },
+  { value: "SUPPORT_WITH_RAG_FALLBACK", label: "Support + RAG 兜底", description: "同时控制 Support 文档召回与后续 Generic RAG 兜底。" },
+  { value: "RAG_ONLY", label: "RAG only", description: "直接进入 Generic RAG 的检索配置。" },
+];
 
 const fields = [
   { key: "vector_top_k", label: "向量召回 Top K" },
@@ -22,11 +29,23 @@ const form = reactive<Record<FieldKey, number>>({
   context_max_chunks: 8,
 });
 
-async function load(): Promise<void> {
-  await rag.run(() => rag.loadConfiguration());
-  if (rag.config) {
-    for (const field of fields) form[field.key] = rag.config[field.key];
+const currentPolicy = computed(() => policies.find((item) => item.value === activePolicy.value)!);
+
+function syncForm(): void {
+  const config = rag.engineConfigs.find((item) => item.execution_policy === activePolicy.value);
+  if (config) {
+    for (const field of fields) form[field.key] = config[field.key];
   }
+}
+
+function selectPolicy(policy: ExecutionPolicy): void {
+  activePolicy.value = policy;
+  syncForm();
+}
+
+async function load(): Promise<void> {
+  await rag.run(() => rag.loadEngineConfigurations());
+  syncForm();
 }
 
 onMounted(() => void load());
@@ -48,7 +67,7 @@ onMounted(() => void load());
       show-icon
     />
     <el-alert
-      title="这是系统级全局 RAG 配置，影响所有进入 RAG 的知识库和下一轮 RAG 请求。总引擎策略请在 Engine Routing 页面管理。"
+      title="配置按 Engine Routing 策略生效。知识库选择哪种策略，就在每次新请求中使用该策略的检索参数；会话仍固定在创建时的索引版本。"
       type="warning"
       :closable="false"
       show-icon
@@ -56,18 +75,23 @@ onMounted(() => void load());
     <section class="panel">
       <header class="panel-header">
         <div>
-          <h3>Generic RAG 全局配置</h3>
-          <span class="sub">独立管理召回、融合、重排和上下文规模</span>
+          <h3>{{ currentPolicy.label }} 检索配置</h3>
+          <span class="sub">{{ currentPolicy.description }}</span>
         </div>
       </header>
       <div class="panel-body config-grid">
+        <el-radio-group :model-value="activePolicy" @update:model-value="selectPolicy">
+          <el-radio-button v-for="policy in policies" :key="policy.value" :label="policy.value">
+            {{ policy.label }}
+          </el-radio-button>
+        </el-radio-group>
         <div v-for="field in fields" :key="field.key" class="param-row">
           <label>{{ field.label }}</label>
           <el-input-number v-model="form[field.key]" :min="1" :max="100" />
         </div>
         <div class="actions">
-          <el-button type="primary" :loading="rag.loading" @click="rag.saveConfig({ ...form })">
-            保存全局 RAG 检索配置
+          <el-button type="primary" :loading="rag.loading" @click="rag.saveEngineConfig(activePolicy, { ...form })">
+            保存当前策略配置
           </el-button>
         </div>
       </div>

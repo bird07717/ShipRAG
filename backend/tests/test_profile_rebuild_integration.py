@@ -32,7 +32,6 @@ from app.releases.repository import ReleaseRepository
 from app.releases.service import ReleaseService
 from app.services.ingestion import IngestionService
 from app.tasks.ingestion import _submit_post_build_profile
-from app.tasks.repository import TaskRecordRepository
 
 pytestmark = pytest.mark.asyncio
 

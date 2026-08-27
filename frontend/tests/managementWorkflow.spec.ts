@@ -2,10 +2,10 @@ import ElementPlus from "element-plus";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { adminStore } from "@/composables/adminStore";
 import { adminApi } from "@/api/admin";
+import { adminStore } from "@/composables/adminStore";
 import IndexBuildView from "@/views/IndexBuildView.vue";
-import type { KnowledgeIndex, KnowledgeRelease } from "@/types/admin";
+import type { KnowledgeIndex } from "@/types/admin";
 
 const index: KnowledgeIndex = {
   id: "idx-2",
@@ -27,7 +27,7 @@ const index: KnowledgeIndex = {
   activated_at: null,
 };
 
-describe("RAG index publication workflow", () => {
+describe("RAG index operations workspace", () => {
   beforeEach(() => {
     adminStore.selectedKnowledgeId = "kb-1";
     adminStore.indexes = [index];
@@ -42,38 +42,52 @@ describe("RAG index publication workflow", () => {
     vi.restoreAllMocks();
   });
 
-  it("keeps a READY candidate in Index Build until its Profile drafts are reviewed", async () => {
-    const release: KnowledgeRelease = {
-      id: "release-2",
-      kb_id: "kb-1",
-      index_id: "idx-2",
-      index_version: 2,
-      index_status: "READY",
-      status: "DRAFT",
-      validation_result: { valid: true, publishable: false, review_required_count: 1 },
-      generation_error: null,
-      draft_count: 1,
-      approved_count: 0,
-      drafts: [],
-      created_at: "2026-08-25T00:00:00Z",
-      updated_at: "2026-08-25T00:01:00Z",
-      published_at: null,
-    };
-    adminStore.releases = [release];
-    vi.spyOn(adminApi, "getKnowledgeRelease").mockResolvedValue(release);
-    const activate = vi.spyOn(adminStore, "activateIndex").mockResolvedValue();
+  it("keeps Index Build limited to technical operations", async () => {
     const wrapper = mount(IndexBuildView, { global: { plugins: [ElementPlus] } });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("审核发布");
-    expect(wrapper.text()).toContain("审核并发布");
+    expect(wrapper.text()).toContain("RAG 技术构建、任务诊断和回收");
+    expect(wrapper.text()).not.toContain("发布 Support");
+    expect(wrapper.text()).not.toContain("编辑 Profile 草稿");
+    expect(wrapper.findAll("button").some((button) => button.text().includes("前往 Profile Review"))).toBe(false);
+  });
 
-    const publish = wrapper.findAll("button").find((button) => button.text().includes("审核并发布"));
-    await publish!.trigger("click");
+  it("rolls the RAG index back only through an explicit confirmation", async () => {
+    const { ElMessageBox } = await import("element-plus");
+    const confirm = vi.spyOn(ElMessageBox, "confirm").mockResolvedValue({
+      action: "confirm",
+    } as never);
+    const deprecated: KnowledgeIndex = { ...index, id: "idx-1", version: 1, status: "DEPRECATED" };
+    adminStore.indexes = [deprecated];
+    const rollback = vi
+      .spyOn(adminApi, "rollbackRagIndex")
+      .mockResolvedValue({ ...deprecated, status: "ACTIVE" });
+
+    const wrapper = mount(IndexBuildView, { global: { plugins: [ElementPlus] } });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("候选发布");
-    expect(wrapper.text()).toContain("仍有 1 条草稿待审核");
-    expect(activate).not.toHaveBeenCalled();
+    const button = wrapper.findAll("button").find((b) => b.text().includes("回滚 RAG"));
+    expect(button).toBeDefined();
+    await button!.trigger("click");
+    await flushPromises();
+
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("显式将 RAG 在线索引回滚到 Index v1"),
+      "回滚 RAG Index",
+      expect.objectContaining({ confirmButtonText: "确认回滚" }),
+    );
+    expect(rollback).toHaveBeenCalledWith("kb-1", "idx-1");
+  });
+
+  it("never offers a rollback for the building or currently active index", async () => {
+    const building: KnowledgeIndex = { ...index, status: "BUILDING" };
+    adminStore.indexes = [building];
+
+    const wrapper = mount(IndexBuildView, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+
+    expect(
+      wrapper.findAll("button").some((b) => b.text().includes("回滚 RAG")),
+    ).toBe(false);
   });
 });

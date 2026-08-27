@@ -112,12 +112,14 @@ onMounted(() => void load());
               <strong>{{ supportReady ? "READY" : "NOT READY" }}</strong>
               <small>{{ supportReadiness?.ready_profile_count ?? 0 }} / {{ supportReadiness?.profile_count ?? 0 }} 个 Profile 已发布就绪</small>
               <small v-if="supportReadiness?.blockers.length">{{ supportReadiness.blockers.join("；") }}</small>
+              <small>Support Release：{{ selectedKnowledge?.support_active_release_id || "未发布" }}</small>
+              <small>Support Index：{{ selectedKnowledge?.support_active_index_id || "无" }}</small>
             </article>
             <article :class="['readiness-card', { ready: ragReady }]">
               <span>Generic RAG</span>
               <strong>{{ ragReady ? "READY" : "NOT READY" }}</strong>
               <small v-if="ragReadiness?.blockers.length">{{ ragReadiness.blockers.join("；") }}</small>
-              <small>Active Index：{{ selectedKnowledge?.active_index_id || "无" }}</small>
+              <small>RAG Active Index：{{ selectedKnowledge?.rag_active_index_id || selectedKnowledge?.active_index_id || "无" }}</small>
             </article>
           </div>
 

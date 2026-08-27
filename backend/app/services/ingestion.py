@@ -293,10 +293,16 @@ class IngestionService:
 
         Two-phase: mark DELETING, then physically delete (DB CASCADE + MinIO).
         Also recovers indexes stuck in DELETING from a previous crash.
+        Long-idle conversations past the retention window are purged first so
+        their frozen index references stop blocking collection; the purged ids
+        are reported back for audit.
         """
         retention_count = self.settings.index_gc_retention_count
         retention_days = self.settings.index_gc_retention_days
 
+        purged_conversation_ids = await self.repository.purge_expired_conversations(
+            self.settings.conversation_retention_days, kb_id=kb_id
+        )
         stuck = await self.repository.find_deleting_indexes()
         deletable = await self.repository.find_deletable_indexes(retention_count, retention_days)
         if kb_id is not None:
@@ -304,6 +310,7 @@ class IngestionService:
             deletable = [item for item in deletable if item.kb_id == kb_id]
 
         deleted_ids: list[str] = []
+        skipped_ids: list[str] = []
         for item in stuck + deletable:
             index_id = item.index_id
             if item.status != "DELETING":
@@ -311,12 +318,24 @@ class IngestionService:
                 if marked is None:
                     continue
             image_assets = await self.repository.list_image_assets_for_index(index_id)
-            await self.repository.delete_index(index_id)
+            deleted = await self.repository.delete_index(index_id)
+            if not deleted:
+                # A pointer appeared after the DELETING mark; the repository
+                # restored the index instead of destroying protected data.
+                skipped_ids.append(str(index_id))
+                continue
             for asset in image_assets:
                 await self._remove_minio_object(asset["minio_bucket"], asset["minio_object_key"])
             deleted_ids.append(str(index_id))
 
-        return {"deleted_index_ids": deleted_ids, "deleted_count": len(deleted_ids)}
+        return {
+            "deleted_index_ids": deleted_ids,
+            "deleted_count": len(deleted_ids),
+            "skipped_index_ids": skipped_ids,
+            "skipped_count": len(skipped_ids),
+            "purged_conversation_ids": purged_conversation_ids[:100],
+            "purged_conversation_count": len(purged_conversation_ids),
+        }
 
     async def delete_index(self, index_id: UUID) -> dict[str, Any]:
         """Force delete a specific index regardless of retention policy."""
@@ -327,10 +346,14 @@ class IngestionService:
         if index["status"] != "DELETING":
             marked = await self.repository.mark_index_deleting(index_id)
             if marked is None:
-                raise ApiError("INDEX_NOT_FOUND", "索引不存在或状态已变更", 404)
+                raise ApiError("INDEX_NOT_FOUND", "索引不存在或仍被线上引用", 404)
 
         image_assets = await self.repository.list_image_assets_for_index(index_id)
-        await self.repository.delete_index(index_id)
+        deleted = await self.repository.delete_index(index_id)
+        if not deleted:
+            raise ApiError(
+                "INDEX_REFERENCE_PROTECTED", "索引仍被线上版本或冻结会话引用，已取消删除", 409
+            )
         for asset in image_assets:
             await self._remove_minio_object(asset["minio_bucket"], asset["minio_object_key"])
         return {"deleted_index_ids": [str(index_id)], "deleted_count": 1}

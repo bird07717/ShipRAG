@@ -217,6 +217,81 @@ describe("adminStore", () => {
     expect(adminStore.notice).toBe("Profile 重建已完成");
   });
 
+  it("synchronizes a running Profile task into the review progress state", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.trackTask(
+      { task_id: "task-profile-running", task_type: "PROFILE_REFRESH", status: "QUEUED", replayed: false },
+      { successMessage: "Profile 重建已完成", knowledgeId: kb.id },
+    );
+    vi.spyOn(adminApi, "getTask").mockResolvedValue({
+      id: "task-profile-running",
+      task_type: "PROFILE_REFRESH",
+      status: "RUNNING",
+      stage: "GENERATING",
+      progress: 55,
+      attempt: 1,
+      kb_id: kb.id,
+      index_id: "idx-1",
+      document_id: null,
+      error_code: null,
+      error_message: null,
+      metadata: { generated_count: 3, document_count: 5 },
+      created_at: "2026-08-26T00:00:00Z",
+      started_at: "2026-08-26T00:00:01Z",
+      finished_at: null,
+      updated_at: "2026-08-26T00:00:02Z",
+    });
+
+    await adminStore.pollTrackedTasks();
+
+    expect(adminStore.trackedTasks).toHaveLength(1);
+    expect(adminStore.latestProfileTasks["idx-1"]).toMatchObject({
+      status: "RUNNING",
+      stage: "GENERATING",
+      progress: 55,
+      metadata: { generated_count: 3, document_count: 5 },
+    });
+  });
+
+  it("shows a submitted Profile refresh immediately even before index-task listing catches up", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.indexes = [index];
+    vi.spyOn(adminApi, "refreshProfileDrafts").mockResolvedValue({
+      task_id: "task-profile-submitted",
+      task_type: "PROFILE_REFRESH",
+      status: "QUEUED",
+      replayed: false,
+    });
+    vi.spyOn(adminApi, "getTask").mockResolvedValue({
+      id: "task-profile-submitted",
+      task_type: "PROFILE_REFRESH",
+      status: "RUNNING",
+      stage: "GENERATING",
+      progress: 5,
+      attempt: 1,
+      kb_id: kb.id,
+      index_id: index.id,
+      document_id: null,
+      error_code: null,
+      error_message: null,
+      metadata: { generated_count: 0, document_count: 2 },
+      created_at: "2026-08-26T00:00:00Z",
+      started_at: "2026-08-26T00:00:01Z",
+      finished_at: null,
+      updated_at: "2026-08-26T00:00:02Z",
+    });
+
+    await adminStore.refreshProfileDrafts(index.id);
+
+    expect(adminStore.latestProfileTasks[index.id]).toMatchObject({
+      id: "task-profile-submitted",
+      status: "RUNNING",
+      progress: 5,
+    });
+  });
+
   it("uploads a document for the selected knowledge base", async () => {
     stubApi();
     adminStore.selectedKnowledgeId = "kb-1";
@@ -225,41 +300,43 @@ describe("adminStore", () => {
     await adminStore.upload(new File(["x"], "a.docx"));
     expect(upload).toHaveBeenCalledWith("kb-1", expect.any(File), expect.any(String));
     expect(adminStore.uploadDrawerOpen).toBe(false);
-    expect(adminStore.notice).toBe("文档已上传，RAG 索引构建已提交；完成后请在 Index Build 审核发布");
+    expect(adminStore.notice).toBe(
+      "文档已上传，RAG 索引构建已提交；构建成功后自动生效，Profile 请在 Profile Review 审核",
+    );
   });
 
-  it("submits a knowledge profile rebuild and tracks the returned task", async () => {
+  it("submits document-attribute generation from the knowledge entry", async () => {
     stubApi();
     adminStore.knowledgeBases = [kb];
     vi.spyOn(ElMessageBox, "confirm").mockResolvedValue({ action: "confirm" } as never);
-    const rebuild = vi.spyOn(adminApi, "rebuildKnowledgeProfiles").mockResolvedValue({
+    const generate = vi.spyOn(adminApi, "generateKnowledgeProfiles").mockResolvedValue({
       task_id: "task-rebuild",
-      task_type: "PROFILE_REFRESH",
+      task_type: "DOCUMENT_PROFILE_GENERATE",
       status: "QUEUED",
       replayed: false,
     });
 
-    await adminStore.rebuildKnowledgeProfiles(kb);
+    await adminStore.regenerateKnowledgeProfiles(kb);
 
-    expect(rebuild).toHaveBeenCalledWith(kb.id);
+    expect(generate).toHaveBeenCalledWith(kb.id);
     expect(adminStore.trackedTasks).toEqual([
       expect.objectContaining({
         taskId: "task-rebuild",
-        taskType: "PROFILE_REFRESH",
+        taskType: "DOCUMENT_PROFILE_GENERATE",
         knowledgeId: kb.id,
       }),
     ]);
-    expect(adminStore.notice).toBe("Profile 重建任务已提交；完成后将弹出提醒");
+    expect(adminStore.notice).toBe("全部待上线 Profile 属性生成任务已提交；完成后将弹出提醒");
   });
 
-  it("skips the profile rebuild when the confirmation is dismissed", async () => {
+  it("skips document-attribute generation when the confirmation is dismissed", async () => {
     stubApi();
     vi.spyOn(ElMessageBox, "confirm").mockRejectedValue(new Error("cancel"));
-    const rebuild = vi.spyOn(adminApi, "rebuildKnowledgeProfiles");
+    const generate = vi.spyOn(adminApi, "generateKnowledgeProfiles");
 
-    await adminStore.rebuildKnowledgeProfiles(kb);
+    await adminStore.regenerateKnowledgeProfiles(kb);
 
-    expect(rebuild).not.toHaveBeenCalled();
+    expect(generate).not.toHaveBeenCalled();
     expect(adminStore.trackedTasks).toEqual([]);
   });
 

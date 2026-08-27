@@ -15,6 +15,8 @@ from app.api.schemas import (
     ChatRequest,
     ChatResponse,
     ChatStreamRequest,
+    EngineRetrievalConfigResponse,
+    EngineRetrievalConfigUpdate,
     MessageResponse,
     ModelConfigResponse,
     ModelConfigUpdate,
@@ -247,6 +249,33 @@ async def update_rag_config(
         fusion_top_k=payload.fusion_top_k,
         rerank_top_n=payload.rerank_top_n,
         context_max_chunks=payload.context_max_chunks,
+    )
+
+
+@router.get(
+    "/engine-retrieval-configs",
+    response_model=list[EngineRetrievalConfigResponse],
+    tags=["rag-config"],
+)
+async def list_engine_retrieval_configs(
+    repository: Annotated[RagRepository, Depends(get_rag_repository)],
+) -> list[dict[str, Any]]:
+    return await repository.list_engine_retrieval_configs()
+
+
+@router.patch(
+    "/engine-retrieval-configs/{execution_policy}",
+    response_model=EngineRetrievalConfigResponse,
+    tags=["rag-config"],
+)
+async def update_engine_retrieval_config(
+    execution_policy: Literal["SUPPORT_ONLY", "RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"],
+    payload: EngineRetrievalConfigUpdate,
+    repository: Annotated[RagRepository, Depends(get_rag_repository)],
+) -> dict[str, Any]:
+    return await repository.update_engine_retrieval_config(
+        execution_policy,
+        **payload.model_dump(exclude_none=True),
     )
 
 

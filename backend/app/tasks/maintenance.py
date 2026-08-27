@@ -69,6 +69,13 @@ async def _run_maintenance_task(task_id: UUID) -> dict[str, Any]:
                 result = await ReleaseService(
                     ReleaseRepository(resources.database), settings
                 ).execute_profile_task(task, records)
+            elif task_type == "DOCUMENT_PROFILE_GENERATE":
+                from app.document_profiles.repository import DocumentProfileRepository
+                from app.document_profiles.service import DocumentProfileService
+
+                result = await DocumentProfileService(
+                    DocumentProfileRepository(resources.database), settings
+                ).execute_generation_task(task, records)
             else:
                 raise ApiError("TASK_TYPE_NOT_SUPPORTED", f"不支持的后台任务类型：{task_type}", 409)
         except Exception as exc:

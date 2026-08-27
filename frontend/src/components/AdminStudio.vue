@@ -13,6 +13,7 @@ import LogsView from "@/views/LogsView.vue";
 import PlaygroundView from "@/views/PlaygroundView.vue";
 import ConfigurationView from "@/views/ConfigurationView.vue";
 import EngineRoutingView from "@/views/EngineRoutingView.vue";
+import SupportReviewView from "@/views/SupportReviewView.vue";
 import ConversationTimeline from "@/components/ConversationTimeline.vue";
 
 const props = defineProps<{ view: string; navigationQuery?: string }>();
@@ -28,6 +29,7 @@ const views: Record<string, Component> = {
   playground: PlaygroundView,
   configuration: ConfigurationView,
   "engine-routing": EngineRoutingView,
+  "support-review": SupportReviewView,
 };
 
 const viewProps = computed(() =>

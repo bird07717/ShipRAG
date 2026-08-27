@@ -9,6 +9,7 @@ from uuid import UUID
 from app.common.errors import ApiError
 from app.gateway.models import ChatEngine, ResolvedPolicy
 from app.gateway.repository import GatewayRepository
+from app.rag.models import RetrievalConfig
 from app.services.rag import RagService
 from app.support.service import TechnicalSupportService
 
@@ -70,6 +71,7 @@ class ChatGatewayService:
                 question=question,
                 request_id=request_id,
                 user_id=user_id,
+                retrieval_overrides=await self._retrieval_overrides(policy),
             )
             await self._freeze(response, policy, ChatEngine.RAG)
             response["execution_engine"] = ChatEngine.RAG.value
@@ -87,6 +89,7 @@ class ChatGatewayService:
             include_images=include_images,
             idempotency_key=idempotency_key,
             return_internal_ids=True,
+            retrieval_config=await self._retrieval_config(policy),
         )
         response_type = str(support_response.get("response_type", ""))
         replayed_gateway = support_response.pop("_gateway_response", None)
@@ -116,6 +119,7 @@ class ChatGatewayService:
             ),
             parent_trace_id=UUID(str(support_response["trace_id"])),
             fallback_reason=response_type,
+            retrieval_overrides=await self._retrieval_overrides(policy),
         )
         await self.repository.link_fallback(
             support_trace_id=UUID(str(support_response["trace_id"])),
@@ -151,7 +155,11 @@ class ChatGatewayService:
                 return
 
             yield _sse("status", {"stage": "support_processing", "engine": "SUPPORT"})
-            support_response = await self.support.handle(**kwargs, return_internal_ids=True)
+            support_response = await self.support.handle(
+                **kwargs,
+                return_internal_ids=True,
+                retrieval_config=await self._retrieval_config(policy),
+            )
             response_type = str(support_response.get("response_type", ""))
             replayed_gateway = support_response.pop("_gateway_response", None)
             message_pair = support_response.pop("_fallback_message_pair", {})
@@ -259,6 +267,7 @@ class ChatGatewayService:
             ),
             parent_trace_id=parent_trace_id,
             fallback_reason=fallback_reason,
+            retrieval_overrides=await self._retrieval_overrides(policy),
         ):
             done = _event_payload(frame, "done")
             if done is not None:
@@ -292,6 +301,19 @@ class ChatGatewayService:
             product_name="",
             scope_description=_PRODUCT_SCOPE,
         )
+
+    async def _retrieval_config(self, policy: ResolvedPolicy) -> RetrievalConfig:
+        return await self.rag.repository.get_engine_retrieval_config(policy.policy.value)
+
+    async def _retrieval_overrides(self, policy: ResolvedPolicy) -> dict[str, int]:
+        config = await self._retrieval_config(policy)
+        return {
+            "vector_top_k": config.vector_top_k,
+            "bm25_top_k": config.bm25_top_k,
+            "fusion_top_k": config.fusion_top_k,
+            "rerank_top_n": config.rerank_top_n,
+            "context_max_chunks": config.context_max_chunks,
+        }
 
     async def _freeze(
         self, response: dict[str, Any], policy: ResolvedPolicy, engine: ChatEngine

@@ -9,6 +9,8 @@ from rq import Queue
 
 from app.core.config import Settings, get_settings
 from app.core.resources import AppResources
+from app.document_profiles.repository import DocumentProfileRepository
+from app.document_profiles.service import DocumentProfileService
 from app.ingestion.embedding import create_embedding_provider
 from app.ingestion.image_understanding import (
     create_ocr_provider,
@@ -17,9 +19,6 @@ from app.ingestion.image_understanding import (
 from app.ingestion.model_config import load_build_models
 from app.ingestion.pipeline import IndexBuildResult, IndexPipeline
 from app.ingestion.repository import BuildReference, IngestionRepository
-from app.releases.repository import ReleaseRepository
-from app.releases.service import ReleaseService
-from app.tasks.repository import TaskRecordRepository
 
 logger = logging.getLogger(__name__)
 
@@ -52,58 +51,26 @@ async def _submit_post_build_profile(
     result: IndexBuildResult,
     task_id: UUID,
 ) -> None:
-    """Submit the follow-on Profile task after a successful index build.
+    """Generate pending document attributes after a successful RAG build.
 
-    ``profile_refresh_after_build`` marks a build that was orchestrated by the
-    Knowledge-level Profile rebuild entry point.  Losing that submission must
-    fail the orchestrated task with a readable error, because the user's
-    requested outcome is the refresh, not the build.  The default build-time
-    generation degrades to a release ``generation_error`` instead, so a queue
-    or LLM issue never turns a complete candidate index into a failed build.
+    Profile generation is best-effort: it never creates an index-bound
+    candidate and a queue/model failure never fails the completed RAG build.
     """
-    records = TaskRecordRepository(resources.database)
-    task = await records.get(task_id)
-    intent = bool(
-        (dict(task.get("metadata") or {}) if task else {}).get("profile_refresh_after_build")
-    )
-
     if result.followup_build is not None:
-        # A newer candidate already superseded this release (documents changed
-        # mid-build), so its release is cancelled and refreshing it would fail.
-        # Carry the intent to the followup build instead.
-        if intent and result.followup_build.task_id is not None:
-            await records.merge_metadata(
-                result.followup_build.task_id, {"profile_refresh_after_build": True}
-            )
         return
 
-    release_service = ReleaseService(ReleaseRepository(resources.database), settings)
+    index = await IngestionRepository(resources.database, settings).get_index(result.index_id)
+    knowledge_id = UUID(str(index["kb_id"]))
     try:
-        submission = await release_service.request_profile_task(
-            result.index_id,
-            task_type="PROFILE_REFRESH" if intent else "PROFILE_GENERATE",
+        await DocumentProfileService(
+            DocumentProfileRepository(resources.database), settings
+        ).request_generation(
+            knowledge_id
         )
-    except Exception as exc:
-        if not intent:
-            logger.exception("Could not submit Profile generation for index %s", result.index_id)
-            release = await release_service.repository.get_release_for_index(result.index_id)
-            if release is not None:
-                await release_service.repository.set_generation_error(
-                    UUID(str(release["id"])), f"{type(exc).__name__}: {exc}"[:500]
-                )
-            return
-        await records.fail(task_id, exc)
-        logger.error(
-            "Profile refresh after orchestrated build failed for index %s: %s",
-            result.index_id,
-            exc,
+    except Exception:
+        logger.exception(
+            "Could not submit document Profile generation for index %s", result.index_id
         )
-        raise
-
-    if intent and not submission.get("replayed"):
-        # Chain the Profile task to its build task so the task center can keep
-        # tracking the rebuild until the refresh itself finishes.
-        await records.merge_metadata(task_id, {"profile_task_id": str(submission["task_id"])})
 
 
 async def _run_index_task(index_id: UUID, task_id: UUID) -> dict[str, int | str]:

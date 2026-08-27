@@ -17,7 +17,11 @@ class KnowledgeBaseResponse(BaseModel):
     name: str
     description: str | None
     status: Literal["ENABLED", "DISABLED", "DELETING"]
+    # active_index_id is the rolling compatibility alias for RAG.
     active_index_id: UUID | None
+    rag_active_index_id: UUID | None = None
+    support_active_index_id: UUID | None = None
+    support_active_release_id: UUID | None = None
     rebuild_required: bool
     runtime_state: str
     created_at: datetime
@@ -83,6 +87,74 @@ class DocumentProfileContextResponse(BaseModel):
     document_id: UUID
     published_profile: PublishedProfileSummary | None = None
     candidate_draft: CandidateProfileDraftSummary | None = None
+    # Attribute-model fields.  Legacy names above remain optional during the
+    # compatibility window so older admin clients keep rendering safely.
+    profile_status: str = "NOT_GENERATED"
+    active_profile: dict[str, Any] | None = None
+    pending_profile: dict[str, Any] | None = None
+    pending_state: str | None = None
+    pending_error_code: str | None = None
+    pending_error_message: str | None = None
+
+
+class DocumentProfilePatchRequest(BaseModel):
+    """A one-intent edit submitted from Profile Review.
+
+    The stored payload supports multiple intents, while the first UI release
+    keeps the existing familiar single-Profile editor.  This prevents an
+    unnecessary workflow change and remains forward compatible.
+    """
+
+    problem_code: str = Field(min_length=1, max_length=100)
+    canonical_question: str = Field(min_length=1, max_length=500)
+    aliases: list[str] = Field(default_factory=list, max_length=10)
+    keywords: list[str] = Field(default_factory=list, max_length=12)
+    product_name: str | None = Field(default=None, max_length=200)
+    model_names: list[str] = Field(default_factory=list, max_length=10)
+    task_type: str | None = Field(default=None, max_length=50)
+    routing_summary: str = Field(default="", max_length=1_000)
+    symptoms: list[str] = Field(default_factory=list, max_length=12)
+    exclusions: list[str] = Field(default_factory=list, max_length=8)
+    enabled: bool = True
+
+    @field_validator("aliases", "keywords", "model_names", "symptoms", "exclusions")
+    @classmethod
+    def non_empty_items(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("列表项不能为空")
+        return list(dict.fromkeys(item.strip() for item in value))
+
+
+class DocumentProfileSummaryResponse(BaseModel):
+    document_id: UUID
+    document_name: str
+    document_status: str
+    profile_status: str
+    active_profile: dict[str, Any] | None = None
+    pending_profile: dict[str, Any] | None = None
+    pending_state: str | None = None
+    pending_error_code: str | None = None
+    pending_error_message: str | None = None
+    active_updated_at: datetime | None = None
+    pending_updated_at: datetime | None = None
+
+
+class KnowledgeProfileSummaryResponse(BaseModel):
+    knowledge_id: UUID
+    online_count: int = 0
+    pending_count: int = 0
+    attention_count: int = 0
+    failed_count: int = 0
+    generating_count: int = 0
+    profiles: list[DocumentProfileSummaryResponse] = Field(default_factory=list)
+
+
+class ProfilePublishCheckResponse(BaseModel):
+    valid: bool
+    publishable: bool
+    pending_count: int = 0
+    errors: list[dict[str, str]] = Field(default_factory=list)
+    warnings: list[dict[str, str]] = Field(default_factory=list)
 
 
 class DocumentResponse(BaseModel):
@@ -123,6 +195,10 @@ class IndexBuildResponse(BaseModel):
 class GarbageCollectionResponse(BaseModel):
     deleted_index_ids: list[str]
     deleted_count: int
+    skipped_index_ids: list[str] = []
+    skipped_count: int = 0
+    purged_conversation_ids: list[str] = []
+    purged_conversation_count: int = 0
 
 
 class DocumentUploadResponse(BaseModel):
@@ -690,6 +766,14 @@ class RagConfigUpdate(BaseModel):
         ):
             raise ValueError("至少提供一个待更新字段")
         return self
+
+
+class EngineRetrievalConfigResponse(RagConfigResponse):
+    execution_policy: Literal["SUPPORT_ONLY", "RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"]
+
+
+class EngineRetrievalConfigUpdate(RagConfigUpdate):
+    pass
 
 
 class ChatRequest(BaseModel):

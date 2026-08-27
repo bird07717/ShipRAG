@@ -5,6 +5,9 @@ import { adminApi } from "@/api/admin";
 import type {
   DocumentItem,
   DocumentProfileContext,
+  KnowledgeProfileSummary,
+  ProfilePublishCheck,
+  DocumentProfileIntent,
   KnowledgeBase,
   KnowledgeIndex,
   IndexTask,
@@ -13,10 +16,12 @@ import type {
   ModelConfigUpdatePayload,
   ModelProbeResult,
   ProfileDraftPatch,
+  ProfileFeedback,
   PromptTemplate,
   RagConfig,
   RagConfigUpdatePayload,
   RagTrace,
+  ReleaseRebaseResult,
   SystemInfo,
   TaskRecord,
   TaskSubmission,
@@ -31,6 +36,7 @@ type TrackedTask = {
   taskType: string;
   successMessage: string;
   knowledgeId?: string;
+  releaseId?: string;
 };
 
 function readSelectedKnowledgeId(): string {
@@ -93,11 +99,14 @@ export const adminStore = reactive({
   elements: [] as Array<Record<string, unknown>>,
   chunks: [] as Array<Record<string, unknown>>,
   documentProfileContext: null as DocumentProfileContext | null,
+  knowledgeProfileSummary: null as KnowledgeProfileSummary | null,
   documentInspectionIndexId: "",
   latestIndexTasks: {} as Record<string, IndexTask | undefined>,
   latestProfileTasks: {} as Record<string, IndexTask | undefined>,
+  latestDocumentProfileTasks: {} as Record<string, IndexTask | undefined>,
   releases: [] as KnowledgeRelease[],
   releaseDetails: {} as Record<string, KnowledgeRelease | undefined>,
+  profileFeedback: [] as ProfileFeedback[],
   systemInfo: null as SystemInfo | null,
 
   /* selection / ui state */
@@ -144,8 +153,25 @@ export const adminStore = reactive({
     return this.knowledgeBases.find((kb) => kb.id === this.selectedKnowledgeId) ?? null;
   },
   get activeIndex(): KnowledgeIndex | null {
-    const activeId = this.selectedKnowledge?.active_index_id;
+    const activeId =
+      this.selectedKnowledge?.rag_active_index_id ?? this.selectedKnowledge?.active_index_id;
     return this.indexes.find((index) => index.id === activeId) ?? null;
+  },
+  get supportActiveIndex(): KnowledgeIndex | null {
+    const activeId = this.selectedKnowledge?.support_active_index_id;
+    return this.indexes.find((index) => index.id === activeId) ?? null;
+  },
+  get supportActiveRelease(): KnowledgeRelease | null {
+    const releaseId = this.selectedKnowledge?.support_active_release_id;
+    return this.releases.find((release) => release.id === releaseId) ?? null;
+  },
+  get pendingSupportReviewCount(): number {
+    return this.releases
+      .filter((release) => !["PUBLISHED", "CANCELLED"].includes(release.status))
+      .reduce(
+        (total, release) => total + Math.max(0, release.draft_count - release.approved_count),
+        0,
+      );
   },
   releaseForIndex(indexId: string): KnowledgeRelease | undefined {
     return this.releases.find((release) => release.index_id === indexId);
@@ -257,6 +283,7 @@ export const adminStore = reactive({
     for (const result of results) {
       if (result.status !== "fulfilled") continue;
       const [trackedTask, task] = result.value;
+      this.syncPolledTask(task);
       if (task.status !== "SUCCEEDED" && task.status !== "FAILED") continue;
       this.trackedTasks = this.trackedTasks.filter((item) => item.taskId !== trackedTask.taskId);
       writeTrackedTasks(this.trackedTasks);
@@ -284,8 +311,61 @@ export const adminStore = reactive({
         await this.loadKnowledgeBases();
       } else if (succeeded && trackedTask.knowledgeId === this.selectedKnowledgeId) {
         await this.refreshOperationalState();
+        await this.loadKnowledgeProfiles();
+        const releaseId = this.taskReleaseId(task, trackedTask);
+        if (releaseId) await this.refreshReleaseDetail(releaseId);
       }
     }
+  },
+
+  registerProfileTaskSubmission(submission: TaskSubmission, indexId: string): void {
+    /* Render a QUEUED task immediately.  The index task list is eventually
+     * consistent and may lag just behind a 202 response, so it must not be
+     * the only source of UI feedback for a user-initiated Profile action. */
+    this.latestProfileTasks[indexId] = {
+      id: submission.task_id,
+      task_type: submission.task_type,
+      status: submission.status,
+      stage: "QUEUED",
+      progress: 0,
+      attempt: 0,
+      index_id: indexId,
+      error_code: null,
+      error_message: null,
+      metadata: {},
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  },
+
+  async hydrateTrackedTask(taskId: string): Promise<void> {
+    try {
+      this.syncPolledTask(await adminApi.getTask(taskId));
+    } catch {
+      // The optimistic QUEUED state remains visible and the regular tracker
+      // will retry. Do not turn a successful 202 submission into a UI error.
+    }
+  },
+
+  syncPolledTask(task: TaskRecord): void {
+    const indexId = task.index_id;
+    const indexTask: IndexTask = { ...task, index_id: indexId ?? "" };
+    if (task.task_type === "DOCUMENT_PROFILE_GENERATE" && task.kb_id) {
+      this.latestDocumentProfileTasks[task.kb_id] = indexTask;
+    } else if (!indexId) {
+      return;
+    } else if (task.task_type.startsWith("PROFILE_")) {
+      this.latestProfileTasks[indexId] = indexTask;
+    } else if (task.task_type === "INDEX_BUILD") {
+      this.latestIndexTasks[indexId] = indexTask;
+    }
+  },
+
+  taskReleaseId(task: TaskRecord, trackedTask: TrackedTask): string | undefined {
+    const metadataReleaseId = task.metadata?.release_id;
+    return typeof metadataReleaseId === "string" && metadataReleaseId
+      ? metadataReleaseId
+      : trackedTask.releaseId;
   },
 
   trackChainedProfileTask(task: TaskRecord, trackedTask: TrackedTask): void {
@@ -298,7 +378,7 @@ export const adminStore = reactive({
     this.trackedTasks.push({
       taskId: chainedId,
       taskType: "PROFILE_REFRESH",
-      successMessage: "Profile 重建已完成，请前往 Index Build 审核候选草稿",
+      successMessage: "Profile 重建已完成，请前往 Profile Review 审核候选草稿",
       knowledgeId: trackedTask.knowledgeId,
     });
     writeTrackedTasks(this.trackedTasks);
@@ -331,25 +411,26 @@ export const adminStore = reactive({
       this.indexes = [];
       this.releases = [];
       this.releaseDetails = {};
+      this.profileFeedback = [];
       this.latestIndexTasks = {};
       this.latestProfileTasks = {};
+      this.latestDocumentProfileTasks = {};
+      this.knowledgeProfileSummary = null;
       return;
     }
     const knowledgeId = this.selectedKnowledgeId;
-    const [documents, indexes, releases] = await Promise.all([
+    const [documents, indexes, profileSummary] = await Promise.all([
       adminApi.listDocuments(knowledgeId),
       adminApi.listIndexes(knowledgeId),
-      adminApi.listKnowledgeReleases(knowledgeId).catch(() => []),
+      adminApi.getKnowledgeProfiles(knowledgeId).catch(() => null),
     ]);
     if (this.selectedKnowledgeId !== knowledgeId) return;
     this.documents = documents;
     this.indexes = indexes;
-    this.releases = releases;
-    this.releaseDetails = Object.fromEntries(
-      Object.entries(this.releaseDetails).filter(([releaseId]) =>
-        releases.some((release) => release.id === releaseId),
-      ),
-    );
+    this.releases = [];
+    this.profileFeedback = [];
+    this.knowledgeProfileSummary = profileSummary;
+    this.releaseDetails = {};
     await this.loadIndexTasks(indexes, knowledgeId);
   },
 
@@ -360,6 +441,14 @@ export const adminStore = reactive({
     this.releaseDetails[detail.id] = detail;
     this.releases = this.releases.map((item) => (item.id === detail.id ? { ...item, ...detail } : item));
     return detail;
+  },
+
+  async refreshReleaseDetail(releaseId: string): Promise<void> {
+    const detail = await adminApi.getKnowledgeRelease(releaseId);
+    this.releaseDetails[detail.id] = detail;
+    this.releases = this.releases.map((item) =>
+      item.id === detail.id ? { ...item, ...detail } : item,
+    );
   },
 
   async loadIndexTasks(
@@ -384,6 +473,21 @@ export const adminStore = reactive({
     this.latestProfileTasks = Object.fromEntries(
       entries.map(([indexId, , profileTask]) => [indexId, profileTask]),
     );
+  },
+
+  async loadKnowledgeProfiles(): Promise<void> {
+    if (!this.selectedKnowledgeId) {
+      this.knowledgeProfileSummary = null;
+      return;
+    }
+    const knowledgeId = this.selectedKnowledgeId;
+    try {
+      const summary = await adminApi.getKnowledgeProfiles(knowledgeId);
+      if (this.selectedKnowledgeId === knowledgeId) this.knowledgeProfileSummary = summary;
+    } catch {
+      // A rolling API upgrade can expose the new UI before the attribute
+      // endpoint is available; task polling must remain usable meanwhile.
+    }
   },
 
   async refreshAll(): Promise<void> {
@@ -466,7 +570,7 @@ export const adminStore = reactive({
         this.loadKnowledgeBases(),
         this.loadKnowledgeDetails(),
       ]);
-    }, "文档已上传，RAG 索引构建已提交；完成后请在 Index Build 审核发布");
+    }, "文档已上传，RAG 索引构建已提交；构建成功后自动生效，Profile 请在 Profile Review 审核");
     if (!this.error) this.uploadDrawerOpen = false;
   },
 
@@ -545,36 +649,94 @@ export const adminStore = reactive({
   },
 
   goToCandidateReview(indexId: string): void {
-    /* Documents only shows Profile state; edits happen in the candidate
-     * review drawer. Navigate there and preselect the candidate's index. */
+    /* Documents only shows Profile state; edits happen in the dedicated
+     * Support review workspace. Navigate there and preselect the release. */
     this.requestedIndexDetailId = indexId;
     this.documentDrawerOpen = false;
-    this.navigate("indexes");
+    this.navigate("support-review");
   },
 
-  async rebuildKnowledgeProfiles(knowledge: KnowledgeBase): Promise<void> {
+  async regenerateKnowledgeProfiles(knowledge: KnowledgeBase): Promise<void> {
     try {
       await ElMessageBox.confirm(
-        `将提交“${knowledge.name}”当前候选的 Profile 重建任务。该操作不会直接修改线上 Profile：` +
-          "有可编辑候选时会覆盖其中未发布的自动草稿；没有候选时会先创建候选构建，" +
-          "Profile 刷新在构建完成后自动执行。完成后请在 Index Build 审核发布。",
-        "重建 Profile",
-        { type: "warning", confirmButtonText: "提交重建任务", cancelButtonText: "取消" },
+        `将为“${knowledge.name}”全部文档重新生成待上线 Profile 属性。` +
+          "不会直接修改线上 Profile，也不会影响 RAG；完成后请在 Profile Review 检查并上线。",
+        "重新生成待上线属性",
+        { type: "warning", confirmButtonText: "提交生成任务", cancelButtonText: "取消" },
       );
     } catch {
       return;
     }
-    await this.runAction(`rebuild-profile:${knowledge.id}`, async () => {
-      const submission = await adminApi.rebuildKnowledgeProfiles(knowledge.id);
+    await this.runAction(`document-profile-generate:${knowledge.id}`, async () => {
+      const submission = await adminApi.generateKnowledgeProfiles(knowledge.id);
       this.trackTask(submission, {
-        successMessage:
-          submission.task_type === "INDEX_BUILD"
-            ? "候选索引构建完成，Profile 重建任务已自动提交"
-            : "Profile 重建已完成，请前往 Index Build 审核候选草稿",
+        successMessage: "Profile 属性已生成，请在 Profile Review 检查并上线",
         knowledgeId: knowledge.id,
       });
+      if (knowledge.id === this.selectedKnowledgeId) await this.loadKnowledgeDetails();
     });
-    if (!this.error) this.notice = "Profile 重建任务已提交；完成后将弹出提醒";
+    if (!this.error) this.notice = "全部待上线 Profile 属性生成任务已提交；完成后将弹出提醒";
+  },
+
+  async generateKnowledgeProfiles(): Promise<void> {
+    if (!this.selectedKnowledgeId) return;
+    const knowledgeId = this.selectedKnowledgeId;
+    await this.runAction(`document-profile-generate:${knowledgeId}`, async () => {
+      const submission = await adminApi.generateKnowledgeProfiles(knowledgeId);
+      this.trackTask(submission, { successMessage: "Profile 属性已生成，请检查并上线", knowledgeId });
+      this.latestDocumentProfileTasks[knowledgeId] = {
+        id: submission.task_id, task_type: submission.task_type, status: submission.status,
+        stage: "QUEUED", progress: 0, attempt: 0, index_id: "", error_code: null,
+        error_message: null, metadata: {}, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      };
+      await this.hydrateTrackedTask(submission.task_id);
+    });
+  },
+
+  async generateDocumentProfile(documentId: string): Promise<void> {
+    if (!this.selectedKnowledgeId) return;
+    const knowledgeId = this.selectedKnowledgeId;
+    await this.runAction(`document-profile-generate:${documentId}`, async () => {
+      const submission = await adminApi.generateDocumentProfile(knowledgeId, documentId);
+      this.trackTask(submission, { successMessage: "文档 Profile 属性已生成", knowledgeId });
+      await this.hydrateTrackedTask(submission.task_id);
+      await this.loadKnowledgeProfiles();
+    });
+  },
+
+  async updateDocumentProfile(documentId: string, payload: DocumentProfileIntent): Promise<void> {
+    if (!this.selectedKnowledgeId) return;
+    await this.runAction(`document-profile-edit:${documentId}`, async () => {
+      await adminApi.updateDocumentProfile(this.selectedKnowledgeId, documentId, payload);
+      await this.loadKnowledgeProfiles();
+    });
+  },
+
+  async checkKnowledgeProfiles(): Promise<ProfilePublishCheck | null> {
+    if (!this.selectedKnowledgeId) return null;
+    let result: ProfilePublishCheck | null = null;
+    await this.runAction(`document-profile-check:${this.selectedKnowledgeId}`, async () => {
+      result = await adminApi.checkKnowledgeProfiles(this.selectedKnowledgeId);
+    });
+    return result;
+  },
+
+  async publishKnowledgeProfiles(): Promise<void> {
+    if (!this.selectedKnowledgeId) return;
+    await this.runAction(`document-profile-publish:${this.selectedKnowledgeId}`, async () => {
+      const result = await adminApi.publishKnowledgeProfiles(this.selectedKnowledgeId);
+      this.knowledgeProfileSummary = result.summary;
+      this.notice = `已上线 ${result.published_count} 项 Profile 属性`;
+    });
+  },
+
+  async discardPendingKnowledgeProfiles(): Promise<void> {
+    if (!this.selectedKnowledgeId) return;
+    await this.runAction(`document-profile-discard:${this.selectedKnowledgeId}`, async () => {
+      const result = await adminApi.discardPendingKnowledgeProfiles(this.selectedKnowledgeId);
+      await this.loadKnowledgeProfiles();
+      this.notice = `已取消 ${result.discarded_count} 项待上线变更`;
+    });
   },
 
   async buildIndex(): Promise<void> {
@@ -584,11 +746,11 @@ export const adminStore = reactive({
       if (build.task_id) {
         this.trackTask(
           { task_id: build.task_id, task_type: "INDEX_BUILD", status: "QUEUED", replayed: build.coalesced },
-          { successMessage: "RAG 索引构建已完成，请审核发布", knowledgeId: this.selectedKnowledgeId },
+          { successMessage: "候选索引构建已完成，请在 Profile Review 审核", knowledgeId: this.selectedKnowledgeId },
         );
       }
       await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
-    }, "RAG 索引构建已提交，完成后请在 Index Build 审核发布");
+    }, "候选索引构建已提交，完成后请在 Profile Review 审核");
   },
 
   async refreshProfileDrafts(indexId: string): Promise<void> {
@@ -597,9 +759,29 @@ export const adminStore = reactive({
       this.trackTask(submission, {
         successMessage: "Profile 重建已完成，请刷新候选草稿进行审核",
         knowledgeId: this.selectedKnowledgeId,
+        releaseId: this.releaseForIndex(indexId)?.id,
       });
+      this.registerProfileTaskSubmission(submission, indexId);
+      await this.loadIndexTasks();
+      if (this.latestProfileTasks[indexId]?.id !== submission.task_id) {
+        this.registerProfileTaskSubmission(submission, indexId);
+      }
+      await this.hydrateTrackedTask(submission.task_id);
     });
     if (!this.error) this.notice = "Profile 重建任务已提交；完成后将弹出提醒";
+  },
+
+  async regenerateProfileDraft(draftId: string): Promise<void> {
+    await this.runAction(`regenerate-profile:${draftId}`, async () => {
+      const submission = await adminApi.regenerateProfileDraft(draftId);
+      this.trackTask(submission, {
+        successMessage: "Profile 草稿重新生成完成，请返回审核工作台复核",
+        knowledgeId: this.selectedKnowledgeId,
+      });
+      await this.hydrateTrackedTask(submission.task_id);
+      await this.loadIndexTasks();
+    });
+    if (!this.error) this.notice = "Profile 草稿重新生成任务已提交";
   },
 
   async updateProfileDraft(draftId: string, payload: ProfileDraftPatch): Promise<void> {
@@ -610,6 +792,9 @@ export const adminStore = reactive({
       this.releases = this.releases.map((item) =>
         item.id === release.id ? { ...item, ...release } : item,
       );
+      if (payload.status === "APPROVED") {
+        this.notice = "草稿已批准；全部草稿完成后请执行发布前验证";
+      }
     });
   },
 
@@ -621,6 +806,13 @@ export const adminStore = reactive({
       this.releases = this.releases.map((item) =>
         item.id === releaseId ? { ...item, ...release, validation_result: validation } : item,
       );
+      if (validation.publishable) {
+        this.notice = "发布前验证通过，当前 Support Release 可以发布";
+      } else if (validation.review_required_count) {
+        this.notice = `发布前验证完成：仍有 ${validation.review_required_count} 篇草稿待审核或批准`;
+      } else if (validation.valid) {
+        this.notice = "发布前验证完成，但当前候选暂不可发布";
+      }
     });
   },
 
@@ -628,6 +820,29 @@ export const adminStore = reactive({
     await this.runAction(`publish-release:${releaseId}`, async () => {
       const published = await adminApi.publishKnowledgeRelease(releaseId);
       this.releaseDetails[releaseId] = published;
+      await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
+    });
+  },
+
+  async rebaseKnowledgeRelease(releaseId: string): Promise<ReleaseRebaseResult | null> {
+    let result: ReleaseRebaseResult | null = null;
+    await this.runAction(`rebase-release:${releaseId}`, async () => {
+      result = await adminApi.rebaseKnowledgeRelease(releaseId);
+      await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
+    });
+    return result;
+  },
+
+  async rollbackSupportRelease(releaseId: string): Promise<void> {
+    await this.runAction(`rollback-support-release:${releaseId}`, async () => {
+      await adminApi.rollbackSupportRelease(this.selectedKnowledgeId, releaseId);
+      await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
+    });
+  },
+
+  async rollbackRagIndex(indexId: string): Promise<void> {
+    await this.runAction(`rollback-rag-index:${indexId}`, async () => {
+      await adminApi.rollbackRagIndex(this.selectedKnowledgeId, indexId);
       await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
     });
   },
@@ -643,7 +858,14 @@ export const adminStore = reactive({
     if (!this.selectedKnowledgeId) return;
     await this.run(async () => {
       const result = await adminApi.gcIndexes(this.selectedKnowledgeId);
-      this.notice = `已回收 ${result.deleted_count} 个旧索引`;
+      const parts = [`已回收 ${result.deleted_count} 个旧索引`];
+      if (result.purged_conversation_count) {
+        parts.push(`清理 ${result.purged_conversation_count} 个超过保留期的会话`);
+      }
+      if (result.skipped_count) {
+        parts.push(`${result.skipped_count} 个索引因新增引用被跳过`);
+      }
+      this.notice = parts.join("；");
       await this.loadKnowledgeDetails();
     });
   },

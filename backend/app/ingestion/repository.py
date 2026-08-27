@@ -80,7 +80,9 @@ class IngestionRepository:
                            (SELECT count(*) FROM document_source d
                             WHERE d.kb_id = kb.id AND d.status = 'STORED') AS document_count,
                            COALESCE((SELECT chunk_count FROM knowledge_index i
-                                     WHERE i.id = kb.active_index_id), 0) AS active_chunk_count,
+                                     WHERE i.id = COALESCE(
+                                         kb.rag_active_index_id, kb.active_index_id
+                                     )), 0) AS active_chunk_count,
                            (SELECT id FROM knowledge_index i WHERE i.kb_id = kb.id
                             AND i.status = 'BUILDING' LIMIT 1) AS building_index_id,
                            (SELECT status FROM knowledge_index i WHERE i.kb_id = kb.id
@@ -101,7 +103,9 @@ class IngestionRepository:
                            (SELECT count(*) FROM document_source d
                             WHERE d.kb_id = kb.id AND d.status = 'STORED') AS document_count,
                            COALESCE((SELECT chunk_count FROM knowledge_index i
-                                     WHERE i.id = kb.active_index_id), 0) AS active_chunk_count,
+                                     WHERE i.id = COALESCE(
+                                         kb.rag_active_index_id, kb.active_index_id
+                                     )), 0) AS active_chunk_count,
                            (SELECT id FROM knowledge_index i WHERE i.kb_id = kb.id
                             AND i.status = 'BUILDING' LIMIT 1) AS building_index_id,
                            (SELECT status FROM knowledge_index i WHERE i.kb_id = kb.id
@@ -253,7 +257,11 @@ class IngestionRepository:
                 text(
                     """
                     UPDATE knowledge_base
-                    SET active_index_id = NULL, status = 'DELETING', updated_at = now()
+                    SET active_index_id = NULL,
+                        rag_active_index_id = NULL,
+                        support_active_index_id = NULL,
+                        support_active_release_id = NULL,
+                        status = 'DELETING', updated_at = now()
                     WHERE id = :knowledge_id
                     """
                 ),
@@ -763,28 +771,6 @@ class IngestionRepository:
             if document["kb_status"] != "ENABLED":
                 raise ApiError("FORBIDDEN", "知识库已停用", 403)
 
-            profile_result = await connection.execute(
-                text(
-                    """
-                    SELECT problem_code FROM document_problem_profile
-                    WHERE document_id = :document_id AND enabled = true
-                    FOR UPDATE
-                    LIMIT 1
-                    """
-                ),
-                {"document_id": document_id},
-            )
-            profile = profile_result.mappings().one_or_none()
-            if profile is not None:
-                raise ApiError(
-                    "DOCUMENT_PROFILE_IN_USE",
-                    (
-                        f"文档正在被问题档案 {profile['problem_code']} 使用；"
-                        "请先禁用或改绑该档案后再删除"
-                    ),
-                    409,
-                )
-
             remaining_result = await connection.execute(
                 text(
                     """
@@ -990,9 +976,13 @@ class IngestionRepository:
         if not documents:
             raise ApiError("VALIDATION_ERROR", "知识库没有可构建文档", 409)
 
-        # 查询上一版 Active Index，判断哪些文档可以复用解析结果
+        # 查询上一版 RAG Active Index，判断哪些文档可以复用解析结果。
+        # active_index_id is kept as a rolling-deployment compatibility alias.
         prev_index_result = await connection.execute(
-            text("SELECT active_index_id FROM knowledge_base WHERE id = :kb_id"),
+            text(
+                "SELECT COALESCE(rag_active_index_id, active_index_id) "
+                "FROM knowledge_base WHERE id = :kb_id"
+            ),
             {"kb_id": knowledge_id},
         )
         prev_index_id = prev_index_result.scalar_one_or_none()
@@ -1151,7 +1141,10 @@ class IngestionRepository:
     async def get_active_index_id(self, knowledge_id: UUID) -> UUID | None:
         async with self.engine.connect() as connection:
             result = await connection.execute(
-                text("SELECT active_index_id FROM knowledge_base WHERE id = :id"),
+                text(
+                    "SELECT COALESCE(rag_active_index_id, active_index_id) "
+                    "FROM knowledge_base WHERE id = :id"
+                ),
                 {"id": knowledge_id},
             )
             return result.scalar_one_or_none()
@@ -1262,10 +1255,10 @@ class IngestionRepository:
             target_result = await connection.execute(
                 text(
                     """
-                    SELECT i.*, kb.active_index_id, r.status AS release_status
+                    SELECT i.*, COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                                      AS active_index_id
                     FROM knowledge_index i
                     JOIN knowledge_base kb ON kb.id = i.kb_id
-                    LEFT JOIN knowledge_release r ON r.index_id = i.id
                     WHERE i.id = :index_id
                     FOR UPDATE OF kb, i
                     """
@@ -1277,12 +1270,6 @@ class IngestionRepository:
                 raise ApiError("INDEX_NOT_FOUND", "索引不存在", 404)
             if target["status"] == "ACTIVE" and target["active_index_id"] == index_id:
                 return dict(target)
-            if target["release_status"] is not None and target["release_status"] != "PUBLISHED":
-                raise ApiError(
-                    "RELEASE_REQUIRED",
-                    "该索引存在未发布的 Profile 候选，请通过发布审核完成原子发布",
-                    409,
-                )
             if target["status"] != "READY":
                 raise ApiError("INDEX_NOT_READY", "只有 READY 索引可以激活", 409)
 
@@ -1313,13 +1300,121 @@ class IngestionRepository:
                 text(
                     """
                     UPDATE knowledge_base
-                    SET active_index_id = :index_id, updated_at = now()
+                    SET rag_active_index_id = :index_id,
+                        active_index_id = :index_id, updated_at = now()
                     WHERE id = :kb_id
                     """
                 ),
                 {"index_id": index_id, "kb_id": target["kb_id"]},
             )
             return dict(activated)
+
+    async def rollback_rag_index(self, knowledge_id: UUID, index_id: UUID) -> dict[str, Any]:
+        """Explicitly roll the RAG online index back to a chosen snapshot.
+
+        The target version is always supplied by the caller — it is never
+        inferred from timestamps or "latest successful build".  Only the RAG
+        lifecycle moves: Support pointers and frozen conversation versions
+        stay untouched, so existing sessions keep their snapshot while new
+        sessions bind to the rollback target.
+        """
+        async with self.engine.begin() as connection:
+            kb_result = await connection.execute(
+                text(
+                    """
+                    SELECT status,
+                           COALESCE(rag_active_index_id, active_index_id)
+                               AS rag_active_index_id
+                    FROM knowledge_base WHERE id = :kb_id FOR UPDATE
+                    """
+                ),
+                {"kb_id": knowledge_id},
+            )
+            kb = kb_result.mappings().one_or_none()
+            if kb is None:
+                raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
+            if kb["status"] != "ENABLED":
+                raise ApiError("FORBIDDEN", "知识库已停用", 403)
+            target_result = await connection.execute(
+                text(
+                    """
+                    SELECT * FROM knowledge_index
+                    WHERE id = :index_id AND kb_id = :kb_id FOR UPDATE
+                    """
+                ),
+                {"index_id": index_id, "kb_id": knowledge_id},
+            )
+            target = target_result.mappings().one_or_none()
+            if target is None:
+                raise ApiError("INDEX_NOT_FOUND", "目标索引不存在", 404)
+            if target["status"] not in ("READY", "ACTIVE", "DEPRECATED"):
+                raise ApiError("INDEX_NOT_ROLLBACKABLE", "目标索引状态不可用于回滚", 409)
+            current_index_id = kb["rag_active_index_id"]
+            if current_index_id is not None and UUID(str(current_index_id)) == index_id:
+                # Idempotent: the requested version is already online.
+                return dict(target)
+            if current_index_id is not None:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE knowledge_index SET status = 'DEPRECATED'
+                        WHERE id = :old_index_id AND status = 'ACTIVE'
+                        """
+                    ),
+                    {"old_index_id": current_index_id},
+                )
+            rolled_back = await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_index
+                    SET status = 'ACTIVE', activated_at = now()
+                    WHERE id = :index_id
+                      AND status IN ('READY', 'ACTIVE', 'DEPRECATED')
+                    RETURNING *
+                    """
+                ),
+                {"index_id": index_id},
+            )
+            row = rolled_back.mappings().one()
+            # active_index_id remains the rolling compatibility alias of the
+            # RAG pointer; Support pointers are deliberately not touched.
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_base
+                    SET rag_active_index_id = :index_id,
+                        active_index_id = :index_id, updated_at = now()
+                    WHERE id = :kb_id
+                    """
+                ),
+                {"index_id": index_id, "kb_id": knowledge_id},
+            )
+            return dict(row)
+
+    async def purge_expired_conversations(
+        self, retention_days: int, kb_id: UUID | None = None
+    ) -> list[UUID]:
+        """Delete long-idle conversations past the retention window.
+
+        Frozen conversations are what keeps old indexes alive for GC.  This
+        is the auditable release valve: only conversations without any
+        activity inside the retention window are removed, and the caller
+        reports exactly which ids were purged.  Messages cascade; traces
+        survive until their index is itself collected.  ``kb_id`` scopes the
+        purge to one knowledge base; without it the whole fleet is pruned.
+        """
+        query = """
+            DELETE FROM conversation
+            WHERE updated_at < now() - INTERVAL '1 day' * :retention_days
+        """
+        parameters: dict[str, Any] = {"retention_days": retention_days}
+        if kb_id is not None:
+            query += " AND knowledge_id = :kb_id"
+            parameters["kb_id"] = kb_id
+        query += " RETURNING id"
+        async with self.engine.begin() as connection:
+            result = await connection.execute(text(query), parameters)
+            return [UUID(str(row[0])) for row in result]
 
     async def retry_index(
         self, index_id: UUID, *, activate_on_success: bool = False
@@ -1554,10 +1649,39 @@ class IngestionRepository:
                     FROM ranked
                     WHERE rn > :retention_count
                       AND created_at < now() - INTERVAL '1 day' * :retention_days
-                      AND kb_id NOT IN (
-                          SELECT kb_id FROM knowledge_index WHERE status = 'BUILDING'
-                      )
-                    ORDER BY created_at
+                       AND NOT EXISTS (
+                           SELECT 1 FROM knowledge_base kb
+                           WHERE ranked.id IN (
+                               kb.active_index_id, kb.rag_active_index_id,
+                               kb.support_active_index_id
+                           )
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM knowledge_base kb2
+                           JOIN knowledge_release active_release
+                             ON active_release.id = kb2.support_active_release_id
+                           WHERE active_release.index_id = ranked.id
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM knowledge_release r
+                           WHERE r.index_id = ranked.id
+                             AND r.status <> 'CANCELLED'
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM task_record t
+                           WHERE t.index_id = ranked.id
+                             AND t.status IN ('QUEUED', 'RUNNING')
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM conversation c
+                           WHERE ranked.id IN (
+                               c.rag_index_id, c.support_index_id, c.focus_index_id
+                           )
+                       )
+                       AND kb_id NOT IN (
+                           SELECT kb_id FROM knowledge_index WHERE status = 'BUILDING'
+                       )
+                     ORDER BY created_at
                     """
                 ),
                 {
@@ -1607,6 +1731,35 @@ class IngestionRepository:
                     UPDATE knowledge_index
                     SET status = 'DELETING'
                     WHERE id = :index_id AND status IN ('DEPRECATED', 'FAILED')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM knowledge_base kb
+                          WHERE knowledge_index.id IN (
+                              kb.active_index_id, kb.rag_active_index_id,
+                              kb.support_active_index_id
+                          )
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM knowledge_base kb2
+                          JOIN knowledge_release active_release
+                            ON active_release.id = kb2.support_active_release_id
+                          WHERE active_release.index_id = knowledge_index.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM knowledge_release r
+                          WHERE r.index_id = knowledge_index.id
+                            AND r.status <> 'CANCELLED'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM task_record t
+                          WHERE t.index_id = knowledge_index.id
+                            AND t.status IN ('QUEUED', 'RUNNING')
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM conversation c
+                          WHERE knowledge_index.id IN (
+                              c.rag_index_id, c.support_index_id, c.focus_index_id
+                          )
+                      )
                     RETURNING *
                     """
                 ),
@@ -1633,8 +1786,58 @@ class IngestionRepository:
     async def delete_index(self, index_id: UUID) -> bool:
         """Physically delete an index row. CASCADE handles child tables.
         rag_trace references the index with ON DELETE RESTRICT, so those
-        rows must be removed first. The index must be in DELETING status."""
+        rows must be removed first. The index must be in DELETING status
+        and is re-checked against live references inside the same
+        transaction: a pointer that appeared after the DELETING mark
+        restores the index instead of destroying protected data."""
         async with self.engine.begin() as connection:
+            referenced = await connection.execute(
+                text(
+                    """
+                    SELECT 1
+                    WHERE EXISTS (
+                        SELECT 1 FROM knowledge_base kb
+                        WHERE :index_id IN (
+                            kb.active_index_id, kb.rag_active_index_id,
+                            kb.support_active_index_id
+                        )
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM knowledge_base kb2
+                        JOIN knowledge_release active_release
+                          ON active_release.id = kb2.support_active_release_id
+                        WHERE active_release.index_id = :index_id
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM knowledge_release r
+                        WHERE r.index_id = :index_id AND r.status <> 'CANCELLED'
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM task_record t
+                        WHERE t.index_id = :index_id
+                          AND t.status IN ('QUEUED', 'RUNNING')
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM conversation c
+                        WHERE :index_id IN (
+                            c.rag_index_id, c.support_index_id, c.focus_index_id
+                        )
+                    )
+                    """
+                ),
+                {"index_id": index_id},
+            )
+            if referenced.scalar_one_or_none() is not None:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE knowledge_index SET status = 'DEPRECATED'
+                        WHERE id = :index_id AND status = 'DELETING'
+                        """
+                    ),
+                    {"index_id": index_id},
+                )
+                return False
             await connection.execute(
                 text("DELETE FROM rag_trace WHERE index_id = :index_id"), {"index_id": index_id}
             )
@@ -1668,7 +1871,7 @@ class IngestionRepository:
         result = await connection.execute(
             text(
                 """
-                SELECT kb.active_index_id
+                SELECT COALESCE(kb.rag_active_index_id, kb.active_index_id)
                 FROM document_source d JOIN knowledge_base kb ON kb.id = d.kb_id
                 WHERE d.id = :document_id
                 """

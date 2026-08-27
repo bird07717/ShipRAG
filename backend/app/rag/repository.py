@@ -86,11 +86,14 @@ class RagRepository:
             kb_result = await connection.execute(
                 text(
                     """
-                    SELECT kb.status AS kb_status, kb.active_index_id,
+                    SELECT kb.status AS kb_status,
+                           COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                               AS rag_active_index_id,
                            i.status AS index_status, i.kb_id AS index_kb_id,
                            i.embedding_model_name
                     FROM knowledge_base kb
-                    LEFT JOIN knowledge_index i ON i.id = kb.active_index_id
+                    LEFT JOIN knowledge_index i
+                      ON i.id = COALESCE(kb.rag_active_index_id, kb.active_index_id)
                     WHERE kb.id = :kb_id
                     FOR UPDATE OF kb
                     """
@@ -102,7 +105,7 @@ class RagRepository:
                 raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
             if kb["kb_status"] != "ENABLED":
                 raise ApiError("FORBIDDEN", "知识库已停用", 403)
-            if kb["active_index_id"] is None:
+            if kb["rag_active_index_id"] is None:
                 raise ApiError("KNOWLEDGE_BASE_NOT_READY", "知识库尚无 Active Index", 409)
             if kb["index_status"] != "ACTIVE" or kb["index_kb_id"] != knowledge_id:
                 raise ApiError("INDEX_NOT_READY", "知识库 Active Index 状态异常", 409)
@@ -110,21 +113,27 @@ class RagRepository:
             resolved_conversation_id = conversation_id or uuid4()
             chat_context: dict[str, Any] = {}
             focus_document_id: UUID | None = None
+            effective_index_id = UUID(str(kb["rag_active_index_id"]))
+            embedding_model_name = str(kb["embedding_model_name"])
             if conversation_id is None:
                 await connection.execute(
                     text(
                         """
-                        INSERT INTO conversation (id, knowledge_id)
-                        VALUES (:id, :knowledge_id)
+                        INSERT INTO conversation (id, knowledge_id, rag_index_id)
+                        VALUES (:id, :knowledge_id, :rag_index_id)
                         """
                     ),
-                    {"id": resolved_conversation_id, "knowledge_id": knowledge_id},
+                    {
+                        "id": resolved_conversation_id,
+                        "knowledge_id": knowledge_id,
+                        "rag_index_id": effective_index_id,
+                    },
                 )
             else:
                 conversation_result = await connection.execute(
                     text(
                         """
-                        SELECT knowledge_id, focus_document_id, chat_context
+                        SELECT knowledge_id, focus_document_id, chat_context, rag_index_id
                         FROM conversation
                         WHERE id = :id FOR UPDATE
                         """
@@ -144,6 +153,34 @@ class RagRepository:
                 raw_context = conversation_row["chat_context"]
                 if isinstance(raw_context, dict):
                     chat_context = dict(raw_context)
+                if conversation_row["rag_index_id"] is not None:
+                    effective_index_id = UUID(str(conversation_row["rag_index_id"]))
+                    frozen_result = await connection.execute(
+                        text(
+                            """
+                            SELECT kb_id, status, embedding_model_name
+                            FROM knowledge_index WHERE id = :index_id
+                            """
+                        ),
+                        {"index_id": effective_index_id},
+                    )
+                    frozen = frozen_result.mappings().one_or_none()
+                    if (
+                        frozen is None
+                        or frozen["kb_id"] != knowledge_id
+                        or frozen["status"] not in {"ACTIVE", "DEPRECATED"}
+                    ):
+                        raise ApiError(
+                            "CONVERSATION_RAG_VERSION_INVALID",
+                            "会话绑定的 RAG 版本不可用",
+                            409,
+                        )
+                    embedding_model_name = str(frozen["embedding_model_name"])
+                else:
+                    await connection.execute(
+                        text("UPDATE conversation SET rag_index_id = :index_id WHERE id = :id"),
+                        {"index_id": effective_index_id, "id": conversation_id},
+                    )
 
             if reuse_messages:
                 if conversation_id is None:
@@ -352,7 +389,7 @@ class RagRepository:
                     "trace_id": trace_id,
                     "request_id": request_id,
                     "kb_id": knowledge_id,
-                    "index_id": kb["active_index_id"],
+                    "index_id": effective_index_id,
                     "conversation_id": resolved_conversation_id,
                     "message_id": assistant_message_id,
                     "question": question,
@@ -377,8 +414,8 @@ class RagRepository:
             user_message_id=user_message_id,
             assistant_message_id=assistant_message_id,
             knowledge_id=knowledge_id,
-            index_id=UUID(str(kb["active_index_id"])),
-            embedding_model_name=str(kb["embedding_model_name"]),
+            index_id=effective_index_id,
+            embedding_model_name=embedding_model_name,
             prompt_template=str(prompt_template),
             llm=ModelSnapshot(
                 provider=str(llm_row["provider"]),
@@ -934,7 +971,8 @@ class RagRepository:
             result = await connection.execute(
                 text(
                     """
-                    SELECT id, name, description, status, active_index_id
+                    SELECT id, name, description, status,
+                           COALESCE(rag_active_index_id, active_index_id) AS active_index_id
                     FROM knowledge_base WHERE id = :kb_id
                     """
                 ),
@@ -1381,6 +1419,74 @@ class RagRepository:
             )
             row = result.mappings().one_or_none()
         return dict(row) if row is not None else self._rag_config_defaults()
+
+    async def get_engine_retrieval_config(self, execution_policy: str) -> RetrievalConfig:
+        async with self.engine.connect() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        text(
+                            """SELECT vector_top_k, bm25_top_k, fusion_top_k, rerank_top_n,
+                                  context_max_chunks
+                           FROM engine_retrieval_config WHERE execution_policy = :policy"""
+                        ),
+                        {"policy": execution_policy},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        data = dict(row) if row else self._rag_config_defaults()
+        return RetrievalConfig(**{key: int(data[key]) for key in self._RAG_CONFIG_FIELDS})
+
+    async def list_engine_retrieval_configs(self) -> list[dict[str, Any]]:
+        async with self.engine.connect() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        text(
+                            """SELECT execution_policy, vector_top_k, bm25_top_k, fusion_top_k,
+                                  rerank_top_n, context_max_chunks, updated_at
+                           FROM engine_retrieval_config ORDER BY execution_policy"""
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [dict(row) for row in rows]
+
+    async def update_engine_retrieval_config(
+        self, execution_policy: str, **values: int | None
+    ) -> dict[str, Any]:
+        allowed = {
+            key: value
+            for key, value in values.items()
+            if key in self._RAG_CONFIG_FIELDS and value is not None
+        }
+        if not allowed:
+            raise ApiError("VALIDATION_ERROR", "没有需要更新的字段", 422)
+        assignments = ", ".join(f"{key} = :{key}" for key in allowed)
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO engine_retrieval_config (execution_policy) VALUES (:policy) "
+                    "ON CONFLICT (execution_policy) DO NOTHING"
+                ),
+                {"policy": execution_policy},
+            )
+            result = await connection.execute(
+                text(
+                    "UPDATE engine_retrieval_config SET "
+                    + assignments
+                    + ", updated_at = now() WHERE execution_policy = :policy "
+                    "RETURNING execution_policy, vector_top_k, bm25_top_k, fusion_top_k, "
+                    "rerank_top_n, context_max_chunks, updated_at"
+                ),
+                {"policy": execution_policy, **allowed},
+            )
+            row = result.mappings().one()
+        return dict(row)
 
     async def update_rag_config(
         self,

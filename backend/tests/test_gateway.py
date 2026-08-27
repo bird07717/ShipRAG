@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from app.gateway.models import ChatEngine, ExecutionPolicy, ResolvedPolicy
 from app.gateway.repository import GatewayRepository
 from app.gateway.service import ChatGatewayService
+from app.rag.models import RetrievalConfig
 
 
 class FakeGatewayRepository:
@@ -70,6 +71,7 @@ class FakeRag:
         self.conversation_id = uuid4()
         self.trace_id = uuid4()
         self.last_kwargs: dict[str, Any] = {}
+        self.repository = _FakeRagConfigRepository()
 
     async def generate(self, **kwargs: Any) -> dict[str, Any]:
         self.calls += 1
@@ -95,6 +97,18 @@ class FakeRag:
             + json.dumps(response, ensure_ascii=False, separators=(",", ":"))
             + "\n\n"
         ).encode()
+
+
+class _FakeRagConfigRepository:
+    async def get_engine_retrieval_config(self, policy: str) -> RetrievalConfig:
+        del policy
+        return RetrievalConfig(
+            vector_top_k=7,
+            bm25_top_k=8,
+            fusion_top_k=9,
+            rerank_top_n=6,
+            context_max_chunks=5,
+        )
 
 
 def policy(value: ExecutionPolicy, frozen: ChatEngine | None = None) -> ResolvedPolicy:
@@ -167,6 +181,7 @@ async def test_rag_only_bypasses_support() -> None:
     assert support.calls == 0
     assert rag.calls == 1
     assert repository.frozen == [(rag.conversation_id, ChatEngine.RAG)]
+    assert rag.last_kwargs["retrieval_overrides"]["vector_top_k"] == 7
 
 
 async def test_no_match_falls_back_and_links_traces() -> None:
@@ -185,6 +200,7 @@ async def test_no_match_falls_back_and_links_traces() -> None:
     assert rag.last_kwargs["reuse_assistant_message_id"] == support.assistant_message_id
     assert rag.last_kwargs["parent_trace_id"] == support.trace_id
     assert rag.last_kwargs["fallback_reason"] == "NO_MATCH"
+    assert rag.last_kwargs["retrieval_overrides"]["fusion_top_k"] == 9
     assert repository.frozen == [(support.conversation_id, ChatEngine.RAG)]
 
 

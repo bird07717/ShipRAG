@@ -141,6 +141,7 @@ class SupportTurn:
     chat_context: dict[str, Any]
     context_version: int
     history: list[dict[str, str]]
+    support_release_id: UUID | None = None
     idempotency_key: str | None = None
     llm: ModelSnapshot | None = None
     replay: dict[str, Any] | None = None
