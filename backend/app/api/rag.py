@@ -269,7 +269,7 @@ async def list_engine_retrieval_configs(
     tags=["rag-config"],
 )
 async def update_engine_retrieval_config(
-    execution_policy: Literal["SUPPORT_ONLY", "RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"],
+    execution_policy: Literal["RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"],
     payload: EngineRetrievalConfigUpdate,
     repository: Annotated[RagRepository, Depends(get_rag_repository)],
 ) -> dict[str, Any]:

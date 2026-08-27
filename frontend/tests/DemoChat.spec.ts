@@ -209,7 +209,7 @@ describe("DemoChat", () => {
     expect(wrapper.text()).toContain("RAG Engine");
     expect(wrapper.text()).toContain("由 RAG 返回的答案");
     expect(wrapper.text()).toContain("自动降级：SUPPORT → RAG");
-    expect(wrapper.text()).toContain("Support 未匹配到 Profile（NO_MATCH）");
+    expect(wrapper.text()).toContain("Support 未定位到可靠文档，本轮由 RAG 兜底（NO_MATCH）");
   });
 
   it("starts a new conversation and sends the newly selected knowledge base", async () => {

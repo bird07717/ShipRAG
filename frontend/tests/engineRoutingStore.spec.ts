@@ -7,7 +7,7 @@ import type { RuntimePolicy } from "@/types/admin";
 
 const policy: RuntimePolicy = {
   knowledge_id: "kb-1",
-  execution_policy: "SUPPORT_ONLY",
+  execution_policy: "SUPPORT_WITH_RAG_FALLBACK",
   config_version: 2,
   fallback_conditions: ["NO_MATCH"],
   source: "DATABASE",

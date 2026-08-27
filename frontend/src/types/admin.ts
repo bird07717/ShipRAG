@@ -193,7 +193,7 @@ export type ModelConfigUpdatePayload = {
 
 export type RagConfigUpdatePayload = Partial<Omit<RagConfig, "updated_at">>;
 
-export type ExecutionPolicy = "SUPPORT_ONLY" | "RAG_ONLY" | "SUPPORT_WITH_RAG_FALLBACK";
+export type ExecutionPolicy = "RAG_ONLY" | "SUPPORT_WITH_RAG_FALLBACK";
 
 export interface EngineRetrievalConfig extends RagConfig {
   execution_policy: ExecutionPolicy;

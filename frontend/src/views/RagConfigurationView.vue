@@ -7,8 +7,7 @@ import type { ExecutionPolicy } from "@/types/admin";
 const rag = useRagAdminStore();
 const activePolicy = ref<ExecutionPolicy>("RAG_ONLY");
 const policies: Array<{ value: ExecutionPolicy; label: string; description: string }> = [
-  { value: "SUPPORT_ONLY", label: "Support only", description: "Profile 未命中时的 Support 内部文档召回。" },
-  { value: "SUPPORT_WITH_RAG_FALLBACK", label: "Support + RAG 兜底", description: "同时控制 Support 文档召回与后续 Generic RAG 兜底。" },
+  { value: "SUPPORT_WITH_RAG_FALLBACK", label: "Support + RAG 兜底", description: "控制 Support 文档级检索及其单轮 Generic RAG 兜底。" },
   { value: "RAG_ONLY", label: "RAG only", description: "直接进入 Generic RAG 的检索配置。" },
 ];
 

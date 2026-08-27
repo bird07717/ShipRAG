@@ -11,7 +11,18 @@ from pydantic import BaseModel, Field
 from app.rag.models import ModelSnapshot
 
 
-class SupportMode(StrEnum):
+class CaseInsensitiveStrEnum(StrEnum):
+    """Accept harmless casing differences from JSON-mode LLM responses."""
+
+    @classmethod
+    def _missing_(cls, value: object) -> CaseInsensitiveStrEnum | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.upper()
+        return next((member for member in cls if member.value == normalized), None)
+
+
+class SupportMode(CaseInsensitiveStrEnum):
     DOCUMENT_EXPLANATION = "DOCUMENT_EXPLANATION"
     STEP_GUIDANCE = "STEP_GUIDANCE"
     GENERAL_OPERATION_GUIDANCE = "GENERAL_OPERATION_GUIDANCE"
@@ -19,7 +30,7 @@ class SupportMode(StrEnum):
     NEED_MORE_INFORMATION = "NEED_MORE_INFORMATION"
 
 
-class EvidenceType(StrEnum):
+class EvidenceType(CaseInsensitiveStrEnum):
     DOCUMENT_FACT = "DOCUMENT_FACT"
     DOCUMENT_EXPLANATION = "DOCUMENT_EXPLANATION"
     GENERAL_GUIDANCE = "GENERAL_GUIDANCE"
@@ -28,14 +39,14 @@ class EvidenceType(StrEnum):
     WARNING = "WARNING"
 
 
-class RiskLevel(StrEnum):
+class RiskLevel(CaseInsensitiveStrEnum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
 
 
-class ProblemDecision(StrEnum):
+class ProblemDecision(CaseInsensitiveStrEnum):
     MATCHED = "MATCHED"
     AMBIGUOUS = "AMBIGUOUS"
     NO_MATCH = "NO_MATCH"

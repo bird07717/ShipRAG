@@ -129,7 +129,7 @@ describe("view smoke", () => {
         else if (path.includes("/runtime-policies/"))
           body = {
             knowledge_id: "kb-1",
-            execution_policy: "SUPPORT_ONLY",
+            execution_policy: "SUPPORT_WITH_RAG_FALLBACK",
             config_version: 1,
             fallback_conditions: ["NO_MATCH"],
             source: "DATABASE",
@@ -140,7 +140,6 @@ describe("view smoke", () => {
           };
         else if (path.includes("/engine-retrieval-configs"))
           body = [
-            "SUPPORT_ONLY",
             "SUPPORT_WITH_RAG_FALLBACK",
             "RAG_ONLY",
           ].map((execution_policy) => ({

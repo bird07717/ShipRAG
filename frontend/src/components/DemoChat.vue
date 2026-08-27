@@ -119,7 +119,7 @@ function formatLatency(ms: number | undefined): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 }
 function fallbackReason(reason: string): string {
-  return reason === "NO_MATCH" ? "Support 未匹配到 Profile（NO_MATCH）" : reason;
+  return reason === "NO_MATCH" ? "Support 未定位到可靠文档，本轮由 RAG 兜底（NO_MATCH）" : reason;
 }
 
 // 切换知识库：清空会话并拉取欢迎引导词（虚拟消息，不入会话历史）
@@ -216,7 +216,7 @@ async function send(choiceId?: string) {
           target.execution_engine = event.to;
           target.route_stage = "rag_processing";
         }
-        streamingHint.value = "Support 未匹配到文档，已自动降级到 RAG...";
+        streamingHint.value = "Support 未定位到可靠文档，本轮已自动降级到 RAG...";
       },
       onDone: (event) => {
         if (generation !== streamGeneration) return;

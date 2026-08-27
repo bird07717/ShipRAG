@@ -4,7 +4,7 @@ import json
 from typing import Any
 from uuid import UUID, uuid4
 
-from app.gateway.models import ChatEngine, ExecutionPolicy, ResolvedPolicy
+from app.gateway.models import ChatEngine, ConversationMode, ExecutionPolicy, ResolvedPolicy
 from app.gateway.repository import GatewayRepository
 from app.gateway.service import ChatGatewayService
 from app.rag.models import RetrievalConfig
@@ -12,14 +12,14 @@ from app.rag.models import RetrievalConfig
 
 class FakeGatewayRepository:
     def __init__(self) -> None:
-        self.frozen: list[tuple[UUID, ChatEngine]] = []
+        self.executions: list[tuple[UUID, ChatEngine]] = []
         self.links: list[tuple[UUID, UUID, str]] = []
 
-    async def freeze_conversation(
+    async def record_conversation_execution(
         self, *, conversation_id: UUID, policy: ResolvedPolicy, engine: ChatEngine
     ) -> None:
         del policy
-        self.frozen.append((conversation_id, engine))
+        self.executions.append((conversation_id, engine))
 
     async def link_fallback(
         self, *, support_trace_id: UUID, rag_trace_id: UUID, reason: str
@@ -111,13 +111,15 @@ class _FakeRagConfigRepository:
         )
 
 
-def policy(value: ExecutionPolicy, frozen: ChatEngine | None = None) -> ResolvedPolicy:
+def policy(
+    value: ExecutionPolicy, mode: ConversationMode | None = None
+) -> ResolvedPolicy:
     return ResolvedPolicy(
         knowledge_id=uuid4(),
         policy=value,
         config_version=3,
         fallback_conditions=("NO_MATCH",),
-        frozen_engine=frozen,
+        conversation_mode=mode,
     )
 
 
@@ -127,9 +129,6 @@ def test_policy_readiness_requires_only_the_engines_selected_by_policy() -> None
         "rag": {"blockers": ["rag blocked"]},
     }
 
-    assert GatewayRepository._policy_blockers(ExecutionPolicy.SUPPORT_ONLY, readiness) == [
-        "support blocked"
-    ]
     assert GatewayRepository._policy_blockers(ExecutionPolicy.RAG_ONLY, readiness) == [
         "rag blocked"
     ]
@@ -153,11 +152,11 @@ def kwargs(knowledge_id: UUID) -> dict[str, Any]:
     }
 
 
-async def test_support_only_stays_in_support_and_freezes_engine() -> None:
+async def test_hybrid_support_result_stays_in_support() -> None:
     repository = FakeGatewayRepository()
-    support = FakeSupport("NO_MATCH")
+    support = FakeSupport("ANSWERED")
     rag = FakeRag()
-    resolved = policy(ExecutionPolicy.SUPPORT_ONLY)
+    resolved = policy(ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK)
     service = ChatGatewayService(repository, support, rag)  # type: ignore[arg-type]
 
     response = await service.handle(policy=resolved, **kwargs(resolved.knowledge_id))
@@ -165,7 +164,7 @@ async def test_support_only_stays_in_support_and_freezes_engine() -> None:
     assert response["answer"] == "support"
     assert support.calls == 1
     assert rag.calls == 0
-    assert repository.frozen == [(support.conversation_id, ChatEngine.SUPPORT)]
+    assert repository.executions == [(support.conversation_id, ChatEngine.SUPPORT)]
 
 
 async def test_rag_only_bypasses_support() -> None:
@@ -180,7 +179,7 @@ async def test_rag_only_bypasses_support() -> None:
     assert response["answer"] == "rag"
     assert support.calls == 0
     assert rag.calls == 1
-    assert repository.frozen == [(rag.conversation_id, ChatEngine.RAG)]
+    assert repository.executions == [(rag.conversation_id, ChatEngine.RAG)]
     assert rag.last_kwargs["retrieval_overrides"]["vector_top_k"] == 7
 
 
@@ -201,7 +200,7 @@ async def test_no_match_falls_back_and_links_traces() -> None:
     assert rag.last_kwargs["parent_trace_id"] == support.trace_id
     assert rag.last_kwargs["fallback_reason"] == "NO_MATCH"
     assert rag.last_kwargs["retrieval_overrides"]["fusion_top_k"] == 9
-    assert repository.frozen == [(support.conversation_id, ChatEngine.RAG)]
+    assert repository.executions == [(support.conversation_id, ChatEngine.RAG)]
 
 
 async def test_fallback_idempotency_replays_final_response_without_second_rag_call() -> None:
@@ -236,24 +235,41 @@ async def test_safety_result_never_falls_back() -> None:
     assert repository.links == []
 
 
-async def test_frozen_rag_conversation_ignores_support_primary_policy() -> None:
+async def test_hybrid_conversation_after_rag_fallback_returns_to_support() -> None:
     repository = FakeGatewayRepository()
     support = FakeSupport("ANSWERED")
     rag = FakeRag()
-    resolved = policy(ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK, ChatEngine.RAG)
+    resolved = policy(ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK, ConversationMode.SUPPORT_DISCOVERY)
     service = ChatGatewayService(repository, support, rag)  # type: ignore[arg-type]
 
     response = await service.handle(policy=resolved, **kwargs(resolved.knowledge_id))
 
-    assert response["answer"] == "rag"
-    assert support.calls == 0
-    assert rag.calls == 1
+    assert response["answer"] == "support"
+    assert support.calls == 1
+    assert rag.calls == 0
+
+
+async def test_focused_support_never_uses_full_rag_as_a_topic_switch() -> None:
+    repository = FakeGatewayRepository()
+    support = FakeSupport("NO_MATCH")
+    rag = FakeRag()
+    resolved = policy(
+        ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK,
+        ConversationMode.FOCUSED_SUPPORT,
+    )
+    service = ChatGatewayService(repository, support, rag)  # type: ignore[arg-type]
+
+    response = await service.handle(policy=resolved, **kwargs(resolved.knowledge_id))
+
+    assert response["answer"] == "support"
+    assert support.calls == 1
+    assert rag.calls == 0
 
 
 async def test_support_stream_exposes_engine_trace_and_message_events() -> None:
     repository = FakeGatewayRepository()
     support = FakeSupport("ANSWERED")
-    resolved = policy(ExecutionPolicy.SUPPORT_ONLY)
+    resolved = policy(ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK)
     service = ChatGatewayService(repository, support, FakeRag())  # type: ignore[arg-type]
 
     frames = [

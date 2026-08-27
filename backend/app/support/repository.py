@@ -191,7 +191,7 @@ class SupportRepository:
                             text("""
                     SELECT c.knowledge_id, c.focus_document_id, c.focus_index_id,
                            c.support_index_id, c.support_release_id,
-                           c.chat_context, c.support_context_version,
+                           c.chat_context, c.pending_switch_options, c.support_context_version,
                            fi.kb_id AS focus_index_kb_id,
                            si.kb_id AS support_index_kb_id,
                            si.status AS support_index_status
@@ -254,6 +254,12 @@ class SupportRepository:
                 chat_context = (
                     dict(row["chat_context"]) if isinstance(row["chat_context"], dict) else {}
                 )
+                # Keep workflow state in chat_context, while the pending
+                # switch choices have a first-class column for routing and
+                # observability.  The context mirror keeps old Support
+                # clients and idempotent replays compatible.
+                if isinstance(row.get("pending_switch_options"), list):
+                    chat_context["pending_options"] = list(row["pending_switch_options"])
                 context_version = int(row["support_context_version"])
             if conversation_id is None:
                 context_version = 0
@@ -647,9 +653,20 @@ class SupportRepository:
             context_result = await conn.execute(
                 text("""
                 UPDATE conversation
-                SET focus_document_id = :focus,
+                SET focus_document_id = CAST(:focus AS uuid),
                     focus_index_id = :focus_index,
                     chat_context = CAST(:context AS jsonb),
+                    pending_switch_options = CAST(:pending_options AS jsonb),
+                    conversation_mode = CASE
+                        WHEN execution_policy_snapshot = 'RAG_ONLY' THEN 'RAG_ONLY'
+                        WHEN CAST(:focus AS uuid) IS NOT NULL THEN 'FOCUSED_SUPPORT'
+                        ELSE 'SUPPORT_DISCOVERY'
+                    END,
+                    focus_epoch = CASE
+                        WHEN focus_document_id IS DISTINCT FROM CAST(:focus AS uuid)
+                             AND CAST(:focus AS uuid) IS NOT NULL THEN focus_epoch + 1
+                        ELSE focus_epoch
+                    END,
                     support_context_version = support_context_version + 1,
                     updated_at = now()
                 WHERE id = :id AND support_context_version = :expected_version
@@ -659,6 +676,9 @@ class SupportRepository:
                     "focus": focus_document_id,
                     "focus_index": turn.index_id if focus_document_id is not None else None,
                     "context": json.dumps(context, ensure_ascii=False),
+                    "pending_options": json.dumps(
+                        context.get("pending_options", []), ensure_ascii=False
+                    ),
                     "expected_version": turn.context_version,
                 },
             )
