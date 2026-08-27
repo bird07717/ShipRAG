@@ -73,7 +73,7 @@ class ChatGatewayService:
                 user_id=user_id,
                 retrieval_overrides=await self._retrieval_overrides(policy),
             )
-            await self._freeze(response, policy, ChatEngine.RAG)
+            await self._record_execution(response, policy, ChatEngine.RAG)
             response["execution_engine"] = ChatEngine.RAG.value
             return response
 
@@ -97,7 +97,7 @@ class ChatGatewayService:
         if isinstance(replayed_gateway, dict):
             return dict(replayed_gateway)
         if not policy.allows_fallback(response_type):
-            await self._freeze(support_response, policy, ChatEngine.SUPPORT)
+            await self._record_execution(support_response, policy, ChatEngine.SUPPORT)
             support_response["execution_engine"] = ChatEngine.SUPPORT.value
             return support_response
 
@@ -126,7 +126,7 @@ class ChatGatewayService:
             rag_trace_id=UUID(str(rag_response["trace_id"])),
             reason=response_type,
         )
-        await self._freeze(rag_response, policy, ChatEngine.RAG)
+        await self._record_execution(rag_response, policy, ChatEngine.RAG)
         rag_response["fallback"] = {
             "from": "SUPPORT",
             "reason": response_type,
@@ -189,7 +189,7 @@ class ChatGatewayService:
                 yield _sse("done", dict(replayed_gateway))
                 return
             if not policy.allows_fallback(response_type):
-                await self._freeze(support_response, policy, ChatEngine.SUPPORT)
+                await self._record_execution(support_response, policy, ChatEngine.SUPPORT)
                 support_response["execution_engine"] = ChatEngine.SUPPORT.value
                 yield _sse(
                     "trace",
@@ -283,7 +283,7 @@ class ChatGatewayService:
                         "reason": fallback_reason or "NO_MATCH",
                         "support_trace_id": str(parent_trace_id),
                     }
-                await self._freeze(done, policy, ChatEngine.RAG)
+                await self._record_execution(done, policy, ChatEngine.RAG)
                 if parent_trace_id is not None and fallback_idempotency_key is not None:
                     await self.support.save_gateway_response(
                         knowledge_id=knowledge_id,
@@ -315,10 +315,10 @@ class ChatGatewayService:
             "context_max_chunks": config.context_max_chunks,
         }
 
-    async def _freeze(
+    async def _record_execution(
         self, response: dict[str, Any], policy: ResolvedPolicy, engine: ChatEngine
     ) -> None:
-        await self.repository.freeze_conversation(
+        await self.repository.record_conversation_execution(
             conversation_id=UUID(str(response["conversation_id"])),
             policy=policy,
             engine=engine,

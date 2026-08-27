@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.common.errors import ApiError
 from app.core.config import Settings
-from app.gateway.models import ChatEngine, ExecutionPolicy, ResolvedPolicy
+from app.gateway.models import ChatEngine, ConversationMode, ExecutionPolicy, ResolvedPolicy
 
 _DEFAULT_FALLBACK_CONDITIONS = ("NO_MATCH",)
 
@@ -36,8 +36,8 @@ class GatewayRepository:
                         await connection.execute(
                             text(
                                 """
-                                SELECT knowledge_id, execution_policy, execution_engine,
-                                       engine_config_version
+                                SELECT knowledge_id, execution_policy_snapshot,
+                                       conversation_mode, engine_config_version
                                 FROM conversation WHERE id = :id
                                 """
                             ),
@@ -51,15 +51,19 @@ class GatewayRepository:
                     raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
                 if conversation["knowledge_id"] != knowledge_id:
                     raise ApiError("CONVERSATION_KB_MISMATCH", "会话不属于指定知识库", 409)
-                if conversation["execution_engine"]:
+                if conversation["execution_policy_snapshot"]:
                     return ResolvedPolicy(
                         knowledge_id=knowledge_id,
                         policy=ExecutionPolicy(
-                            str(conversation["execution_policy"] or self._default_policy())
+                            str(conversation["execution_policy_snapshot"])
                         ),
                         config_version=int(conversation["engine_config_version"] or 0),
                         fallback_conditions=_DEFAULT_FALLBACK_CONDITIONS,
-                        frozen_engine=ChatEngine(str(conversation["execution_engine"])),
+                        conversation_mode=(
+                            ConversationMode(str(conversation["conversation_mode"]))
+                            if conversation["conversation_mode"]
+                            else None
+                        ),
                     )
 
             policy = (
@@ -262,8 +266,7 @@ class GatewayRepository:
         blockers: list[str] = []
         if execution_policy != ExecutionPolicy.RAG_ONLY:
             blockers.extend(str(item) for item in readiness["support"]["blockers"])
-        if execution_policy != ExecutionPolicy.SUPPORT_ONLY:
-            blockers.extend(str(item) for item in readiness["rag"]["blockers"])
+        blockers.extend(str(item) for item in readiness["rag"]["blockers"])
         return list(dict.fromkeys(blockers))
 
     async def update_policy(
@@ -320,7 +323,7 @@ class GatewayRepository:
             "readiness": readiness,
         }
 
-    async def freeze_conversation(
+    async def record_conversation_execution(
         self,
         *,
         conversation_id: UUID,
@@ -332,12 +335,16 @@ class GatewayRepository:
                 text(
                     """
                     UPDATE conversation
-                    SET execution_policy = COALESCE(execution_policy, :policy),
-                        execution_engine = COALESCE(execution_engine, :engine),
+                    SET execution_policy_snapshot = COALESCE(execution_policy_snapshot, :policy),
+                        last_execution_engine = :engine,
                         engine_config_version = COALESCE(engine_config_version, :version),
+                        conversation_mode = CASE
+                            WHEN :policy = 'RAG_ONLY' THEN 'RAG_ONLY'
+                            WHEN focus_document_id IS NOT NULL THEN 'FOCUSED_SUPPORT'
+                            ELSE 'SUPPORT_DISCOVERY'
+                        END,
                         updated_at = now()
                     WHERE id = :id
-                      AND (execution_engine IS NULL OR execution_engine = :engine)
                     """
                 ),
                 {
@@ -348,7 +355,7 @@ class GatewayRepository:
                 },
             )
             if result.rowcount != 1:
-                raise ApiError("ENGINE_POLICY_CONFLICT", "会话已冻结到另一问答引擎", 409)
+                raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
 
     async def link_fallback(
         self,

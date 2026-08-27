@@ -501,7 +501,133 @@ class TechnicalSupportService:
                 return response
 
             # Focused turns load the complete, frozen document directly and
-            # never invoke the Generic RAG stack.
+            # never invoke the Generic RAG answer stack. Before asking the
+            # focused assistant, run the closed Profile/document-only router
+            # once for an obvious topic change. A candidate is always a
+            # proposal: the current focus is retained until choice_id confirms
+            # it on a following turn.
+            switch_options: list[dict[str, Any]] = []
+            focused_resolution = await resolver.resolve(
+                question=clean_question, profiles=profiles
+            )
+            if (
+                focused_resolution.decision == ProblemDecision.MATCHED
+                and focused_resolution.profile is not None
+                and focused_resolution.profile.document_id != turn.focus_document_id
+            ):
+                switch_options.append(
+                    {
+                        "choice_id": "switch_1",
+                        "document_id": str(focused_resolution.profile.document_id),
+                        "problem_code": focused_resolution.profile.problem_code,
+                        "title": focused_resolution.profile.canonical_question,
+                        "routing_method": focused_resolution.method,
+                        "confidence": focused_resolution.confidence,
+                    }
+                )
+            elif focused_resolution.decision == ProblemDecision.AMBIGUOUS:
+                for number, candidate in enumerate(focused_resolution.choices, start=1):
+                    if candidate.document_id == turn.focus_document_id:
+                        continue
+                    switch_options.append(
+                        {
+                            "choice_id": f"switch_{number}",
+                            "document_id": str(candidate.document_id),
+                            "problem_code": candidate.problem_code,
+                            "title": candidate.canonical_question,
+                            "routing_method": focused_resolution.method,
+                            "confidence": focused_resolution.confidence,
+                        }
+                    )
+            elif self.settings.support_rag_fallback_enabled and self.document_router:
+                current_stage = "RAG_DOCUMENT_RESOLUTION"
+                await self.repository.set_stage(turn, current_stage)
+                topic_route = await self.document_router.resolve(
+                    knowledge_id=knowledge_id,
+                    index_id=turn.index_id,
+                    question=clean_question,
+                    retrieval=retrieval_config,
+                )
+                if (
+                    topic_route.action == ACTION_DELIVER
+                    and topic_route.document_id
+                    and topic_route.document_id != turn.focus_document_id
+                ):
+                    candidate_profile = await self.repository.get_profile_by_document(
+                        knowledge_id, topic_route.document_id
+                    )
+                    switch_options.append(
+                        {
+                            "choice_id": "switch_1",
+                            "document_id": str(topic_route.document_id),
+                            "problem_code": (
+                                candidate_profile.problem_code if candidate_profile else None
+                            ),
+                            "title": topic_route.document_title
+                            or (candidate_profile.canonical_question if candidate_profile else "候选文档"),
+                            "routing_method": "DOCUMENT_ROUTER",
+                            "confidence": topic_route.confidence,
+                        }
+                    )
+                elif topic_route.action == ACTION_CLARIFY:
+                    for number, route_option in enumerate(topic_route.options, start=1):
+                        if str(route_option.get("document_id")) == str(turn.focus_document_id):
+                            continue
+                        candidate_profile = await self.repository.get_profile_by_document(
+                            knowledge_id, UUID(str(route_option["document_id"]))
+                        )
+                        switch_options.append(
+                            {
+                                "choice_id": f"switch_{number}",
+                                "document_id": str(route_option["document_id"]),
+                                "problem_code": (
+                                    candidate_profile.problem_code if candidate_profile else None
+                                ),
+                                "title": str(route_option.get("title") or "候选文档"),
+                                "routing_method": "DOCUMENT_ROUTER",
+                                "confidence": topic_route.confidence,
+                            }
+                        )
+            if switch_options:
+                response = self._base_response(turn, started)
+                public_options = [
+                    {
+                        key: option[key]
+                        for key in ("choice_id", "document_id", "problem_code", "title")
+                    }
+                    for option in switch_options
+                ]
+                response.update(
+                    {
+                        "response_type": "CLARIFICATION_REQUIRED",
+                        "answer": "当前问题可能属于另一篇文档，请确认是否切换焦点文档。",
+                        "clarification": {
+                            "type": "CONFIRM_DOCUMENT_SWITCH",
+                            "message": "当前问题可能属于另一篇文档，请确认是否切换焦点文档。",
+                            "choices": public_options,
+                        },
+                        "routing": {
+                            "source": "FOCUSED_SWITCH_CHECK",
+                            "decision": "OFFER_SWITCH",
+                        },
+                        "latency_ms": _elapsed(started),
+                    }
+                )
+                context = dict(turn.chat_context)
+                context["pending_options"] = switch_options
+                await self.repository.finish_turn(
+                    turn,
+                    response=response,
+                    context=context,
+                    focus_document_id=turn.focus_document_id,
+                    trace={
+                        "support_version": 1,
+                        "focus_document_id": str(turn.focus_document_id),
+                        "document_switch": {"candidates": public_options},
+                    },
+                )
+                return response
+
             current_stage = "DOCUMENT_LOADING"
             await self.repository.set_stage(turn, current_stage)
             profile = await self.repository.get_profile_by_document(

@@ -7,7 +7,7 @@ import type { ExecutionPolicy } from "@/types/admin";
 
 const shared = useAdminStore();
 const routing = useEngineRoutingStore();
-const selectedPolicy = ref<ExecutionPolicy>("SUPPORT_ONLY");
+const selectedPolicy = ref<ExecutionPolicy>("SUPPORT_WITH_RAG_FALLBACK");
 
 const policies: Array<{
   value: ExecutionPolicy;
@@ -15,14 +15,9 @@ const policies: Array<{
   description: string;
 }> = [
   {
-    value: "SUPPORT_ONLY",
-    label: "仅 Profile Support",
-    description: "新会话只执行 Profile、完整文档交付和基于完整文档的持续问答。",
-  },
-  {
     value: "SUPPORT_WITH_RAG_FALLBACK",
     label: "Support 优先，RAG 自动降级",
-    description: "先执行 Support；当前仅 NO_MATCH 可以把该会话降级并冻结到 RAG。",
+    description: "每轮优先匹配 Support 文档；仅无可靠文档时单轮使用完整 RAG，后续不会永久锁定为 RAG。",
   },
   {
     value: "RAG_ONLY",
@@ -39,7 +34,7 @@ const ragReady = computed(() => Boolean(ragReadiness.value?.ready));
 const blockers = computed(() => {
   const result: string[] = [];
   const needsSupport = selectedPolicy.value !== "RAG_ONLY";
-  const needsRag = selectedPolicy.value !== "SUPPORT_ONLY";
+  const needsRag = true;
   if (needsSupport) result.push(...(supportReadiness.value?.blockers ?? []));
   if (needsRag) result.push(...(ragReadiness.value?.blockers ?? []));
   return [...new Set(result)];
@@ -124,7 +119,7 @@ onMounted(() => void load());
           </div>
 
           <el-alert
-            title="策略修改只影响新会话；已有会话继续使用已冻结的执行引擎。"
+            title="策略修改只影响新会话；会话保存策略快照，但 Hybrid 会在每轮重新决定是否需要 RAG 兜底。"
             type="info"
             :closable="false"
             show-icon

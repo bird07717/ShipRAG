@@ -208,3 +208,41 @@ async def test_postgres_workflow_optimistic_lock_rejects_stale_turn() -> None:
                 trace={},
             )
         assert conflict.value.code == "WORKFLOW_CONFLICT"
+
+
+async def test_postgres_persists_support_clarification_response_type() -> None:
+    """The longest valid Support response type must commit to rag_trace."""
+    async with _repository() as (repository, knowledge_id):
+        turn = await repository.begin_turn(
+            knowledge_id=knowledge_id,
+            conversation_id=None,
+            question="设备出错了",
+            request_id="integration-clarification-response-type",
+            user_id=None,
+            idempotency_key=None,
+            request_hash="e" * 64,
+        )
+        response = {
+            "answer": "请确认要处理的文档。",
+            "references": [],
+            "content": [],
+            "response_type": "CLARIFICATION_REQUIRED",
+            "latency_ms": 1,
+        }
+
+        await repository.finish_turn(
+            turn,
+            response=response,
+            context={"support_version": 1, "pending_options": []},
+            focus_document_id=None,
+            trace={},
+        )
+
+        async with repository.engine.connect() as connection:
+            response_type = (
+                await connection.execute(
+                    text("SELECT response_type FROM rag_trace WHERE trace_id = :trace_id"),
+                    {"trace_id": turn.trace_id},
+                )
+            ).scalar_one()
+        assert response_type == "CLARIFICATION_REQUIRED"

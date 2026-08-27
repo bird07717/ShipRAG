@@ -81,6 +81,39 @@ async def test_focused_assistant_validates_and_resolves_document_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_focused_assistant_accepts_case_insensitive_enum_values() -> None:
+    document = _document()
+    provider = FakeLlmProvider(
+        completions=[
+            _draft(
+                mode="step_guidance",
+                sections=[
+                    {
+                        "type": "document_fact",
+                        "title": "设备地址",
+                        "content": "设备 IP 为 172.16.8.150。",
+                        "evidence_element_ids": ["E1"],
+                        "risk_level": "medium",
+                    }
+                ],
+            )
+        ]
+    )
+
+    draft, _, _ = await _assistant(provider).answer(
+        question="文档中的地址是什么？",
+        document=document,
+        workflow={},
+        history=[],
+    )
+
+    assert draft.mode.value == "STEP_GUIDANCE"
+    assert draft.sections[0].type.value == "DOCUMENT_FACT"
+    assert draft.sections[0].risk_level is not None
+    assert draft.sections[0].risk_level.value == "MEDIUM"
+
+
+@pytest.mark.asyncio
 async def test_focused_assistant_repairs_invalid_json_once() -> None:
     provider = FakeLlmProvider(completions=["not-json", _draft(image_ids=[])])
 

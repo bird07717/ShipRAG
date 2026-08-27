@@ -354,12 +354,12 @@ class WelcomeResponse(BaseModel):
 
 
 class RuntimePolicyUpdate(BaseModel):
-    execution_policy: Literal["SUPPORT_ONLY", "RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"]
+    execution_policy: Literal["RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"]
 
 
 class RuntimePolicyResponse(BaseModel):
     knowledge_id: UUID
-    execution_policy: Literal["SUPPORT_ONLY", "RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"]
+    execution_policy: Literal["RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"]
     config_version: int
     fallback_conditions: list[str]
     source: Literal["DATABASE", "DEFAULT"]
@@ -769,7 +769,7 @@ class RagConfigUpdate(BaseModel):
 
 
 class EngineRetrievalConfigResponse(RagConfigResponse):
-    execution_policy: Literal["SUPPORT_ONLY", "RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"]
+    execution_policy: Literal["RAG_ONLY", "SUPPORT_WITH_RAG_FALLBACK"]
 
 
 class EngineRetrievalConfigUpdate(RagConfigUpdate):

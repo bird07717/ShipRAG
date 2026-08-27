@@ -937,6 +937,7 @@ class RagRepository:
                     """
                     UPDATE conversation
                     SET chat_context = CAST(:chat_context AS jsonb),
+                        pending_switch_options = CAST(:pending_options AS jsonb),
                         updated_at = now()
                     WHERE id = :conversation_id
                     """
@@ -950,6 +951,7 @@ class RagRepository:
                         },
                         ensure_ascii=False,
                     ),
+                    "pending_options": json.dumps(pending_options, ensure_ascii=False),
                 },
             )
 
@@ -959,7 +961,9 @@ class RagRepository:
                 text(
                     """
                     UPDATE conversation
-                    SET chat_context = '{}'::jsonb, updated_at = now()
+                    SET chat_context = '{}'::jsonb,
+                        pending_switch_options = '[]'::jsonb,
+                        updated_at = now()
                     WHERE id = :conversation_id
                     """
                 ),

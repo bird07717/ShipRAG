@@ -25,7 +25,7 @@ const knowledgeBase: KnowledgeBase = {
 
 const policy: RuntimePolicy = {
   knowledge_id: "kb-1",
-  execution_policy: "SUPPORT_ONLY",
+  execution_policy: "SUPPORT_WITH_RAG_FALLBACK",
   config_version: 1,
   fallback_conditions: ["NO_MATCH"],
   source: "DATABASE",

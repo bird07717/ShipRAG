@@ -371,11 +371,10 @@ function stubApi() {
     context_max_chunks: 8,
   });
   vi.spyOn(adminApi, "listEngineRetrievalConfigs").mockResolvedValue([
-    "SUPPORT_ONLY",
     "SUPPORT_WITH_RAG_FALLBACK",
     "RAG_ONLY",
   ].map((execution_policy) => ({
-    execution_policy: execution_policy as "SUPPORT_ONLY" | "SUPPORT_WITH_RAG_FALLBACK" | "RAG_ONLY",
+    execution_policy: execution_policy as "SUPPORT_WITH_RAG_FALLBACK" | "RAG_ONLY",
     vector_top_k: 10,
     bm25_top_k: 10,
     fusion_top_k: 20,
