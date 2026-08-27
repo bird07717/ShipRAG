@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -13,7 +14,13 @@ from app.core.config import Settings
 from app.rag.llm import LlmError, create_llm_provider
 from app.rag.models import RetrievalConfig
 from app.support.document_delivery import deliver_document
-from app.support.document_router import ACTION_CLARIFY, ACTION_DELIVER, SupportDocumentRouter
+from app.support.document_router import (
+    ACTION_CLARIFY,
+    ACTION_DELIVER,
+    ACTION_OFFER_SWITCH,
+    ACTION_STAY,
+    SupportDocumentRouter,
+)
 from app.support.escalation import build_escalation
 from app.support.focused_assistant import FocusedSupportAssistant
 from app.support.models import ProblemDecision, ProblemProfile, SupportTurn
@@ -82,6 +89,29 @@ def _failure_stage(code: str, current_stage: str) -> str:
     if code == "MODEL_NOT_CONFIGURED":
         return "LLM"
     return current_stage
+
+
+_DISCOVERY_FOLLOW_UP = re.compile(
+    r"^(?:还是|仍然|依然|然后|接着|下一步|继续|再|这个|那个|它|该|上述|上面|前面|刚才)"
+)
+
+
+def _discovery_routing_query(question: str, history: list[dict[str, str]]) -> str:
+    """Add one recent user turn only for an obviously elliptical follow-up."""
+    normalized = "".join(question.split())
+    if len(normalized) > 16 or not _DISCOVERY_FOLLOW_UP.search(normalized):
+        return question
+    previous = next(
+        (
+            str(item.get("content", "")).strip()
+            for item in reversed(history)
+            if str(item.get("role", "")).upper() == "USER" and str(item.get("content", "")).strip()
+        ),
+        "",
+    )
+    if not previous or previous == question:
+        return question
+    return f"{previous}。{question}"
 
 
 class TechnicalSupportService:
@@ -161,8 +191,18 @@ class TechnicalSupportService:
                 "latency_ms": _elapsed(started),
             }
         )
+        switch_origin = None
+        if turn.focus_document_id is not None and document.id != turn.focus_document_id:
+            discovery = turn.chat_context.get("discovery", {})
+            if isinstance(discovery, dict):
+                value = discovery.get("last_clarification_question")
+                if isinstance(value, str) and value.strip():
+                    switch_origin = value.strip()
         context = reset_for_document(
-            str(document.id), profile.problem_code if profile else "", str(turn.index_id)
+            str(document.id),
+            profile.problem_code if profile else "",
+            str(turn.index_id),
+            switch_origin_question=switch_origin,
         )
         return response, context, document.id
 
@@ -213,7 +253,10 @@ class TechnicalSupportService:
             # A choice is the only path that can confirm a pending document
             # switch. It precedes focus-based assistant behavior.
             profiles = await self.repository.list_profiles(
-                knowledge_id, enabled_only=True, ready_only=True
+                knowledge_id,
+                enabled_only=True,
+                ready_only=True,
+                index_id=turn.index_id,
             )
             # Profile resolution is intentionally deterministic.  The RAG
             # fallback below handles natural-language misses using document
@@ -271,7 +314,7 @@ class TechnicalSupportService:
                     except (TypeError, ValueError) as exc:
                         raise ApiError("INVALID_CHOICE", "待确认文档无效", 409) from exc
                     selected_profile = await self.repository.get_profile_by_document(
-                        knowledge_id, selected_document_id
+                        knowledge_id, selected_document_id, index_id=turn.index_id
                     )
                     selected_method = str(option.get("routing_method") or "DOCUMENT_CHOICE")
                     selected_confidence = float(option.get("confidence") or 0.0)
@@ -305,7 +348,7 @@ class TechnicalSupportService:
                 focus: UUID | None = None
                 if document_id is not None:
                     profile = await self.repository.get_profile_by_document(
-                        knowledge_id, document_id
+                        knowledge_id, document_id, index_id=turn.index_id
                     )
                     if profile is None or not profile.support_ready:
                         raise ApiError(
@@ -325,7 +368,9 @@ class TechnicalSupportService:
                     )
                     response["routing"]["source"] = "EXPLICIT"
                 elif problem_code is not None:
-                    profile = await self.repository.get_profile_by_code(knowledge_id, problem_code)
+                    profile = await self.repository.get_profile_by_code(
+                        knowledge_id, problem_code, index_id=turn.index_id
+                    )
                     if profile is None:
                         raise ApiError("PROBLEM_CODE_NOT_FOUND", "问题编码不存在或未启用", 404)
                     if not profile.support_ready:
@@ -367,8 +412,9 @@ class TechnicalSupportService:
                             route = await self.document_router.resolve(
                                 knowledge_id=knowledge_id,
                                 index_id=turn.index_id,
-                                question=clean_question,
+                                question=_discovery_routing_query(clean_question, turn.history),
                                 retrieval=retrieval_config,
+                                profiles=profiles,
                             )
                         if (
                             route is not None
@@ -376,7 +422,7 @@ class TechnicalSupportService:
                             and route.document_id
                         ):
                             profile = await self.repository.get_profile_by_document(
-                                knowledge_id, route.document_id
+                                knowledge_id, route.document_id, index_id=turn.index_id
                             )
                             current_stage = "DOCUMENT_DELIVERY"
                             response, context, focus = await self._deliver(
@@ -534,7 +580,9 @@ class TechnicalSupportService:
                     context=context,
                     focus_document_id=focus,
                     pending_switch_options=(
-                        pending_options if response["response_type"] == "CLARIFICATION_REQUIRED" else []
+                        pending_options
+                        if response["response_type"] == "CLARIFICATION_REQUIRED"
+                        else []
                     ),
                     trace={
                         "support_version": 1,
@@ -554,9 +602,7 @@ class TechnicalSupportService:
             # proposal: the current focus is retained until choice_id confirms
             # it on a following turn.
             switch_options: list[dict[str, Any]] = []
-            focused_resolution = await resolver.resolve(
-                question=clean_question, profiles=profiles
-            )
+            focused_resolution = await resolver.resolve(question=clean_question, profiles=profiles)
             if (
                 focused_resolution.decision == ProblemDecision.MATCHED
                 and focused_resolution.profile is not None
@@ -594,6 +640,8 @@ class TechnicalSupportService:
                     index_id=turn.index_id,
                     question=clean_question,
                     retrieval=retrieval_config,
+                    profiles=profiles,
+                    focus_document_id=turn.focus_document_id,
                 )
                 if (
                     topic_route.action == ACTION_DELIVER
@@ -601,7 +649,7 @@ class TechnicalSupportService:
                     and topic_route.document_id != turn.focus_document_id
                 ):
                     candidate_profile = await self.repository.get_profile_by_document(
-                        knowledge_id, topic_route.document_id
+                        knowledge_id, topic_route.document_id, index_id=turn.index_id
                     )
                     switch_options.append(
                         {
@@ -611,17 +659,23 @@ class TechnicalSupportService:
                                 candidate_profile.problem_code if candidate_profile else None
                             ),
                             "title": topic_route.document_title
-                            or (candidate_profile.canonical_question if candidate_profile else "候选文档"),
+                            or (
+                                candidate_profile.canonical_question
+                                if candidate_profile
+                                else "候选文档"
+                            ),
                             "routing_method": "DOCUMENT_ROUTER",
                             "confidence": topic_route.confidence,
                         }
                     )
-                elif topic_route.action == ACTION_CLARIFY:
+                elif topic_route.action in {ACTION_OFFER_SWITCH, ACTION_CLARIFY}:
                     for number, route_option in enumerate(topic_route.options, start=1):
                         if str(route_option.get("document_id")) == str(turn.focus_document_id):
                             continue
                         candidate_profile = await self.repository.get_profile_by_document(
-                            knowledge_id, UUID(str(route_option["document_id"]))
+                            knowledge_id,
+                            UUID(str(route_option["document_id"])),
+                            index_id=turn.index_id,
                         )
                         switch_options.append(
                             {
@@ -635,6 +689,12 @@ class TechnicalSupportService:
                                 "confidence": topic_route.confidence,
                             }
                         )
+                elif topic_route.action == ACTION_STAY:
+                    # The focus-aware document router found no evidence strong
+                    # enough to leave the current document. Continue with the
+                    # focused assistant instead of turning weak alternatives
+                    # into a switch confirmation.
+                    pass
             if switch_options:
                 response = self._base_response(turn, started)
                 public_options = [
@@ -689,7 +749,7 @@ class TechnicalSupportService:
             current_stage = "DOCUMENT_LOADING"
             await self.repository.set_stage(turn, current_stage)
             profile = await self.repository.get_profile_by_document(
-                knowledge_id, turn.focus_document_id
+                knowledge_id, turn.focus_document_id, index_id=turn.index_id
             )
             document = await self.repository.get_document(
                 knowledge_id=knowledge_id,

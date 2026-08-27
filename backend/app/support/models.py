@@ -131,6 +131,7 @@ class EscalationDraft(BaseModel):
 class SupportDraft(BaseModel):
     mode: SupportMode
     answer: str = Field(min_length=1, max_length=12_000)
+    answer_evidence_element_ids: list[str] = Field(default_factory=list)
     sections: list[SupportSection] = Field(default_factory=list)
     image_ids: list[str] = Field(default_factory=list)
     questions: list[str] = Field(default_factory=list)

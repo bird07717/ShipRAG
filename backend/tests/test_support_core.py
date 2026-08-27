@@ -27,7 +27,7 @@ from app.support.models import (
 )
 from app.support.problem_resolver import ProblemResolver, normalize_for_match
 from app.support.repository import SupportRepository
-from app.support.service import TechnicalSupportService
+from app.support.service import TechnicalSupportService, _discovery_routing_query
 from app.support.validator import validate_draft
 from app.support.workflow_state import (
     apply_workflow_update,
@@ -135,6 +135,62 @@ async def test_problem_resolver_handles_ambiguity_rules_and_closed_catalog() -> 
     assert classified.method == "LLM_CATALOG"
 
 
+@pytest.mark.asyncio
+async def test_problem_resolver_uses_anchor_symptom_exclusion_and_structured_ambiguity() -> None:
+    upgrade = _profile(alias="PDC U盘升级")
+    upgrade.product_name = "PDC"
+    upgrade.task_type = "UPGRADE"
+    upgrade.symptoms = ["升级后无法启动"]
+    upgrade.exclusions = ["网口升级"]
+
+    anchor = await ProblemResolver().resolve(
+        question="PDC U盘升级失败后怎么重新操作？", profiles=[upgrade]
+    )
+    assert anchor.decision == ProblemDecision.MATCHED
+    assert anchor.method == "ALIAS_ANCHOR"
+
+    symptom = await ProblemResolver().resolve(question="PDC升级后无法启动", profiles=[upgrade])
+    assert symptom.decision == ProblemDecision.MATCHED
+    assert symptom.method == "DETERMINISTIC_RULE"
+
+    excluded = await ProblemResolver().resolve(question="PDC网口升级失败", profiles=[upgrade])
+    assert excluded.decision == ProblemDecision.NO_MATCH
+    assert excluded.method == "EXCLUSION"
+
+    replacement = _profile(alias="PDC 硬件更换")
+    replacement.product_name = "PDC"
+    replacement.task_type = "UPGRADE"
+    ambiguous = await ProblemResolver().resolve(
+        question="PDC需要升级", profiles=[upgrade, replacement]
+    )
+    assert ambiguous.decision == ProblemDecision.AMBIGUOUS
+    assert ambiguous.method == "STRUCTURED_CONFLICT"
+    assert ambiguous.choices == [upgrade, replacement]
+
+
+@pytest.mark.asyncio
+async def test_problem_resolver_does_not_anchor_a_generic_alias() -> None:
+    profile = _profile(alias="设备升级失败")
+    profile.product_name = None
+    profile.model_names = []
+    profile.keywords = ["升级", "失败"]
+    result = await ProblemResolver().resolve(
+        question="设备升级失败以后怎么恢复？", profiles=[profile]
+    )
+    assert result.decision == ProblemDecision.NO_MATCH
+
+
+def test_discovery_routing_query_adds_only_one_recent_user_turn() -> None:
+    history = [
+        {"role": "USER", "content": "我正在给PDC做U盘升级"},
+        {"role": "ASSISTANT", "content": "请补充具体现象"},
+    ]
+    assert _discovery_routing_query("还是失败", history) == "我正在给PDC做U盘升级。还是失败"
+    assert _discovery_routing_query("FFC怎么更换", history) == "FFC怎么更换"
+    long_question = "PDC通过U盘升级失败后应该如何恢复到上一个版本"
+    assert _discovery_routing_query(long_question, history) == long_question
+
+
 def test_document_delivery_keeps_order_and_optionally_suppresses_images() -> None:
     document = _document()
     content, images = deliver_document(document, include_images=True)
@@ -171,6 +227,20 @@ def test_context_v1_migrates_legacy_workflow_and_keeps_candidates_outside_prompt
     assert migrated["support_workflow"]["completed_steps"] == [1]
     assert "pending_options" not in migrated["support_workflow"]
     assert migrated["discovery"]["last_clarification_question"] == "设备型号是什么？"
+
+
+def test_document_switch_retains_only_its_origin_question() -> None:
+    context = reset_for_document(
+        str(uuid4()),
+        "PDC_USB_UPGRADE",
+        str(uuid4()),
+        switch_origin_question="FFC接线盒进水后报警怎么处理？",
+    )
+
+    assert context["support_workflow"]["observations"] == [
+        {"source": "USER", "value": "FFC接线盒进水后报警怎么处理？"}
+    ]
+    assert context["discovery"]["last_clarification_question"] is None
 
 
 def test_document_delivery_keeps_original_alt_text_as_caption() -> None:
@@ -384,6 +454,51 @@ def test_validator_requires_evidence_limits_images_and_blocks_unsupported_risk()
     assert validated.escalation.required
     assert validated.sections[2].type == EvidenceType.WARNING
     assert validated.sections[2].risk_level == RiskLevel.HIGH
+
+
+def test_validator_checks_top_level_answer_evidence_and_high_risk_content() -> None:
+    document = _document()
+    element_id = str(document.blocks[0].element_id)
+    safe = SupportDraft.model_validate(
+        {
+            "mode": "STEP_GUIDANCE",
+            "answer": "请关闭设备电源后再操作。",
+            "answer_evidence_element_ids": ["E1"],
+        }
+    )
+    validated = validate_draft(
+        safe,
+        document=document,
+        evidence_registry={"E1": element_id},
+        image_registry={},
+        question="如何处理？",
+    )
+    assert validated.answer_evidence_element_ids == [element_id]
+
+    unsupported_ip = SupportDraft.model_validate(
+        {"mode": "STEP_GUIDANCE", "answer": "请连接 10.0.0.99 后继续。"}
+    )
+    with pytest.raises(ApiError, match="文档外的产品参数"):
+        validate_draft(
+            unsupported_ip,
+            document=document,
+            evidence_registry={},
+            image_registry={},
+            question="如何处理？",
+        )
+
+    high_risk = SupportDraft.model_validate(
+        {"mode": "STEP_GUIDANCE", "answer": "请断电后拆机更换硬件。"}
+    )
+    guarded = validate_draft(
+        high_risk,
+        document=document,
+        evidence_registry={},
+        image_registry={},
+        question="如何处理？",
+    )
+    assert guarded.escalation.required is True
+    assert "暂停操作" in guarded.answer
 
     bad_fact = SupportDraft.model_validate(
         {
@@ -666,7 +781,7 @@ async def test_profile_query_is_scoped_to_knowledge_base_and_document_owner() ->
     sql, parameters = engine.connection.executed[0]
     assert "WHERE p.kb_id = :kb_id" in sql
     assert "d.id = p.document_id AND d.kb_id = p.kb_id" in sql
-    assert parameters == {"kb_id": knowledge_id}
+    assert parameters == {"kb_id": knowledge_id, "index_id": None}
 
 
 @pytest.mark.asyncio
@@ -838,6 +953,11 @@ class _SupportServiceRepository:
         self.chat_context: dict[str, Any] = {}
         self.pending_switch_options: list[dict[str, Any]] = []
         self.finished: dict[str, Any] | None = None
+        self.focus_document_id = None
+        self.focus_epoch = 0
+        self.catalog_requests: list[dict[str, Any]] = []
+        self.profile_requests: list[dict[str, Any]] = []
+        self.document_requests: list[dict[str, Any]] = []
 
     @staticmethod
     def request_hash(**_: Any) -> str:
@@ -852,25 +972,38 @@ class _SupportServiceRepository:
             knowledge_id=self.knowledge_id,
             index_id=self.document.index_id,
             question=kwargs["question"],
-            focus_document_id=None,
+            focus_document_id=self.focus_document_id,
             chat_context=self.chat_context,
             context_version=0,
             history=[],
+            focus_epoch=self.focus_epoch,
             pending_switch_options=self.pending_switch_options,
             idempotency_key=kwargs.get("idempotency_key"),
         )
 
-    async def list_profiles(self, knowledge_id: Any, **__: Any) -> list[ProblemProfile]:
+    async def list_profiles(self, knowledge_id: Any, **kwargs: Any) -> list[ProblemProfile]:
         assert knowledge_id == self.knowledge_id
+        self.catalog_requests.append(kwargs)
         return self.profiles
 
-    async def get_profile_by_code(self, *_: Any, **__: Any) -> ProblemProfile | None:
+    async def get_profile_by_code(self, *_: Any, **kwargs: Any) -> ProblemProfile | None:
+        self.profile_requests.append({"method": "code", **kwargs})
         return self.profile
 
-    async def get_profile_by_document(self, *_: Any, **__: Any) -> ProblemProfile | None:
-        return self.profile
+    async def get_profile_by_document(self, *args: Any, **kwargs: Any) -> ProblemProfile | None:
+        self.profile_requests.append({"method": "document", **kwargs})
+        document_id = args[1] if len(args) > 1 else kwargs.get("document_id")
+        return next(
+            (
+                profile
+                for profile in self.profiles
+                if profile and profile.document_id == document_id
+            ),
+            None,
+        )
 
-    async def get_document(self, **_: Any) -> FocusedDocument:
+    async def get_document(self, **kwargs: Any) -> FocusedDocument:
+        self.document_requests.append(kwargs)
         return self.document
 
     async def finish_turn(self, turn: SupportTurn, **kwargs: Any) -> None:
@@ -929,10 +1062,44 @@ async def test_support_service_delivers_complete_document_without_llm() -> None:
     assert response["images"][0]["image_asset_id"] == str(document.blocks[2].image_asset_id)
     assert repository.finished is not None
     assert repository.finished["focus_document_id"] == document.id
-    assert (
-        repository.finished["context"]["support_workflow"]["index_id"]
-        == str(document.index_id)
+    assert repository.finished["context"]["support_workflow"]["index_id"] == str(document.index_id)
+    assert repository.catalog_requests[0]["index_id"] == document.index_id
+    assert repository.profile_requests == [
+        {"method": "code", "index_id": document.index_id}
+    ]
+    assert repository.document_requests[0]["index_id"] == document.index_id
+
+
+@pytest.mark.asyncio
+async def test_support_service_explicit_document_uses_frozen_index() -> None:
+    knowledge_id = uuid4()
+    profile = _profile()
+    profile.knowledge_id = knowledge_id
+    document = _document()
+    profile.document_id = document.id
+    repository = _SupportServiceRepository(
+        knowledge_id=knowledge_id,
+        profile=profile,
+        document=document,
     )
+    service = TechnicalSupportService(
+        cast(SupportRepository, repository), Settings(_env_file=None, app_env="test")
+    )
+
+    response = await service.handle(
+        knowledge_id=knowledge_id,
+        conversation_id=None,
+        question="打开指定文档",
+        request_id="request-explicit-document-index",
+        document_id=document.id,
+    )
+
+    assert response["response_type"] == "DOCUMENT_DELIVERED"
+    assert repository.catalog_requests[0]["index_id"] == document.index_id
+    assert repository.profile_requests == [
+        {"method": "document", "index_id": document.index_id}
+    ]
+    assert repository.document_requests[0]["index_id"] == document.index_id
 
 
 @pytest.mark.asyncio
@@ -1153,6 +1320,60 @@ async def test_support_service_rag_fallback_requests_and_accepts_document_choice
     assert delivered["response_type"] == "DOCUMENT_DELIVERED"
     assert delivered["routing"]["method"] == "RAG_FALLBACK_CHOICE"
     assert len(router.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_confirmed_switch_preserves_origin_question_and_frozen_index() -> None:
+    knowledge_id = uuid4()
+    original_profile = _profile(alias="PDC U盘升级")
+    target_profile = _profile(alias="FFC 更换")
+    original_profile.knowledge_id = target_profile.knowledge_id = knowledge_id
+    target_document = _document()
+    original_profile.document_id = uuid4()
+    target_profile.document_id = target_document.id
+    repository = _SupportServiceRepository(
+        knowledge_id=knowledge_id,
+        profile=target_profile,
+        document=target_document,
+    )
+    repository.profiles = [original_profile, target_profile]
+    repository.focus_document_id = original_profile.document_id
+    repository.focus_epoch = 3
+    origin_question = "FFC 接线盒进水后报警怎么处理？"
+    repository.chat_context = discovery_context(
+        {}, last_clarification_question=origin_question
+    )
+    repository.pending_switch_options = [
+        {
+            "choice_id": "switch_1",
+            "document_id": str(target_document.id),
+            "problem_code": target_profile.problem_code,
+            "title": target_profile.canonical_question,
+            "origin_focus_epoch": 3,
+            "origin_document_id": str(original_profile.document_id),
+        }
+    ]
+    service = TechnicalSupportService(
+        cast(SupportRepository, repository), Settings(_env_file=None, app_env="test")
+    )
+
+    response = await service.handle(
+        knowledge_id=knowledge_id,
+        conversation_id=uuid4(),
+        question="确认切换",
+        request_id="request-confirm-switch-index",
+        choice_id="switch_1",
+    )
+
+    assert response["response_type"] == "DOCUMENT_DELIVERED"
+    assert repository.finished is not None
+    assert repository.finished["focus_document_id"] == target_document.id
+    assert repository.finished["context"]["support_workflow"]["observations"] == [
+        {"source": "USER", "value": origin_question}
+    ]
+    assert repository.catalog_requests[0]["index_id"] == target_document.index_id
+    assert repository.profile_requests == []
+    assert repository.document_requests[0]["index_id"] == target_document.index_id
 
 
 @pytest.mark.asyncio

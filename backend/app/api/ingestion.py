@@ -27,6 +27,7 @@ from app.common.errors import ApiError
 from app.core.config import Settings
 from app.core.resources import AppResources
 from app.document_profiles.repository import DocumentProfileRepository
+from app.document_profiles.service import DocumentProfileService
 from app.ingestion.repository import IngestionRepository
 from app.releases.models import RagIndexRollbackRequest
 from app.services.ingestion import IngestionService
@@ -47,6 +48,19 @@ def get_ingestion_service(
     resources: Annotated[AppResources, Depends(get_resources)],
 ) -> IngestionService:
     return IngestionService(repository, resources.minio, settings)
+
+
+def get_document_profile_repository(
+    resources: Annotated[AppResources, Depends(get_resources)],
+) -> DocumentProfileRepository:
+    return DocumentProfileRepository(resources.database)
+
+
+def get_document_profile_service(
+    repository: Annotated[DocumentProfileRepository, Depends(get_document_profile_repository)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> DocumentProfileService:
+    return DocumentProfileService(repository, settings)
 
 
 @router.post(
@@ -106,8 +120,7 @@ async def delete_knowledge_base(
 )
 async def rebuild_knowledge_profiles(
     knowledge_id: UUID,
-    settings: Annotated[Settings, Depends(get_app_settings)],
-    resources: Annotated[AppResources, Depends(get_resources)],
+    service: Annotated[DocumentProfileService, Depends(get_document_profile_service)],
     idempotency_key: Annotated[
         str | None, Header(alias="Idempotency-Key", min_length=1, max_length=200)
     ] = None,
@@ -117,12 +130,8 @@ async def rebuild_knowledge_profiles(
     It now queues document attribute regeneration and never consults a
     candidate release, so a published historical release cannot block it.
     """
-    from app.document_profiles.service import DocumentProfileService
-
     del idempotency_key  # durable task de-duplication is knowledge-base scoped
-    return await DocumentProfileService(
-        DocumentProfileRepository(resources.database), settings
-    ).request_generation(knowledge_id)
+    return await service.request_generation(knowledge_id)
 
 
 @router.post(
@@ -178,10 +187,10 @@ async def get_document(
 )
 async def get_document_profile_context(
     document_id: UUID,
-    resources: Annotated[AppResources, Depends(get_resources)],
+    repository: Annotated[DocumentProfileRepository, Depends(get_document_profile_repository)],
 ) -> dict[str, Any]:
     """Online and pending document Profile attributes for Documents."""
-    context = await DocumentProfileRepository(resources.database).document_context(document_id)
+    context = await repository.document_context(document_id)
     if context is None:
         raise ApiError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
     return context

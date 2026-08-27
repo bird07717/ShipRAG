@@ -92,13 +92,27 @@ def apply_workflow_update(context: dict[str, Any], update: WorkflowUpdate) -> di
     return next_context
 
 
-def reset_for_document(document_id: str, problem_code: str, index_id: str) -> dict[str, Any]:
+def reset_for_document(
+    document_id: str,
+    problem_code: str,
+    index_id: str,
+    *,
+    switch_origin_question: str | None = None,
+) -> dict[str, Any]:
     del problem_code  # Profile metadata belongs to the response/trace, not workflow memory.
-    return normalize_context(
+    context = normalize_context(
         {},
         document_id=document_id,
         index_id=index_id,
     )
+    if switch_origin_question and switch_origin_question.strip():
+        # The old focus epoch must not leak into a new document. Preserve only
+        # the user question that justified this confirmed switch so a short
+        # follow-up ("下一步呢") still has the relevant symptom/task context.
+        context["support_workflow"]["observations"] = [
+            {"source": "USER", "value": switch_origin_question.strip()}
+        ]
+    return context
 
 
 def discovery_context(

@@ -412,13 +412,16 @@ async def test_upload_service_stores_valid_docx_without_build(tmp_path) -> None:
     )
     upload = UploadFile(filename=path.name, file=BytesIO(path.read_bytes()))
 
-    response = await service.upload_document(
-        knowledge_id=uuid4(),
-        upload=upload,
-        display_name="上传测试",
-        request_build=False,
-        idempotency_key="upload-test",
-    )
+    try:
+        response = await service.upload_document(
+            knowledge_id=uuid4(),
+            upload=upload,
+            display_name="上传测试",
+            request_build=False,
+            idempotency_key="upload-test",
+        )
+    finally:
+        await upload.close()
 
     assert repository.created
     assert minio.uploaded == path.read_bytes()
