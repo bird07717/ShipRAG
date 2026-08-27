@@ -74,7 +74,7 @@ def _repository(results: list[Any]) -> tuple[RagRepository, _FakeConnection]:
 
 
 async def test_set_conversation_focus_resets_chat_context() -> None:
-    repo, connection = _repository([])
+    repo, connection = _repository([[0]])
     conversation_id, document_id, index_id = uuid4(), uuid4(), uuid4()
 
     await repo.set_conversation_focus(conversation_id, document_id, index_id)
@@ -83,11 +83,11 @@ async def test_set_conversation_focus_resets_chat_context() -> None:
     assert "focus_document_id = :document_id" in sql
     assert "focus_index_id = :index_id" in sql
     assert "'{}'::jsonb" in sql
-    assert params == {
-        "conversation_id": conversation_id,
-        "document_id": document_id,
-        "index_id": index_id,
-    }
+    assert params is not None
+    assert params["conversation_id"] == conversation_id
+    assert params["document_id"] == document_id
+    assert params["index_id"] == index_id
+    assert params["expected_context_version"] is None
 
 
 async def test_clear_conversation_focus() -> None:
@@ -125,7 +125,7 @@ async def test_clear_conversation_pending() -> None:
 
     sql, params = connection.executed[0]
     assert "chat_context = '{}'::jsonb" in sql
-    assert params == {"conversation_id": conversation_id}
+    assert params == {"conversation_id": conversation_id, "expected_context_version": None}
 
 
 async def test_list_kb_documents_prefers_display_name() -> None:

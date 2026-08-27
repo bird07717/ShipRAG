@@ -29,7 +29,12 @@ from app.support.problem_resolver import ProblemResolver, normalize_for_match
 from app.support.repository import SupportRepository
 from app.support.service import TechnicalSupportService
 from app.support.validator import validate_draft
-from app.support.workflow_state import apply_workflow_update, read_workflow, reset_for_document
+from app.support.workflow_state import (
+    apply_workflow_update,
+    discovery_context,
+    read_workflow,
+    reset_for_document,
+)
 
 
 def _profile(*, alias: str = "PDC U盘升级") -> ProblemProfile:
@@ -143,6 +148,29 @@ def test_document_delivery_keeps_order_and_optionally_suppresses_images() -> Non
     without_images, hidden_images = deliver_document(document, include_images=False)
     assert [item["sequence_no"] for item in without_images] == [1, 2]
     assert hidden_images == []
+
+
+def test_context_v1_migrates_legacy_workflow_and_keeps_candidates_outside_prompt_memory() -> None:
+    document_id, index_id = uuid4(), uuid4()
+    legacy = {
+        "workflow": {
+            "completed_steps": [1],
+            "observations": [{"source": "USER", "value": "设备已断电"}],
+            "pending_options": [{"choice_id": "switch_1"}],
+        },
+        "pending_options": [{"choice_id": "switch_1"}],
+    }
+
+    context = reset_for_document(str(document_id), "PDC_USB_UPGRADE", str(index_id))
+    migrated = discovery_context(legacy, last_clarification_question="设备型号是什么？")
+
+    assert context["schema_version"] == 2
+    assert context["support_workflow"]["document_id"] == str(document_id)
+    assert context["support_workflow"]["completed_steps"] == []
+    assert "pending_options" not in context["support_workflow"]
+    assert migrated["support_workflow"]["completed_steps"] == [1]
+    assert "pending_options" not in migrated["support_workflow"]
+    assert migrated["discovery"]["last_clarification_question"] == "设备型号是什么？"
 
 
 def test_document_delivery_keeps_original_alt_text_as_caption() -> None:
@@ -808,6 +836,7 @@ class _SupportServiceRepository:
         self.profiles = [profile] if profile is not None else []
         self.document = document
         self.chat_context: dict[str, Any] = {}
+        self.pending_switch_options: list[dict[str, Any]] = []
         self.finished: dict[str, Any] | None = None
 
     @staticmethod
@@ -827,6 +856,7 @@ class _SupportServiceRepository:
             chat_context=self.chat_context,
             context_version=0,
             history=[],
+            pending_switch_options=self.pending_switch_options,
             idempotency_key=kwargs.get("idempotency_key"),
         )
 
@@ -845,6 +875,7 @@ class _SupportServiceRepository:
 
     async def finish_turn(self, turn: SupportTurn, **kwargs: Any) -> None:
         self.finished = {"turn": turn, **kwargs}
+        self.pending_switch_options = list(kwargs.get("pending_switch_options", []))
 
     async def fail_turn(self, *_: Any, **__: Any) -> None:
         raise AssertionError("successful service tests must not fail the turn")
@@ -898,7 +929,10 @@ async def test_support_service_delivers_complete_document_without_llm() -> None:
     assert response["images"][0]["image_asset_id"] == str(document.blocks[2].image_asset_id)
     assert repository.finished is not None
     assert repository.finished["focus_document_id"] == document.id
-    assert repository.finished["context"]["focus"]["index_id"] == str(document.index_id)
+    assert (
+        repository.finished["context"]["support_workflow"]["index_id"]
+        == str(document.index_id)
+    )
 
 
 @pytest.mark.asyncio
@@ -1181,7 +1215,7 @@ async def test_support_service_requires_choice_for_ambiguous_catalog_match() -> 
     assert len(response["clarification"]["choices"]) == 2
     assert repository.finished is not None
     assert repository.finished["focus_document_id"] is None
-    assert len(repository.finished["context"]["pending_options"]) == 2
+    assert len(repository.finished["pending_switch_options"]) == 2
 
 
 @pytest.mark.asyncio

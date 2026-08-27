@@ -40,6 +40,8 @@ class Turn:
     history: list[dict[str, str]]
     rerank: ModelSnapshot | None = None
     focus_document_id: UUID | None = None
+    focus_epoch: int = 0
+    context_version: int = 0
     chat_context: dict[str, Any] = field(default_factory=dict)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
 

@@ -19,7 +19,12 @@ from app.support.focused_assistant import FocusedSupportAssistant
 from app.support.models import ProblemDecision, ProblemProfile, SupportTurn
 from app.support.problem_resolver import ProblemResolver
 from app.support.repository import SupportRepository
-from app.support.workflow_state import apply_workflow_update, read_workflow, reset_for_document
+from app.support.workflow_state import (
+    apply_workflow_update,
+    discovery_context,
+    read_workflow,
+    reset_for_document,
+)
 
 
 def _elapsed(started: float) -> int:
@@ -214,8 +219,24 @@ class TechnicalSupportService:
             # fallback below handles natural-language misses using document
             # evidence, avoiding an online LLM scan over the full catalog.
             resolver = ProblemResolver()
-            pending_raw = turn.chat_context.get("pending_options", [])
-            pending = pending_raw if isinstance(pending_raw, list) else []
+            # Pending choices are conversation state, not model workflow
+            # memory.  Bind V1 candidates to the focus epoch that produced
+            # them so an old switch prompt cannot change a newer focus.
+            pending_source = turn.pending_switch_options
+            if not pending_source:
+                # Read pre-V1 state during the migration window. New writes
+                # never mirror candidates back into chat_context.
+                legacy_pending = turn.chat_context.get("pending_options", [])
+                pending_source = legacy_pending if isinstance(legacy_pending, list) else []
+            pending = [
+                item
+                for item in pending_source
+                if isinstance(item, dict)
+                and (
+                    item.get("origin_focus_epoch") is None
+                    or item.get("origin_focus_epoch") == turn.focus_epoch
+                )
+            ]
             if choice_id:
                 selected = await resolver.resolve(
                     question=clean_question,
@@ -417,7 +438,18 @@ class TechnicalSupportService:
                                         "latency_ms": _elapsed(started),
                                     }
                                 )
-                                context = {"support_version": 1, "pending_options": pending_options}
+                                pending_options = [
+                                    {
+                                        **option,
+                                        "origin_focus_epoch": turn.focus_epoch,
+                                        "origin_document_id": None,
+                                    }
+                                    for option in pending_options
+                                ]
+                                context = discovery_context(
+                                    turn.chat_context,
+                                    last_clarification_question=clean_question,
+                                )
                             elif resolution.choices:
                                 options = [
                                     {
@@ -448,7 +480,18 @@ class TechnicalSupportService:
                                         "latency_ms": _elapsed(started),
                                     }
                                 )
-                                context = {"support_version": 1, "pending_options": options}
+                                pending_options = [
+                                    {
+                                        **option,
+                                        "origin_focus_epoch": turn.focus_epoch,
+                                        "origin_document_id": None,
+                                    }
+                                    for option in options
+                                ]
+                                context = discovery_context(
+                                    turn.chat_context,
+                                    last_clarification_question=clean_question,
+                                )
                             else:
                                 response.update(
                                     {
@@ -476,7 +519,8 @@ class TechnicalSupportService:
                                         "latency_ms": _elapsed(started),
                                     }
                                 )
-                                context = {"support_version": 1}
+                                pending_options = []
+                                context = discovery_context(turn.chat_context)
                         if route is None or route.action != ACTION_DELIVER:
                             focus = None
                 if response.get("response_type") == "NO_MATCH":
@@ -489,6 +533,9 @@ class TechnicalSupportService:
                     response=response,
                     context=context,
                     focus_document_id=focus,
+                    pending_switch_options=(
+                        pending_options if response["response_type"] == "CLARIFICATION_REQUIRED" else []
+                    ),
                     trace={
                         "support_version": 1,
                         "problem_resolution": response.get(
@@ -613,13 +660,24 @@ class TechnicalSupportService:
                         "latency_ms": _elapsed(started),
                     }
                 )
-                context = dict(turn.chat_context)
-                context["pending_options"] = switch_options
+                switch_options = [
+                    {
+                        **option,
+                        "origin_focus_epoch": turn.focus_epoch,
+                        "origin_document_id": str(turn.focus_document_id),
+                    }
+                    for option in switch_options
+                ]
+                context = discovery_context(
+                    turn.chat_context,
+                    last_clarification_question=clean_question,
+                )
                 await self.repository.finish_turn(
                     turn,
                     response=response,
                     context=context,
                     focus_document_id=turn.focus_document_id,
+                    pending_switch_options=switch_options,
                     trace={
                         "support_version": 1,
                         "focus_document_id": str(turn.focus_document_id),
@@ -654,7 +712,7 @@ class TechnicalSupportService:
                 draft, evidence, images = await assistant.answer(
                     question=clean_question,
                     document=document,
-                    workflow=turn.chat_context,
+                    workflow=read_workflow(turn.chat_context).model_dump(mode="json"),
                     history=turn.history,
                 )
                 current_stage = "VALIDATION"
@@ -695,13 +753,21 @@ class TechnicalSupportService:
                                 "latency_ms": _elapsed(started),
                             }
                         )
-                        context = dict(turn.chat_context)
-                        context["pending_options"] = [option]
+                        option = {
+                            **option,
+                            "origin_focus_epoch": turn.focus_epoch,
+                            "origin_document_id": str(turn.focus_document_id),
+                        }
+                        context = discovery_context(
+                            turn.chat_context,
+                            last_clarification_question=clean_question,
+                        )
                         await self.repository.finish_turn(
                             turn,
                             response=response,
                             context=context,
                             focus_document_id=document.id,
+                            pending_switch_options=[option],
                             trace={
                                 "support_version": 1,
                                 "document_switch": {
