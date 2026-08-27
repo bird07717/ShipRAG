@@ -113,6 +113,8 @@ class RagRepository:
             resolved_conversation_id = conversation_id or uuid4()
             chat_context: dict[str, Any] = {}
             focus_document_id: UUID | None = None
+            focus_epoch = 0
+            context_version = 0
             effective_index_id = UUID(str(kb["rag_active_index_id"]))
             embedding_model_name = str(kb["embedding_model_name"])
             if conversation_id is None:
@@ -133,7 +135,8 @@ class RagRepository:
                 conversation_result = await connection.execute(
                     text(
                         """
-                        SELECT knowledge_id, focus_document_id, chat_context, rag_index_id
+                        SELECT knowledge_id, focus_document_id, chat_context, rag_index_id,
+                               focus_epoch, support_context_version
                         FROM conversation
                         WHERE id = :id FOR UPDATE
                         """
@@ -153,6 +156,8 @@ class RagRepository:
                 raw_context = conversation_row["chat_context"]
                 if isinstance(raw_context, dict):
                     chat_context = dict(raw_context)
+                focus_epoch = int(conversation_row["focus_epoch"] or 0)
+                context_version = int(conversation_row["support_context_version"] or 0)
                 if conversation_row["rag_index_id"] is not None:
                     effective_index_id = UUID(str(conversation_row["rag_index_id"]))
                     frozen_result = await connection.execute(
@@ -346,13 +351,13 @@ class RagRepository:
                     text(
                         """
                         INSERT INTO message (
-                            id, conversation_id, sequence_no, role, content, status
+                            id, conversation_id, sequence_no, role, content, status, focus_epoch
                         ) VALUES (
                             :user_id, :conversation_id, :user_sequence,
-                            'USER', :question, 'COMPLETED'
+                            'USER', :question, 'COMPLETED', :focus_epoch
                         ), (
                             :assistant_id, :conversation_id, :assistant_sequence,
-                            'ASSISTANT', '', 'STREAMING'
+                            'ASSISTANT', '', 'STREAMING', :focus_epoch
                         )
                         """
                     ),
@@ -363,6 +368,7 @@ class RagRepository:
                         "question": question,
                         "user_sequence": first_sequence,
                         "assistant_sequence": first_sequence + 1,
+                        "focus_epoch": focus_epoch,
                     },
                 )
             await connection.execute(
@@ -435,6 +441,8 @@ class RagRepository:
                 api_key=self._decrypt_api_key(dict(rerank_row)),
             ),
             focus_document_id=focus_document_id,
+            focus_epoch=focus_epoch,
+            context_version=context_version,
             chat_context=chat_context,
             retrieval=retrieval,
         )
@@ -887,26 +895,65 @@ class RagRepository:
         return dict(row)
 
     async def set_conversation_focus(
-        self, conversation_id: UUID, document_id: UUID, index_id: UUID
-    ) -> None:
+        self,
+        conversation_id: UUID,
+        document_id: UUID,
+        index_id: UUID,
+        *,
+        expected_context_version: int | None = None,
+        user_message_id: UUID | None = None,
+        assistant_message_id: UUID | None = None,
+    ) -> int:
+        """Promote a delivered document through the shared state CAS."""
         async with self.engine.begin() as connection:
-            await connection.execute(
+            result = await connection.execute(
                 text(
                     """
                     UPDATE conversation
                     SET focus_document_id = :document_id,
                         focus_index_id = :index_id,
                         chat_context = '{}'::jsonb,
+                        pending_switch_options = '[]'::jsonb,
+                        focus_epoch = CASE
+                            WHEN focus_document_id IS DISTINCT FROM :document_id
+                            THEN focus_epoch + 1
+                            ELSE focus_epoch
+                        END,
+                        support_context_version = support_context_version + 1,
                         updated_at = now()
                     WHERE id = :conversation_id
+                      AND (
+                          CAST(:expected_context_version AS integer) IS NULL
+                          OR support_context_version = :expected_context_version
+                      )
+                    RETURNING focus_epoch
                     """
                 ),
                 {
                     "conversation_id": conversation_id,
                     "document_id": document_id,
                     "index_id": index_id,
+                    "expected_context_version": expected_context_version,
                 },
             )
+            focus_epoch = result.scalar_one_or_none()
+            if focus_epoch is None:
+                raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
+            if user_message_id is not None and assistant_message_id is not None:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE message SET focus_epoch = :focus_epoch
+                        WHERE id IN (:user_message_id, :assistant_message_id)
+                        """
+                    ),
+                    {
+                        "focus_epoch": int(focus_epoch),
+                        "user_message_id": user_message_id,
+                        "assistant_message_id": assistant_message_id,
+                    },
+                )
+        return int(focus_epoch)
 
     async def clear_conversation_focus(self, conversation_id: UUID) -> None:
         async with self.engine.begin() as connection:
@@ -930,16 +977,22 @@ class RagRepository:
         *,
         pending_options: list[dict[str, Any]],
         pending_query: str,
+        expected_context_version: int | None = None,
     ) -> None:
         async with self.engine.begin() as connection:
-            await connection.execute(
+            result = await connection.execute(
                 text(
                     """
                     UPDATE conversation
                     SET chat_context = CAST(:chat_context AS jsonb),
                         pending_switch_options = CAST(:pending_options AS jsonb),
+                        support_context_version = support_context_version + 1,
                         updated_at = now()
                     WHERE id = :conversation_id
+                      AND (
+                          CAST(:expected_context_version AS integer) IS NULL
+                          OR support_context_version = :expected_context_version
+                      )
                     """
                 ),
                 {
@@ -952,23 +1005,38 @@ class RagRepository:
                         ensure_ascii=False,
                     ),
                     "pending_options": json.dumps(pending_options, ensure_ascii=False),
+                    "expected_context_version": expected_context_version,
                 },
             )
+            if expected_context_version is not None and result.rowcount != 1:
+                raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
 
-    async def clear_conversation_pending(self, conversation_id: UUID) -> None:
+    async def clear_conversation_pending(
+        self, conversation_id: UUID, *, expected_context_version: int | None = None
+    ) -> None:
         async with self.engine.begin() as connection:
-            await connection.execute(
+            result = await connection.execute(
                 text(
                     """
                     UPDATE conversation
                     SET chat_context = '{}'::jsonb,
                         pending_switch_options = '[]'::jsonb,
+                        support_context_version = support_context_version + 1,
                         updated_at = now()
                     WHERE id = :conversation_id
+                      AND (
+                          CAST(:expected_context_version AS integer) IS NULL
+                          OR support_context_version = :expected_context_version
+                      )
                     """
                 ),
-                {"conversation_id": conversation_id},
+                {
+                    "conversation_id": conversation_id,
+                    "expected_context_version": expected_context_version,
+                },
             )
+            if expected_context_version is not None and result.rowcount != 1:
+                raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
 
     async def get_knowledge_base_summary(self, knowledge_id: UUID) -> dict[str, Any]:
         async with self.engine.connect() as connection:

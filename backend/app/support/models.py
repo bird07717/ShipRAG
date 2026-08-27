@@ -152,6 +152,8 @@ class SupportTurn:
     chat_context: dict[str, Any]
     context_version: int
     history: list[dict[str, str]]
+    focus_epoch: int = 0
+    pending_switch_options: list[dict[str, Any]] = field(default_factory=list)
     support_release_id: UUID | None = None
     idempotency_key: str | None = None
     llm: ModelSnapshot | None = None

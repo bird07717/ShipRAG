@@ -16,6 +16,7 @@ from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
 from app.rag.models import ModelSnapshot
 from app.support.models import DocumentContentBlock, FocusedDocument, ProblemProfile, SupportTurn
+from app.support.workflow_state import normalize_context
 
 
 class SupportRepository:
@@ -146,7 +147,9 @@ class SupportRepository:
                             index_id=UUID(str(response["index_id"])),
                             question=question,
                             focus_document_id=None,
+                            focus_epoch=0,
                             chat_context={},
+                            pending_switch_options=[],
                             context_version=0,
                             history=[],
                             idempotency_key=idempotency_key,
@@ -161,6 +164,8 @@ class SupportRepository:
             resolved_conversation_id = conversation_id or uuid4()
             focus_document_id: UUID | None = None
             focus_index_id: UUID | None = None
+            focus_epoch = 0
+            pending_switch_options: list[dict[str, Any]] = []
             support_index_id = (
                 UUID(str(kb["support_active_index_id"])) if kb["support_active_index_id"] else None
             )
@@ -191,7 +196,8 @@ class SupportRepository:
                             text("""
                     SELECT c.knowledge_id, c.focus_document_id, c.focus_index_id,
                            c.support_index_id, c.support_release_id,
-                           c.chat_context, c.pending_switch_options, c.support_context_version,
+                           c.chat_context, c.pending_switch_options, c.focus_epoch,
+                           c.support_context_version,
                            fi.kb_id AS focus_index_kb_id,
                            si.kb_id AS support_index_kb_id,
                            si.status AS support_index_status
@@ -254,12 +260,19 @@ class SupportRepository:
                 chat_context = (
                     dict(row["chat_context"]) if isinstance(row["chat_context"], dict) else {}
                 )
-                # Keep workflow state in chat_context, while the pending
-                # switch choices have a first-class column for routing and
-                # observability.  The context mirror keeps old Support
-                # clients and idempotent replays compatible.
+                focus_epoch = int(row.get("focus_epoch") or 0)
                 if isinstance(row.get("pending_switch_options"), list):
-                    chat_context["pending_options"] = list(row["pending_switch_options"])
+                    pending_switch_options = list(row["pending_switch_options"])
+                elif isinstance(chat_context.get("pending_options"), list):
+                    # Legacy rows can be read once, but all V1 writes use the
+                    # dedicated column only.
+                    pending_switch_options = list(chat_context["pending_options"])
+                chat_context = normalize_context(
+                    chat_context,
+                    focus_epoch=focus_epoch,
+                    document_id=focus_document_id,
+                    index_id=focus_index_id,
+                )
                 context_version = int(row["support_context_version"])
             if conversation_id is None:
                 context_version = 0
@@ -277,24 +290,47 @@ class SupportRepository:
             if effective_index_id is None:  # narrowed above; protects future query changes
                 raise ApiError("KNOWLEDGE_BASE_NOT_READY", "知识库尚无可用文档版本", 409)
 
+            if focus_document_id is None:
+                history_statement = text("""
+                    SELECT role, content FROM (
+                        SELECT role, content, sequence_no FROM message
+                        WHERE conversation_id = :id AND status = 'COMPLETED' AND role = 'USER'
+                        ORDER BY sequence_no DESC LIMIT :limit
+                    ) recent ORDER BY sequence_no
+                """)
+                history_params: dict[str, Any] = {
+                    "id": resolved_conversation_id,
+                    "limit": min(2, self.settings.support_history_max_messages),
+                }
+            else:
+                # Legacy messages are available only until this focus epoch
+                # receives its first V1 message. After that, never leak an
+                # earlier document's history into the focused prompt.
+                history_statement = text("""
+                    SELECT role, content FROM (
+                        SELECT role, content, sequence_no FROM message m
+                        WHERE m.conversation_id = :id AND m.status = 'COMPLETED'
+                          AND (
+                              m.focus_epoch = :focus_epoch
+                              OR (
+                                  m.focus_epoch IS NULL
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM message current_epoch
+                                      WHERE current_epoch.conversation_id = :id
+                                        AND current_epoch.focus_epoch = :focus_epoch
+                                  )
+                              )
+                          )
+                        ORDER BY sequence_no DESC LIMIT :limit
+                    ) recent ORDER BY sequence_no
+                """)
+                history_params = {
+                    "id": resolved_conversation_id,
+                    "focus_epoch": focus_epoch,
+                    "limit": min(6, self.settings.support_history_max_messages),
+                }
             history_rows = (
-                (
-                    await conn.execute(
-                        text("""
-                SELECT role, content FROM (
-                    SELECT role, content, sequence_no FROM message
-                    WHERE conversation_id = :id AND status = 'COMPLETED'
-                    ORDER BY sequence_no DESC LIMIT :limit
-                ) recent ORDER BY sequence_no
-            """),
-                        {
-                            "id": resolved_conversation_id,
-                            "limit": self.settings.support_history_max_messages,
-                        },
-                    )
-                )
-                .mappings()
-                .all()
+                (await conn.execute(history_statement, history_params)).mappings().all()
             )
             sequence = (
                 int(
@@ -311,9 +347,15 @@ class SupportRepository:
             )
             await conn.execute(
                 text("""
-                INSERT INTO message (id, conversation_id, sequence_no, role, content, status)
-                VALUES (:user_id, :conversation_id, :sequence, 'USER', :question, 'COMPLETED'),
-                       (:assistant_id, :conversation_id, :assistant_sequence, 'ASSISTANT', '', 'STREAMING')
+                INSERT INTO message (
+                    id, conversation_id, sequence_no, role, content, status, focus_epoch
+                ) VALUES (
+                    :user_id, :conversation_id, :sequence, 'USER', :question, 'COMPLETED',
+                    :focus_epoch
+                ), (
+                    :assistant_id, :conversation_id, :assistant_sequence, 'ASSISTANT', '',
+                    'STREAMING', :focus_epoch
+                )
             """),
                 {
                     "user_id": user_message_id,
@@ -322,6 +364,7 @@ class SupportRepository:
                     "sequence": sequence,
                     "assistant_sequence": sequence + 1,
                     "question": question,
+                    "focus_epoch": focus_epoch,
                 },
             )
             await conn.execute(
@@ -389,7 +432,9 @@ class SupportRepository:
                 index_id=effective_index_id,
                 question=question,
                 focus_document_id=focus_document_id,
+                focus_epoch=focus_epoch,
                 chat_context=chat_context,
+                pending_switch_options=pending_switch_options,
                 context_version=context_version,
                 history=self._budget_history([dict(item) for item in history_rows]),
                 support_release_id=support_release_id,
@@ -633,7 +678,21 @@ class SupportRepository:
         focus_document_id: UUID | None,
         trace: dict[str, Any],
         usage: dict[str, Any] | None = None,
+        pending_switch_options: list[dict[str, Any]] | None = None,
     ) -> None:
+        focus_changed = (
+            focus_document_id is not None and focus_document_id != turn.focus_document_id
+        )
+        target_epoch = turn.focus_epoch + 1 if focus_changed else turn.focus_epoch
+        normalized_context = normalize_context(
+            context,
+            focus_epoch=target_epoch,
+            document_id=focus_document_id,
+            index_id=turn.index_id if focus_document_id is not None else None,
+        )
+        if pending_switch_options is None:
+            legacy_pending = context.get("pending_options", [])
+            pending_switch_options = legacy_pending if isinstance(legacy_pending, list) else []
         async with self.engine.begin() as conn:
             await conn.execute(
                 text("""
@@ -675,15 +734,24 @@ class SupportRepository:
                     "id": turn.conversation_id,
                     "focus": focus_document_id,
                     "focus_index": turn.index_id if focus_document_id is not None else None,
-                    "context": json.dumps(context, ensure_ascii=False),
-                    "pending_options": json.dumps(
-                        context.get("pending_options", []), ensure_ascii=False
-                    ),
+                    "context": json.dumps(normalized_context, ensure_ascii=False),
+                    "pending_options": json.dumps(pending_switch_options, ensure_ascii=False),
                     "expected_version": turn.context_version,
                 },
             )
             if context_result.rowcount != 1:
                 raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
+            await conn.execute(
+                text("""
+                    UPDATE message SET focus_epoch = :focus_epoch
+                    WHERE id IN (:user_message_id, :assistant_message_id)
+                """),
+                {
+                    "focus_epoch": target_epoch,
+                    "user_message_id": turn.user_message_id,
+                    "assistant_message_id": turn.assistant_message_id,
+                },
+            )
             await conn.execute(
                 text("""
                 UPDATE rag_trace SET answer = :answer, sources = CAST(:sources AS jsonb), retrieval_result = CAST(:trace AS jsonb),

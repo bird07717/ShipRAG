@@ -153,9 +153,10 @@ class _RoutingRepository:
         return []
 
     async def set_conversation_focus(
-        self, conversation_id: Any, document_id: Any, index_id: Any
-    ) -> None:
+        self, conversation_id: Any, document_id: Any, index_id: Any, **_: Any
+    ) -> int:
         self.focus_updates.append(document_id)
+        return self.turn.focus_epoch + 1
 
     async def clear_conversation_focus(self, conversation_id: Any) -> None:
         self.focus_updates.append(None)
@@ -166,10 +167,11 @@ class _RoutingRepository:
         *,
         pending_options: list[dict[str, Any]],
         pending_query: str,
+        **_: Any,
     ) -> None:
         self.pending_updates.append({"options": pending_options, "query": pending_query})
 
-    async def clear_conversation_pending(self, conversation_id: Any) -> None:
+    async def clear_conversation_pending(self, conversation_id: Any, **_: Any) -> None:
         self.pending_clears += 1
 
     async def list_kb_documents(self, knowledge_id: Any) -> list[dict[str, Any]]:

@@ -927,6 +927,7 @@ class RagService:
         )
         if plan_error is not None:
             raise plan_error
+        turn = prepared.turn
 
         if plan.kind == "DELIVER" or plan.fixed_answer is not None:
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
@@ -1089,9 +1090,22 @@ class RagService:
                 index_id=turn.index_id,
                 document_id=decision.document_id,
             )
-            await self.repository.set_conversation_focus(
-                turn.conversation_id, decision.document_id, turn.index_id
+            focus_epoch = await self.repository.set_conversation_focus(
+                turn.conversation_id,
+                decision.document_id,
+                turn.index_id,
+                expected_context_version=turn.context_version,
+                user_message_id=turn.user_message_id,
+                assistant_message_id=turn.assistant_message_id,
             )
+            turn = replace(
+                turn,
+                focus_document_id=decision.document_id,
+                focus_epoch=focus_epoch,
+                context_version=turn.context_version + 1,
+                chat_context={},
+            )
+            prepared.turn = turn
             delivery = self._build_delivery_payload(document)
             return _ChatPlan(
                 kind="DELIVER",
@@ -1118,9 +1132,22 @@ class RagService:
                     index_id=turn.index_id,
                     document_id=matched_id,
                 )
-                await self.repository.set_conversation_focus(
-                    turn.conversation_id, matched_id, turn.index_id
+                focus_epoch = await self.repository.set_conversation_focus(
+                    turn.conversation_id,
+                    matched_id,
+                    turn.index_id,
+                    expected_context_version=turn.context_version,
+                    user_message_id=turn.user_message_id,
+                    assistant_message_id=turn.assistant_message_id,
                 )
+                turn = replace(
+                    turn,
+                    focus_document_id=matched_id,
+                    focus_epoch=focus_epoch,
+                    context_version=turn.context_version + 1,
+                    chat_context={},
+                )
+                prepared.turn = turn
                 delivery = self._build_delivery_payload(document)
                 routing = decision.to_dict()
                 routing["resolved_from"] = "TITLE_MATCH"
@@ -1369,13 +1396,27 @@ class RagService:
 
     async def _apply_post_state(self, plan: _ChatPlan, turn: Any, question: str) -> None:
         if plan.pending_after:
+            pending_options = [
+                {
+                    **option,
+                    "origin_focus_epoch": turn.focus_epoch,
+                    "origin_document_id": (
+                        str(turn.focus_document_id) if turn.focus_document_id is not None else None
+                    ),
+                }
+                for option in plan.pending_after
+            ]
             await self.repository.set_conversation_pending(
                 turn.conversation_id,
-                pending_options=plan.pending_after,
+                pending_options=pending_options,
                 pending_query=question,
+                expected_context_version=turn.context_version,
             )
         elif plan.clear_pending_after:
-            await self.repository.clear_conversation_pending(turn.conversation_id)
+            await self.repository.clear_conversation_pending(
+                turn.conversation_id,
+                expected_context_version=turn.context_version,
+            )
 
     def _finalize_chat_result(self, plan: _ChatPlan, raw_answer: str) -> ChatResult:
         if plan.kind in ("DOC_QA", "CHUNK_RAG"):
