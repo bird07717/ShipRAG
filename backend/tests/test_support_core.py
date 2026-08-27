@@ -653,7 +653,8 @@ async def test_begin_turn_uses_pinned_index_for_focused_conversation() -> None:
             _ScriptedResult(
                 {
                     "status": "ENABLED",
-                    "active_index_id": active_index_id,
+                    "support_active_index_id": active_index_id,
+                    "support_active_release_id": None,
                     "index_status": "ACTIVE",
                     "index_kb_id": knowledge_id,
                 }
@@ -664,10 +665,15 @@ async def test_begin_turn_uses_pinned_index_for_focused_conversation() -> None:
                     "focus_document_id": document_id,
                     "focus_index_id": pinned_index_id,
                     "focus_index_kb_id": knowledge_id,
+                    "support_index_id": None,
+                    "support_release_id": None,
+                    "support_index_kb_id": None,
+                    "support_index_status": None,
                     "chat_context": {"support_version": 1},
                     "support_context_version": 2,
                 }
             ),
+            _ScriptedResult(),
             _ScriptedResult([]),
             _ScriptedResult(4),
         ]
@@ -706,7 +712,8 @@ async def test_begin_turn_restarts_failed_idempotent_request() -> None:
             _ScriptedResult(
                 {
                     "status": "ENABLED",
-                    "active_index_id": active_index_id,
+                    "support_active_index_id": active_index_id,
+                    "support_active_release_id": None,
                     "index_status": "ACTIVE",
                     "index_kb_id": knowledge_id,
                 }

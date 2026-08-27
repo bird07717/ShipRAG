@@ -643,7 +643,9 @@ class ReleaseRepository:
                             text(
                                 """
                                 SELECT r.*, i.status AS index_status,
-                                       i.version AS index_version, kb.active_index_id
+                                       i.version AS index_version,
+                                       kb.support_active_index_id,
+                                       kb.support_active_release_id
                                 FROM knowledge_release r
                                 JOIN knowledge_index i ON i.id = r.index_id
                                 JOIN knowledge_base kb ON kb.id = r.kb_id
@@ -660,8 +662,8 @@ class ReleaseRepository:
                     raise ApiError("RELEASE_NOT_FOUND", "发布候选不存在", 404)
                 if release["status"] != "READY_TO_PUBLISH":
                     raise ApiError("RELEASE_NOT_VALIDATED", "发布候选尚未通过验证", 409)
-                if release["index_status"] != "READY":
-                    raise ApiError("INDEX_NOT_READY", "候选索引不是 READY 状态", 409)
+                if release["index_status"] not in {"READY", "ACTIVE", "DEPRECATED"}:
+                    raise ApiError("INDEX_NOT_READY", "候选索引尚不可供 Support 使用", 409)
                 newer_release = await connection.execute(
                     text(
                         """
@@ -710,48 +712,37 @@ class ReleaseRepository:
                 for row in drafts:
                     if row["operation"] == "NONE":
                         continue
-                    present = await connection.execute(
-                        text(
-                            """
-                            SELECT 1 FROM document_element
-                            WHERE index_id = :index_id AND document_id = :document_id LIMIT 1
-                            """
-                        ),
-                        {"index_id": release["index_id"], "document_id": row["document_id"]},
-                    )
-                    if present.scalar_one_or_none() is None:
-                        raise ApiError("DOCUMENT_NOT_PUBLISHED", "草稿文档不在候选索引中", 409)
+                    if row["operation"] != "REMOVE":
+                        present = await connection.execute(
+                            text(
+                                """
+                                SELECT 1 FROM document_element
+                                WHERE index_id = :index_id AND document_id = :document_id LIMIT 1
+                                """
+                            ),
+                            {"index_id": release["index_id"], "document_id": row["document_id"]},
+                        )
+                        if present.scalar_one_or_none() is None:
+                            raise ApiError("DOCUMENT_NOT_PUBLISHED", "草稿文档不在候选索引中", 409)
                     await self._publish_profile(connection, dict(row))
 
-                old_index_id = release["active_index_id"]
-                if old_index_id is not None:
-                    await connection.execute(
-                        text(
-                            """
-                            UPDATE knowledge_index SET status = 'DEPRECATED'
-                            WHERE id = :id AND status = 'ACTIVE'
-                            """
-                        ),
-                        {"id": old_index_id},
-                    )
+                # Publishing a reviewed Support release changes only the
+                # Support lifecycle. RAG activation is owned by ingestion.
                 await connection.execute(
                     text(
                         """
-                        UPDATE knowledge_index
-                        SET status = 'ACTIVE', activated_at = now()
-                        WHERE id = :id AND status = 'READY'
-                        """
-                    ),
-                    {"id": release["index_id"]},
-                )
-                await connection.execute(
-                    text(
-                        """
-                        UPDATE knowledge_base SET active_index_id = :index_id, updated_at = now()
+                        UPDATE knowledge_base
+                        SET support_active_index_id = :index_id,
+                            support_active_release_id = :release_id,
+                            updated_at = now()
                         WHERE id = :kb_id
                         """
                     ),
-                    {"index_id": release["index_id"], "kb_id": release["kb_id"]},
+                    {
+                        "index_id": release["index_id"],
+                        "release_id": release_id,
+                        "kb_id": release["kb_id"],
+                    },
                 )
                 await connection.execute(
                     text(
@@ -761,6 +752,11 @@ class ReleaseRepository:
                         """
                     ),
                     {"release_id": release_id},
+                )
+                # Freeze the resulting live Profile state so an explicit
+                # Support rollback can later restore exactly this version.
+                await self._snapshot_live_profiles(
+                    connection, release_id, UUID(str(release["kb_id"]))
                 )
                 await connection.execute(
                     text(
@@ -790,6 +786,24 @@ class ReleaseRepository:
             "symptoms_json": json.dumps(list(draft.get("symptoms") or []), ensure_ascii=False),
             "exclusions_json": json.dumps(list(draft.get("exclusions") or []), ensure_ascii=False),
         }
+        if draft["operation"] == "REMOVE":
+            # Soft-disable keeps the Profile row and its review history for
+            # audit; a later CREATE/UPDATE draft can re-enable the routing.
+            if draft["target_profile_id"] is None:
+                raise ApiError("REMOVE_TARGET_REQUIRED", "REMOVE 草稿缺少目标 Profile", 409)
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE document_problem_profile
+                    SET enabled = false, updated_at = now()
+                    WHERE id = :target_profile_id AND kb_id = :kb_id
+                    """
+                ),
+                parameters,
+            )
+            if result.rowcount != 1:
+                raise ApiError("REMOVE_TARGET_NOT_FOUND", "待移除的 Profile 不存在", 409)
+            return
         if draft["operation"] == "UPDATE":
             if draft["target_profile_id"] is None:
                 raise ApiError("UPDATE_TARGET_REQUIRED", "UPDATE 草稿缺少目标 Profile", 409)
@@ -835,6 +849,652 @@ class ReleaseRepository:
             ),
             {**parameters, "new_id": uuid4()},
         )
+
+    @staticmethod
+    async def _snapshot_live_profiles(
+        connection: AsyncConnection, release_id: UUID, knowledge_id: UUID
+    ) -> None:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO support_release_profile (
+                    id, release_id, document_id, problem_code, canonical_question,
+                    aliases, keywords, product_name, model_names, task_type,
+                    routing_summary, symptoms, exclusions,
+                    profile_enrichment_version, enabled
+                )
+                SELECT gen_random_uuid(), :release_id, document_id, problem_code,
+                       canonical_question, aliases, keywords, product_name,
+                       model_names, task_type, routing_summary, symptoms, exclusions,
+                       profile_enrichment_version, enabled
+                FROM document_problem_profile
+                WHERE kb_id = :kb_id
+                ON CONFLICT (release_id, document_id) DO UPDATE SET
+                    problem_code = EXCLUDED.problem_code,
+                    canonical_question = EXCLUDED.canonical_question,
+                    aliases = EXCLUDED.aliases,
+                    keywords = EXCLUDED.keywords,
+                    product_name = EXCLUDED.product_name,
+                    model_names = EXCLUDED.model_names,
+                    task_type = EXCLUDED.task_type,
+                    routing_summary = EXCLUDED.routing_summary,
+                    symptoms = EXCLUDED.symptoms,
+                    exclusions = EXCLUDED.exclusions,
+                    profile_enrichment_version = EXCLUDED.profile_enrichment_version,
+                    enabled = EXCLUDED.enabled
+                """
+            ),
+            {"release_id": release_id, "kb_id": knowledge_id},
+        )
+
+    async def rebase_release(self, source_release_id: UUID) -> dict[str, Any]:
+        """Explicitly carry a lagging candidate onto the current RAG index.
+
+        Human-reviewed drafts survive only through this explicit operation;
+        nothing silently rebinds an old review to a new index.  Documents are
+        classified as REUSED (unchanged content, draft copied verbatim
+        including its review state), REGENERATE (content changed, draft is
+        copied but reset to DRAFT with a review note), REMOVE (live Profile
+        whose document left the index) or CREATE (new document without a
+        draft).
+        """
+        try:
+            async with self.engine.begin() as connection:
+                source = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT r.id, r.kb_id, r.index_id, r.status,
+                                       kb.rag_active_index_id,
+                                       COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                                           AS effective_rag_index_id
+                                FROM knowledge_release r
+                                JOIN knowledge_base kb ON kb.id = r.kb_id
+                                WHERE r.id = :release_id
+                                FOR UPDATE OF r, kb
+                                """
+                            ),
+                            {"release_id": source_release_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if source is None:
+                    raise ApiError("RELEASE_NOT_FOUND", "发布候选不存在", 404)
+                if source["status"] in {"PUBLISHED", "CANCELLED"}:
+                    raise ApiError("RELEASE_NOT_EDITABLE", "发布候选已发布或已取消", 409)
+                target_index_id = UUID(str(source["effective_rag_index_id"]))
+                if target_index_id is None:
+                    raise ApiError("RAG_INDEX_NOT_ACTIVE", "知识库尚无 RAG Active Index", 409)
+                if target_index_id == UUID(str(source["index_id"])):
+                    raise ApiError(
+                        "RELEASE_ALREADY_CURRENT", "候选已在当前 RAG 版本上，无需 Rebase", 409
+                    )
+                knowledge_id = UUID(str(source["kb_id"]))
+
+                target_index = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT id, version, status FROM knowledge_index
+                                WHERE id = :index_id AND kb_id = :kb_id
+                                FOR UPDATE
+                                """
+                            ),
+                            {"index_id": target_index_id, "kb_id": knowledge_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if target_index is None or target_index["status"] not in {
+                    "READY",
+                    "ACTIVE",
+                    "DEPRECATED",
+                }:
+                    raise ApiError("INDEX_NOT_READY", "目标 RAG 索引尚不可用", 409)
+
+                # The target index needs its own release candidate.
+                target_release = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT id, status FROM knowledge_release
+                                WHERE index_id = :index_id
+                                FOR UPDATE
+                                """
+                            ),
+                            {"index_id": target_index_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if target_release is not None and target_release["status"] in {
+                    "PUBLISHED",
+                    "CANCELLED",
+                }:
+                    raise ApiError(
+                        "RELEASE_TARGET_NOT_EDITABLE",
+                        "目标版本上的 Release 已发布或已取消，无法承接 Rebase",
+                        409,
+                    )
+                if target_release is None:
+                    target_release_id = uuid4()
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO knowledge_release (id, kb_id, index_id, status)
+                            VALUES (:id, :kb_id, :index_id, 'DRAFT')
+                            """
+                        ),
+                        {
+                            "id": target_release_id,
+                            "kb_id": knowledge_id,
+                            "index_id": target_index_id,
+                        },
+                    )
+                else:
+                    target_release_id = UUID(str(target_release["id"]))
+
+                # Document fingerprint on the target index: presence + hash.
+                target_documents = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT document_id, source_hash FROM index_document
+                                WHERE index_id = :index_id
+                                """
+                            ),
+                            {"index_id": target_index_id},
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                target_hashes = {
+                    UUID(str(row["document_id"])): str(row["source_hash"])
+                    for row in target_documents
+                }
+                source_documents = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT document_id, source_hash FROM index_document
+                                WHERE index_id = :index_id
+                                """
+                            ),
+                            {"index_id": source["index_id"]},
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                source_hashes = {
+                    UUID(str(row["document_id"])): str(row["source_hash"])
+                    for row in source_documents
+                }
+
+                existing_target_drafts = await connection.execute(
+                    text(
+                        """
+                        SELECT document_id FROM problem_profile_draft
+                        WHERE release_id = :release_id
+                        """
+                    ),
+                    {"release_id": target_release_id},
+                )
+                existing_target_ids = {
+                    UUID(str(row[0])) for row in existing_target_drafts
+                }
+
+                live_profiles = await connection.execute(
+                    text(
+                        """
+                        SELECT id, document_id, problem_code FROM document_problem_profile
+                        WHERE kb_id = :kb_id
+                        """
+                    ),
+                    {"kb_id": knowledge_id},
+                )
+                live_by_document = {
+                    UUID(str(row["document_id"])): dict(row) for row in live_profiles.mappings()
+                }
+
+                drafts = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT * FROM problem_profile_draft
+                                WHERE release_id = :release_id
+                                  AND status <> 'PUBLISHED'
+                                ORDER BY created_at, id
+                                FOR UPDATE
+                                """
+                            ),
+                            {"release_id": source_release_id},
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+
+                reused = 0
+                review_required = 0
+                regenerate = 0
+                removed = 0
+                created = 0
+                for draft in drafts:
+                    document_id = UUID(str(draft["document_id"]))
+                    if document_id in existing_target_ids:
+                        # An administrator already touched the target
+                        # candidate; never overwrite in-progress edits.
+                        if document_id in target_hashes:
+                            reused += 1
+                        continue
+                    target_hash = target_hashes.get(document_id)
+                    source_hash = source_hashes.get(document_id)
+                    unchanged = (
+                        target_hash is not None
+                        and source_hash is not None
+                        and target_hash == source_hash
+                    )
+                    if unchanged:
+                        await self._copy_rebased_draft(
+                            connection,
+                            target_release_id=target_release_id,
+                            draft=dict(draft),
+                            reset_review=False,
+                            note=None,
+                        )
+                        if draft["status"] == "APPROVED":
+                            reused += 1
+                        else:
+                            review_required += 1
+                    elif target_hash is not None:
+                        await self._copy_rebased_draft(
+                            connection,
+                            target_release_id=target_release_id,
+                            draft=dict(draft),
+                            reset_review=True,
+                            note="文档内容在目标索引中已变化，请重新生成或人工复核本草稿。",
+                        )
+                        review_required += 1
+                        regenerate += 1
+                    else:
+                        # Document left the index; keep a REMOVE suggestion so
+                        # the reviewer explicitly decides its Profile's fate.
+                        live = live_by_document.get(document_id)
+                        if live is not None:
+                            await self._copy_rebased_draft(
+                                connection,
+                                target_release_id=target_release_id,
+                                draft=dict(draft),
+                                reset_review=True,
+                                note="文档已不在目标索引中，建议移除对应线上 Profile。",
+                                force_operation="REMOVE",
+                                target_profile_id=UUID(str(live["id"])),
+                            )
+                            removed += 1
+                        # Without a live Profile there is nothing to remove
+                        # and nothing to reuse; drop the stale draft.
+
+                # Documents newly present on the target index without any
+                # draft and without a live Profile need CREATE suggestions.
+                for document_id in target_hashes:
+                    if (
+                        document_id not in existing_target_ids
+                        and document_id not in live_by_document
+                        and document_id not in {UUID(str(d["document_id"])) for d in drafts}
+                    ):
+                        created += 1
+
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE knowledge_release
+                        SET status = 'CANCELLED', updated_at = now()
+                        WHERE id = :release_id
+                        """
+                    ),
+                    {"release_id": source_release_id},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE knowledge_release
+                        SET status = 'DRAFT', validation_result = '{}'::jsonb,
+                            updated_at = now()
+                        WHERE id = :release_id AND status NOT IN ('PUBLISHED', 'CANCELLED')
+                        """
+                    ),
+                    {"release_id": target_release_id},
+                )
+                return {
+                    "source_release_id": str(source_release_id),
+                    "target_release_id": str(target_release_id),
+                    "target_index_id": str(target_index_id),
+                    "target_index_version": int(target_index["version"]),
+                    "reused_draft_count": reused,
+                    "review_required_draft_count": review_required,
+                    "regenerate_document_count": regenerate,
+                    "remove_suggestion_count": removed,
+                    "create_suggestion_count": created,
+                }
+        except ApiError:
+            raise
+        except SQLAlchemyError as exc:
+            raise ApiError("RELEASE_REBASE_CONFLICT", "Rebase 时检测到数据冲突", 409) from exc
+
+    @staticmethod
+    async def _copy_rebased_draft(
+        connection: AsyncConnection,
+        *,
+        target_release_id: UUID,
+        draft: dict[str, Any],
+        reset_review: bool,
+        note: str | None,
+        force_operation: str | None = None,
+        target_profile_id: UUID | None = None,
+    ) -> None:
+        status = "DRAFT" if reset_review else str(draft["status"])
+        quality_notes = list(draft.get("quality_notes") or [])
+        quality_status = str(draft.get("quality_status") or "PASS")
+        if note is not None:
+            quality_notes = list(dict.fromkeys([*quality_notes, note]))
+            quality_status = "REVIEW_REQUIRED"
+        await connection.execute(
+            text(
+                """
+                INSERT INTO problem_profile_draft (
+                    id, release_id, kb_id, document_id, operation,
+                    target_profile_id, problem_code, canonical_question,
+                    aliases, keywords, product_name, model_names, task_type,
+                    enabled, routing_summary, symptoms, exclusions,
+                    profile_enrichment_version, generation_source, confidence,
+                    reasoning, status, quality_status, quality_notes, quality_evidence
+                ) VALUES (
+                    :id, :release_id, :kb_id, :document_id, :operation,
+                    :target_profile_id, :problem_code, :canonical_question,
+                    CAST(:aliases AS jsonb), CAST(:keywords AS jsonb),
+                    :product_name, CAST(:model_names AS jsonb), :task_type,
+                    :enabled, :routing_summary, CAST(:symptoms AS jsonb),
+                    CAST(:exclusions AS jsonb), :profile_enrichment_version,
+                    :generation_source, :confidence, :reasoning, :status,
+                    :quality_status, CAST(:quality_notes AS jsonb),
+                    CAST(:quality_evidence AS jsonb)
+                )
+                """
+            ),
+            {
+                "id": uuid4(),
+                "release_id": target_release_id,
+                "kb_id": draft["kb_id"],
+                "document_id": draft["document_id"],
+                "operation": force_operation or draft["operation"],
+                "target_profile_id": (
+                    target_profile_id
+                    if target_profile_id is not None
+                    else draft.get("target_profile_id")
+                ),
+                "problem_code": draft["problem_code"],
+                "canonical_question": draft["canonical_question"],
+                "aliases": json.dumps(list(draft.get("aliases") or []), ensure_ascii=False),
+                "keywords": json.dumps(list(draft.get("keywords") or []), ensure_ascii=False),
+                "product_name": draft.get("product_name"),
+                "model_names": json.dumps(
+                    list(draft.get("model_names") or []), ensure_ascii=False
+                ),
+                "task_type": draft.get("task_type"),
+                "enabled": bool(draft.get("enabled", True)),
+                "routing_summary": str(draft.get("routing_summary") or ""),
+                "symptoms": json.dumps(list(draft.get("symptoms") or []), ensure_ascii=False),
+                "exclusions": json.dumps(list(draft.get("exclusions") or []), ensure_ascii=False),
+                "profile_enrichment_version": int(draft.get("profile_enrichment_version") or 1),
+                "generation_source": draft.get("generation_source") or "FALLBACK",
+                "confidence": float(draft.get("confidence") or 0),
+                "reasoning": draft.get("reasoning"),
+                "status": status,
+                "quality_status": quality_status,
+                "quality_notes": json.dumps(quality_notes, ensure_ascii=False),
+                "quality_evidence": json.dumps(
+                    list(draft.get("quality_evidence") or []), ensure_ascii=False
+                ),
+            },
+        )
+
+    async def rollback_support_release(
+        self, knowledge_id: UUID, target_release_id: UUID
+    ) -> dict[str, Any]:
+        """Explicitly switch Support back to a previously published release.
+
+        The live Profile projection is restored from the target release's
+        publish-time snapshot; Profiles introduced by later releases are
+        soft-disabled instead of deleted so the review trail survives.
+        Conversations keep their frozen ``support_release_id`` untouched.
+        """
+        try:
+            async with self.engine.begin() as connection:
+                kb = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT id, status, support_active_release_id
+                                FROM knowledge_base
+                                WHERE id = :kb_id FOR UPDATE
+                                """
+                            ),
+                            {"kb_id": knowledge_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if kb is None:
+                    raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
+                if kb["status"] != "ENABLED":
+                    raise ApiError("FORBIDDEN", "知识库已停用", 403)
+                target = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT id, kb_id, index_id, status, published_at
+                                FROM knowledge_release
+                                WHERE id = :release_id FOR UPDATE
+                                """
+                            ),
+                            {"release_id": target_release_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if target is None:
+                    raise ApiError("RELEASE_NOT_FOUND", "目标 Support Release 不存在", 404)
+                if UUID(str(target["kb_id"])) != knowledge_id:
+                    raise ApiError("RELEASE_KB_MISMATCH", "Release 不属于指定知识库", 409)
+                if target["status"] != "PUBLISHED":
+                    raise ApiError(
+                        "RELEASE_NOT_ROLLBACKABLE", "只能回滚到已发布的 Support Release", 409
+                    )
+                if (
+                    kb["support_active_release_id"] is not None
+                    and UUID(str(kb["support_active_release_id"])) == target_release_id
+                ):
+                    # Idempotent rollback to the currently active release.
+                    return await self._rollback_response(connection, target_release_id)
+                snapshots = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT * FROM support_release_profile
+                                WHERE release_id = :release_id
+                                ORDER BY document_id
+                                FOR UPDATE
+                                """
+                            ),
+                            {"release_id": target_release_id},
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                if not snapshots:
+                    raise ApiError(
+                        "RELEASE_SNAPSHOT_MISSING",
+                        "该 Release 没有发布时的 Profile 快照，无法回滚",
+                        409,
+                    )
+
+                for snapshot in snapshots:
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO document_problem_profile (
+                                id, document_id, kb_id, problem_code,
+                                canonical_question, aliases, keywords, product_name,
+                                model_names, task_type, enabled, routing_summary,
+                                symptoms, exclusions, profile_enrichment_version
+                            ) VALUES (
+                                :id, :document_id, :kb_id, :problem_code,
+                                :canonical_question, CAST(:aliases AS jsonb),
+                                CAST(:keywords AS jsonb), :product_name,
+                                CAST(:model_names AS jsonb), :task_type, :enabled,
+                                :routing_summary, CAST(:symptoms AS jsonb),
+                                CAST(:exclusions AS jsonb), :profile_enrichment_version
+                            )
+                            ON CONFLICT (kb_id, problem_code) DO UPDATE SET
+                                document_id = EXCLUDED.document_id,
+                                canonical_question = EXCLUDED.canonical_question,
+                                aliases = EXCLUDED.aliases,
+                                keywords = EXCLUDED.keywords,
+                                product_name = EXCLUDED.product_name,
+                                model_names = EXCLUDED.model_names,
+                                task_type = EXCLUDED.task_type,
+                                enabled = EXCLUDED.enabled,
+                                routing_summary = EXCLUDED.routing_summary,
+                                symptoms = EXCLUDED.symptoms,
+                                exclusions = EXCLUDED.exclusions,
+                                profile_enrichment_version = EXCLUDED.profile_enrichment_version,
+                                updated_at = now()
+                            """
+                        ),
+                        {
+                            "id": uuid4(),
+                            "document_id": snapshot["document_id"],
+                            "kb_id": knowledge_id,
+                            "problem_code": snapshot["problem_code"],
+                            "canonical_question": snapshot["canonical_question"],
+                            "aliases": json.dumps(
+                                list(snapshot.get("aliases") or []), ensure_ascii=False
+                            ),
+                            "keywords": json.dumps(
+                                list(snapshot.get("keywords") or []), ensure_ascii=False
+                            ),
+                            "product_name": snapshot.get("product_name"),
+                            "model_names": json.dumps(
+                                list(snapshot.get("model_names") or []), ensure_ascii=False
+                            ),
+                            "task_type": snapshot.get("task_type"),
+                            "enabled": bool(snapshot.get("enabled", True)),
+                            "routing_summary": str(snapshot.get("routing_summary") or ""),
+                            "symptoms": json.dumps(
+                                list(snapshot.get("symptoms") or []), ensure_ascii=False
+                            ),
+                            "exclusions": json.dumps(
+                                list(snapshot.get("exclusions") or []), ensure_ascii=False
+                            ),
+                            "profile_enrichment_version": int(
+                                snapshot.get("profile_enrichment_version") or 1
+                            ),
+                        },
+                    )
+                # Profiles introduced after the target release (or whose
+                # document left the snapshot) are disabled, never deleted.
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE document_problem_profile p
+                        SET enabled = false, updated_at = now()
+                        WHERE p.kb_id = :kb_id
+                          AND NOT EXISTS (
+                              SELECT 1 FROM support_release_profile s
+                              WHERE s.release_id = :release_id
+                                AND s.document_id = p.document_id
+                          )
+                        """
+                    ),
+                    {"kb_id": knowledge_id, "release_id": target_release_id},
+                )
+
+                # Only Support pointers move; RAG stays exactly as it is.
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE knowledge_base
+                        SET support_active_release_id = :release_id,
+                            support_active_index_id = :index_id,
+                            updated_at = now()
+                        WHERE id = :kb_id
+                        """
+                    ),
+                    {
+                        "release_id": target_release_id,
+                        "index_id": target["index_id"],
+                        "kb_id": knowledge_id,
+                    },
+                )
+                return await self._rollback_response(connection, target_release_id)
+        except ApiError:
+            raise
+        except SQLAlchemyError as exc:
+            raise ApiError("RELEASE_ROLLBACK_CONFLICT", "回滚时检测到数据冲突", 409) from exc
+
+    async def _rollback_response(
+        self, connection: AsyncConnection, release_id: UUID
+    ) -> dict[str, Any]:
+        row = (
+            (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT kb.support_active_release_id, kb.support_active_index_id,
+                               r.published_at, i.version AS index_version
+                        FROM knowledge_base kb
+                        LEFT JOIN knowledge_release r ON r.id = kb.support_active_release_id
+                        LEFT JOIN knowledge_index i ON i.id = r.index_id
+                        WHERE kb.id = (SELECT kb_id FROM knowledge_release WHERE id = :release_id)
+                        """
+                    ),
+                    {"release_id": release_id},
+                )
+            )
+            .mappings()
+            .one()
+        )
+        return {
+            "support_active_release_id": (
+                str(row["support_active_release_id"]) if row["support_active_release_id"] else None
+            ),
+            "support_active_index_id": (
+                str(row["support_active_index_id"]) if row["support_active_index_id"] else None
+            ),
+            "index_version": (
+                int(row["index_version"]) if row["index_version"] is not None else None
+            ),
+            "published_at": row["published_at"],
+            "rolled_back_to_release_id": str(release_id),
+        }
 
     async def document_profile_context(self, document_id: UUID) -> dict[str, Any] | None:
         """Deterministic single-document Profile context for the Documents view.

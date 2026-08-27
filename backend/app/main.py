@@ -117,6 +117,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # body, leaving the integration side without a request_id to report.
         code = f"HTTP_{exc.status_code}"
         message = str(exc.detail) if exc.detail else "请求无法处理"
+        if exc.status_code == 404 and message == "Not Found":
+            # A bare "Not Found" from the router almost always means the
+            # running API process predates the route (e.g. after a deploy);
+            # say so instead of surfacing FastAPI's default text.
+            message = "接口不存在：后端服务可能是旧版本，请重启后端进程后重试"
         await record_request_error(
             request, status_code=exc.status_code, error_code=code, message=message
         )

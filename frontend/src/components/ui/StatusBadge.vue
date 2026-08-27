@@ -17,6 +17,7 @@ const statusMap: Record<string, { label: string; tone: Tone }> = {
   READY_TO_PUBLISH: { label: "可发布", tone: "success" },
   APPROVED: { label: "审核通过", tone: "success" },
   PUBLISHED: { label: "已发布", tone: "success" },
+  HISTORICAL_PUBLISHED: { label: "历史已发布", tone: "neutral" },
   COMPLETED: { label: "已完成", tone: "success" },
   SUCCEEDED: { label: "已完成", tone: "success" },
   ENABLED: { label: "已启用", tone: "success" },

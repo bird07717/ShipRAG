@@ -8,7 +8,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, Header, Query, Response, UploadFile, status
 
 from app.api.dependencies import get_app_settings, get_resources
-from app.api.releases import get_release_repository
 from app.api.schemas import (
     DocumentDeleteResponse,
     DocumentProfileContextResponse,
@@ -27,8 +26,9 @@ from app.api.schemas import (
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.core.resources import AppResources
+from app.document_profiles.repository import DocumentProfileRepository
 from app.ingestion.repository import IngestionRepository
-from app.releases.repository import ReleaseRepository
+from app.releases.models import RagIndexRollbackRequest
 from app.services.ingestion import IngestionService
 
 router = APIRouter()
@@ -106,25 +106,23 @@ async def delete_knowledge_base(
 )
 async def rebuild_knowledge_profiles(
     knowledge_id: UUID,
-    service: Annotated[IngestionService, Depends(get_ingestion_service)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    resources: Annotated[AppResources, Depends(get_resources)],
     idempotency_key: Annotated[
         str | None, Header(alias="Idempotency-Key", min_length=1, max_length=200)
     ] = None,
 ) -> dict[str, Any]:
-    """Knowledge-level Profile rebuild shortcut.
+    """Compatibility endpoint for the old "rebuild drafts" control.
 
-    Never writes live Profiles: resolves to the same candidate pipeline as
-    Index Build — a deduplicated PROFILE_REFRESH on the editable candidate, a
-    build-then-refresh orchestration, or an intent merged into a running
-    build.  Repeated submissions return the already active task.
+    It now queues document attribute regeneration and never consults a
+    candidate release, so a published historical release cannot block it.
     """
-    resolution = await service.request_profile_rebuild(knowledge_id, idempotency_key)
-    return {
-        "task_id": resolution["task_id"],
-        "task_type": resolution["task_type"],
-        "status": resolution["status"],
-        "replayed": resolution["replayed"],
-    }
+    from app.document_profiles.service import DocumentProfileService
+
+    del idempotency_key  # durable task de-duplication is knowledge-base scoped
+    return await DocumentProfileService(
+        DocumentProfileRepository(resources.database), settings
+    ).request_generation(knowledge_id)
 
 
 @router.post(
@@ -180,12 +178,10 @@ async def get_document(
 )
 async def get_document_profile_context(
     document_id: UUID,
-    repository: Annotated[ReleaseRepository, Depends(get_release_repository)],
+    resources: Annotated[AppResources, Depends(get_resources)],
 ) -> dict[str, Any]:
-    """Published Profile plus the current unpublished candidate draft for one
-    document, so the Documents view never guesses candidate ownership from the
-    knowledge-wide Profile list."""
-    context = await repository.document_profile_context(document_id)
+    """Online and pending document Profile attributes for Documents."""
+    context = await DocumentProfileRepository(resources.database).document_context(document_id)
     if context is None:
         raise ApiError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
     return context
@@ -337,6 +333,25 @@ async def activate_index(
     repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
 ) -> dict[str, Any]:
     return await repository.activate_index(index_id)
+
+
+@router.post(
+    "/knowledge-bases/{knowledge_id}/rag-index/rollback",
+    response_model=IndexResponse,
+    tags=["indexes"],
+)
+async def rollback_rag_index(
+    knowledge_id: UUID,
+    payload: RagIndexRollbackRequest,
+    repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
+) -> dict[str, Any]:
+    """Roll the RAG online index back to an explicitly chosen snapshot.
+
+    Support pointers and frozen conversation versions are not touched; new
+    sessions bind to the rollback target while old sessions keep their
+    frozen snapshot.
+    """
+    return await repository.rollback_rag_index(knowledge_id, payload.target_index_id)
 
 
 @router.post(

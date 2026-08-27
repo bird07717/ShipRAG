@@ -19,11 +19,13 @@ from app.core.config import Settings
 from app.ingestion.embedding import EmbeddingError, EmbeddingProvider, create_embedding_provider
 from app.ingestion.models import EmbeddingInput
 from app.rag.doc_router import ACTION_CLARIFY, ACTION_DELIVER, ACTION_NO_MATCH, decide_doc_routing
-from app.rag.models import ModelSnapshot, RerankDocument, RetrievalCandidate
+from app.rag.models import ModelSnapshot, RerankDocument, RetrievalCandidate, RetrievalConfig
 from app.rag.repository import RagRepository
 from app.rag.rerank import RerankError, RerankProvider, create_rerank_provider
 from app.rag.retrieval import apply_rerank, reciprocal_rank_fusion
 from app.support.repository import SupportRepository
+
+__all__ = ["ACTION_CLARIFY", "ACTION_DELIVER", "SupportDocumentRouter"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +64,15 @@ class SupportDocumentRouter:
         knowledge_id: UUID,
         index_id: UUID,
         question: str,
+        retrieval: RetrievalConfig | None = None,
     ) -> SupportDocumentRoute:
+        retrieval = retrieval or RetrievalConfig(
+            vector_top_k=self.settings.m3_vector_top_k,
+            bm25_top_k=self.settings.m5_bm25_top_k,
+            fusion_top_k=self.settings.m5_fusion_top_k,
+            rerank_top_n=self.settings.m5_rerank_top_n,
+            context_max_chunks=self.settings.m3_context_max_chunks,
+        )
         provider: EmbeddingProvider | None = None
         trace: dict[str, Any] = {"source": "RAG_FALLBACK"}
         try:
@@ -77,7 +87,7 @@ class SupportDocumentRouter:
                     knowledge_id=knowledge_id,
                     index_id=index_id,
                     query=question,
-                    limit=self.settings.m5_bm25_top_k,
+                    limit=retrieval.bm25_top_k,
                 ),
             )
             if len(embeddings) != 1 or len(embeddings[0]) != self.settings.embedding_dimension:
@@ -86,20 +96,20 @@ class SupportDocumentRouter:
                 knowledge_id=knowledge_id,
                 index_id=index_id,
                 embedding=embeddings[0],
-                limit=self.settings.m3_vector_top_k,
+                limit=retrieval.vector_top_k,
             )
             fused = reciprocal_rank_fusion(
                 vector_candidates,
                 bm25_candidates,
                 rrf_k=self.settings.m5_rrf_k,
-                limit=self.settings.m5_fusion_top_k,
+                limit=retrieval.fusion_top_k,
             )
             trace["candidate_counts"] = {
                 "bm25": len(bm25_candidates),
                 "vector": len(vector_candidates),
                 "fused": len(fused),
             }
-            candidates, rerank_trace = await self._rerank(question, fused)
+            candidates, rerank_trace = await self._rerank(question, fused, retrieval)
             trace["rerank"] = rerank_trace
             decision = decide_doc_routing(
                 question=question,
@@ -157,19 +167,19 @@ class SupportDocumentRouter:
                 await provider.aclose()
 
     async def _rerank(
-        self, question: str, candidates: list[RetrievalCandidate]
+        self, question: str, candidates: list[RetrievalCandidate], retrieval: RetrievalConfig
     ) -> tuple[list[RetrievalCandidate], dict[str, Any]]:
         if not candidates:
             return [], {"status": "SKIPPED", "reason": "NO_CANDIDATES"}
         try:
             snapshot = await self.repository.get_rerank_model()
         except ApiError as exc:
-            return candidates[: self.settings.m5_rerank_top_n], {
+            return candidates[: retrieval.rerank_top_n], {
                 "status": "DEGRADED",
                 "reason": exc.code,
             }
         if snapshot is None:
-            return candidates[: self.settings.m5_rerank_top_n], {
+            return candidates[: retrieval.rerank_top_n], {
                 "status": "DEGRADED",
                 "reason": "MODEL_NOT_CONFIGURED",
             }
@@ -179,12 +189,12 @@ class SupportDocumentRouter:
                 outcome = await provider.rerank(
                     question,
                     [RerankDocument(candidate.content) for candidate in candidates],
-                    self.settings.m5_rerank_top_n,
+                    retrieval.rerank_top_n,
                 )
             finally:
                 await provider.aclose()
         except RerankError as exc:
-            return candidates[: self.settings.m5_rerank_top_n], {
+            return candidates[: retrieval.rerank_top_n], {
                 "status": "DEGRADED",
                 "reason": exc.code,
             }

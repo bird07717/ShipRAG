@@ -172,7 +172,14 @@ class ReleaseService:
                 await provider.aclose()
         await self.repository.set_generation_error(
             release_id,
-            f"LLM 生成已降级为保守草稿：{provider_error}" if provider_error else None,
+            (
+                "模型未返回可用的结构化 Profile，已生成保守草稿；"
+                "请检查该模型的 JSON/结构化输出能力后重新生成。"
+                if provider_error == "STRUCTURED_OUTPUT_INVALID"
+                else f"LLM 生成已降级为保守草稿：{provider_error}"
+                if provider_error
+                else None
+            ),
         )
         return generated
 
@@ -367,7 +374,7 @@ class ReleaseService:
             raise ApiError("RELEASE_NOT_FOUND", "发布候选不存在", 404)
         if release["status"] in {"PUBLISHED", "CANCELLED"}:
             raise ApiError("RELEASE_NOT_EDITABLE", "发布候选已发布或已取消", 409)
-        if release.get("index_status") != "READY":
+        if release.get("index_status") not in {"READY", "ACTIVE", "DEPRECATED"}:
             raise ApiError("INDEX_NOT_READY", "候选索引尚未完成，暂不能维护 Profile", 409)
         return release
 
@@ -426,10 +433,10 @@ class ReleaseService:
                     409,
                 )
         operation = changes.get("operation")
-        if operation == "UPDATE" and not changes.get("target_profile_id"):
+        if operation in {"UPDATE", "REMOVE"} and not changes.get("target_profile_id"):
             # Existing target may already be present; repository validation will
             # make the final determination.  This check only protects a wholly
-            # empty UPDATE request.
+            # empty UPDATE/REMOVE request.
             async with self.repository.engine.connect() as connection:
                 current = await connection.execute(
                     text("SELECT target_profile_id FROM problem_profile_draft WHERE id = :id"),
@@ -462,6 +469,36 @@ class ReleaseService:
                 details={"validation": report},
             )
         return await self.repository.publish(release_id)
+
+    async def rebase(self, release_id: UUID) -> dict[str, Any]:
+        """Explicitly catch a lagging candidate up to the current RAG index.
+
+        Human-reviewed drafts for unchanged documents are copied verbatim;
+        changed documents keep a draft that requires regeneration or manual
+        re-review; documents that left the index produce REMOVE suggestions.
+        A backfill task then generates drafts only for documents that still
+        have none — it never overwrites carried-over human edits.
+        """
+        result = await self.repository.rebase_release(release_id)
+        target_index_id = UUID(str(result["target_index_id"]))
+        backfill_submitted = False
+        if result["create_suggestion_count"] > 0:
+            try:
+                submission = await self.request_profile_task(
+                    target_index_id, task_type="PROFILE_BACKFILL"
+                )
+                backfill_submitted = not bool(submission.get("replayed"))
+            except ApiError:
+                # The rebase itself succeeded; draft generation for new
+                # documents can be requested from the review workspace.
+                backfill_submitted = False
+        result["backfill_submitted"] = backfill_submitted
+        return result
+
+    async def rollback_support_release(
+        self, knowledge_id: UUID, target_release_id: UUID
+    ) -> dict[str, Any]:
+        return await self.repository.rollback_support_release(knowledge_id, target_release_id)
 
     async def _generate_profile(
         self, document: dict[str, Any], provider: LlmProvider | None
@@ -689,8 +726,8 @@ class ReleaseService:
         review_required: dict[str, dict[str, str]] = {}
         drafts = list(snapshot.get("drafts") or [])
         live_profiles = list(snapshot.get("live_profiles") or [])
-        if snapshot.get("index_status") != "READY":
-            errors.append({"code": "INDEX_NOT_READY", "message": "候选索引不是 READY 状态"})
+        if snapshot.get("index_status") not in {"READY", "ACTIVE", "DEPRECATED"}:
+            errors.append({"code": "INDEX_NOT_READY", "message": "候选索引尚不可供 Support 使用"})
         if not drafts:
             warnings.append(
                 {"code": "NO_PROFILE_CHANGES", "message": "本次发布没有需要审核的 Profile 草稿"}
@@ -714,20 +751,31 @@ class ReleaseService:
             if draft["operation"] == "NONE":
                 continue
             readiness = draft.get("candidate_readiness") or {}
-            if not readiness.get("document_published"):
-                errors.append(
-                    {
-                        "code": "DOCUMENT_NOT_PUBLISHED",
-                        "message": f"文档 {draft['document_name']} 不在候选索引中",
-                    }
-                )
-            if not readiness.get("images_complete", True):
-                errors.append(
-                    {
-                        "code": "IMAGE_ASSET_MISSING",
-                        "message": f"文档 {draft['document_name']} 的图片资源不完整",
-                    }
-                )
+            if draft["operation"] == "REMOVE":
+                # REMOVE intentionally targets a document that left the
+                # candidate index; presence checks do not apply.
+                if not draft.get("target_profile_id"):
+                    errors.append(
+                        {
+                            "code": "REMOVE_TARGET_REQUIRED",
+                            "message": f"{draft['document_name']} 缺少移除目标",
+                        }
+                    )
+            else:
+                if not readiness.get("document_published"):
+                    errors.append(
+                        {
+                            "code": "DOCUMENT_NOT_PUBLISHED",
+                            "message": f"文档 {draft['document_name']} 不在候选索引中",
+                        }
+                    )
+                if not readiness.get("images_complete", True):
+                    errors.append(
+                        {
+                            "code": "IMAGE_ASSET_MISSING",
+                            "message": f"文档 {draft['document_name']} 的图片资源不完整",
+                        }
+                    )
             code = str(draft["problem_code"]).strip()
             canonical = normalize_for_match(str(draft["canonical_question"]))
             if not code or not canonical:

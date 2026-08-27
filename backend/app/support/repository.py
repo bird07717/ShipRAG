@@ -98,8 +98,13 @@ class SupportRepository:
                 (
                     await conn.execute(
                         text("""
-                SELECT kb.status, kb.active_index_id, i.status AS index_status, i.kb_id AS index_kb_id
-                FROM knowledge_base kb LEFT JOIN knowledge_index i ON i.id = kb.active_index_id
+                SELECT kb.status,
+                       COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                           AS support_active_index_id,
+                       i.status AS index_status, i.kb_id AS index_kb_id
+                FROM knowledge_base kb
+                LEFT JOIN knowledge_index i
+                  ON i.id = COALESCE(kb.rag_active_index_id, kb.active_index_id)
                 WHERE kb.id = :kb_id FOR UPDATE OF kb
             """),
                         {"kb_id": knowledge_id},
@@ -156,11 +161,28 @@ class SupportRepository:
             resolved_conversation_id = conversation_id or uuid4()
             focus_document_id: UUID | None = None
             focus_index_id: UUID | None = None
+            support_index_id = (
+                UUID(str(kb["support_active_index_id"])) if kb["support_active_index_id"] else None
+            )
+            support_release_id = None
+            support_index_status = kb["index_status"]
+            support_index_kb_id = kb["index_kb_id"]
             chat_context: dict[str, Any] = {}
             if conversation_id is None:
                 await conn.execute(
-                    text("INSERT INTO conversation (id, knowledge_id) VALUES (:id, :kb_id)"),
-                    {"id": resolved_conversation_id, "kb_id": knowledge_id},
+                    text(
+                        """
+                        INSERT INTO conversation (
+                            id, knowledge_id, support_index_id, support_release_id
+                        ) VALUES (:id, :kb_id, :support_index_id, :support_release_id)
+                        """
+                    ),
+                    {
+                        "id": resolved_conversation_id,
+                        "kb_id": knowledge_id,
+                        "support_index_id": support_index_id,
+                        "support_release_id": support_release_id,
+                    },
                 )
             else:
                 row = (
@@ -168,10 +190,14 @@ class SupportRepository:
                         await conn.execute(
                             text("""
                     SELECT c.knowledge_id, c.focus_document_id, c.focus_index_id,
+                           c.support_index_id, c.support_release_id,
                            c.chat_context, c.support_context_version,
-                           fi.kb_id AS focus_index_kb_id
+                           fi.kb_id AS focus_index_kb_id,
+                           si.kb_id AS support_index_kb_id,
+                           si.status AS support_index_status
                     FROM conversation c
                     LEFT JOIN knowledge_index fi ON fi.id = c.focus_index_id
+                    LEFT JOIN knowledge_index si ON si.id = c.support_index_id
                     WHERE c.id = :id FOR UPDATE OF c
                 """),
                             {"id": conversation_id},
@@ -188,6 +214,35 @@ class SupportRepository:
                     UUID(str(row["focus_document_id"])) if row["focus_document_id"] else None
                 )
                 focus_index_id = UUID(str(row["focus_index_id"])) if row["focus_index_id"] else None
+                if row["support_index_id"] is not None:
+                    if row["support_index_kb_id"] != knowledge_id:
+                        raise ApiError(
+                            "CONVERSATION_SUPPORT_VERSION_INVALID",
+                            "会话绑定的 Support 版本无效",
+                            409,
+                        )
+                    support_index_id = UUID(str(row["support_index_id"]))
+                    support_index_status = row["support_index_status"]
+                    support_index_kb_id = row["support_index_kb_id"]
+                    support_release_id = (
+                        UUID(str(row["support_release_id"])) if row["support_release_id"] else None
+                    )
+                elif support_index_id is not None:
+                    await conn.execute(
+                        text(
+                            """
+                            UPDATE conversation
+                            SET support_index_id = :index_id,
+                                support_release_id = :release_id
+                            WHERE id = :id
+                            """
+                        ),
+                        {
+                            "id": conversation_id,
+                            "index_id": support_index_id,
+                            "release_id": support_release_id,
+                        },
+                    )
                 if focus_document_id is not None and (
                     focus_index_id is None or row["focus_index_kb_id"] != knowledge_id
                 ):
@@ -207,12 +262,12 @@ class SupportRepository:
                 effective_index_id = focus_index_id
             else:
                 if (
-                    kb["active_index_id"] is None
-                    or kb["index_status"] != "ACTIVE"
-                    or kb["index_kb_id"] != knowledge_id
+                    support_index_id is None
+                    or support_index_status not in {"READY", "ACTIVE", "DEPRECATED"}
+                    or support_index_kb_id != knowledge_id
                 ):
-                    raise ApiError("KNOWLEDGE_BASE_NOT_READY", "知识库尚无可用 Active Index", 409)
-                effective_index_id = UUID(str(kb["active_index_id"]))
+                    raise ApiError("KNOWLEDGE_BASE_NOT_READY", "知识库尚无已发布 Support 版本", 409)
+                effective_index_id = support_index_id
             if effective_index_id is None:  # narrowed above; protects future query changes
                 raise ApiError("KNOWLEDGE_BASE_NOT_READY", "知识库尚无可用文档版本", 409)
 
@@ -267,11 +322,12 @@ class SupportRepository:
                 text("""
                 INSERT INTO rag_trace (
                     id, trace_id, request_id, kb_id, index_id, conversation_id,
-                    message_id, question, mode, status, user_id, engine, stage
+                    message_id, question, mode, status, user_id, engine, stage,
+                    support_release_id
                 ) VALUES (
                     :id, :trace_id, :request_id, :kb_id, :index_id, :conversation_id,
                     :message_id, :question, 'CHAT', 'RUNNING', :user_id,
-                    'SUPPORT', 'PROFILE_RESOLUTION'
+                    'SUPPORT', 'PROFILE_RESOLUTION', :support_release_id
                 )
             """),
                 {
@@ -284,6 +340,7 @@ class SupportRepository:
                     "message_id": assistant_message_id,
                     "question": question,
                     "user_id": user_id,
+                    "support_release_id": support_release_id,
                 },
             )
             if idempotency_key:
@@ -329,6 +386,7 @@ class SupportRepository:
                 chat_context=chat_context,
                 context_version=context_version,
                 history=self._budget_history([dict(item) for item in history_rows]),
+                support_release_id=support_release_id,
                 idempotency_key=idempotency_key,
             )
 
@@ -394,24 +452,47 @@ class SupportRepository:
         ready_only: bool = False,
     ) -> list[ProblemProfile]:
         query = """
+            WITH profile_rows AS (
+                -- New attribute projection is authoritative whenever a
+                -- document has an online value.  Multiple intents are
+                -- expanded to the resolver's existing flat catalog shape.
+                SELECT dp.document_id AS id, dp.document_id, dp.kb_id,
+                       intent.value ->> 'problem_code' AS problem_code,
+                       intent.value ->> 'canonical_question' AS canonical_question,
+                       COALESCE(intent.value -> 'aliases', '[]'::jsonb) AS aliases,
+                       COALESCE(intent.value -> 'keywords', '[]'::jsonb) AS keywords,
+                       intent.value ->> 'product_name' AS product_name,
+                       COALESCE(intent.value -> 'model_names', '[]'::jsonb) AS model_names,
+                       intent.value ->> 'task_type' AS task_type,
+                       COALESCE(intent.value ->> 'routing_summary', '') AS routing_summary,
+                       COALESCE(intent.value -> 'symptoms', '[]'::jsonb) AS symptoms,
+                       COALESCE(intent.value -> 'exclusions', '[]'::jsonb) AS exclusions,
+                       1 AS profile_enrichment_version,
+                       dp.enabled
+                FROM document_profile dp
+                CROSS JOIN LATERAL jsonb_array_elements(
+                    COALESCE(dp.active_payload -> 'intents', '[]'::jsonb)
+                ) intent(value)
+                WHERE dp.kb_id = :kb_id AND dp.active_payload IS NOT NULL AND dp.enabled
+            )
             SELECT p.*,
                    d.status AS document_status,
-                   kb.active_index_id,
+                   COALESCE(kb.rag_active_index_id, kb.active_index_id) AS active_index_id,
                    EXISTS (
                        SELECT 1 FROM document_element e
-                       WHERE e.index_id = kb.active_index_id
+                       WHERE e.index_id = COALESCE(kb.rag_active_index_id, kb.active_index_id)
                          AND e.document_id = p.document_id
                    ) AS document_published,
                    NOT EXISTS (
                        SELECT 1
                        FROM document_element e
                        LEFT JOIN image_asset a ON a.element_id = e.id
-                       WHERE e.index_id = kb.active_index_id
+                       WHERE e.index_id = COALESCE(kb.rag_active_index_id, kb.active_index_id)
                          AND e.document_id = p.document_id
                          AND e.element_type = 'IMAGE'
                          AND a.id IS NULL
                    ) AS images_complete
-            FROM document_problem_profile p
+            FROM profile_rows p
             JOIN knowledge_base kb ON kb.id = p.kb_id
             JOIN document_source d ON d.id = p.document_id AND d.kb_id = p.kb_id
             WHERE p.kb_id = :kb_id

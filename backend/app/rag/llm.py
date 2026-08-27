@@ -35,6 +35,40 @@ class LlmError(RuntimeError):
 StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
 
 
+def _validate_structured_json(schema: type[StructuredModel], raw: str) -> StructuredModel:
+    """Validate a model result while tolerating harmless JSON wrappers.
+
+    Some OpenAI-compatible endpoints return a valid object inside a Markdown
+    fence or add a short explanatory prefix even when JSON mode is requested.
+    The Profile pipeline must still reject invalid schemas, but should not
+    degrade to a fallback merely because transport-compatible providers add
+    that presentation wrapper.
+    """
+    candidates = [raw.strip()]
+    decoder = json.JSONDecoder()
+    for offset, character in enumerate(raw):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(raw[offset:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            candidate = json.dumps(value, ensure_ascii=False)
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+    first_error: ValidationError | ValueError | None = None
+    for candidate in candidates:
+        try:
+            return schema.model_validate_json(candidate)
+        except (ValidationError, ValueError) as exc:
+            if first_error is None:
+                first_error = exc
+    assert first_error is not None
+    raise first_error
+
+
 class LlmProvider(Protocol):
     usage: dict[str, Any]
 
@@ -321,7 +355,7 @@ class ZhipuLlmProvider:
             )
             self.usage["structured_attempts"] = attempt + 1
             try:
-                return schema.model_validate_json(raw)
+                return _validate_structured_json(schema, raw)
             except (ValidationError, ValueError) as exc:
                 if attempt:
                     raise LlmError(
@@ -366,7 +400,7 @@ async def _complete_structured(
         # from a schema-repair retry without retaining the raw model output.
         provider.usage["structured_attempts"] = attempt + 1
         try:
-            return schema.model_validate_json(raw)
+            return _validate_structured_json(schema, raw)
         except (ValidationError, ValueError) as exc:
             if attempt:
                 raise LlmError(

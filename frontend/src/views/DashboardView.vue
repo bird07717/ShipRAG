@@ -140,17 +140,22 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
       </header>
       <div class="workflow-grid">
         <button type="button" @click="store.navigate('indexes')">
-          <span>构建中</span><strong>{{ store.buildingCount }}</strong>
-          <small>查看索引任务</small>
+          <span>Processing</span><strong>{{ store.buildingCount }}</strong>
+          <small>{{ store.buildingCount ? "文档正在处理" : "当前没有处理任务" }}</small>
         </button>
         <button type="button" @click="store.navigate('indexes')">
-          <span>待审核发布</span><strong>{{ store.indexes.filter((index) => index.status === 'READY').length }}</strong>
-          <small>在 Index Build 审核 RAG 索引</small>
+          <span>RAG Online</span>
+          <strong class="state-text">{{ store.activeIndex ? `v${store.activeIndex.version}` : "未就绪" }}</strong>
+          <small>技术构建成功后自动切换</small>
         </button>
-        <button type="button" @click="store.navigate('indexes')">
-          <span>线上索引</span>
-          <strong class="state-text">{{ store.activeIndex ? `v${store.activeIndex.version}` : "未发布" }}</strong>
-          <small>当前新会话使用的 RAG 版本</small>
+        <button type="button" @click="store.navigate('support-review')">
+          <span>Profile 属性</span>
+          <strong class="state-text">
+            {{ store.knowledgeProfileSummary?.online_count ?? 0 }} 项已上线
+          </strong>
+          <small>
+            {{ store.knowledgeProfileSummary?.pending_count ? `${store.knowledgeProfileSummary.pending_count} 项待上线` : "RAG 始终可用" }}
+          </small>
         </button>
       </div>
     </section>

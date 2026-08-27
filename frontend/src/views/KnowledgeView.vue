@@ -50,13 +50,13 @@ function rebuild(): void {
   void store.buildIndex();
 }
 
-function rebuildProfile(): void {
+function regenerateProfiles(): void {
   const kb = detailTarget.value;
   if (!kb || kb.status !== "ENABLED") return;
-  void store.rebuildKnowledgeProfiles(kb);
+  void store.regenerateKnowledgeProfiles(kb);
 }
 
-function profileRebuildDisabledReason(kb: KnowledgeBase): string {
+function profileGenerationDisabledReason(kb: KnowledgeBase): string {
   if (kb.status === "DELETING") return "知识库正在删除";
   if (kb.status !== "ENABLED") return "知识库已停用";
   return "";
@@ -242,7 +242,8 @@ function isDeleting(kb: KnowledgeBase): boolean {
             <span class="mono">{{ detailTarget.id }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="Active Index">
-            <span class="mono">{{ detailTarget.active_index_id ?? "—" }}</span>
+            <span class="mono">RAG：{{ detailTarget.rag_active_index_id ?? detailTarget.active_index_id ?? "—" }}</span>
+            <span class="mono">Support：{{ detailTarget.support_active_index_id ?? "—" }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="Building Index">
             <span class="mono">{{ detailTarget.building_index_id ?? "—" }}</span>
@@ -268,17 +269,17 @@ function isDeleting(kb: KnowledgeBase): boolean {
           <span class="spacer" />
           <el-button @click="rebuild">重建索引</el-button>
           <el-tooltip
-            :content="profileRebuildDisabledReason(detailTarget)"
-            :disabled="!profileRebuildDisabledReason(detailTarget)"
+            :content="profileGenerationDisabledReason(detailTarget)"
+            :disabled="!profileGenerationDisabledReason(detailTarget)"
             placement="top"
           >
             <span>
               <el-button
-                :disabled="Boolean(profileRebuildDisabledReason(detailTarget))"
-                :loading="store.isActionLoading(`rebuild-profile:${detailTarget.id}`)"
-                @click="rebuildProfile"
+                :disabled="Boolean(profileGenerationDisabledReason(detailTarget))"
+                :loading="store.isActionLoading(`document-profile-generate:${detailTarget.id}`)"
+                @click="regenerateProfiles"
               >
-                重建 Profile
+                重新生成待上线属性
               </el-button>
             </span>
           </el-tooltip>

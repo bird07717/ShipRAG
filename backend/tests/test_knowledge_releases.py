@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -101,6 +101,135 @@ def test_release_validation_allows_explicit_reference_only_document() -> None:
     )
 
     assert report.valid is True
+
+
+def test_release_validation_remove_draft_requires_target() -> None:
+    report = ReleaseService._validate_snapshot(
+        {
+            "index_status": "READY",
+            "drafts": [_draft(operation="REMOVE", target_profile_id=None)],
+            "live_profiles": [],
+        }
+    )
+
+    assert report.valid is False
+    assert {item["code"] for item in report.errors} == {"REMOVE_TARGET_REQUIRED"}
+
+
+def test_release_validation_remove_draft_skips_index_presence_checks() -> None:
+    report = ReleaseService._validate_snapshot(
+        {
+            "index_status": "READY",
+            "drafts": [
+                _draft(
+                    operation="REMOVE",
+                    target_profile_id=uuid4(),
+                    candidate_readiness={"document_published": False},
+                )
+            ],
+            "live_profiles": [],
+        }
+    )
+
+    assert report.valid is True
+    assert report.errors == []
+
+
+def test_remove_draft_publish_disables_live_profile_instead_of_deleting() -> None:
+    connection = _Connection()
+    profile_id = uuid4()
+    statements: list[str] = []
+
+    async def _execute(statement: object, parameters: dict[str, object]) -> object:
+        statements.append(str(statement))
+        assert parameters["target_profile_id"] == profile_id
+        return type("Result", (), {"rowcount": 1})()
+
+    connection.execute = _execute  # type: ignore[method-assign]
+    draft = _draft(operation="REMOVE", target_profile_id=profile_id)
+
+    import asyncio
+
+    asyncio.run(ReleaseRepository._publish_profile(connection, draft))  # type: ignore[arg-type]
+
+    assert any("enabled = false" in statement for statement in statements)
+    assert not any("DELETE FROM document_problem_profile" in s for s in statements)
+
+
+def test_rebase_service_reports_classification_and_requests_backfill() -> None:
+    class _Repository:
+        def __init__(self) -> None:
+            self.rebased: list[UUID] = []
+
+        async def rebase_release(self, release_id: UUID) -> dict[str, object]:
+            self.rebased.append(release_id)
+            return {
+                "source_release_id": str(release_id),
+                "target_release_id": str(uuid4()),
+                "target_index_id": str(uuid4()),
+                "target_index_version": 7,
+                "reused_draft_count": 3,
+                "review_required_draft_count": 1,
+                "regenerate_document_count": 1,
+                "remove_suggestion_count": 2,
+                "create_suggestion_count": 2,
+            }
+
+    class _Service(ReleaseService):
+        def __init__(self, repository: _Repository) -> None:
+            self.repository = repository  # type: ignore[assignment]
+            self.requested: list[tuple[UUID, str]] = []
+
+        async def request_profile_task(
+            self, index_id: UUID, *, task_type: str, draft_id: UUID | None = None
+        ) -> dict[str, object]:
+            self.requested.append((index_id, task_type))
+            return {"task_id": str(uuid4()), "replayed": False}
+
+    import asyncio
+
+    repository = _Repository()
+    service = _Service(repository)
+    release_id = uuid4()
+
+    result = asyncio.run(service.rebase(release_id))
+
+    assert repository.rebased == [release_id]
+    assert result["backfill_submitted"] is True
+    assert service.requested[0][1] == "PROFILE_BACKFILL"
+
+
+def test_rebase_service_tolerates_backfill_submission_failure() -> None:
+    class _Repository:
+        async def rebase_release(self, release_id: UUID) -> dict[str, object]:
+            return {
+                "source_release_id": str(release_id),
+                "target_release_id": str(uuid4()),
+                "target_index_id": str(uuid4()),
+                "target_index_version": 3,
+                "reused_draft_count": 0,
+                "review_required_draft_count": 0,
+                "regenerate_document_count": 0,
+                "remove_suggestion_count": 0,
+                "create_suggestion_count": 1,
+            }
+
+    class _Service(ReleaseService):
+        def __init__(self, repository: _Repository) -> None:
+            self.repository = repository  # type: ignore[assignment]
+
+        async def request_profile_task(
+            self, index_id: UUID, *, task_type: str, draft_id: UUID | None = None
+        ) -> dict[str, object]:
+            raise ApiError("UPSTREAM_UNAVAILABLE", "异步任务队列不可用", 503)
+
+    import asyncio
+
+    service = _Service(_Repository())
+
+    result = asyncio.run(service.rebase(uuid4()))
+
+    assert result["backfill_submitted"] is False
 
 
 def test_fallback_profile_is_conservative_and_editable() -> None:
@@ -301,7 +430,6 @@ async def test_ready_legacy_index_without_release_can_still_activate() -> None:
                     "kb_id": knowledge_id,
                     "status": "READY",
                     "active_index_id": None,
-                    "release_status": None,
                 }
             ),
             _Result(row={"id": index_id, "kb_id": knowledge_id, "status": "ACTIVE"}),
@@ -315,33 +443,37 @@ async def test_ready_legacy_index_without_release_can_still_activate() -> None:
 
     assert published["status"] == "ACTIVE"
     statements = "\n".join(statement for statement, _ in connection.executed)
-    assert "LEFT JOIN knowledge_release" in statements
+    assert "rag_active_index_id" in statements
+    assert "LEFT JOIN knowledge_release" not in statements
 
 
 @pytest.mark.asyncio
-async def test_candidate_index_cannot_bypass_release_publication() -> None:
+async def test_candidate_index_can_activate_for_rag_without_support_publication() -> None:
     index_id = uuid4()
+    knowledge_id = uuid4()
     connection = _Connection(
         [
             _Result(
                 row={
                     "id": index_id,
-                    "kb_id": uuid4(),
+                    "kb_id": knowledge_id,
                     "status": "READY",
                     "active_index_id": None,
-                    "release_status": "DRAFT",
                 }
-            )
+            ),
+            _Result(row={"id": index_id, "kb_id": knowledge_id, "status": "ACTIVE"}),
         ]
     )
     repository = IngestionRepository(
         cast(AsyncEngine, _Engine(connection)), Settings(_env_file=None, app_env="test")
     )
 
-    with pytest.raises(ApiError) as raised:
-        await repository.activate_index(index_id)
+    activated = await repository.activate_index(index_id)
 
-    assert raised.value.code == "RELEASE_REQUIRED"
+    assert activated["status"] == "ACTIVE"
+    statements = "\n".join(statement for statement, _ in connection.executed)
+    assert "release_status" not in statements
+    assert "rag_active_index_id = :index_id" in statements
 
 
 @pytest.mark.asyncio
@@ -370,3 +502,97 @@ async def test_publish_rejects_a_release_superseded_by_a_newer_version() -> None
 
     assert raised.value.code == "RELEASE_SUPERSEDED"
     assert "newer_index.version > :index_version" in connection.executed[1][0]
+
+
+@pytest.mark.asyncio
+async def test_rag_rollback_switches_pointer_and_double_writes_alias() -> None:
+    index_id = uuid4()
+    knowledge_id = uuid4()
+    connection = _Connection(
+        [
+            _Result(row={"status": "ENABLED", "rag_active_index_id": uuid4()}),
+            _Result(
+                row={
+                    "id": index_id,
+                    "kb_id": knowledge_id,
+                    "status": "DEPRECATED",
+                    "version": 1,
+                }
+            ),
+            _Result(),
+            _Result(
+                row={
+                    "id": index_id,
+                    "kb_id": knowledge_id,
+                    "status": "ACTIVE",
+                    "version": 1,
+                }
+            ),
+            _Result(),
+        ]
+    )
+    repository = IngestionRepository(
+        cast(AsyncEngine, _Engine(connection)), Settings(_env_file=None, app_env="test")
+    )
+
+    rolled = await repository.rollback_rag_index(knowledge_id, index_id)
+
+    assert rolled["status"] == "ACTIVE"
+    statements = "\n".join(statement for statement, _ in connection.executed)
+    assert "rag_active_index_id = :index_id" in statements
+    assert "active_index_id = :index_id" in statements
+    assert "support_active" not in statements
+
+
+@pytest.mark.asyncio
+async def test_rag_rollback_to_current_version_is_idempotent() -> None:
+    index_id = uuid4()
+    knowledge_id = uuid4()
+    connection = _Connection(
+        [
+            _Result(row={"status": "ENABLED", "rag_active_index_id": index_id}),
+            _Result(
+                row={
+                    "id": index_id,
+                    "kb_id": knowledge_id,
+                    "status": "ACTIVE",
+                    "version": 2,
+                }
+            ),
+        ]
+    )
+    repository = IngestionRepository(
+        cast(AsyncEngine, _Engine(connection)), Settings(_env_file=None, app_env="test")
+    )
+
+    rolled = await repository.rollback_rag_index(knowledge_id, index_id)
+
+    assert rolled["status"] == "ACTIVE"
+    assert len(connection.executed) == 2
+
+
+@pytest.mark.asyncio
+async def test_rag_rollback_rejects_building_target() -> None:
+    index_id = uuid4()
+    knowledge_id = uuid4()
+    connection = _Connection(
+        [
+            _Result(row={"status": "ENABLED", "rag_active_index_id": uuid4()}),
+            _Result(
+                row={
+                    "id": index_id,
+                    "kb_id": knowledge_id,
+                    "status": "BUILDING",
+                    "version": 3,
+                }
+            ),
+        ]
+    )
+    repository = IngestionRepository(
+        cast(AsyncEngine, _Engine(connection)), Settings(_env_file=None, app_env="test")
+    )
+
+    with pytest.raises(ApiError) as raised:
+        await repository.rollback_rag_index(knowledge_id, index_id)
+
+    assert raised.value.code == "INDEX_NOT_ROLLBACKABLE"

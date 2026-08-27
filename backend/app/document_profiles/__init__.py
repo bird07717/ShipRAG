@@ -1,0 +1,1 @@
+"""Document Profile attribute domain."""

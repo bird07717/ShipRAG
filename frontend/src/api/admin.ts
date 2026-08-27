@@ -2,6 +2,9 @@ import type {
   DocumentItem,
   DocumentDeleteResult,
   DocumentProfileContext,
+  KnowledgeProfileSummary,
+  ProfilePublishCheck,
+  DocumentProfileIntent,
   BuildRequestResult,
   GarbageCollectionResult,
   KnowledgeBase,
@@ -19,9 +22,11 @@ import type {
   ProfileDraft,
   ProfileDraftPatch,
   ProfileFeedback,
+  ReleaseRebaseResult,
   ReleaseValidation,
   RagConfig,
   RagConfigUpdatePayload,
+  EngineRetrievalConfig,
   RagTrace,
   RuntimePolicy,
   RequestErrorLog,
@@ -29,6 +34,7 @@ import type {
   FailureSummary,
   SupportMetrics,
   SupportMessage,
+  SupportReleaseRollbackResult,
   SystemInfo,
   TaskRecord,
   TaskSubmission,
@@ -116,6 +122,24 @@ export const adminApi = {
     ),
   getDocumentProfileContext: (documentId: string) =>
     apiRequest<DocumentProfileContext>(`/documents/${documentId}/profile-context`),
+  getKnowledgeProfiles: (knowledgeId: string) =>
+    apiRequest<KnowledgeProfileSummary>(`/knowledge-bases/${knowledgeId}/profiles`),
+  generateKnowledgeProfiles: (knowledgeId: string) =>
+    apiRequest<TaskSubmission>(`/knowledge-bases/${knowledgeId}/profiles/generate`, { method: "POST" }),
+  generateDocumentProfile: (knowledgeId: string, documentId: string) =>
+    apiRequest<TaskSubmission>(`/knowledge-bases/${knowledgeId}/documents/${documentId}/profile/generate`, { method: "POST" }),
+  updateDocumentProfile: (knowledgeId: string, documentId: string, payload: DocumentProfileIntent) =>
+    apiRequest<DocumentProfileContext>(`/knowledge-bases/${knowledgeId}/documents/${documentId}/profile`, {
+      method: "PUT", body: JSON.stringify(payload),
+    }),
+  checkKnowledgeProfiles: (knowledgeId: string) =>
+    apiRequest<ProfilePublishCheck>(`/knowledge-bases/${knowledgeId}/profiles/check`, { method: "POST" }),
+  publishKnowledgeProfiles: (knowledgeId: string) =>
+    apiRequest<{ published_count: number; check: ProfilePublishCheck; summary: KnowledgeProfileSummary }>(
+      `/knowledge-bases/${knowledgeId}/profiles/publish`, { method: "POST" },
+    ),
+  discardPendingKnowledgeProfiles: (knowledgeId: string) =>
+    apiRequest<{ discarded_count: number }>(`/knowledge-bases/${knowledgeId}/profiles/discard-pending`, { method: "POST" }),
   rebuildKnowledgeProfiles: (knowledgeId: string, idempotencyKey: string = crypto.randomUUID()) =>
     apiRequest<TaskSubmission>(`/knowledge-bases/${knowledgeId}/profiles/rebuild`, {
       method: "POST",
@@ -262,6 +286,16 @@ export const adminApi = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+  listEngineRetrievalConfigs: () =>
+    apiRequest<EngineRetrievalConfig[]>("/engine-retrieval-configs"),
+  updateEngineRetrievalConfig: (
+    executionPolicy: EngineRetrievalConfig["execution_policy"],
+    payload: RagConfigUpdatePayload,
+  ) =>
+    apiRequest<EngineRetrievalConfig>(`/engine-retrieval-configs/${executionPolicy}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
   getRuntimePolicy: (knowledgeId: string) =>
     apiRequest<RuntimePolicy>(`/runtime-policies/${knowledgeId}`),
   updateRuntimePolicy: (knowledgeId: string, executionPolicy: RuntimePolicy["execution_policy"]) =>
@@ -303,6 +337,21 @@ export const adminApi = {
     apiRequest<ReleaseValidation>(`/releases/${releaseId}/validate`, { method: "POST" }),
   publishKnowledgeRelease: (releaseId: string) =>
     apiRequest<KnowledgeRelease>(`/releases/${releaseId}/publish`, { method: "POST" }),
+  rebaseKnowledgeRelease: (releaseId: string) =>
+    apiRequest<ReleaseRebaseResult>(`/releases/${releaseId}/rebase`, { method: "POST" }),
+  rollbackSupportRelease: (knowledgeId: string, releaseId: string) =>
+    apiRequest<SupportReleaseRollbackResult>(
+      `/knowledge-bases/${knowledgeId}/support-release/rollback`,
+      {
+        method: "POST",
+        body: JSON.stringify({ target_release_id: releaseId }),
+      },
+    ),
+  rollbackRagIndex: (knowledgeId: string, indexId: string) =>
+    apiRequest<KnowledgeIndex>(`/knowledge-bases/${knowledgeId}/rag-index/rollback`, {
+      method: "POST",
+      body: JSON.stringify({ target_index_id: indexId }),
+    }),
   listProfileFeedback: (knowledgeId: string) =>
     apiRequest<ProfileFeedback[]>(`/knowledge-bases/${knowledgeId}/profile-feedback`),
 };

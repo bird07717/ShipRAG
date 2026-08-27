@@ -13,7 +13,7 @@ ReleaseStatus = Literal[
     "PUBLISHED",
     "CANCELLED",
 ]
-DraftOperation = Literal["CREATE", "UPDATE", "NONE"]
+DraftOperation = Literal["CREATE", "UPDATE", "REMOVE", "NONE"]
 DraftStatus = Literal["DRAFT", "APPROVED", "REJECTED", "PUBLISHED"]
 PROFILE_ENRICHMENT_VERSION = 1
 ProfileQualityStatus = Literal["PASS", "REVIEW_REQUIRED", "FALLBACK", "MANUAL_REVIEWED"]
@@ -111,3 +111,28 @@ class ValidationReport(BaseModel):
     review_required_count: int = 0
     review_required: list[dict[str, str]] = Field(default_factory=list)
     checked_draft_count: int = 0
+
+
+class RagIndexRollbackRequest(BaseModel):
+    """Explicit RAG rollback target.  The version is never guessed."""
+
+    target_index_id: UUID
+
+
+class SupportReleaseRollbackRequest(BaseModel):
+    """Explicit Support rollback target.  The version is never guessed."""
+
+    target_release_id: UUID
+
+
+class ReleaseRebaseReport(BaseModel):
+    source_release_id: UUID
+    target_release_id: UUID
+    target_index_id: UUID
+    target_index_version: int
+    reused_draft_count: int = 0
+    review_required_draft_count: int = 0
+    regenerate_document_count: int = 0
+    remove_suggestion_count: int = 0
+    create_suggestion_count: int = 0
+    backfill_submitted: bool = False

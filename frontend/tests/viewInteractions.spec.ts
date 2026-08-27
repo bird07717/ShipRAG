@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
-import type { DocumentProfileContext } from "@/types/admin";
+import type { DocumentProfileContext, KnowledgeRelease, ProfileDraft } from "@/types/admin";
 import AdminStudio from "@/components/AdminStudio.vue";
 
 const kb = {
@@ -51,6 +51,66 @@ const index = {
   created_at: "2026-08-17T00:00:00Z",
   finished_at: "2026-08-17T00:01:00Z",
   activated_at: null,
+};
+
+const candidateIndex = {
+  ...index,
+  id: "idx-2",
+  version: 4,
+  status: "READY",
+  activate_on_success: false,
+  build_reason: "DOCUMENT_CHANGED",
+  activated_at: null,
+};
+
+const profileDraft: ProfileDraft = {
+  id: "draft-1",
+  release_id: "rel-1",
+  kb_id: "kb-1",
+  document_id: "doc-1",
+  document_name: "操作手册",
+  operation: "UPDATE",
+  target_profile_id: "pp-1",
+  target_problem_code: "PDC_UPGRADE",
+  problem_code: "PDC_UPGRADE",
+  canonical_question: "如何升级 PDC？",
+  aliases: ["PDC 怎么升级"],
+  keywords: ["升级"],
+  product_name: "PDC",
+  model_names: ["VDR600"],
+  task_type: "UPGRADE",
+  routing_summary: "解决 PDC 升级问题",
+  symptoms: ["升级失败"],
+  exclusions: [],
+  profile_enrichment_version: 1,
+  enabled: true,
+  status: "DRAFT",
+  generation_source: "LLM",
+  quality_status: "PASS",
+  quality_notes: [],
+  quality_evidence: [],
+  confidence: 0.91,
+  reasoning: "文档主题明确",
+  validation_result: {},
+  created_at: "2026-08-17T00:00:00Z",
+  updated_at: "2026-08-17T00:00:00Z",
+};
+
+const supportRelease: KnowledgeRelease = {
+  id: "rel-1",
+  kb_id: "kb-1",
+  index_id: "idx-2",
+  index_version: 4,
+  index_status: "READY",
+  status: "DRAFT",
+  validation_result: { publishable: false, review_required_count: 1 },
+  generation_error: null,
+  draft_count: 1,
+  approved_count: 0,
+  drafts: [profileDraft],
+  created_at: "2026-08-17T00:00:00Z",
+  updated_at: "2026-08-17T00:00:00Z",
+  published_at: null,
 };
 
 const traceSummary = {
@@ -265,11 +325,41 @@ const profileContext: DocumentProfileContext = {
   },
 };
 
+const documentProfileSummary = {
+  knowledge_id: "kb-1",
+  online_count: 1,
+  pending_count: 1,
+  attention_count: 0,
+  failed_count: 0,
+  generating_count: 0,
+  profiles: [
+    {
+      document_id: "doc-1",
+      document_name: "操作手册",
+      document_status: "STORED",
+      profile_status: "PENDING_ONLINE" as const,
+      active_profile: { intents: [{ problem_code: "PDC_UPGRADE", canonical_question: "如何升级 PDC？", aliases: [], keywords: [] }] },
+      pending_profile: { intents: [{ problem_code: "PDC_UPGRADE", canonical_question: "如何升级 PDC？", aliases: ["PDC 怎么升级"], keywords: ["升级"] }] },
+      pending_state: "PENDING_ONLINE",
+      pending_error_code: null,
+      pending_error_message: null,
+      active_updated_at: null,
+      pending_updated_at: null,
+    },
+  ],
+};
+
 function stubApi() {
   vi.spyOn(adminApi, "listKnowledgeBases").mockResolvedValue([kb]);
   vi.spyOn(adminApi, "listDocuments").mockResolvedValue([doc]);
-  vi.spyOn(adminApi, "listIndexes").mockResolvedValue([index]);
+  vi.spyOn(adminApi, "listIndexes").mockResolvedValue([index, candidateIndex]);
   vi.spyOn(adminApi, "listIndexTasks").mockResolvedValue([]);
+  vi.spyOn(adminApi, "listKnowledgeReleases").mockResolvedValue([supportRelease]);
+  vi.spyOn(adminApi, "getKnowledgeRelease").mockResolvedValue(supportRelease);
+  vi.spyOn(adminApi, "updateProfileDraft").mockImplementation(async (_draftId, patch) => ({
+    ...profileDraft,
+    ...patch,
+  }));
   vi.spyOn(adminApi, "listTraces").mockResolvedValue([traceSummary]);
   vi.spyOn(adminApi, "listModels").mockResolvedValue([model]);
   vi.spyOn(adminApi, "listPrompts").mockResolvedValue([prompt]);
@@ -280,6 +370,18 @@ function stubApi() {
     rerank_top_n: 10,
     context_max_chunks: 8,
   });
+  vi.spyOn(adminApi, "listEngineRetrievalConfigs").mockResolvedValue([
+    "SUPPORT_ONLY",
+    "SUPPORT_WITH_RAG_FALLBACK",
+    "RAG_ONLY",
+  ].map((execution_policy) => ({
+    execution_policy: execution_policy as "SUPPORT_ONLY" | "SUPPORT_WITH_RAG_FALLBACK" | "RAG_ONLY",
+    vector_top_k: 10,
+    bm25_top_k: 10,
+    fusion_top_k: 20,
+    rerank_top_n: 10,
+    context_max_chunks: 8,
+  })));
   vi.spyOn(adminApi, "getTrace").mockResolvedValue(traceDetail);
   vi.spyOn(adminApi, "runPlayground").mockResolvedValue(traceDetail);
   vi.spyOn(adminApi, "listElements").mockResolvedValue({
@@ -298,12 +400,26 @@ function stubApi() {
     rebuild_required: false,
   });
   vi.spyOn(adminApi, "getDocumentProfileContext").mockResolvedValue(profileContext);
-  vi.spyOn(adminApi, "rebuildKnowledgeProfiles").mockResolvedValue({
-    task_id: "task-rebuild",
-    task_type: "PROFILE_REFRESH",
-    status: "QUEUED",
-    replayed: false,
+  vi.spyOn(adminApi, "getKnowledgeProfiles").mockResolvedValue(documentProfileSummary);
+  vi.spyOn(adminApi, "checkKnowledgeProfiles").mockResolvedValue({
+    valid: true, publishable: true, pending_count: 1, errors: [], warnings: [],
   });
+  vi.spyOn(adminApi, "generateKnowledgeProfiles").mockResolvedValue({
+    task_id: "task-profile", task_type: "DOCUMENT_PROFILE_GENERATE", status: "QUEUED", replayed: false,
+  });
+  vi.spyOn(adminApi, "generateDocumentProfile").mockResolvedValue({
+    task_id: "task-profile-doc", task_type: "DOCUMENT_PROFILE_GENERATE", status: "QUEUED", replayed: false,
+  });
+  vi.spyOn(adminApi, "updateDocumentProfile").mockResolvedValue({
+    ...profileContext, profile_status: "PENDING_ONLINE", active_profile: null,
+    pending_profile: documentProfileSummary.profiles[0]!.pending_profile,
+  });
+  vi.spyOn(adminApi, "publishKnowledgeProfiles").mockResolvedValue({
+    published_count: 1,
+    check: { valid: true, publishable: true, pending_count: 1, errors: [], warnings: [] },
+    summary: { ...documentProfileSummary, pending_count: 0, online_count: 2 },
+  });
+  vi.spyOn(adminApi, "discardPendingKnowledgeProfiles").mockResolvedValue({ discarded_count: 1 });
 }
 
 async function mountView(view: string, navigationQuery = "") {
@@ -402,11 +518,48 @@ describe("view interactions", () => {
       .trigger("click");
     await flushPromises();
     expect(adminStore.requestedIndexDetailId).toBe("idx-2");
-    expect(adminStore.requestedView).toBe("indexes");
+    expect(adminStore.requestedView).toBe("support-review");
     expect(adminStore.documentDrawerOpen).toBe(false);
   });
 
-  it("knowledge: detail drawer submits a profile rebuild behind confirmation", async () => {
+  it("support review: manages document attributes in one workspace", async () => {
+    const wrapper = await mountView("support-review");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Profile 是文档的高置信快速命中属性");
+    expect(wrapper.text()).toContain("操作手册");
+    expect(wrapper.text()).toContain("如何升级 PDC？");
+    expect(wrapper.text()).toContain("待上线");
+    expect(wrapper.text()).toContain("RAG 始终可用");
+    expect(wrapper.findAll("button").some((button) => button.text().includes("编辑属性"))).toBe(true);
+  });
+
+  it("support review: checks then publishes pending attributes", async () => {
+    const { ElMessageBox } = await import("element-plus");
+    vi.spyOn(ElMessageBox, "confirm").mockResolvedValue({ action: "confirm" } as never);
+    const wrapper = await mountView("support-review");
+    await flushPromises();
+
+    const publish = wrapper.findAll("button").find((button) => button.text().includes("上线 Profile 变更"));
+    expect(publish).toBeDefined();
+    await publish!.trigger("click");
+    await flushPromises();
+    expect(adminApi.checkKnowledgeProfiles).toHaveBeenCalledWith("kb-1");
+    expect(adminApi.publishKnowledgeProfiles).toHaveBeenCalledWith("kb-1");
+  });
+
+  it("support review: submits a visible all-document regeneration task", async () => {
+    const wrapper = await mountView("support-review");
+    await flushPromises();
+    const regenerate = wrapper.findAll("button").find((button) => button.text().includes("重新生成全部"));
+    expect(regenerate).toBeDefined();
+    await regenerate!.trigger("click");
+    await flushPromises();
+    expect(adminApi.generateKnowledgeProfiles).toHaveBeenCalledWith("kb-1");
+    expect(wrapper.text()).toContain("当前生成任务");
+  });
+
+  it("knowledge: detail drawer regenerates pending attributes behind confirmation", async () => {
     const { ElMessageBox } = await import("element-plus");
     const confirm = vi.spyOn(ElMessageBox, "confirm").mockResolvedValue({
       action: "confirm",
@@ -415,21 +568,21 @@ describe("view interactions", () => {
     await wrapper.get(".el-table__row").trigger("click");
     await flushPromises();
 
-    const button = wrapper.findAll("button").find((b) => b.text().includes("重建 Profile"));
+    const button = wrapper.findAll("button").find((b) => b.text().includes("重新生成待上线属性"));
     expect(button).toBeDefined();
     await button!.trigger("click");
     await flushPromises();
 
     expect(confirm).toHaveBeenCalledWith(
       expect.stringContaining("不会直接修改线上 Profile"),
-      "重建 Profile",
-      expect.objectContaining({ confirmButtonText: "提交重建任务" }),
+      "重新生成待上线属性",
+      expect.objectContaining({ confirmButtonText: "提交生成任务" }),
     );
-    expect(adminApi.rebuildKnowledgeProfiles).toHaveBeenCalledWith("kb-1");
+    expect(adminApi.generateKnowledgeProfiles).toHaveBeenCalledWith("kb-1");
     expect(adminStore.trackedTasks).toEqual([
-      expect.objectContaining({ taskId: "task-rebuild", taskType: "PROFILE_REFRESH" }),
+      expect.objectContaining({ taskId: "task-profile", taskType: "DOCUMENT_PROFILE_GENERATE" }),
     ]);
-    expect(adminStore.notice).toBe("Profile 重建任务已提交；完成后将弹出提醒");
+    expect(adminStore.notice).toBe("全部待上线 Profile 属性生成任务已提交；完成后将弹出提醒");
   });
 
   it("playground: runs a query and renders answer, sources and context", async () => {
@@ -638,7 +791,7 @@ describe("view interactions", () => {
       .find((tab) => tab.text().includes("RAG 检索参数"));
     await ragTab!.trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("Generic RAG 全局配置");
+    expect(wrapper.text()).toContain("RAG only 检索配置");
   });
 
   it("configuration: opens service credentials and clears the credential", async () => {

@@ -321,6 +321,7 @@ class TestErrorResponsesAndCapture:
         body = response.json()
         assert body["error"]["code"] == "HTTP_404"
         assert body["error"]["request_id"]
+        assert "后端服务可能是旧版本" in body["error"]["message"]
 
     def test_api_error_response_still_includes_request_id(self, client: TestClient) -> None:
         response = client.get("/api/v1/system/info")
