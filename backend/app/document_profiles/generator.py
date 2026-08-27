@@ -17,6 +17,52 @@ _PROFILE_SYSTEM = """你是企业技术文档目录编辑。根据给定的文�
 只描述范围内的一个核心问题；不得编造文档没有的产品、型号、版本、错误码或步骤。输出严格 JSON。"""
 _REVIEW_SYSTEM = """你是企业技术文档 Profile 质量审核员。核对 Profile 的问题主体、别名、关键词、症状和排除范围是否都有文档证据。输出修订后的 Profile、质量状态、简短原因和证据，严格 JSON。"""
 
+_PROFILE_SOURCE_MAX_CHARS = 20_000
+_PROFILE_SIGNAL_PATTERN = re.compile(
+    r"(?:[A-Za-z]+[-_ ]?\d+[A-Za-z0-9_-]*|"
+    r"错误码|故障码|告警码|报警码|升级|更新|更换|替换|配置|设置|检查|检测|"
+    r"无法|失败|异常|报警|告警|无响应|不适用|不支持|仅适用于|不能用于|禁止|请勿|注意)"
+)
+
+
+def build_profile_source(content: str, *, max_chars: int = _PROFILE_SOURCE_MAX_CHARS) -> str:
+    """Select stable, representative text without adding another model call.
+
+    Long technical documents often put error codes, limitations and warnings
+    after the introductory section. Keep the beginning and end, then use the
+    remaining budget for signal-bearing lines from the whole document.
+    """
+    clean = content.strip()
+    if len(clean) <= max_chars:
+        return clean
+
+    head_budget = max_chars // 2
+    tail_budget = max_chars // 5
+    signal_budget = max_chars - head_budget - tail_budget - 4
+    head = clean[:head_budget].rstrip()
+    tail = clean[-tail_budget:].lstrip()
+    selected: list[str] = []
+    seen: set[str] = set()
+    used = 0
+    for raw_line in clean.splitlines():
+        line = raw_line.strip()
+        if not line or not _PROFILE_SIGNAL_PATTERN.search(line):
+            continue
+        normalized = re.sub(r"\s+", " ", line)
+        if normalized in seen or normalized in head or normalized in tail:
+            continue
+        required = len(normalized) + (1 if selected else 0)
+        if used + required > signal_budget:
+            continue
+        selected.append(normalized)
+        seen.add(normalized)
+        used += required
+    segments = [head]
+    if selected:
+        segments.append("\n".join(selected))
+    segments.append(tail)
+    return "\n\n".join(segment for segment in segments if segment)[:max_chars]
+
 
 class ProfileEvidence(BaseModel):
     field: str = Field(min_length=1, max_length=80)
@@ -75,7 +121,8 @@ class DocumentProfileGenerator:
                 "FALLBACK",
                 ["模型不可用，需人工审核。"],
             )
-        prompt = f"文档标题：{title}\n\n文档正文：\n{str(document.get('content') or '')[:20_000]}"
+        source = build_profile_source(str(document.get("content") or ""))
+        prompt = f"文档标题：{title}\n\n文档正文：\n{source}"
         try:
             scope = await provider.complete_structured(
                 prompt,

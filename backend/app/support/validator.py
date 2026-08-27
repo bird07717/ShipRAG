@@ -15,6 +15,7 @@ def _rejected_draft_summary(draft: SupportDraft) -> dict[str, Any]:
     reviewer can see what was attempted without a content dump in the trace."""
     return {
         "mode": draft.mode,
+        "answer_evidence_count": len(draft.answer_evidence_element_ids),
         "sections": [
             {
                 "title": section.title,
@@ -53,6 +54,36 @@ def validate_draft(
             if block.ocr_text:
                 text_parts.append(block.ocr_text)
     document_text = "\n".join(text_parts)
+    answer_evidence = draft.answer_evidence_element_ids
+    invalid_answer_evidence = [item for item in answer_evidence if item not in valid_elements]
+    if invalid_answer_evidence:
+        raise ApiError(
+            "INVALID_EVIDENCE",
+            "模型引用了当前文档之外的答案证据",
+            502,
+            details={
+                "invalid_evidence_ids": invalid_answer_evidence,
+                "rejected_draft": _rejected_draft_summary(draft),
+            },
+        )
+    for ip in _IP.findall(draft.answer):
+        if ip not in document_text:
+            raise ApiError(
+                "UNSUPPORTED_PRODUCT_PARAMETER",
+                "回答包含文档外的产品参数",
+                502,
+                details={
+                    "parameter": ip,
+                    "rejected_draft": _rejected_draft_summary(draft),
+                },
+            )
+    answer_risk = classify_risk(draft.answer)
+    if answer_risk in {RiskLevel.HIGH, RiskLevel.CRITICAL} and not answer_evidence:
+        draft.escalation.required = True
+        draft.escalation.reason = "高风险回答没有当前文档依据"
+        draft.answer = "该操作属于高风险且当前文档没有明确依据，请暂停操作并联系技术支持。"
+    else:
+        draft.answer_evidence_element_ids = [evidence_registry[item] for item in answer_evidence]
     for section in draft.sections:
         evidence = section.evidence_element_ids
         invalid = [item for item in evidence if item not in valid_elements]

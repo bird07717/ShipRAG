@@ -329,9 +329,7 @@ class SupportRepository:
                     "focus_epoch": focus_epoch,
                     "limit": min(6, self.settings.support_history_max_messages),
                 }
-            history_rows = (
-                (await conn.execute(history_statement, history_params)).mappings().all()
-            )
+            history_rows = (await conn.execute(history_statement, history_params)).mappings().all()
             sequence = (
                 int(
                     (
@@ -501,6 +499,7 @@ class SupportRepository:
         *,
         enabled_only: bool = False,
         ready_only: bool = False,
+        index_id: UUID | None = None,
     ) -> list[ProblemProfile]:
         query = """
             WITH profile_rows AS (
@@ -528,17 +527,23 @@ class SupportRepository:
             )
             SELECT p.*,
                    d.status AS document_status,
-                   COALESCE(kb.rag_active_index_id, kb.active_index_id) AS active_index_id,
+                   COALESCE(
+                       CAST(:index_id AS uuid), kb.rag_active_index_id, kb.active_index_id
+                   ) AS active_index_id,
                    EXISTS (
                        SELECT 1 FROM document_element e
-                       WHERE e.index_id = COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                       WHERE e.index_id = COALESCE(
+                           CAST(:index_id AS uuid), kb.rag_active_index_id, kb.active_index_id
+                       )
                          AND e.document_id = p.document_id
                    ) AS document_published,
                    NOT EXISTS (
                        SELECT 1
                        FROM document_element e
                        LEFT JOIN image_asset a ON a.element_id = e.id
-                       WHERE e.index_id = COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                       WHERE e.index_id = COALESCE(
+                           CAST(:index_id AS uuid), kb.rag_active_index_id, kb.active_index_id
+                       )
                          AND e.document_id = p.document_id
                          AND e.element_type = 'IMAGE'
                          AND a.id IS NULL
@@ -552,22 +557,26 @@ class SupportRepository:
             query += " AND p.enabled"
         query += " ORDER BY p.canonical_question"
         async with self.engine.connect() as conn:
-            rows = (await conn.execute(text(query), {"kb_id": knowledge_id})).mappings().all()
+            rows = (
+                (await conn.execute(text(query), {"kb_id": knowledge_id, "index_id": index_id}))
+                .mappings()
+                .all()
+            )
         profiles = [self._profile(dict(row)) for row in rows]
         return (
             [profile for profile in profiles if profile.support_ready] if ready_only else profiles
         )
 
     async def get_profile_by_code(
-        self, knowledge_id: UUID, problem_code: str
+        self, knowledge_id: UUID, problem_code: str, *, index_id: UUID | None = None
     ) -> ProblemProfile | None:
-        profiles = await self.list_profiles(knowledge_id, enabled_only=True)
+        profiles = await self.list_profiles(knowledge_id, enabled_only=True, index_id=index_id)
         return next((profile for profile in profiles if profile.problem_code == problem_code), None)
 
     async def get_profile_by_document(
-        self, knowledge_id: UUID, document_id: UUID
+        self, knowledge_id: UUID, document_id: UUID, *, index_id: UUID | None = None
     ) -> ProblemProfile | None:
-        profiles = await self.list_profiles(knowledge_id, enabled_only=True)
+        profiles = await self.list_profiles(knowledge_id, enabled_only=True, index_id=index_id)
         return next((profile for profile in profiles if profile.document_id == document_id), None)
 
     @staticmethod
