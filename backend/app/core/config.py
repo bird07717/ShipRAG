@@ -31,7 +31,9 @@ class Settings(BaseSettings):
     required_postgres_extensions: str = "vector,pg_search"
     redis_url: SecretStr = SecretStr("redis://:rag-redis-password@127.0.0.1:16379/0")
     rq_queues: str = "ingestion,index_build,maintenance"
+    rq_worker_name: str = "rag-worker"
     rq_index_job_timeout_seconds: int = 7_200
+    rq_maintenance_job_timeout_seconds: int = 7_200
 
     minio_endpoint: str = "127.0.0.1:19000"
     minio_access_key: SecretStr = SecretStr("rag-minio")
@@ -81,6 +83,22 @@ class Settings(BaseSettings):
     m3_trace_retain_prompt: bool = True
     m3_provider_timeout_seconds: float = 120.0
 
+    # Document Profile generation (Profile Review page). One short structured
+    # draft call per document. Keep concurrency low so a
+    # transient provider slowdown cannot stall the entire maintenance task.
+    profile_generation_concurrency: int = 2
+    profile_llm_timeout_seconds: float = 30.0
+    profile_llm_retry_attempts: int = 2
+    # Profile is only a high-confidence shortcut. Broad aliases can surface
+    # candidates but never force a document choice; uncertainty falls to RAG.
+    profile_direct_threshold: float = 0.84
+    profile_candidate_threshold: float = 0.60
+    profile_direct_gap: float = 0.08
+    profile_canonical_weight: float = 0.60
+    profile_summary_weight: float = 0.25
+    profile_alias_weight: float = 0.15
+    profile_generic_alias_penalty: float = 0.35
+
     # Formal Support is the default. Legacy RAG remains only as a simple,
     # explicit rollback for the compatibility /chat endpoints.
     chat_execution_mode: Literal["legacy_rag", "technical_support"] = "technical_support"
@@ -125,10 +143,15 @@ class Settings(BaseSettings):
     index_gc_retention_count: int = 3
     index_gc_retention_days: int = 7
 
+    # Periodic fleet-wide GC interval for the maintenance worker's
+    # self-rescheduling delayed job.  0 disables the periodic run; manual
+    # GC (admin button / POST /gc) is always available.
+    index_gc_interval_seconds: int = 86_400
+
     # Frozen conversations keep old indexes alive for GC; conversations idle
     # longer than this window are purged by the auditable GC step.  0 keeps
     # them forever.
-    conversation_retention_days: int = 90
+    conversation_retention_days: int = 7
 
     # Failed-request log retention; 0 disables pruning (keep forever).
     request_error_log_retention_days: int = 30
@@ -160,6 +183,13 @@ class Settings(BaseSettings):
             raise ValueError("index GC retention days must be between 1 and 3650")
         return value
 
+    @field_validator("index_gc_interval_seconds")
+    @classmethod
+    def validate_index_gc_interval(cls, value: int) -> int:
+        if not 0 <= value <= 2_592_000:
+            raise ValueError("index GC interval must be between 0 (disabled) and 2592000 seconds")
+        return value
+
     @field_validator("conversation_retention_days")
     @classmethod
     def validate_conversation_retention_days(cls, value: int) -> int:
@@ -179,6 +209,27 @@ class Settings(BaseSettings):
     def validate_rq_index_job_timeout(cls, value: int) -> int:
         if not 60 <= value <= 86_400:
             raise ValueError("RQ index job timeout must be between 60 and 86400 seconds")
+        return value
+
+    @field_validator("rq_maintenance_job_timeout_seconds")
+    @classmethod
+    def validate_rq_maintenance_job_timeout(cls, value: int) -> int:
+        if not 60 <= value <= 86_400:
+            raise ValueError("RQ maintenance job timeout must be between 60 and 86400 seconds")
+        return value
+
+    @field_validator("profile_generation_concurrency")
+    @classmethod
+    def validate_profile_generation_concurrency(cls, value: int) -> int:
+        if not 1 <= value <= 16:
+            raise ValueError("profile generation concurrency must be between 1 and 16")
+        return value
+
+    @field_validator("profile_llm_retry_attempts")
+    @classmethod
+    def validate_profile_llm_retry_attempts(cls, value: int) -> int:
+        if not 1 <= value <= 5:
+            raise ValueError("profile LLM retry attempts must be between 1 and 5")
         return value
 
     @field_validator("m0_target_embedding_dimension")
@@ -297,6 +348,28 @@ class Settings(BaseSettings):
     def validate_m3_timeout(cls, value: float) -> float:
         if not 5 <= value <= 600:
             raise ValueError("M3 provider timeout must be between 5 and 600 seconds")
+        return value
+
+    @field_validator("profile_llm_timeout_seconds")
+    @classmethod
+    def validate_profile_llm_timeout(cls, value: float) -> float:
+        if not 5 <= value <= 600:
+            raise ValueError("profile LLM timeout must be between 5 and 600 seconds")
+        return value
+
+    @field_validator(
+        "profile_direct_threshold",
+        "profile_candidate_threshold",
+        "profile_direct_gap",
+        "profile_canonical_weight",
+        "profile_summary_weight",
+        "profile_alias_weight",
+        "profile_generic_alias_penalty",
+    )
+    @classmethod
+    def validate_profile_routing_scores(cls, value: float) -> float:
+        if not 0 < value <= 1:
+            raise ValueError("profile routing scores must be between 0 and 1")
         return value
 
     @field_validator(

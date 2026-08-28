@@ -19,6 +19,7 @@ from app.ingestion.image_understanding import (
 from app.ingestion.model_config import load_build_models
 from app.ingestion.pipeline import IndexBuildResult, IndexPipeline
 from app.ingestion.repository import BuildReference, IngestionRepository
+from app.tasks.repository import TaskRecordRepository
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,21 @@ async def _submit_post_build_profile(
     index = await IngestionRepository(resources.database, settings).get_index(result.index_id)
     knowledge_id = UUID(str(index["kb_id"]))
     try:
-        await DocumentProfileService(
+        submission = await DocumentProfileService(
             DocumentProfileRepository(resources.database), settings
         ).request_generation(
             knowledge_id
+        )
+        # The index task is already terminal when this follow-up is queued.
+        # Preserve the relation so clients that were tracking the RAG build
+        # can continue polling the independent Profile task and refresh the
+        # review workspace when it settles.
+        await TaskRecordRepository(resources.database).merge_metadata(
+            task_id,
+            {
+                "profile_task_id": str(submission["task_id"]),
+                "profile_task_type": str(submission["task_type"]),
+            },
         )
     except Exception:
         logger.exception(

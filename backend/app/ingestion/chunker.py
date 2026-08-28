@@ -247,6 +247,8 @@ def build_parent_chunks(
             elements[item].content for item in ordered_elements if elements[item].content
         )
         content = f"{_section_prefix(section_path)}{body}".strip()
+        if not content:
+            raise ValueError("Parent Chunk 内容为空，无法满足 token_count > 0 约束")
         parent_index = len(parents)
         parents.append(
             ParentChunkDraft(
@@ -273,6 +275,7 @@ def build_parent_chunks(
         )
         if section_changed or would_exceed:
             flush_parent()
+            unique_new_elements = list(chunk.element_indexes)
         if not child_group:
             section_path = list(chunk.section_path)
         child_group.append(child_index)

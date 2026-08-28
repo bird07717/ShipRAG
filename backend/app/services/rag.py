@@ -32,6 +32,7 @@ from app.rag.models import (
     RerankDocument,
     RetrievalCandidate,
     Source,
+    Turn,
 )
 from app.rag.prompt import (
     build_chunk_qa_prompt_template,
@@ -53,6 +54,7 @@ from app.rag.routing import (
     post_validate,
 )
 from app.rag.routing import ContentBlock as RoutingContentBlock
+from app.rag.welcome import build_suggestions
 
 EmbeddingFactory = Callable[[Settings], EmbeddingProvider]
 LlmFactory = Callable[[Settings, Any], LlmProvider]
@@ -80,6 +82,9 @@ class _ChatPlan:
     fixed_answer: str | None = None
     pending_after: list[dict[str, Any]] | None = None
     clear_pending_after: bool = False
+    # Clickable retry questions for NO_MATCH routing turns: shown by the
+    # frontend after the answer instead of leaving the user at a dead end.
+    fallback_suggestions: list[str] = field(default_factory=list)
 
 
 def sse_event(event: str, payload: dict[str, Any]) -> bytes:
@@ -104,6 +109,24 @@ class RagService:
         self.embedding_factory = embedding_factory
         self.llm_factory = llm_factory
         self.rerank_factory = rerank_factory
+
+    def _select_query_embedding_provider(self, turn: Turn) -> EmbeddingProvider:
+        """Pick the query embedder that matches the active index's model.
+
+        Preference order: admin-managed DB snapshot (carries the DB-stored
+        key/base_url), then env settings.  Neither matching raises later in
+        prepare() with the frozen-snapshot mismatch error.  Custom injected
+        factories only accept settings, so the snapshot path is limited to
+        the production default factory.
+        """
+        env_provider = self.embedding_factory(self.settings)
+        if turn.embedding is not None and self.embedding_factory is create_embedding_provider:
+            db_provider = create_embedding_provider(self.settings, turn.embedding)
+            if db_provider.provider == "fake" or (
+                db_provider.model_name == turn.embedding_model_name
+            ):
+                return db_provider
+        return env_provider
 
     async def prepare(
         self,
@@ -151,7 +174,11 @@ class RagService:
         provider: EmbeddingProvider | None = None
         rerank_provider: RerankProvider | None = None
         try:
-            provider = self.embedding_factory(self.settings)
+            # Query-side embedding must match the model the active index was
+            # built with.  Prefer the admin-managed DB snapshot when it
+            # matches; fall back to env settings (legacy default, and the
+            # safety net while a post-config-change rebuild is in flight).
+            provider = self._select_query_embedding_provider(turn)
             if provider.provider != "fake" and provider.model_name != turn.embedding_model_name:
                 raise EmbeddingError("查询模型与 Active Index 的 Embedding 模型快照不一致")
 
@@ -827,6 +854,7 @@ class RagService:
                     "disclaimer": result.disclaimer,
                     "content": [block.to_dict() for block in result.content],
                     "references": plan.references,
+                    "next_suggestions": self._next_suggestions(plan, result),
                 },
             )
         except asyncio.CancelledError:
@@ -949,7 +977,12 @@ class RagService:
                 answer_mode=result.answer_mode.value if result.answer_mode else None,
             )
             return self._chat_payload(
-                turn, result, plan.references, {}, prepared.timings["total_ms"]
+                turn,
+                result,
+                plan.references,
+                {},
+                prepared.timings["total_ms"],
+                self._next_suggestions(plan, result),
             )
 
         provider: LlmProvider | None = None
@@ -980,7 +1013,12 @@ class RagService:
                 answer_mode=result.answer_mode.value if result.answer_mode else None,
             )
             return self._chat_payload(
-                turn, result, plan.references, usage, prepared.timings["total_ms"]
+                turn,
+                result,
+                plan.references,
+                usage,
+                prepared.timings["total_ms"],
+                self._next_suggestions(plan, result),
             )
         except LlmError as exc:
             prepared.timings["llm_ms"] = _elapsed_ms(llm_started)
@@ -1267,6 +1305,20 @@ class RagService:
                 clear_pending_after=clear_pending_after,
             )
         context = "文档目录：\n" + self._render_doc_list(catalog)
+        fallback_suggestions: list[str] = []
+        if decision.action == ACTION_NO_MATCH:
+            # Retrieval weak candidates: documents with real hits that did
+            # not reach the delivery thresholds. They are prompt hints only —
+            # deliberately NOT pending_options, so they never enter the
+            # auto-delivery resolution loop (low mis-delivery rate first).
+            weak_candidates = [item.to_dict() for item in decision.doc_scores if item.hits >= 1][:3]
+            if weak_candidates:
+                context += (
+                    "\n检索器弱候选（与问题有一定相关度但未达交付置信度，"
+                    "仅供澄清参考，不作为交付依据）：\n"
+                    + self._render_weak_candidates(weak_candidates)
+                )
+            fallback_suggestions = build_suggestions(weak_candidates) or build_suggestions(catalog)
         prompt = render_prompt(
             build_routing_prompt_template(product_name, scope_description),
             context=context,
@@ -1279,6 +1331,7 @@ class RagService:
             prompt=prompt,
             routing=routing,
             clear_pending_after=clear_pending_after,
+            fallback_suggestions=fallback_suggestions,
         )
 
     def _build_delivery_payload(self, document: dict[str, Any]) -> dict[str, Any]:
@@ -1391,6 +1444,7 @@ class RagService:
                 "disclaimer": result.disclaimer,
                 "content": [block.to_dict() for block in result.content],
                 "references": plan.references,
+                "next_suggestions": self._next_suggestions(plan, result),
             },
         )
 
@@ -1437,6 +1491,21 @@ class RagService:
         )
 
     @staticmethod
+    def _render_weak_candidates(weak: list[dict[str, Any]]) -> str:
+        return "\n".join(
+            f"{index}. 《{item.get('title', '')!s}》"
+            f"（相关度 {float(item.get('score', 0.0)):.2f}，命中 {item.get('hits', 0)} 个片段）"
+            for index, item in enumerate(weak, start=1)
+        )
+
+    @staticmethod
+    def _next_suggestions(plan: _ChatPlan, result: ChatResult) -> list[str]:
+        """Expose plan retry suggestions unless the turn delivered a document."""
+        if result.response_type.value in ("DOC_DELIVERED", "DOCUMENT_DELIVERED"):
+            return []
+        return plan.fallback_suggestions
+
+    @staticmethod
     def _match_catalog_title(question: str, catalog: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Return the catalog document whose title contains the question.
 
@@ -1477,6 +1546,7 @@ class RagService:
         references: list[dict[str, Any]],
         usage: dict[str, Any],
         total_ms: int,
+        next_suggestions: list[str] | None = None,
     ) -> dict[str, Any]:
         return {
             "message_id": str(turn.assistant_message_id),
@@ -1491,6 +1561,7 @@ class RagService:
             "references": references,
             "usage": usage,
             "latency_ms": total_ms,
+            "next_suggestions": next_suggestions or [],
         }
 
     @staticmethod

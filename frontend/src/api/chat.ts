@@ -58,6 +58,8 @@ export interface ChatDoneEvent {
   references: ChatReference[];
   usage: Record<string, unknown>;
   latency_ms: number;
+  /** Retry questions surfaced after NO_MATCH routing turns; empty otherwise. */
+  next_suggestions?: string[];
 }
 
 export interface ChatStatusEvent {

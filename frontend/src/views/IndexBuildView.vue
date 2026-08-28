@@ -77,6 +77,18 @@ function formatDuration(index: KnowledgeIndex): string {
   if (seconds < 60) return `${seconds}s`;
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
+
+function buildingDocumentSummary(index: KnowledgeIndex): string | null {
+  if (index.status !== "BUILDING") return null;
+  const metadata = store.latestIndexTasks[index.id]?.metadata ?? {};
+  const total = Number(metadata.total_documents ?? metadata.document_count);
+  const current = Number(metadata.current_document_position);
+  if (Number.isFinite(total) && total > 0 && Number.isFinite(current) && current >= 0) {
+    return `构建中 · 已处理 ${Math.min(current, total)}/${total} 份文档`;
+  }
+  if (Number.isFinite(total) && total > 0) return `构建中 · 共 ${total} 份文档`;
+  return "构建中 · 正在等待任务统计";
+}
 </script>
 
 <template>
@@ -120,7 +132,8 @@ function formatDuration(index: KnowledgeIndex): string {
           <template #default="scope">
             <div class="cell-primary">
               <b>Index v{{ scope.row.version }}</b>
-              <small>{{ scope.row.document_count }} 份文档 · {{ scope.row.chunk_count }} 个切片</small>
+              <small v-if="buildingDocumentSummary(scope.row)">{{ buildingDocumentSummary(scope.row) }}</small>
+              <small v-else>{{ scope.row.document_count }} 份文档 · {{ scope.row.chunk_count }} 个切片</small>
             </div>
           </template>
         </el-table-column>
@@ -195,6 +208,15 @@ function formatDuration(index: KnowledgeIndex): string {
             <strong>{{ detailIndex.chunk_count }}</strong>
           </div>
         </div>
+
+        <el-alert
+          v-if="buildingDocumentSummary(detailIndex)"
+          :title="buildingDocumentSummary(detailIndex) + '；文档、元素和切片总数会在技术校验完成后一次性写入。'"
+          type="info"
+          :closable="false"
+          show-icon
+          class="detail-alert"
+        />
 
         <h4 class="section-label">Pipeline</h4>
         <el-progress
@@ -433,6 +455,7 @@ function formatDuration(index: KnowledgeIndex): string {
 
 .detail-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 18px;

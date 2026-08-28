@@ -61,6 +61,19 @@ class TestEmbeddingProviderConfig:
         provider = create_embedding_provider(settings, snapshot)
         assert isinstance(provider, SiliconFlowEmbeddingProvider)
 
+    def test_zhipu_snapshot_uses_zhipu_fallbacks(self) -> None:
+        settings = _settings(zhipu_api_key=SecretStr("sk-zhipu"))
+        provider = create_embedding_provider(
+            settings,
+            _snapshot("zhipu", "embedding-3", base_url="https://open.bigmodel.cn/api/paas/v4/"),
+        )
+        assert isinstance(provider, SiliconFlowEmbeddingProvider)
+        try:
+            assert provider.provider == "zhipu"
+            assert provider.client.headers["Authorization"] == "Bearer sk-zhipu"
+        finally:
+            asyncio.run(provider.aclose())
+
     def test_auto_mode_falls_back_to_fake_without_any_key(self) -> None:
         settings = _settings()
         provider = create_embedding_provider(settings, _snapshot("siliconflow", "m"))
@@ -97,6 +110,26 @@ class TestImageProviderConfig:
         assert provider.model_name == "custom-vision"
         assert provider.client.headers["Authorization"] == "Bearer sk-db"
 
+    def test_image_capabilities_accept_the_other_provider(self) -> None:
+        settings = _settings(
+            zhipu_api_key=SecretStr("sk-zhipu"),
+            siliconflow_api_key=SecretStr("sk-siliconflow"),
+        )
+        ocr = create_ocr_provider(settings, _snapshot("zhipu", "glm-4.6v"))
+        vision = create_vision_provider(
+            settings, _snapshot("siliconflow", "Qwen/Qwen3-VL-8B-Instruct")
+        )
+        assert isinstance(ocr, OpenAiCompatibleImageProvider)
+        assert isinstance(vision, OpenAiCompatibleImageProvider)
+        try:
+            assert ocr.provider == "zhipu"
+            assert vision.provider == "siliconflow"
+            assert ocr.client.headers["Authorization"] == "Bearer sk-zhipu"
+            assert vision.client.headers["Authorization"] == "Bearer sk-siliconflow"
+        finally:
+            asyncio.run(ocr.aclose())
+            asyncio.run(vision.aclose())
+
     def test_ocr_auto_without_any_key_is_fake(self) -> None:
         settings = _settings()
         provider = create_ocr_provider(settings, _snapshot("siliconflow", "m"))
@@ -115,6 +148,10 @@ class TestImageProviderConfig:
 
 class TestBuildModelConfigModule:
     def test_expected_provider_map_covers_all_build_types(self) -> None:
-        from app.ingestion.model_config import _EXPECTED_PROVIDER, BUILD_MODEL_TYPES
+        from app.ingestion.model_config import BUILD_MODEL_TYPES
+        from app.rag.model_providers import supported_providers
 
-        assert set(BUILD_MODEL_TYPES) == set(_EXPECTED_PROVIDER)
+        assert all(
+            set(supported_providers(model_type)) == {"zhipu", "siliconflow"}
+            for model_type in BUILD_MODEL_TYPES
+        )

@@ -178,15 +178,21 @@ class SupportRepository:
                     text(
                         """
                         INSERT INTO conversation (
-                            id, knowledge_id, support_index_id, support_release_id
-                        ) VALUES (:id, :kb_id, :support_index_id, :support_release_id)
+                            id, knowledge_id, support_index_id, support_release_id,
+                            user_id, title
+                        ) VALUES (
+                            :id, :kb_id, :support_index_id, :release_id,
+                            :user_id, :title
+                        )
                         """
                     ),
                     {
                         "id": resolved_conversation_id,
                         "kb_id": knowledge_id,
                         "support_index_id": support_index_id,
-                        "support_release_id": support_release_id,
+                        "release_id": support_release_id,
+                        "user_id": user_id,
+                        "title": question.strip()[:200] or None,
                     },
                 )
             else:
@@ -507,7 +513,13 @@ class SupportRepository:
                 -- document has an online value.  Multiple intents are
                 -- expanded to the resolver's existing flat catalog shape.
                 SELECT dp.document_id AS id, dp.document_id, dp.kb_id,
-                       intent.value ->> 'problem_code' AS problem_code,
+                       COALESCE(
+                           NULLIF(intent.value ->> 'problem_code', ''),
+                           CONCAT(
+                               'DOC_',
+                               UPPER(SUBSTRING(REPLACE(dp.document_id::text, '-', '') FROM 1 FOR 12))
+                           )
+                       ) AS problem_code,
                        intent.value ->> 'canonical_question' AS canonical_question,
                        COALESCE(intent.value -> 'aliases', '[]'::jsonb) AS aliases,
                        COALESCE(intent.value -> 'keywords', '[]'::jsonb) AS keywords,

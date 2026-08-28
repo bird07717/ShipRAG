@@ -90,4 +90,22 @@ describe("RAG index operations workspace", () => {
       wrapper.findAll("button").some((b) => b.text().includes("回滚 RAG")),
     ).toBe(false);
   });
+
+  it("shows task document progress instead of final zero counts while building", async () => {
+    adminStore.indexes = [{ ...index, status: "BUILDING", document_count: 0, element_count: 0, chunk_count: 0 }];
+    adminStore.latestIndexTasks = {
+      [index.id]: {
+        id: "task-building", status: "RUNNING", stage: "EMBEDDING", progress: 40, attempt: 1,
+        index_id: index.id, error_code: null, error_message: null,
+        metadata: { total_documents: 12, current_document_position: 5 },
+        created_at: index.created_at, updated_at: index.created_at,
+      },
+    };
+
+    const wrapper = mount(IndexBuildView, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("已处理 5/12 份文档");
+    expect(wrapper.text()).not.toContain("0 份文档 · 0 个切片");
+  });
 });

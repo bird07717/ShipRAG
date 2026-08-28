@@ -18,6 +18,7 @@ from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
 from app.rag.llm import FakeLlmProvider, LlmError, ZhipuLlmProvider, create_llm_provider
 from app.rag.model_probe import probe_model
+from app.rag.model_providers import supported_providers
 from app.rag.models import ModelSnapshot
 from app.rag.rerank import SiliconFlowRerankProvider, create_rerank_provider
 
@@ -129,6 +130,31 @@ class TestProviderKeyPrecedence:
         )
         assert isinstance(create_llm_provider(settings, snapshot), ZhipuLlmProvider)
 
+    def test_siliconflow_llm_uses_siliconflow_fallback_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.core.config import Settings
+
+        monkeypatch.setenv("ZHIPU_API_KEY", "")
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "")
+        settings = Settings(
+            _env_file=None,
+            app_env="test",
+            siliconflow_api_key=SecretStr("sk-siliconflow"),
+        )
+        snapshot = ModelSnapshot(
+            provider="siliconflow",
+            model_name="deepseek-ai/DeepSeek-V4-Flash",
+            parameters={"thinking": {"type": "disabled"}},
+        )
+        provider = ZhipuLlmProvider(settings, snapshot)
+        try:
+            assert provider.provider == "siliconflow"
+            assert provider.client.headers["Authorization"] == "Bearer sk-siliconflow"
+            assert str(provider.client.base_url) == "https://api.siliconflow.cn/v1/"
+        finally:
+            asyncio.run(provider.aclose())
+
     def test_auto_without_key_allows_fake_only_in_test(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -160,8 +186,52 @@ class TestProviderKeyPrecedence:
         )
         assert isinstance(create_rerank_provider(settings, snapshot), SiliconFlowRerankProvider)
 
+    def test_zhipu_rerank_uses_zhipu_fallback_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.core.config import Settings
+
+        monkeypatch.setenv("ZHIPU_API_KEY", "")
+        settings = Settings(
+            _env_file=None,
+            app_env="test",
+            zhipu_api_key=SecretStr("sk-zhipu"),
+        )
+        provider = create_rerank_provider(
+            settings,
+            ModelSnapshot(provider="zhipu", model_name="rerank", parameters={}),
+        )
+        assert isinstance(provider, SiliconFlowRerankProvider)
+        try:
+            assert provider.provider == "zhipu"
+            assert provider.client.headers["Authorization"] == "Bearer sk-zhipu"
+        finally:
+            asyncio.run(provider.aclose())
+
 
 class TestProbeModel:
+    @pytest.mark.parametrize("model_type", ["LLM", "EMBEDDING", "RERANK", "OCR", "VISION"])
+    def test_every_model_type_supports_both_configured_providers(self, model_type: str) -> None:
+        assert set(supported_providers(model_type)) == {"zhipu", "siliconflow"}
+
+    @pytest.mark.parametrize("provider", ["zhipu", "siliconflow"])
+    async def test_llm_probe_accepts_both_providers(self, provider: str) -> None:
+        from app.core.config import Settings
+
+        settings = Settings(_env_file=None, app_env="test")
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        )
+        result = await probe_model(
+            settings,
+            model_type="LLM",
+            provider=provider,
+            model_name="test-model",
+            base_url="https://example.test/v1/",
+            api_key=SecretStr("sk-test"),
+            client=httpx.AsyncClient(transport=transport),
+        )
+        assert result["ok"] is True
     async def test_embedding_probe_reports_dimension(self) -> None:
         from app.core.config import Settings
 
@@ -297,6 +367,13 @@ class _StubEmbeddingRepository(_StubRepository):
         return self._row()
 
 
+class _NoopIngestionService:
+    """Fleet-rebuild stub: the dimension-gate tests only exercise the probe."""
+
+    async def request_rebuild_all(self, *, reason: str) -> list[dict[str, Any]]:
+        return []
+
+
 def _probe_result(ok: bool, detail: str, dimension: int | None = None) -> dict[str, Any]:
     return {
         "ok": ok,
@@ -317,11 +394,13 @@ class TestEmbeddingDimensionGate:
         probe_result: dict[str, Any],
     ) -> _StubEmbeddingRepository:
         from app.api import rag as rag_api
+        from app.api.ingestion import get_ingestion_service
         from app.api.rag import get_app_settings, get_rag_repository
         from app.core.config import Settings
 
         stub = _StubEmbeddingRepository()
         client.app.dependency_overrides[get_rag_repository] = lambda: stub
+        client.app.dependency_overrides[get_ingestion_service] = lambda: _NoopIngestionService()
         client.app.dependency_overrides[get_app_settings] = lambda: Settings(
             _env_file=None, app_env="test"
         )
@@ -341,7 +420,7 @@ class TestEmbeddingDimensionGate:
         try:
             response = client.patch(
                 "/api/v1/models/00000000-0000-0000-0000-000000000001",
-                json={"model_name": "other-embedding"},
+                json={"model_name": "other-embedding", "rebuild_all_confirmed": True},
                 headers={"Authorization": "Bearer test-token"},
             )
             assert response.status_code == 422
@@ -357,7 +436,10 @@ class TestEmbeddingDimensionGate:
         try:
             response = client.patch(
                 "/api/v1/models/00000000-0000-0000-0000-000000000001",
-                json={"base_url": "https://other.example.com/v1/"},
+                json={
+                    "base_url": "https://other.example.com/v1/",
+                    "rebuild_all_confirmed": True,
+                },
                 headers={"Authorization": "Bearer test-token"},
             )
             assert response.status_code == 409
@@ -377,7 +459,7 @@ class TestEmbeddingDimensionGate:
         try:
             response = client.patch(
                 "/api/v1/models/00000000-0000-0000-0000-000000000001",
-                json={"model_name": "other-embedding"},
+                json={"model_name": "other-embedding", "rebuild_all_confirmed": True},
                 headers={"Authorization": "Bearer test-token"},
             )
             assert response.status_code == 200
@@ -429,11 +511,19 @@ async def _async_value(value: Any) -> Any:
 
 
 class TestApiKeyEndpoints:
-    def test_put_and_delete_api_key(self, client: TestClient) -> None:
+    def test_put_and_delete_api_key(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.api import rag as rag_api
         from app.api.rag import get_rag_repository
 
         stub = _StubRepository()
         client.app.dependency_overrides[get_rag_repository] = lambda: stub
+        monkeypatch.setattr(
+            rag_api,
+            "probe_model",
+            lambda *args, **kwargs: _async_value(_probe_result(True, "连通正常")),
+        )
         try:
             response = client.put(
                 "/api/v1/models/00000000-0000-0000-0000-000000000001/api-key",
@@ -478,3 +568,13 @@ class TestApiKeyEndpoints:
         finally:
             client.app.dependency_overrides.pop(get_rag_repository, None)
             client.app.dependency_overrides.pop(get_app_settings, None)
+
+
+def test_model_name_typographic_dashes_are_normalized() -> None:
+    from app.api.schemas import ModelConfigUpdate
+
+    payload = ModelConfigUpdate(model_name="GLM\u20115.3\u2011Flash")
+    assert payload.model_name == "GLM-5.3-Flash"
+
+    payload = ModelConfigUpdate(model_name="  glm-5.2 ")
+    assert payload.model_name == "glm-5.2"

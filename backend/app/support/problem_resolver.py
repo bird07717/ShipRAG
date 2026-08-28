@@ -3,8 +3,11 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any
 
+from app.core.config import Settings
 from app.support.models import ProblemDecision, ProblemProfile, ProblemResolution
 
 
@@ -17,87 +20,146 @@ def normalize_for_match(value: str) -> str:
     )
 
 
+# Kept for call-site compatibility. Profile resolution deliberately never
+# invokes an online classifier: uncertain routing belongs to RAG.
 CatalogClassifier = Callable[[str, list[ProblemProfile]], Awaitable[str | None]]
 
-_TASK_TERMS: dict[str, tuple[str, ...]] = {
-    "UPGRADE": ("升级", "更新", "刷版本", "update"),
-    "CHECK": ("检查", "检测", "自检", "check"),
-    "REPLACEMENT": ("更换", "替换", "replacement", "replace"),
-    "CONFIGURATION": ("配置", "设置", "修改", "configuration", "configure"),
-    "ALARM": ("报警", "告警", "异常", "alarm"),
-}
-
-_GENERIC_ANCHORS = {
+_GENERIC_ALIAS_TERMS = {
     "升级",
     "更新",
-    "异常",
-    "故障",
-    "更换",
-    "替换",
-    "报警",
-    "告警",
-    "检查",
     "配置",
     "设置",
+    "检查",
+    "检测",
+    "异常",
+    "故障",
+    "报警",
+    "告警",
     "怎么处理",
     "如何处理",
+    "设备升级",
+    "升级失败",
+    "设备异常",
 }
-_ASCII_IDENTIFIER = re.compile(r"[a-z]+[a-z0-9_-]*\d+[a-z0-9_-]*|[a-z]{3,}", re.IGNORECASE)
+_CODE_PATTERN = re.compile(r"\b[a-z]*\d[a-z0-9_-]*\b", re.IGNORECASE)
+_UPPER_ACRONYM_PATTERN = re.compile(r"[A-Z]{3,}")
 
 
-def _normalized_terms(values: list[str]) -> set[str]:
-    return {term for value in values if (term := normalize_for_match(value))}
+@dataclass(frozen=True, slots=True)
+class _ProfileScore:
+    profile: ProblemProfile
+    total: float
+    canonical: float
+    alias: float
+    summary: float
+    alias_specific: bool
+
+    @property
+    def direct_evidence(self) -> bool:
+        # Alias alone cannot direct-route unless it is a specific identifier.
+        return self.canonical >= 0.86 or (
+            self.canonical >= 0.70 and self.summary >= 0.62
+        ) or (self.alias_specific and self.alias >= 0.96)
 
 
-def _profile_product_terms(profile: ProblemProfile) -> set[str]:
-    values = [*profile.model_names]
-    if profile.product_name:
-        values.append(profile.product_name)
-    # Existing generated Profiles often carry a product/model identifier in
-    # keywords. Treat only ASCII identifiers as product evidence; ordinary
-    # Chinese keywords remain weak supporting terms.
-    values.extend(value for value in profile.keywords if _ASCII_IDENTIFIER.search(value))
-    return _normalized_terms(values)
+def _character_bigrams(value: str) -> set[str]:
+    if len(value) < 2:
+        return {value} if value else set()
+    return {value[index : index + 2] for index in range(len(value) - 1)}
 
 
-def _profile_task_terms(profile: ProblemProfile) -> set[str]:
-    result: set[str] = set()
-    if profile.task_type:
-        result.update(
-            _normalized_terms(
-                list(_TASK_TERMS.get(profile.task_type.upper(), (profile.task_type,)))
-            )
-        )
-    normalized_keywords = _normalized_terms(profile.keywords)
-    for terms in _TASK_TERMS.values():
-        normalized_group = _normalized_terms(list(terms))
-        if normalized_keywords & normalized_group:
-            result.update(normalized_group)
-    return result
+def _similarity(question: str, profile_text: str) -> float:
+    """Local similarity for short standard scenarios, not semantic retrieval."""
+    left, right = normalize_for_match(question), normalize_for_match(profile_text)
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    containment = len(shorter) / len(longer) if len(shorter) >= 4 and shorter in longer else 0.0
+    left_bigrams, right_bigrams = _character_bigrams(left), _character_bigrams(right)
+    union = left_bigrams | right_bigrams
+    jaccard = len(left_bigrams & right_bigrams) / len(union) if union else 0.0
+    sequence = SequenceMatcher(a=left, b=right, autojunk=False).ratio()
+    return max(containment, 0.55 * sequence + 0.45 * jaccard)
 
 
-def _matches_exclusion(normalized_question: str, profile: ProblemProfile) -> bool:
-    return any(
-        len(term) >= 4 and term in normalized_question
-        for term in _normalized_terms(profile.exclusions)
+def _is_specific_alias(alias: str) -> bool:
+    normalized = normalize_for_match(alias)
+    if len(normalized) < 6 or normalized in _GENERIC_ALIAS_TERMS:
+        return False
+    # A long natural-language Alias can still be broad ("设备升级失败"). Only
+    # a model, error code, or other ASCII identifier is safe as a direct alias
+    # anchor; every other Alias remains a RAG candidate signal.
+    display_alias = unicodedata.normalize("NFKC", alias)
+    return bool(
+        _CODE_PATTERN.search(normalized) or _UPPER_ACRONYM_PATTERN.search(display_alias)
     )
 
 
-def _is_distinctive_anchor(alias: str, profile: ProblemProfile) -> bool:
-    normalized = normalize_for_match(alias)
-    if len(normalized) < 6 or normalized in _GENERIC_ANCHORS:
-        return False
-    product_terms = _profile_product_terms(profile)
-    return any(term in normalized for term in product_terms) or bool(
-        _ASCII_IDENTIFIER.search(alias)
+def _score_profile(
+    question: str,
+    profile: ProblemProfile,
+    available: list[ProblemProfile],
+    settings: Settings | None,
+) -> _ProfileScore:
+    canonical = _similarity(question, profile.canonical_question)
+    aliases = [(_similarity(question, value), value) for value in profile.aliases]
+    alias, alias_text = max(aliases, default=(0.0, ""), key=lambda item: item[0])
+    alias_specific = bool(alias_text) and _is_specific_alias(alias_text)
+    normalized_question = normalize_for_match(question)
+    if alias_specific and normalize_for_match(alias_text) in normalized_question:
+        # A unique model/error-code Alias embedded in a longer question is
+        # still strong evidence, not a generic substring match.
+        alias = max(alias, 0.96)
+    summary = _similarity(question, profile.routing_summary)
+    canonical_weight = (
+        settings.profile_canonical_weight if settings else 0.60
+    )
+    summary_weight = settings.profile_summary_weight if settings else 0.25
+    alias_weight = settings.profile_alias_weight if settings else 0.15
+    if alias_text and not alias_specific:
+        penalty = settings.profile_generic_alias_penalty if settings else 0.35
+        alias *= penalty
+    total = canonical_weight * canonical + summary_weight * summary + alias_weight * alias
+    # Do not let an omitted summary or a deliberately low Alias weight erase
+    # an otherwise strong standard-question match.
+    total = max(total, 0.95 * canonical)
+    if alias_specific:
+        total = max(total, 0.90 * alias)
+    return _ProfileScore(
+        profile=profile,
+        total=round(total, 4),
+        canonical=round(canonical, 4),
+        alias=round(alias, 4),
+        summary=round(summary, 4),
+        alias_specific=alias_specific,
     )
 
 
 class ProblemResolver:
-    """Closed-set resolver. It never uses chunk retrieval or produces an answer."""
+    """High-confidence Profile shortcut; all ambiguity falls through to RAG."""
 
-    def __init__(self, catalog_classifier: CatalogClassifier | None = None) -> None:
+    def __init__(
+        self,
+        catalog_classifier: CatalogClassifier | None = None,
+        *,
+        settings: Settings | None = None,
+    ) -> None:
+        self.settings = settings
         self.catalog_classifier = catalog_classifier
+
+    @property
+    def _direct_threshold(self) -> float:
+        return self.settings.profile_direct_threshold if self.settings else 0.84
+
+    @property
+    def _candidate_threshold(self) -> float:
+        return self.settings.profile_candidate_threshold if self.settings else 0.60
+
+    @property
+    def _direct_gap(self) -> float:
+        return self.settings.profile_direct_gap if self.settings else 0.08
 
     async def resolve(
         self,
@@ -120,99 +182,69 @@ class ProblemResolver:
             return ProblemResolution(ProblemDecision.NO_MATCH, "INVALID_CHOICE", 0.0)
 
         normalized = normalize_for_match(question)
-        routable = [profile for profile in available if not _matches_exclusion(normalized, profile)]
-        canonical = [p for p in routable if normalize_for_match(p.canonical_question) == normalized]
-        if len(canonical) == 1:
-            return ProblemResolution(
-                ProblemDecision.MATCHED, "CANONICAL_QUESTION", 1.0, canonical[0]
-            )
-        if len(canonical) > 1:
-            return ProblemResolution(
-                ProblemDecision.AMBIGUOUS, "CANONICAL_CONFLICT", 0.0, choices=canonical
-            )
-        aliases = [
-            p for p in routable if normalized in {normalize_for_match(alias) for alias in p.aliases}
+        if not normalized:
+            return ProblemResolution(ProblemDecision.NO_MATCH, "NO_MATCH", 0.0)
+
+        exact_canonical = [
+            profile
+            for profile in available
+            if normalize_for_match(profile.canonical_question) == normalized
         ]
-        if len(aliases) == 1:
-            return ProblemResolution(ProblemDecision.MATCHED, "ALIAS", 1.0, aliases[0])
-        if len(aliases) > 1:
+        if len(exact_canonical) == 1:
             return ProblemResolution(
-                ProblemDecision.AMBIGUOUS, "ALIAS_CONFLICT", 0.0, choices=aliases
+                ProblemDecision.MATCHED, "CANONICAL_QUESTION", 1.0, exact_canonical[0]
             )
+        if len(exact_canonical) > 1:
+            return ProblemResolution(ProblemDecision.NO_MATCH, "CANONICAL_CONFLICT_RAG", 1.0)
 
-        # A reviewed, distinctive alias may anchor a longer natural-language
-        # question. Exact alias matching above remains the primary path. This
-        # extension deliberately rejects generic aliases and requires catalog
-        # uniqueness so words such as "升级" can never route by substring.
-        anchor_matches: list[ProblemProfile] = []
-        for profile in routable:
-            for alias in profile.aliases:
-                anchor = normalize_for_match(alias)
-                if (
-                    len(normalized) > len(anchor)
-                    and anchor in normalized
-                    and _is_distinctive_anchor(alias, profile)
-                ):
-                    anchor_matches.append(profile)
-                    break
-        unique_anchor_matches = list(
-            {profile.document_id: profile for profile in anchor_matches}.values()
+        exact_alias = [
+            profile
+            for profile in available
+            if normalized in {normalize_for_match(alias) for alias in profile.aliases}
+        ]
+        if len(exact_alias) == 1:
+            alias = next(
+                value
+                for value in exact_alias[0].aliases
+                if normalize_for_match(value) == normalized
+            )
+            if _is_specific_alias(alias):
+                return ProblemResolution(ProblemDecision.MATCHED, "ALIAS", 1.0, exact_alias[0])
+            return ProblemResolution(ProblemDecision.NO_MATCH, "GENERIC_ALIAS_RAG", 1.0)
+        if len(exact_alias) > 1:
+            return ProblemResolution(ProblemDecision.NO_MATCH, "ALIAS_CONFLICT_RAG", 1.0)
+
+        ranked = sorted(
+            (_score_profile(question, profile, available, self.settings) for profile in available),
+            key=lambda item: item.total,
+            reverse=True,
         )
-        if len(unique_anchor_matches) == 1:
+        if not ranked or ranked[0].total < self._candidate_threshold:
+            return ProblemResolution(ProblemDecision.NO_MATCH, "NO_MATCH", 0.0)
+
+        top = ranked[0]
+        runner = ranked[1] if len(ranked) > 1 else None
+        runner_score = runner.total if runner else 0.0
+        top_is_clear = top.total - runner_score >= self._direct_gap
+        runner_has_evidence = runner is not None and runner.direct_evidence
+        if (
+            top.total >= self._direct_threshold
+            and top.direct_evidence
+            and (top_is_clear or not runner_has_evidence)
+        ):
             return ProblemResolution(
-                ProblemDecision.MATCHED,
-                "ALIAS_ANCHOR",
-                0.95,
-                unique_anchor_matches[0],
-            )
-        if len(unique_anchor_matches) > 1:
-            return ProblemResolution(
-                ProblemDecision.AMBIGUOUS,
-                "ALIAS_ANCHOR_CONFLICT",
-                0.0,
-                choices=unique_anchor_matches,
+                ProblemDecision.MATCHED, "WEIGHTED_PROFILE", top.total, top.profile
             )
 
-        # Structured routing requires two independent evidence dimensions.
-        # Multiple ordinary keywords never count as independent evidence.
-        candidates: list[ProblemProfile] = []
-        for profile in routable:
-            product_match = any(term in normalized for term in _profile_product_terms(profile))
-            task_match = any(term in normalized for term in _profile_task_terms(profile))
-            symptom_match = any(
-                len(term) >= 4 and term in normalized
-                for term in _normalized_terms(profile.symptoms)
-            )
-            if (product_match and (task_match or symptom_match)) or (task_match and symptom_match):
-                candidates.append(profile)
-        if len(candidates) == 1:
-            return ProblemResolution(
-                ProblemDecision.MATCHED, "DETERMINISTIC_RULE", 0.9, candidates[0]
-            )
-        if len(candidates) > 1:
-            # A classifier can disambiguate only from this closed profile set.
-            if self.catalog_classifier:
-                code = await self.catalog_classifier(question, candidates)
-                if code:
-                    matching = [profile for profile in candidates if profile.problem_code == code]
-                    if len(matching) == 1:
-                        return ProblemResolution(
-                            ProblemDecision.MATCHED, "LLM_CATALOG", 0.7, matching[0]
-                        )
-            return ProblemResolution(
-                ProblemDecision.AMBIGUOUS,
-                "STRUCTURED_CONFLICT",
-                0.0,
-                choices=candidates,
-            )
-
-        if self.catalog_classifier and routable:
-            code = await self.catalog_classifier(question, routable)
-            if code:
-                matching = [profile for profile in routable if profile.problem_code == code]
-                if len(matching) == 1:
-                    return ProblemResolution(
-                        ProblemDecision.MATCHED, "LLM_CATALOG", 0.7, matching[0]
-                    )
-        method = "EXCLUSION" if routable != available else "NO_MATCH"
-        return ProblemResolution(ProblemDecision.NO_MATCH, method, 0.0)
+        close_candidates = [
+            item
+            for item in ranked
+            if item.total >= self._candidate_threshold
+            and top.total - item.total < self._direct_gap
+        ]
+        method = (
+            "PROFILE_MULTI_CANDIDATE"
+            if len(close_candidates) >= 2
+            else "PROFILE_BELOW_DIRECT_THRESHOLD"
+        )
+        return ProblemResolution(ProblemDecision.NO_MATCH, method, top.total)

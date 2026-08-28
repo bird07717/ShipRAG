@@ -7,9 +7,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response, StreamingResponse
+from pydantic import SecretStr
 
 from app.api.dependencies import get_app_settings, get_resources
 from app.api.engine_dependencies import get_rag_repository, get_rag_service
+from app.api.ingestion import get_ingestion_service
 from app.api.schemas import (
     ApiKeyUpdate,
     ChatRequest,
@@ -33,8 +35,10 @@ from app.core.config import Settings
 from app.core.resources import AppResources
 from app.observability.recorder import observe_stream_errors
 from app.rag.model_probe import probe_model
+from app.rag.model_providers import is_supported_provider, supported_providers
 from app.rag.prompt import runtime_prompt_entries
 from app.rag.repository import RagRepository
+from app.services.ingestion import IngestionService
 from app.services.rag import RagService
 
 router = APIRouter()
@@ -144,50 +148,93 @@ async def update_model(
     request: Request,
     settings: Annotated[Settings, Depends(get_app_settings)],
     repository: Annotated[RagRepository, Depends(get_rag_repository)],
+    ingestion_service: Annotated[IngestionService, Depends(get_ingestion_service)],
 ) -> dict[str, Any]:
-    # Dimension contract gate: changing an EMBEDDING row's model or endpoint
-    # must be verified against the frozen dimension (1024) BEFORE commit.
-    # The probe runs with the candidate values + effective key, so a config
-    # that would poison the next index build is rejected up front.
-    if payload.model_name is not None or payload.base_url is not None:
+    # Provider, model id, endpoint and API key form an atomic runtime
+    # identity.  Probe the candidate before storing it so an incompatible
+    # provider/key/endpoint combination cannot break chat or profile jobs.
+    candidate_input_supplied = any(
+        value is not None
+        for value in (payload.provider, payload.model_name, payload.base_url, payload.api_key)
+    )
+    embedding_identity_changed = False
+    if candidate_input_supplied:
         current = await repository.read_model_with_key(model_id)
-        if str(current["model_type"]) == "EMBEDDING":
-            candidate_name = payload.model_name or str(current["model_name"])
-            candidate_base_url = payload.base_url or (
-                str(current["base_url"]) if current["base_url"] is not None else None
+        model_type = str(current["model_type"])
+        candidate_provider = payload.provider or str(current["provider"])
+        if not is_supported_provider(model_type, candidate_provider):
+            supported = "、".join(supported_providers(model_type))
+            raise ApiError(
+                "MODEL_PROVIDER_UNSUPPORTED",
+                f"{model_type} 不支持 Provider：{candidate_provider}（支持：{supported}）",
+                422,
             )
-            if candidate_name != str(current["model_name"]) or candidate_base_url != (
-                str(current["base_url"]) if current["base_url"] is not None else None
-            ):
-                probe = await probe_model(
-                    settings,
-                    model_type="EMBEDDING",
-                    provider=str(current["provider"]),
-                    model_name=candidate_name,
-                    base_url=candidate_base_url,
-                    api_key=current.get("api_key"),
+        candidate_name = payload.model_name or str(current["model_name"])
+        candidate_base_url = payload.base_url or (
+            str(current["base_url"]) if current["base_url"] is not None else None
+        )
+        candidate_key = (
+            SecretStr(payload.api_key) if payload.api_key is not None else current.get("api_key")
+        )
+        embedding_identity_changed = model_type == "EMBEDDING" and (
+            candidate_provider != str(current["provider"])
+            or candidate_name != str(current["model_name"])
+            or candidate_base_url
+            != (str(current["base_url"]) if current["base_url"] is not None else None)
+        )
+        identity_changed = (
+            candidate_provider != str(current["provider"])
+            or candidate_name != str(current["model_name"])
+            or candidate_base_url
+            != (str(current["base_url"]) if current["base_url"] is not None else None)
+        )
+        if embedding_identity_changed and not payload.rebuild_all_confirmed:
+            raise ApiError(
+                "EMBEDDING_REBUILD_REQUIRED",
+                "修改 Embedding Provider、模型或 Base URL 会改变向量空间："
+                "必须确认对所有知识库执行 RAG 全量重建",
+                409,
+            )
+        if identity_changed or payload.api_key is not None:
+            probe = await probe_model(
+                settings,
+                model_type=model_type,
+                provider=candidate_provider,
+                model_name=candidate_name,
+                base_url=candidate_base_url,
+                api_key=candidate_key,
+            )
+            if not probe["ok"]:
+                code = (
+                    "EMBEDDING_DIMENSION_MISMATCH"
+                    if model_type == "EMBEDDING"
+                    and (probe.get("dimension") is not None or "维度" in str(probe["detail"]))
+                    else "MODEL_PROBE_FAILED"
                 )
-                if not probe["ok"]:
-                    code = (
-                        "EMBEDDING_DIMENSION_MISMATCH"
-                        if probe.get("dimension") is not None or "维度" in str(probe["detail"])
-                        else "MODEL_PROBE_FAILED"
-                    )
-                    raise ApiError(
-                        code,
-                        f"维度契约门禁未通过：{probe['detail']}",
-                        422 if code == "EMBEDDING_DIMENSION_MISMATCH" else 409,
-                    )
+                raise ApiError(
+                    code,
+                    f"模型配置连通性校验未通过：{probe['detail']}",
+                    422 if code == "EMBEDDING_DIMENSION_MISMATCH" else 409,
+                )
     # begin_turn snapshots model_config every turn, so the committed values
     # affect the next chat request without a restart.
-    return await repository.update_model_config(
+    result = await repository.update_model_config(
         model_id,
+        provider=payload.provider,
         model_name=payload.model_name,
         base_url=payload.base_url,
+        api_key=payload.api_key,
         parameters=payload.parameters,
         enabled=payload.enabled,
         actor=str(request.state.request_id),
     )
+    if embedding_identity_changed:
+        # Policy: an EMBEDDING identity change invalidates every index's
+        # vector space.  Confirming the edit means paying for a full fleet
+        # rebuild immediately, not remembering to click "build" later.
+        rebuilds = await ingestion_service.request_rebuild_all(reason="EMBEDDING_MODEL_CHANGED")
+        result = {**result, "rebuilds": rebuilds}
+    return result
 
 
 @router.put("/models/{model_id}/api-key", response_model=ModelConfigResponse, tags=["models"])
@@ -195,10 +242,22 @@ async def set_model_api_key(
     model_id: UUID,
     payload: ApiKeyUpdate,
     request: Request,
+    settings: Annotated[Settings, Depends(get_app_settings)],
     repository: Annotated[RagRepository, Depends(get_rag_repository)],
 ) -> dict[str, Any]:
-    # Write-only: the key is encrypted at rest (ADR-0005) and is never
-    # readable through the API. DB key wins over the env setting.
+    # Validate the new credential against the current provider/model before
+    # committing it.  The raw key remains request-local and is never returned.
+    current = await repository.read_model_with_key(model_id)
+    probe = await probe_model(
+        settings,
+        model_type=str(current["model_type"]),
+        provider=str(current["provider"]),
+        model_name=str(current["model_name"]),
+        base_url=(str(current["base_url"]) if current["base_url"] is not None else None),
+        api_key=SecretStr(payload.api_key),
+    )
+    if not probe["ok"]:
+        raise ApiError("MODEL_PROBE_FAILED", f"API 密钥校验未通过：{probe['detail']}", 409)
     return await repository.set_api_key(
         model_id, payload.api_key, actor=str(request.state.request_id)
     )

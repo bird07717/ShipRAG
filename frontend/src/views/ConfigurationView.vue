@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
+import { ElMessageBox } from "element-plus";
 
 import { useAdminStore } from "@/composables/adminStore";
 import type { ModelConfig, PromptTemplate } from "@/types/admin";
@@ -37,6 +38,11 @@ const TYPE_LABELS: Record<string, string> = {
 
 const EDITABLE_TYPES = new Set(["LLM", "RERANK", "OCR", "VISION", "EMBEDDING"]);
 
+const PROVIDER_DEFAULT_BASE_URLS: Readonly<Record<string, string>> = {
+  siliconflow: "https://api.siliconflow.cn/v1/",
+  zhipu: "https://open.bigmodel.cn/api/paas/v4/",
+};
+
 const isBuildBoundType = computed(
   () =>
     editingModel.value !== null &&
@@ -71,6 +77,7 @@ const probing = ref(false);
 const probeResult = ref<{ ok: boolean; detail: string } | null>(null);
 
 const editForm = reactive({
+  provider: "",
   model_name: "",
   base_url: "",
   enabled: true,
@@ -80,9 +87,39 @@ const editForm = reactive({
   api_key: "",
 });
 
+const configuredProvider = computed(() => editForm.provider.trim() || "当前 Provider");
+
+const availableProviders = computed(() => {
+  const supported = editingModel.value?.supported_providers ?? [];
+  return supported.length ? supported : [editingModel.value?.provider ?? ""];
+});
+
+const modelNamePlaceholder = computed(
+  () => `请输入 ${configuredProvider.value} 在此地址可用的模型标识`,
+);
+
+const modelConfigurationHint = computed(() => {
+  const baseUrl = editForm.base_url.trim() || "未配置";
+  return `当前 Provider：${configuredProvider.value}；请求地址：${baseUrl}。模型名称必须与该 Provider 和地址实际支持的模型一致。`;
+});
+
+const apiKeyPlaceholder = computed(
+  () => `输入 ${configuredProvider.value} 的 API 密钥；留空则保持现状`,
+);
+
+function defaultBaseUrlForProvider(provider: string): string | undefined {
+  return PROVIDER_DEFAULT_BASE_URLS[provider.trim().toLowerCase()];
+}
+
+function handleProviderChange(provider: string): void {
+  const nextBaseUrl = defaultBaseUrlForProvider(provider);
+  if (nextBaseUrl) editForm.base_url = nextBaseUrl;
+}
+
 function openEdit(model: ModelConfig): void {
   editingModel.value = model;
   const thinking = model.parameters.thinking as { type?: string } | undefined;
+  editForm.provider = model.provider;
   editForm.model_name = model.model_name;
   editForm.base_url = model.base_url;
   editForm.enabled = model.enabled;
@@ -126,15 +163,21 @@ async function saveEdit(): Promise<void> {
   if (!model) return;
   const isLlm = model.model_type === "LLM";
   const payload: {
+    provider: string;
     model_name: string;
     base_url: string;
+    api_key?: string;
     enabled: boolean;
     parameters?: Record<string, unknown>;
+    rebuild_all_confirmed?: boolean;
   } = {
+    provider: editForm.provider.trim(),
     model_name: editForm.model_name.trim(),
     base_url: editForm.base_url.trim(),
     enabled: editForm.enabled,
   };
+  const newKey = editForm.api_key.trim();
+  if (newKey) payload.api_key = newKey;
   if (isLlm) {
     payload.parameters = {
       ...model.parameters,
@@ -143,10 +186,25 @@ async function saveEdit(): Promise<void> {
       thinking: { type: editForm.thinking_enabled ? "enabled" : "disabled" },
     };
   }
+  const embeddingIdentityChanged =
+    model.model_type === "EMBEDDING" &&
+    (payload.provider !== model.provider ||
+      payload.model_name !== model.model_name ||
+      payload.base_url !== model.base_url);
+  if (embeddingIdentityChanged) {
+    try {
+      await ElMessageBox.confirm(
+        "修改 Embedding Provider、模型或 Base URL 会改变向量空间：保存后系统会立即对全部知识库发起 RAG 全量重建（构建完成前检索继续使用旧模型向量）。",
+        "确认全量重建 RAG 索引",
+        { type: "warning", confirmButtonText: "确认修改并全量重建", cancelButtonText: "取消" },
+      );
+    } catch {
+      return;
+    }
+    payload.rebuild_all_confirmed = true;
+  }
   await store.saveModelConfig(model.id, payload);
   if (store.error) return;
-  const newKey = editForm.api_key.trim();
-  if (newKey) await store.putModelApiKey(model.id, newKey);
   if (!store.error) editDialogOpen.value = false;
 }
 
@@ -328,8 +386,27 @@ async function saveEdit(): Promise<void> {
       <template v-if="editingModel">
         <div class="dialog-form">
           <div class="dialog-field">
+            <label>Provider</label>
+            <el-select
+              v-model="editForm.provider"
+              placeholder="选择 Provider"
+              @change="handleProviderChange"
+            >
+              <el-option
+                v-for="provider in availableProviders"
+                :key="provider"
+                :label="provider"
+                :value="provider"
+              />
+            </el-select>
+            <p class="desc">
+              切换 Provider 时会自动带入该服务商的默认 Base URL；如使用私有网关，可再手动修改。
+            </p>
+          </div>
+          <div class="dialog-field">
             <label>模型名称</label>
-            <el-input v-model="editForm.model_name" placeholder="例如 glm-5.2" />
+            <el-input v-model="editForm.model_name" :placeholder="modelNamePlaceholder" />
+            <p class="desc">{{ modelConfigurationHint }}</p>
           </div>
           <div class="dialog-field">
             <label>Base URL</label>
@@ -374,8 +451,8 @@ async function saveEdit(): Promise<void> {
               已有 Active Index 不受影响；保存后所有知识库将标记“需要重建”。
               <template v-if="isEmbeddingType">
                 <br />
-                修改模型名称或 Base URL 时，服务端会先执行维度契约探测（输出必须为冻结维度
-                1024），探测不通过将拒绝保存。
+                修改 Provider、模型名称或 Base URL 时，服务端会先执行维度契约探测（输出必须为冻结维度
+                1024）；确认修改后系统会<b>立即对全部知识库发起 RAG 全量重建</b>。
               </template>
             </div>
           </div>
@@ -385,7 +462,7 @@ async function saveEdit(): Promise<void> {
               v-model="editForm.api_key"
               type="password"
               show-password
-              placeholder="留空则保持现状"
+              :placeholder="apiKeyPlaceholder"
               autocomplete="new-password"
             />
             <div class="key-actions">

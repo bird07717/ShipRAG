@@ -4,10 +4,8 @@ import { Document, Search, UploadFilled } from "@element-plus/icons-vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 import type {
-  DocumentProfileIntent,
   DocumentProfileStatus,
   ProfileQualityStatus,
-  PublishedProfileSummary,
 } from "@/types/admin";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
@@ -82,16 +80,6 @@ async function confirmUpload(): Promise<void> {
 
 function formatSize(size: number): string {
   return `${Math.max(1, Math.ceil(size / 1024))} KB`;
-}
-
-function formatProductModels(profile: PublishedProfileSummary): string {
-  const parts = [profile.product_name, ...profile.model_names].filter(Boolean);
-  return parts.length ? parts.join(" · ") : "—";
-}
-
-function formatIntentProductModels(intent: DocumentProfileIntent): string {
-  const parts = [intent.product_name, ...(intent.model_names ?? [])].filter(Boolean);
-  return parts.length ? parts.join(" · ") : "—";
 }
 
 function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "info" {
@@ -301,35 +289,19 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                 <div class="profile-card">
                   <div class="profile-card-head"><h4>Profile 属性</h4><el-tag :type="profileTagType(store.documentProfileContext.profile_status ?? 'NOT_GENERATED')" size="small">{{ profileLabels[store.documentProfileContext.profile_status ?? 'NOT_GENERATED'] }}</el-tag></div>
                   <p class="muted">未上线、低置信或失败的 Profile 不参与快速命中，RAG 仍可用。</p>
-                  <div v-for="intent in store.documentProfileContext.active_profile?.intents ?? []" :key="`active-${intent.problem_code}`" class="intent-details">
+                  <div v-for="(intent, index) in store.documentProfileContext.active_profile?.intents ?? []" :key="`active-${index}`" class="intent-details">
                     <h5>当前线上属性</h5>
                     <el-descriptions :column="1" border size="small">
-                      <el-descriptions-item label="标准问题"><b>{{ intent.canonical_question }}</b> <span class="mono">{{ intent.problem_code }}</span></el-descriptions-item>
+                      <el-descriptions-item label="标准问题"><b>{{ intent.canonical_question }}</b></el-descriptions-item>
                       <el-descriptions-item label="Alias"><div v-if="intent.aliases.length" class="tag-wrap"><el-tag v-for="alias in intent.aliases" :key="alias" size="small">{{ alias }}</el-tag></div><span v-else class="muted">无</span></el-descriptions-item>
-                      <el-descriptions-item label="关键词">
-                        <div v-if="intent.keywords.length" class="tag-wrap">
-                          <el-tag
-                            v-for="keyword in intent.keywords"
-                            :key="keyword"
-                            size="small"
-                            type="info"
-                          >
-                            {{ keyword }}
-                          </el-tag>
-                        </div><span v-else class="muted">无</span>
-                      </el-descriptions-item>
-                      <el-descriptions-item label="产品 / 型号">{{ formatIntentProductModels(intent) }}</el-descriptions-item>
-                      <el-descriptions-item label="任务类型">{{ intent.task_type || "—" }}</el-descriptions-item>
                       <el-descriptions-item label="路由摘要">{{ intent.routing_summary || "—" }}</el-descriptions-item>
-                      <el-descriptions-item label="症状">{{ (intent.symptoms ?? []).join("、") || "—" }}</el-descriptions-item>
-                      <el-descriptions-item label="排除项">{{ (intent.exclusions ?? []).join("、") || "—" }}</el-descriptions-item>
                       <el-descriptions-item label="启用状态"><el-tag :type="intent.enabled !== false ? 'success' : 'info'" size="small">{{ intent.enabled !== false ? "启用" : "停用" }}</el-tag></el-descriptions-item>
                     </el-descriptions>
                   </div>
-                  <div v-for="intent in store.documentProfileContext.pending_profile?.intents ?? []" :key="`pending-${intent.problem_code}`" class="intent-details profile-pending">
+                  <div v-for="(intent, index) in store.documentProfileContext.pending_profile?.intents ?? []" :key="`pending-${index}`" class="intent-details profile-pending">
                     <h5>待上线属性</h5>
                     <el-descriptions :column="1" border size="small">
-                      <el-descriptions-item label="标准问题"><b>{{ intent.canonical_question }}</b> <span class="mono">{{ intent.problem_code }}</span></el-descriptions-item>
+                      <el-descriptions-item label="标准问题"><b>{{ intent.canonical_question }}</b></el-descriptions-item>
                       <el-descriptions-item label="Alias">
                         <div v-if="intent.aliases.length" class="tag-wrap">
                           <el-tag
@@ -342,23 +314,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                           </el-tag>
                         </div><span v-else class="muted">无</span>
                       </el-descriptions-item>
-                      <el-descriptions-item label="关键词">
-                        <div v-if="intent.keywords.length" class="tag-wrap">
-                          <el-tag
-                            v-for="keyword in intent.keywords"
-                            :key="keyword"
-                            size="small"
-                            type="info"
-                          >
-                            {{ keyword }}
-                          </el-tag>
-                        </div><span v-else class="muted">无</span>
-                      </el-descriptions-item>
-                      <el-descriptions-item label="产品 / 型号">{{ formatIntentProductModels(intent) }}</el-descriptions-item>
-                      <el-descriptions-item label="任务类型">{{ intent.task_type || "—" }}</el-descriptions-item>
                       <el-descriptions-item label="路由摘要">{{ intent.routing_summary || "—" }}</el-descriptions-item>
-                      <el-descriptions-item label="症状">{{ (intent.symptoms ?? []).join("、") || "—" }}</el-descriptions-item>
-                      <el-descriptions-item label="排除项">{{ (intent.exclusions ?? []).join("、") || "—" }}</el-descriptions-item>
                       <el-descriptions-item label="启用状态"><el-tag :type="intent.enabled !== false ? 'success' : 'info'" size="small">{{ intent.enabled !== false ? "启用" : "停用" }}</el-tag></el-descriptions-item>
                     </el-descriptions>
                   </div>
@@ -380,27 +336,8 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                     <el-tag type="success" size="small">已发布 · 影响线上 Support</el-tag>
                   </div>
                   <el-descriptions :column="1" border size="small">
-                    <el-descriptions-item label="问题编码">
-                      <span class="mono">{{ store.documentProfileContext.published_profile.problem_code }}</span>
-                    </el-descriptions-item>
                     <el-descriptions-item label="标准问题">
                       {{ store.documentProfileContext.published_profile.canonical_question }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="产品 / 型号">
-                      {{ formatProductModels(store.documentProfileContext.published_profile) }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="关键词">
-                      <div v-if="store.documentProfileContext.published_profile.keywords.length" class="tag-wrap">
-                        <el-tag
-                          v-for="keyword in store.documentProfileContext.published_profile.keywords"
-                          :key="keyword"
-                          size="small"
-                          type="info"
-                        >
-                          {{ keyword }}
-                        </el-tag>
-                      </div>
-                      <span v-else class="muted">无</span>
                     </el-descriptions-item>
                     <el-descriptions-item label="Alias">
                       <div v-if="store.documentProfileContext.published_profile.aliases.length" class="tag-wrap">
@@ -418,14 +355,6 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                       <p class="wrapped-text">
                         {{ store.documentProfileContext.published_profile.routing_summary || "—" }}
                       </p>
-                    </el-descriptions-item>
-                    <el-descriptions-item label="启用状态">
-                      <el-tag
-                        :type="store.documentProfileContext.published_profile.enabled ? 'success' : 'info'"
-                        size="small"
-                      >
-                        {{ store.documentProfileContext.published_profile.enabled ? "启用" : "停用" }}
-                      </el-tag>
                     </el-descriptions-item>
                   </el-descriptions>
                 </div>
@@ -483,6 +412,9 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                         </el-tag>
                       </div>
                       <span v-else class="muted">空 Alias（无用户改写）</span>
+                    </el-descriptions-item>
+                    <el-descriptions-item label="路由摘要">
+                      {{ store.documentProfileContext.candidate_draft.routing_summary || "—" }}
                     </el-descriptions-item>
                   </el-descriptions>
                   <div class="draft-actions">
@@ -583,6 +515,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
 
 .drawer-footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
 }

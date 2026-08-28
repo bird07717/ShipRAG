@@ -47,6 +47,7 @@ export class ApiRequestError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    public readonly details: Record<string, unknown> = {},
   ) {
     super(message);
   }
@@ -76,9 +77,13 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   const response = await fetch(`${apiBaseUrl}/api/v1${path}`, { ...init, headers });
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
-      error?: { message?: string };
+      error?: { message?: string; details?: Record<string, unknown> };
     } | null;
-    throw new ApiRequestError(body?.error?.message ?? `请求失败：HTTP ${response.status}`, response.status);
+    throw new ApiRequestError(
+      body?.error?.message ?? `请求失败：HTTP ${response.status}`,
+      response.status,
+      body?.error?.details ?? {},
+    );
   }
   return (await response.json()) as T;
 }
@@ -153,6 +158,8 @@ export const adminApi = {
     apiRequest<KnowledgeIndex[]>(`/knowledge-bases/${knowledgeId}/indexes`),
   listIndexTasks: (indexId: string) => apiRequest<IndexTask[]>(`/indexes/${indexId}/tasks`),
   getTask: (taskId: string) => apiRequest<TaskRecord>(`/tasks/${taskId}`),
+  cancelTask: (taskId: string) =>
+    apiRequest<TaskRecord>(`/tasks/${taskId}/cancel`, { method: "POST" }),
   buildIndex: (knowledgeId: string) =>
     apiRequest<BuildRequestResult>(`/knowledge-bases/${knowledgeId}/indexes/build`, {
       method: "POST",
@@ -165,8 +172,8 @@ export const adminApi = {
     apiRequest<GarbageCollectionResult>(`/knowledge-bases/${knowledgeId}/indexes/gc`, {
       method: "POST",
     }),
-  deleteIndex: (indexId: string) =>
-    apiRequest<GarbageCollectionResult>(`/indexes/${indexId}`, {
+  deleteIndex: (indexId: string, force = false) =>
+    apiRequest<GarbageCollectionResult>(`/indexes/${indexId}${force ? "?force=true" : ""}`, {
       method: "DELETE",
     }),
   listTraces: (

@@ -749,6 +749,48 @@ class IngestionRepository:
             activate_on_success=activate_on_success,
         )
 
+    async def request_rebuild_for_all_knowledge_bases(
+        self, reason: str, *, activate_on_success: bool
+    ) -> list[tuple[UUID, BuildReference]]:
+        """Create a build for every enabled KB that has documents.
+
+        Used when a build-bound model identity changes (e.g. EMBEDDING):
+        the vector space of every index is stale, so a full rebuild is not
+        optional.  KBs already building coalesce via rebuild_required.
+        """
+        builds: list[tuple[UUID, BuildReference]] = []
+        async with self.engine.begin() as connection:
+            kb_rows = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                    SELECT kb.id
+                    FROM knowledge_base kb
+                    WHERE kb.status = 'ENABLED'
+                      AND EXISTS (
+                          SELECT 1 FROM document_source d
+                          WHERE d.kb_id = kb.id AND d.status = 'STORED'
+                      )
+                    ORDER BY kb.created_at
+                    """
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for knowledge_id in kb_rows:
+                build = await self._request_build_locked(
+                    connection,
+                    UUID(str(knowledge_id)),
+                    reason,
+                    activate_on_success=activate_on_success,
+                )
+                if build.index_id is not None and build.task_id is not None:
+                    builds.append((UUID(str(knowledge_id)), build))
+        return builds
+
     async def delete_document(
         self, document_id: UUID, *, request_build: bool = True
     ) -> DocumentDeleteResult:
@@ -1767,6 +1809,87 @@ class IngestionRepository:
             )
             row = result.mappings().one_or_none()
             return dict(row) if row is not None else None
+
+    async def get_index_deletion_blockers(self, index_id: UUID) -> dict[str, Any] | None:
+        """Return the live references that protect an index from deletion.
+
+        The same predicates are used by :meth:`mark_index_deleting` and the
+        final delete transaction.  Keeping this diagnostic query separate
+        lets the API explain a rejected delete without weakening either
+        atomic protection point.
+        """
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT i.status,
+                           (SELECT count(*) FROM knowledge_base kb
+                            WHERE kb.active_index_id = i.id) AS active_index_pointer_count,
+                           (SELECT count(*) FROM knowledge_base kb
+                            WHERE kb.rag_active_index_id = i.id) AS rag_active_pointer_count,
+                           (SELECT count(*) FROM knowledge_base kb
+                            WHERE kb.support_active_index_id = i.id)
+                              AS support_active_pointer_count,
+                           (SELECT count(*) FROM knowledge_base kb
+                            JOIN knowledge_release r
+                              ON r.id = kb.support_active_release_id
+                            WHERE r.index_id = i.id) AS support_active_release_count,
+                           (SELECT count(*) FROM knowledge_release r
+                            WHERE r.index_id = i.id AND r.status <> 'CANCELLED')
+                              AS open_release_count,
+                           (SELECT count(*) FROM task_record t
+                            WHERE t.index_id = i.id
+                              AND t.status IN ('QUEUED', 'RUNNING')) AS active_task_count,
+                           (SELECT count(*) FROM conversation c
+                            WHERE i.id IN (
+                                c.rag_index_id, c.support_index_id, c.focus_index_id
+                            )) AS frozen_conversation_count
+                    FROM knowledge_index i
+                    WHERE i.id = :index_id
+                    """
+                ),
+                {"index_id": index_id},
+            )
+            row = result.mappings().one_or_none()
+            return dict(row) if row is not None else None
+
+    async def release_frozen_conversation_references(self, index_id: UUID) -> int:
+        """Detach conversations frozen to this index so it can be force-deleted.
+
+        RAG and Support conversations re-bind to the current active index on
+        their next message; focused conversations reset to generic support
+        mode (same field reset as ``clear_conversation_focus``).  Messages
+        survive untouched.  Returns the number of released column
+        references; a conversation frozen on the same index in several
+        columns counts once per column.
+        """
+        async with self.engine.begin() as connection:
+            rag = await connection.execute(
+                text("UPDATE conversation SET rag_index_id = NULL WHERE rag_index_id = :index_id"),
+                {"index_id": index_id},
+            )
+            support = await connection.execute(
+                text(
+                    """
+                    UPDATE conversation
+                    SET support_index_id = NULL, support_release_id = NULL
+                    WHERE support_index_id = :index_id
+                    """
+                ),
+                {"index_id": index_id},
+            )
+            focus = await connection.execute(
+                text(
+                    """
+                    UPDATE conversation
+                    SET focus_document_id = NULL, focus_index_id = NULL,
+                        chat_context = '{}'::jsonb, pending_switch_options = '[]'::jsonb
+                    WHERE focus_index_id = :index_id
+                    """
+                ),
+                {"index_id": index_id},
+            )
+            return sum(int(result.rowcount or 0) for result in (rag, support, focus))
 
     async def list_image_assets_for_index(self, index_id: UUID) -> list[dict[str, str]]:
         """List MinIO bucket/object_key pairs for image assets belonging to an index."""

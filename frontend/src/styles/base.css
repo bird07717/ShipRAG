@@ -255,6 +255,8 @@ p {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* Wrap instead of overflowing when a long title meets a wide action. */
+  flex-wrap: wrap;
   gap: 12px;
   padding: 14px 18px;
   border-bottom: 1px solid var(--border-subtle);

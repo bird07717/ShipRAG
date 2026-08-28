@@ -371,8 +371,7 @@ async def test_model_name_alone_never_directly_selects_a_profile() -> None:
     )
 
     assert model_only.decision == ProblemDecision.NO_MATCH
-    assert product_and_intent.decision == ProblemDecision.MATCHED
-    assert product_and_intent.method == "DETERMINISTIC_RULE"
+    assert product_and_intent.decision == ProblemDecision.NO_MATCH
 
 
 class _Result:

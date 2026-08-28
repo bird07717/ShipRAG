@@ -31,6 +31,7 @@ from app.document_profiles.service import DocumentProfileService
 from app.ingestion.repository import IngestionRepository
 from app.releases.models import RagIndexRollbackRequest
 from app.services.ingestion import IngestionService
+from app.tasks.repository import TaskRecordRepository
 
 router = APIRouter()
 
@@ -375,6 +376,19 @@ async def gc_indexes(
     return await service.collect_garbage(kb_id=knowledge_id)
 
 
+@router.post("/gc", response_model=GarbageCollectionResponse, tags=["indexes"])
+async def gc_all_indexes(
+    service: Annotated[IngestionService, Depends(get_ingestion_service)],
+) -> dict[str, Any]:
+    """Run fleet-wide GC across every knowledge base.
+
+    Same pipeline as the per-KB endpoint: expired conversations are purged
+    first, then obsolete indexes are physically deleted with their MinIO
+    image assets.  Runs inline so the response reports what was collected.
+    """
+    return await service.collect_garbage()
+
+
 @router.delete(
     "/indexes/{index_id}",
     response_model=GarbageCollectionResponse,
@@ -383,8 +397,9 @@ async def gc_indexes(
 async def delete_index(
     index_id: UUID,
     service: Annotated[IngestionService, Depends(get_ingestion_service)],
+    force: bool = False,
 ) -> dict[str, Any]:
-    return await service.delete_index(index_id)
+    return await service.delete_index(index_id, force=force)
 
 
 @router.post(
@@ -451,4 +466,31 @@ async def get_task(
     task_id: UUID,
     repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
 ) -> dict[str, Any]:
+    return await repository.get_task(task_id)
+
+
+@router.post("/tasks/{task_id}/cancel", response_model=TaskResponse, tags=["tasks"])
+async def cancel_task(
+    task_id: UUID,
+    repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
+    resources: Annotated[AppResources, Depends(get_resources)],
+) -> dict[str, Any]:
+    """Cooperatively cancel an active background task.
+
+    Cancellation is a database state transition: the worker polls
+    task_record.status between documents and stops scheduling new work, so
+    in-flight documents finish and the task settles as CANCELLED.  Only
+    DOCUMENT_PROFILE_GENERATE supports this today; other task types keep
+    running and would misreport their real outcome.
+    """
+    task = await repository.get_task(task_id)
+    if task["task_type"] != "DOCUMENT_PROFILE_GENERATE":
+        raise ApiError("TASK_NOT_CANCELLABLE", "该任务类型暂不支持取消", 409)
+    status = str(task["status"])
+    if status == "CANCELLED":
+        return task
+    if status not in {"QUEUED", "RUNNING"}:
+        raise ApiError("TASK_NOT_CANCELLABLE", "任务已结束，无法取消", 409)
+    task_records = TaskRecordRepository(resources.database)
+    await task_records.request_cancel(task_id)
     return await repository.get_task(task_id)

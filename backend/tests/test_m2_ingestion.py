@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -42,6 +42,111 @@ def test_index_build_contract_rejects_auto_activation() -> None:
     assert IndexBuildRequest().activate_on_success is False
     with pytest.raises(ValidationError):
         IndexBuildRequest(activate_on_success=True)  # type: ignore[arg-type]
+
+
+def test_index_delete_blocker_error_names_live_references() -> None:
+    with pytest.raises(ApiError) as raised:
+        IngestionService._raise_index_delete_blocked(
+            {
+                "status": "DEPRECATED",
+                "active_index_pointer_count": 0,
+                "rag_active_pointer_count": 0,
+                "support_active_pointer_count": 1,
+                "support_active_release_count": 1,
+                "open_release_count": 1,
+                "active_task_count": 0,
+                "frozen_conversation_count": 12,
+            }
+        )
+
+    assert raised.value.code == "INDEX_REFERENCE_PROTECTED"
+    assert raised.value.status_code == 409
+    assert raised.value.details["support_active_pointer_count"] == 1
+    assert "Support 在线索引" in raised.value.message
+    assert "12 个冻结会话" in raised.value.message
+
+
+def test_index_delete_blocker_error_explains_non_deletable_status() -> None:
+    with pytest.raises(ApiError) as raised:
+        IngestionService._raise_index_delete_blocked(
+            {
+                "status": "READY",
+                "active_index_pointer_count": 0,
+                "rag_active_pointer_count": 0,
+                "support_active_pointer_count": 0,
+                "support_active_release_count": 0,
+                "open_release_count": 0,
+                "active_task_count": 0,
+                "frozen_conversation_count": 0,
+            }
+        )
+
+    assert raised.value.code == "INDEX_NOT_DELETABLE"
+    assert "当前状态为 READY" in raised.value.message
+
+
+class _FakeFrozenIndexRepository:
+    """Simulates a DEPRECATED index protected by one frozen conversation."""
+
+    def __init__(self) -> None:
+        self.frozen_conversations = 1
+        self.release_calls: list[UUID] = []
+
+    async def get_index(self, index_id: UUID) -> dict[str, Any]:
+        return {"id": str(index_id), "status": "DEPRECATED"}
+
+    async def release_frozen_conversation_references(self, index_id: UUID) -> int:
+        self.release_calls.append(index_id)
+        released = self.frozen_conversations
+        self.frozen_conversations = 0
+        return released
+
+    async def mark_index_deleting(self, index_id: UUID) -> dict[str, Any] | None:
+        if self.frozen_conversations:
+            return None
+        return {"id": str(index_id), "status": "DELETING"}
+
+    async def get_index_deletion_blockers(self, index_id: UUID) -> dict[str, Any]:
+        return {
+            "status": "DEPRECATED",
+            "active_index_pointer_count": 0,
+            "rag_active_pointer_count": 0,
+            "support_active_pointer_count": 0,
+            "support_active_release_count": 0,
+            "open_release_count": 0,
+            "active_task_count": 0,
+            "frozen_conversation_count": self.frozen_conversations,
+        }
+
+    async def list_image_assets_for_index(self, index_id: UUID) -> list[dict[str, str]]:
+        return []
+
+    async def delete_index(self, index_id: UUID) -> bool:
+        return self.frozen_conversations == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_index_force_releases_frozen_conversation() -> None:
+    repository = _FakeFrozenIndexRepository()
+    service = IngestionService(
+        cast(IngestionRepository, repository),
+        cast(Any, _FakeMinio()),
+        Settings(_env_file=None, app_env="test", m2_embedding_provider="fake"),
+    )
+    index_id = uuid4()
+
+    with pytest.raises(ApiError) as raised:
+        await service.delete_index(index_id)
+
+    assert raised.value.code == "INDEX_REFERENCE_PROTECTED"
+    assert "1 个冻结会话" in raised.value.message
+    assert repository.release_calls == []
+
+    result = await service.delete_index(index_id, force=True)
+
+    assert result["deleted_count"] == 1
+    assert result["released_conversation_count"] == 1
+    assert repository.release_calls == [index_id]
 
 
 def test_docx_validation_and_parser_preserve_order(tmp_path) -> None:
@@ -141,6 +246,44 @@ def test_text_chunks_overlap_by_whole_paragraph_and_build_parent_graph() -> None
     assert chunks[1].next_chunk_index == 2
     assert chunks[2].previous_chunk_index == 1
     assert chunks[2].next_chunk_index is None
+
+
+def test_parent_chunks_never_empty_when_image_chunk_absorbs_adjacent_text() -> None:
+    long_ocr = "图片文字：" + "屏幕内容 " * 1_500
+    elements = [
+        ParsedElement("TEXT", "步骤说明。", []),
+        ParsedElement(
+            "IMAGE",
+            long_ocr,
+            [],
+            image_bytes=b"img-1",
+            image_mime_type="image/png",
+        ),
+        ParsedElement("TEXT", "确认状态。", []),
+        ParsedElement(
+            "IMAGE",
+            long_ocr,
+            [],
+            image_bytes=b"img-2",
+            image_mime_type="image/png",
+        ),
+        ParsedElement("TEXT", "完成。", []),
+    ]
+
+    chunks = build_chunks(elements, target_chars=100, max_chars=300, overlap_paragraphs=1)
+    parents = build_parent_chunks(elements, chunks, max_chars=8_000)
+
+    assert parents
+    assert all(parent.content for parent in parents)
+    assert all(parent.token_count > 0 for parent in parents)
+    assert all(parent.element_indexes for parent in parents)
+    for parent in parents:
+        covered = {
+            index
+            for child_index in parent.child_indexes
+            for index in chunks[child_index].element_indexes
+        }
+        assert covered <= set(parent.element_indexes)
 
 
 def test_chunk_completeness_detector_marks_suspended_text_before_image() -> None:

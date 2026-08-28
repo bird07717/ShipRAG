@@ -21,7 +21,7 @@ def enqueue_maintenance_task(settings: Settings, task_id: UUID) -> None:
             process_maintenance_task,
             str(task_id),
             job_id=str(task_id),
-            job_timeout=settings.rq_index_job_timeout_seconds,
+            job_timeout=settings.rq_maintenance_job_timeout_seconds,
             result_ttl=86_400,
             failure_ttl=604_800,
         )
@@ -37,8 +37,8 @@ async def _run_maintenance_task(task_id: UUID) -> dict[str, Any]:
         task = await records.get(task_id)
         if task is None:
             raise ApiError("TASK_NOT_FOUND", "后台任务不存在", 404)
-        if task["status"] == "SUCCEEDED":
-            return {"task_id": str(task_id), "status": "SUCCEEDED"}
+        if task["status"] in {"SUCCEEDED", "CANCELLED"}:
+            return {"task_id": str(task_id), "status": task["status"]}
 
         task_type = str(task["task_type"])
         started = await records.start(

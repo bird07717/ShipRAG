@@ -12,6 +12,12 @@ import httpx
 
 from app.core.config import Settings
 from app.ingestion.models import EmbeddingInput
+from app.rag.model_providers import (
+    environment_api_key,
+    environment_base_url,
+    get_provider_capability,
+    normalize_provider,
+)
 from app.rag.models import ModelSnapshot
 
 
@@ -52,8 +58,6 @@ class FakeEmbeddingProvider:
 
 
 class SiliconFlowEmbeddingProvider:
-    provider = "siliconflow"
-
     def __init__(
         self,
         settings: Settings,
@@ -61,28 +65,35 @@ class SiliconFlowEmbeddingProvider:
         *,
         snapshot: ModelSnapshot | None = None,
     ) -> None:
-        # DB model_config snapshot wins (admin-managed); env settings are the
-        # bootstrap fallback (same priority chain as chat-side providers).
-        api_key = (snapshot.api_key if snapshot else None) or settings.siliconflow_api_key
+        self.provider = normalize_provider(snapshot.provider) if snapshot else "siliconflow"
+        if get_provider_capability("EMBEDDING", self.provider) is None:
+            raise EmbeddingError("Embedding Provider 不受支持")
+        # DB model_config snapshot wins (admin-managed); the selected
+        # provider's environment key is the bootstrap fallback.
+        api_key = (snapshot.api_key if snapshot else None) or environment_api_key(
+            settings, "EMBEDDING", self.provider
+        )
         if not settings.has_secret(api_key):
-            raise EmbeddingError("SiliconFlow Embedding 未配置")
+            raise EmbeddingError(f"{self.provider} Embedding 未配置")
         assert api_key is not None
         self.model_name = (snapshot.model_name if snapshot else None) or (
             settings.siliconflow_embedding_model
         )
         self.dimension = settings.embedding_dimension
         self.batch_size = settings.m2_embedding_batch_size
+        self._supports_multimodal_input = self.provider == "siliconflow"
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
-            base_url=(snapshot.base_url if snapshot else None) or settings.siliconflow_base_url,
+            base_url=(snapshot.base_url if snapshot else None)
+            or environment_base_url(settings, "EMBEDDING", self.provider)
+            or settings.siliconflow_base_url,
             headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
             timeout=httpx.Timeout(settings.m0_provider_timeout_seconds),
             follow_redirects=False,
         )
 
-    @staticmethod
-    def _payload_input(item: EmbeddingInput) -> str | dict[str, str]:
-        if item.image_bytes is None:
+    def _payload_input(self, item: EmbeddingInput) -> str | dict[str, str]:
+        if item.image_bytes is None or not self._supports_multimodal_input:
             return item.text
         mime_type = item.image_mime_type or "image/png"
         encoded = base64.b64encode(item.image_bytes).decode("ascii")
@@ -146,7 +157,10 @@ def create_embedding_provider(
     settings: Settings, snapshot: ModelSnapshot | None = None
 ) -> EmbeddingProvider:
     mode = settings.m2_embedding_provider
-    api_key = (snapshot.api_key if snapshot else None) or settings.siliconflow_api_key
+    provider = normalize_provider(snapshot.provider) if snapshot else "siliconflow"
+    api_key = (snapshot.api_key if snapshot else None) or environment_api_key(
+        settings, "EMBEDDING", provider
+    )
     if mode == "fake" or (mode == "auto" and not settings.has_secret(api_key)):
         return FakeEmbeddingProvider(settings.embedding_dimension)
     return SiliconFlowEmbeddingProvider(settings, snapshot=snapshot)

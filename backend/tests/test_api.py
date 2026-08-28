@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
+from app.api.engine_dependencies import get_rag_repository
 from app.api.ingestion import (
     get_document_profile_repository,
     get_document_profile_service,
@@ -204,3 +206,149 @@ def test_document_profile_context_rejects_unknown_document(client: TestClient) -
     assert response.status_code == 404
     body: dict[str, Any] = response.json()
     assert body["error"]["code"] == "DOCUMENT_NOT_FOUND"
+
+
+class _FleetGcServiceStub:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def collect_garbage(self, kb_id: UUID | None = None) -> dict[str, Any]:
+        self.calls.append({"kb_id": kb_id})
+        return {
+            "deleted_index_ids": [],
+            "deleted_count": 0,
+            "skipped_index_ids": [],
+            "skipped_count": 0,
+            "purged_conversation_ids": [],
+            "purged_conversation_count": 0,
+        }
+
+
+def test_fleet_gc_endpoint_runs_without_kb_scope(client: TestClient) -> None:
+    service = _FleetGcServiceStub()
+    client.app.dependency_overrides[get_ingestion_service] = lambda: service
+    try:
+        response = client.post(
+            "/api/v1/gc",
+            headers={"Authorization": "Bearer test-token"},
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_ingestion_service, None)
+
+    assert response.status_code == 200
+    assert service.calls == [{"kb_id": None}]
+    assert response.json()["deleted_count"] == 0
+
+
+class _ModelConfigRepositoryStub:
+    def __init__(self, model_type: str = "EMBEDDING") -> None:
+        self.model_type = model_type
+        self.update_calls: list[dict[str, Any]] = []
+
+    async def read_model_with_key(self, model_id: UUID) -> dict[str, Any]:
+        return {
+            "model_type": self.model_type,
+            "provider": "siliconflow",
+            "model_name": "old-embedding-model",
+            "base_url": "https://api.siliconflow.cn/v1/",
+            "api_key": None,
+        }
+
+    async def update_model_config(self, model_id: UUID, **kwargs: Any) -> dict[str, Any]:
+        self.update_calls.append(kwargs)
+        return {
+            "id": model_id,
+            "name": "default-embedding",
+            "model_type": self.model_type,
+            "provider": "siliconflow",
+            "base_url": "https://api.siliconflow.cn/v1/",
+            "model_name": kwargs.get("model_name") or "old-embedding-model",
+            "parameters": {},
+            "enabled": True,
+            "api_key_configured": False,
+            "api_key_source": None,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-08-28T00:00:00Z",
+        }
+
+
+class _RebuildAllServiceStub:
+    def __init__(self) -> None:
+        self.reasons: list[str] = []
+
+    async def request_rebuild_all(self, *, reason: str) -> list[dict[str, Any]]:
+        self.reasons.append(reason)
+        return [
+            {
+                "knowledge_id": str(uuid4()),
+                "index_id": str(uuid4()),
+                "task_id": str(uuid4()),
+                "coalesced": False,
+                "enqueued": True,
+            }
+        ]
+
+
+def test_embedding_identity_change_requires_rebuild_confirmation(
+    client: TestClient,
+) -> None:
+    repository = _ModelConfigRepositoryStub()
+    client.app.dependency_overrides[get_rag_repository] = lambda: repository
+    try:
+        response = client.patch(
+            f"/api/v1/models/{uuid4()}",
+            headers={"Authorization": "Bearer test-token"},
+            json={"model_name": "new-embedding-model"},
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_rag_repository, None)
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "EMBEDDING_REBUILD_REQUIRED"
+    assert repository.update_calls == []
+
+
+def test_embedding_identity_change_without_actual_change_skips_gate(
+    client: TestClient,
+) -> None:
+    repository = _ModelConfigRepositoryStub()
+    client.app.dependency_overrides[get_rag_repository] = lambda: repository
+    try:
+        response = client.patch(
+            f"/api/v1/models/{uuid4()}",
+            headers={"Authorization": "Bearer test-token"},
+            json={"model_name": "old-embedding-model"},
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_rag_repository, None)
+
+    assert response.status_code == 200
+    assert len(repository.update_calls) == 1
+
+
+def test_confirmed_embedding_change_triggers_fleet_rebuild(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _probe_ok(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"ok": True, "detail": ""}
+
+    monkeypatch.setattr("app.api.rag.probe_model", _probe_ok)
+    repository = _ModelConfigRepositoryStub()
+    rebuilds = _RebuildAllServiceStub()
+    client.app.dependency_overrides[get_rag_repository] = lambda: repository
+    client.app.dependency_overrides[get_ingestion_service] = lambda: rebuilds
+    try:
+        response = client.patch(
+            f"/api/v1/models/{uuid4()}",
+            headers={"Authorization": "Bearer test-token"},
+            json={"model_name": "new-embedding-model", "rebuild_all_confirmed": True},
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_rag_repository, None)
+        client.app.dependency_overrides.pop(get_ingestion_service, None)
+
+    assert response.status_code == 200
+    body: dict[str, Any] = response.json()
+    assert body["rebuilds"] and body["rebuilds"][0]["enqueued"] is True
+    assert rebuilds.reasons == ["EMBEDDING_MODEL_CHANGED"]
+    assert repository.update_calls[0]["model_name"] == "new-embedding-model"

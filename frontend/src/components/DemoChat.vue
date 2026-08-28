@@ -172,6 +172,7 @@ async function send(choiceId?: string) {
   if (!input.value.trim() || !selectedKb.value || loading.value) return;
   const q = input.value.trim();
   input.value = "";
+  suggestions.value = [];
   messages.value.push({ id: Date.now() + "-u", role: "user", text: q });
   const pid = Date.now() + "-a";
   const aiMsg: UiMessage = { id: pid, role: "assistant", text: "", streaming: true };
@@ -251,6 +252,8 @@ async function send(choiceId?: string) {
           };
         }
         if (!conversationId.value) conversationId.value = event.conversation_id;
+        // NO_MATCH 回合后重显"换个问法"建议；正常回合清空，避免过时引导
+        suggestions.value = event.next_suggestions ?? [];
         for (const b of event.content) {
           const assetId = b.image_asset_id;
           if (b.type === "image" && assetId && !imageUrls[assetId]) {
@@ -531,6 +534,20 @@ onMounted(async () => {
         </div>
       </div>
 
+      <!-- In-chat retry suggestions after failed routing turns -->
+      <div v-if="!showHero && !loading && suggestions.length" class="chat-suggestions">
+        <span class="suggestion-label">换个问法试试</span>
+        <button
+          v-for="question in suggestions"
+          :key="question"
+          type="button"
+          class="suggestion-chip"
+          @click="askQuestion(question)"
+        >
+          {{ question }}
+        </button>
+      </div>
+
       <!-- Composer -->
       <div class="composer-area">
         <ChatComposer
@@ -634,6 +651,22 @@ onMounted(async () => {
   gap: 8px;
   justify-items: center;
   margin-top: 20px;
+}
+
+/* 会话内"换个问法"建议条：位于消息列表与输入区之间 */
+.chat-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.chat-suggestions .suggestion-label {
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: 0.02em;
 }
 
 .suggestion-label {
