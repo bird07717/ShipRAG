@@ -1,0 +1,42 @@
+{"id": "rag_std_001", "category": "standard", "question": "如何检查LRU通讯线缆", "expected": {"document_keys": ["检查LRU通讯线缆"], "tolerance": "EXACT"}}
+{"id": "rag_std_002", "category": "standard", "question": "如何更换PSU电源板", "expected": {"document_keys": ["更换PSU电源板"], "tolerance": "EXACT"}}
+{"id": "rag_std_003", "category": "standard", "question": "检查存储体内的数据", "expected": {"document_keys": ["检查存储体内的数据"], "tolerance": "EXACT"}}
+{"id": "rag_std_004", "category": "standard", "question": "如何手动自检VDR", "expected": {"document_keys": ["手动自检VDR"], "tolerance": "EXACT"}}
+{"id": "rag_std_005", "category": "standard", "question": "检查麦克风", "expected": {"document_keys": ["检查麦克风"], "tolerance": "EXACT"}}
+{"id": "rag_std_006", "category": "standard", "question": "如何使用U盘升级PDC", "expected": {"document_keys": ["U盘升级PDC"], "forbidden_keys": ["U盘升级3359核心板", "U盘插到3359底板"], "tolerance": "EXACT"}}
+{"id": "rag_std_007", "category": "standard", "question": "U盘格式查看", "expected": {"document_keys": ["U盘格式"], "forbidden_keys": ["U盘升级PDC", "U盘插到3359底板"], "tolerance": "EXACT"}}
+{"id": "rag_std_008", "category": "standard", "question": "如何升级FFC", "expected": {"document_keys": ["升级FFC"], "forbidden_keys": ["FFC如何更换", "FFC更换外壳"], "tolerance": "EXACT"}}
+{"id": "rag_std_009", "category": "standard", "question": "如何更换LRU单元", "expected": {"document_keys": ["更换LRU单元"], "tolerance": "EXACT"}}
+{"id": "rag_std_010", "category": "standard", "question": "如何配VAU图像", "expected": {"document_keys": ["配VAU图像"], "tolerance": "EXACT"}}
+{"id": "rag_col_001", "category": "colloquial", "question": "PDC坏了怎么换", "expected": {"document_keys": ["更换故障PDC"], "forbidden_keys": ["U盘升级PDC"], "tolerance": "EXACT"}}
+{"id": "rag_col_002", "category": "colloquial", "question": "麦克风没声音了怎么排查", "expected": {"document_keys": ["检查麦克风"], "tolerance": "EXACT"}}
+{"id": "rag_col_003", "category": "colloquial", "question": "怎么查看U盘的格式", "expected": {"document_keys": ["U盘格式"], "forbidden_keys": ["U盘升级PDC", "U盘插到3359底板"], "tolerance": "EXACT"}}
+{"id": "rag_col_004", "category": "colloquial", "question": "船名在哪里修改", "expected": {"document_keys": ["修改船名"], "tolerance": "EXACT"}}
+{"id": "rag_col_005", "category": "colloquial", "question": "想给FFC换个外壳", "expected": {"document_keys": ["FFC更换外壳"], "forbidden_keys": ["FFC如何更换"], "tolerance": "EXACT"}}
+{"id": "rag_col_006", "category": "colloquial", "question": "LRU怎么升级版本", "expected": {"document_keys": ["升级LRU"], "tolerance": "EXACT"}}
+{"id": "rag_col_007", "category": "colloquial", "question": "蓄电池组怎么更换", "expected": {"document_keys": ["更换蓄电池组"], "forbidden_keys": ["电池保险丝", "FFC600更换电池组"], "tolerance": "EXACT"}}
+{"id": "rag_col_008", "category": "colloquial", "question": "面板上的时间不准了", "expected": {"document_keys": ["UTC时间"], "tolerance": "EXACT"}}
+{"id": "rag_col_009", "category": "colloquial", "question": "怎么备份存储体里的数据", "expected": {"document_keys": ["检查存储体内的数据", "U盘插到3359底板上备份"], "tolerance": "ANY_OF"}}
+{"id": "rag_idf_001", "category": "identifier", "question": "3359核心板怎么用U盘升级", "expected": {"document_keys": ["U盘升级3359核心板"], "forbidden_keys": ["U盘升级PDC"], "tolerance": "EXACT"}}
+{"id": "rag_idf_002", "category": "identifier", "question": "time battery low报警怎么处理", "expected": {"document_keys": ["timebatterylow"], "tolerance": "EXACT"}}
+{"id": "rag_idf_003", "category": "identifier", "question": "FFC600电池组怎么更换", "expected": {"document_keys": ["FFC600"], "tolerance": "EXACT"}}
+{"id": "rag_idf_004", "category": "identifier", "question": "如何用tftp升级3359核心板", "expected": {"document_keys": ["tftp"], "forbidden_keys": ["U盘升级3359核心板"], "tolerance": "EXACT"}}
+{"id": "rag_idf_005", "category": "identifier", "question": "怎么屏蔽DC24V解决绝缘低问题", "expected": {"document_keys": ["屏蔽DC24V"], "tolerance": "EXACT"}}
+{"id": "rag_xdoc_001", "category": "cross_doc", "question": "接线盒怎么检查", "expected": {"document_keys": ["接线盒"], "tolerance": "ANY_OF"}}
+{"id": "rag_xdoc_002", "category": "cross_doc", "question": "通讯线缆怎么检查", "expected": {"document_keys": ["通讯线缆"], "tolerance": "ANY_OF"}}
+{"id": "rag_xdoc_003", "category": "cross_doc", "question": "PSU板上的保险丝怎么更换", "expected": {"document_keys": ["保险丝"], "tolerance": "ANY_OF"}}
+{"id": "rag_xdoc_004", "category": "cross_doc", "question": "MU报警了怎么处理", "expected": {"document_keys": ["MU报警"], "tolerance": "ANY_OF"}}
+{"id": "rag_xdoc_005", "category": "cross_doc", "question": "怎么升级设备固件", "expected": {"document_keys": ["升级"], "tolerance": "ANY_OF"}}
+{"id": "rag_xdoc_006", "category": "cross_doc", "question": "电池怎么换", "expected": {"document_keys": ["电池"], "tolerance": "ANY_OF"}}
+{"id": "rag_oos_001", "category": "out_of_scope", "question": "今天天气怎么样", "expected": {"document_keys": [], "tolerance": "NONE"}}
+{"id": "rag_oos_002", "category": "out_of_scope", "question": "帮我写一首关于大海的诗", "expected": {"document_keys": [], "tolerance": "NONE"}}
+{"id": "rag_oos_003", "category": "out_of_scope", "question": "美国的首都是哪里", "expected": {"document_keys": [], "tolerance": "NONE"}}
+{"id": "rag_oos_004", "category": "out_of_scope", "question": "如何报销差旅费", "expected": {"document_keys": [], "tolerance": "NONE"}}
+{"id": "rag_oos_005", "category": "out_of_scope", "question": "推荐一部好看的电影", "expected": {"document_keys": [], "tolerance": "NONE"}}
+{"id": "rag_knw_001", "category": "knowledge", "question": "UTC时间在哪里看", "expected": {"document_keys": ["UTC时间"], "tolerance": "EXACT"}}
+{"id": "rag_knw_002", "category": "knowledge", "question": "绝缘低报警怎么解决", "expected": {"document_keys": ["屏蔽DC24V"], "tolerance": "EXACT"}}
+{"id": "rag_fup_001", "category": "follow_up", "turns": [{"question": "如何使用U盘升级PDC", "expected": {"document_keys": ["U盘升级PDC"], "tolerance": "EXACT"}}, {"question": "还是失败怎么办", "expected": {"document_keys": ["U盘升级PDC"], "tolerance": "EXACT"}}]}
+{"id": "rag_fup_002", "category": "follow_up", "turns": [{"question": "如何更换故障PDC", "expected": {"document_keys": ["更换故障PDC"], "tolerance": "EXACT"}}, {"question": "具体操作步骤是什么", "expected": {"document_keys": ["更换故障PDC"], "tolerance": "EXACT"}}]}
+{"id": "rag_fup_003", "category": "follow_up", "turns": [{"question": "检查麦克风", "expected": {"document_keys": ["检查麦克风"], "tolerance": "EXACT"}}, {"question": "怎么判断它是不是坏了", "expected": {"document_keys": ["检查麦克风"], "tolerance": "EXACT"}}]}
+{"id": "rag_fup_004", "category": "follow_up", "turns": [{"question": "如何升级FFC", "expected": {"document_keys": ["升级FFC"], "tolerance": "EXACT"}}, {"question": "FFC怎么检查接线盒", "expected": {"document_keys": ["FFC如何检查接线盒"], "forbidden_keys": ["PDC如何检查接线盒"], "tolerance": "EXACT"}}]}
+{"id": "rag_fup_005", "category": "follow_up", "turns": [{"question": "VDR600如何修改船名", "expected": {"document_keys": ["修改船名"], "tolerance": "EXACT"}}, {"question": "在哪个界面操作", "expected": {"document_keys": ["修改船名"], "tolerance": "EXACT"}}]}

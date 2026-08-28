@@ -1,0 +1,922 @@
+{
+  "run_id": "20260828-152635",
+  "base_url": "http://127.0.0.1:18000",
+  "knowledge_id": "5ae9881a-a568-436b-9330-2da5e9a2a9c9",
+  "total_cases": 42,
+  "total_turns": 47,
+  "passed_cases": 41,
+  "pass_rate": 0.9762,
+  "by_category": {
+    "colloquial": {
+      "cases": 9,
+      "passed": 9,
+      "pass_rate": 1.0
+    },
+    "cross_doc": {
+      "cases": 6,
+      "passed": 6,
+      "pass_rate": 1.0
+    },
+    "follow_up": {
+      "cases": 5,
+      "passed": 4,
+      "pass_rate": 0.8
+    },
+    "identifier": {
+      "cases": 5,
+      "passed": 5,
+      "pass_rate": 1.0
+    },
+    "knowledge": {
+      "cases": 2,
+      "passed": 2,
+      "pass_rate": 1.0
+    },
+    "out_of_scope": {
+      "cases": 5,
+      "passed": 5,
+      "pass_rate": 1.0
+    },
+    "standard": {
+      "cases": 10,
+      "passed": 10,
+      "pass_rate": 1.0
+    }
+  },
+  "latency_ms": {
+    "p50": 7498.0,
+    "p95": 29850.0,
+    "max": 96046.0
+  },
+  "results": [
+    {
+      "id": "rag_std_001",
+      "category": "standard",
+      "turns": [
+        {
+          "question": "如何检查LRU通讯线缆",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 904,
+          "hits": [
+            "故障解决文档17—如何检查LRU通讯线缆"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档17—如何检查LRU通讯线缆》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_std_002",
+      "category": "standard",
+      "turns": [
+        {
+          "question": "如何更换PSU电源板",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1271,
+          "hits": [
+            "故障解决文档21—如何更换PSU电源板"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档21—如何更换PSU电源板》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_std_003",
+      "category": "standard",
+      "turns": [
+        {
+          "question": "检查存储体内的数据",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1330,
+          "hits": [
+            "故障解决文档29—检查存储体内的数据"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档29—检查存储体内的数据》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_std_004",
+      "category": "standard",
+      "turns": [
+        {
+          "question": "如何手动自检VDR",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 2426,
+          "hits": [
+            "故障解决文档34—如何手动自检VDR"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档34—如何手动自检VDR》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_std_005",
+      "category": "standard",
+      "turns": [
+        {
+          "question": "检查麦克风",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1329,
+          "hits": [
+            "故障解决文档35—检查麦克风"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档35—检查麦克风》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_std_006",
+      "category": "standard",
+      "turns": [
+        {
+          "question": "如何使用U盘升级PDC",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1611,
+          "hits": [
+            "故障解决文档11—如何U盘升级PDC"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档11—如何U盘升级PDC》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_std_007",
+      "category": "standard",
+      "turns": [
+        {
+          "question": "U盘格式查看",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1223,
+          "hits": [
+            "故障解决文档26—U盘格式查看"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档26—U盘格式查看》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_std_008",
+      "category": "standard",
+      "turns": [
+        {
+          "question": "如何升级FFC",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1908,
+          "hits": [
+            "故障解决文档16—如何升级FFC"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档16—如何升级FFC》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_std_009",
+      "category": "standard",
+      "turns": [
+        {
+          "question": "如何更换LRU单元",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1083,
+          "hits": [
+            "故障解决文档18—如何更换LRU单元"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档18—如何更换LRU单元》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_std_010",
+      "category": "standard",
+      "turns": [
+        {
+          "question": "如何配VAU图像",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 802,
+          "hits": [
+            "故障解决文档5—如何配VAU图像"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档5—如何配VAU图像》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_col_001",
+      "category": "colloquial",
+      "turns": [
+        {
+          "question": "PDC坏了怎么换",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1253,
+          "hits": [
+            "故障解决文档10—如何更换故障PDC"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档10—如何更换故障PDC》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_col_002",
+      "category": "colloquial",
+      "turns": [
+        {
+          "question": "麦克风没声音了怎么排查",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 18712,
+          "hits": [
+            "故障解决文档35—检查麦克风"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据现有文档，我为您找到了一份相关参考：《故障解决文档35—检查麦克风》。不过，这份文档主要针对麦克风检查的特定场景，而您的问题可能涉及多种原因（如系统设置、硬件连接、权限配置等）。\n\n为了更精准地帮您定位问题，请确认以下细节：\n1. 您使用的是哪款产品（如具体型号）？\n2. 麦克风是完全无声，还是声音异常（如音量小、有杂音）？\n3. 问题出现在哪个环节（如"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_col_003",
+      "category": "colloquial",
+      "turns": [
+        {
+          "question": "怎么查看U盘的格式",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 8029,
+          "hits": [
+            "故障解决文档26—U盘格式查看"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据现有文档《故障解决文档26—U盘格式查看》，我可以帮助您了解如何查看U盘的格式。请问您具体想了解以下哪种情况？\n\n1. 在Windows系统中查看U盘格式（如FAT32、NTFS等）\n2. 在macOS系统中查看U盘格式\n3. 在Linux系统中查看U盘格式\n4. 其他特定设备或场景下的查看方法\n\n请补充您的操作系统或使用场景，以便我给出更准确的步骤说明"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_col_004",
+      "category": "colloquial",
+      "turns": [
+        {
+          "question": "船名在哪里修改",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 12161,
+          "hits": [
+            "VDR600如何修改船名"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据现有文档，您的问题对应《VDR600如何修改船名》。请问您使用的是VDR600型号吗？如果是，我可以为您提供修改步骤；如果不是，请补充具体产品型号，以便进一步确认。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_col_005",
+      "category": "colloquial",
+      "turns": [
+        {
+          "question": "想给FFC换个外壳",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1421,
+          "hits": [
+            "故障解决文档14—FFC 更换外壳"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档14—FFC 更换外壳》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_col_006",
+      "category": "colloquial",
+      "turns": [
+        {
+          "question": "LRU怎么升级版本",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 16028,
+          "hits": [
+            "故障解决文档12-手动升级3个存储体和3359核心板 conv",
+            "故障解决文档18—如何更换LRU单元",
+            "故障解决文档19—如何升级LRU"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据您的问题，LRU升级版本的操作可能涉及多份文档。为了更准确地帮您定位，请确认以下细节：\n\n- 您是想升级 **LRU单元本身**（对应《故障解决文档19—如何升级LRU》），还是需要 **更换LRU单元**（对应《故障解决文档18—如何更换LRU单元》）？\n- 或者您提到的“LRU”是指 **存储体或3359核心板** 的升级（对应《故障解决文档12-手"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_col_007",
+      "category": "colloquial",
+      "turns": [
+        {
+          "question": "蓄电池组怎么更换",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 16062,
+          "hits": [
+            "故障解决文档22-如何更换蓄电池组"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据现有文档《故障解决文档22-如何更换蓄电池组》，我可以为您提供蓄电池组更换的相关指导。\n\n请问您遇到的具体情况是：\n- 需要了解更换蓄电池组的完整操作步骤？\n- 还是更换过程中遇到了某个具体问题（如拆卸困难、安装后无法启动等）？\n\n如果您能补充设备型号或故障现象，我可以更精准地帮您定位到文档中的对应内容。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_col_008",
+      "category": "colloquial",
+      "turns": [
+        {
+          "question": "面板上的时间不准了",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1257,
+          "hits": [
+            "故障解决文档40-面板上的UTC时间"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档40-面板上的UTC时间》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_col_009",
+      "category": "colloquial",
+      "turns": [
+        {
+          "question": "怎么备份存储体里的数据",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 21172,
+          "hits": [
+            "故障解决文档27—U盘插到3359底板上备份",
+            "故障解决文档29—检查存储体内的数据"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据您的提问“怎么备份存储体里的数据”，我找到了两份可能相关的文档：\n\n- **《故障解决文档29—检查存储体内的数据》**（相关度较高）\n- **《故障解决文档27—U盘插到3359底板上备份》**\n\n这两份文档分别涉及“检查存储体数据”和“通过U盘在3359底板上备份”，但具体操作路径可能不同。请问您是想：\n\n1. 查看/导出存储体内已有的录音数据（对应"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_idf_001",
+      "category": "identifier",
+      "turns": [
+        {
+          "question": "3359核心板怎么用U盘升级",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 685,
+          "hits": [
+            "故障解决文档1—如何用检查3359核心板版本&U盘升级3359核心板"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档1—如何用检查3359核心板版本&U盘升级3359核心板》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_idf_002",
+      "category": "identifier",
+      "turns": [
+        {
+          "question": "time battery low报警怎么处理",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1400,
+          "hits": [
+            "故障解决文档41-time battery low报警"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档41-time battery low报警》，以下是文档完整内容："
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_idf_003",
+      "category": "identifier",
+      "turns": [
+        {
+          "question": "FFC600电池组怎么更换",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 4526,
+          "hits": [
+            "故障解决文档41-time battery low报警",
+            "故障解决文档43-VDR600 FFC600更换电池组说明-英文"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据您的提问，您想了解FFC600电池组的更换方法。这与《故障解决文档43-VDR600 FFC600更换电池组说明-英文》直接相关。\n\n不过，为了给您更准确的指引，请确认一下：\n\n您需要的是**FFC600更换电池组的操作步骤**吗？如果是，我将为您提供该文档的详细内容。\n\n另外，如果您遇到的是“电池低电量报警”问题，可能还涉及《故障解决文档41-time"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_idf_004",
+      "category": "identifier",
+      "turns": [
+        {
+          "question": "如何用tftp升级3359核心板",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 10234,
+          "hits": [
+            "故障解决文档2—如何用tftp软件手动升级3359核心板"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据您的提问，您想了解如何用TFTP升级3359核心板。这与《故障解决文档2—如何用tftp软件手动升级3359核心板》直接相关。\n\n请问您是否还需要了解其他升级方式（例如U盘升级或手动升级3个存储体），还是仅需要TFTP升级的详细步骤？如果仅需TFTP升级，我可以直接为您提供该文档的对应内容。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_idf_005",
+      "category": "identifier",
+      "turns": [
+        {
+          "question": "怎么屏蔽DC24V解决绝缘低问题",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 15760,
+          "hits": [
+            "故障解决文本46—VDR600 如何屏蔽 DC24V解决绝缘低问题-中文"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据您的提问，我找到了与“屏蔽DC24V解决绝缘低问题”直接相关的文档：\n\n**《故障解决文本46—VDR600 如何屏蔽 DC24V解决绝缘低问题-中文》**\n\n该文档应包含您所需的操作步骤。请问您是需要了解该操作的具体步骤，还是遇到了其他相关问题（例如操作后仍有报警、或不确定如何判断绝缘低故障来源）？我可以帮您进一步定位。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_xdoc_001",
+      "category": "cross_doc",
+      "turns": [
+        {
+          "question": "接线盒怎么检查",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 7498,
+          "hits": [
+            "故障解决文档13—FFC 如何检查接线盒",
+            "故障解决文档9—PDC 如何检查接线盒"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "您的问题涉及“接线盒检查”，目前有两份相关文档可供参考：\n\n1. 《故障解决文档13—FFC 如何检查接线盒》\n2. 《故障解决文档9—PDC 如何检查接线盒》\n\n请问您需要针对哪个产品（FFC 还是 PDC）进行接线盒检查？或者您可以补充一下具体的故障现象，以便我帮您定位到更准确的文档。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_xdoc_002",
+      "category": "cross_doc",
+      "turns": [
+        {
+          "question": "通讯线缆怎么检查",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 96046,
+          "hits": [
+            "故障解决文档33—如何检查VAU线缆",
+            "故障解决文档6—如何检查VAU通讯线缆",
+            "故障解决文档7—如何DAU通讯线缆",
+            "故障解决文档8—如何NAU通讯线缆"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "您的问题涉及通讯线缆的检查，目前知识库中有三份相关文档：\n\n1. 《故障解决文档8—如何NAU通讯线缆》\n2. 《故障解决文档6—如何检查VAU通讯线缆》\n3. 《故障解决文档7—如何DAU通讯线缆》\n\n请问您需要检查的是哪一种通讯线缆（NAU、VAU 还是 DAU）？或者您能补充一下具体的故障现象或操作目标，以便我帮您定位到最合适的文档？"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_xdoc_003",
+      "category": "cross_doc",
+      "turns": [
+        {
+          "question": "PSU板上的保险丝怎么更换",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 23431,
+          "hits": [
+            "故障解决文档23—PSU板上DC保险丝",
+            "故障解决文档25—PSU板上AC保险丝"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "您的问题涉及PSU板上的保险丝更换，但候选文档中区分了AC保险丝和DC保险丝两种类型，更换步骤可能不同。请确认您需要更换的是哪一种：\n\n1. 《故障解决文档25—PSU板上AC保险丝》\n2. 《故障解决文档23—PSU板上DC保险丝》\n\n请补充具体是AC侧还是DC侧的保险丝，或描述故障现象（如设备无法上电、某路输出异常等），以便我为您定位到准确的文档。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_xdoc_004",
+      "category": "cross_doc",
+      "turns": [
+        {
+          "question": "MU报警了怎么处理",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 7894,
+          "hits": [
+            "故障解决文档3-VDR600 MU报警如何排查是3359核心板故障还是3359底板故障说明",
+            "故障解决文档4-VDR600 MU报警如何更换3359核心板&底板"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据现有文档，MU报警的处理方式取决于故障原因。目前有两份相关文档可供参考：\n\n1. 《故障解决文档3-VDR600 MU报警如何排查是3359核心板故障还是3359底板故障说明》——用于排查故障定位\n2. 《故障解决文档4-VDR600 MU报警如何更换3359核心板&底板》——用于故障后的更换操作\n\n建议您先按照文档1进行排查，确认是核心板还是底板故障后"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_xdoc_005",
+      "category": "cross_doc",
+      "turns": [
+        {
+          "question": "怎么升级设备固件",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 9659,
+          "hits": [
+            "故障解决文档11—如何U盘升级PDC",
+            "故障解决文档16—如何升级FFC",
+            "故障解决文档19—如何升级LRU",
+            "故障解决文档1—如何用检查3359核心板版本&U盘升级3359核心板",
+            "故障解决文档2—如何用tftp软件手动升级3359核心板",
+            "故障解决文档42—如何升级OPU满足8路网络图像接入 conv"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "您的问题涉及“升级设备固件”，但本产品包含多种设备单元（如3359核心板、FFC、PDC、LRU、OPU等），不同单元的升级方法不同。为了准确帮您定位到对应文档，请确认您要升级的是哪个设备单元？\n\n候选文档如下，请选择或补充细节：\n- 《故障解决文档1—如何用检查3359核心板版本&U盘升级3359核心板》\n- 《故障解决文档2—如何用tftp软件手动升级3"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_xdoc_006",
+      "category": "cross_doc",
+      "turns": [
+        {
+          "question": "电池怎么换",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 22102,
+          "hits": [
+            "故障解决文档20—PSU板上电池保险丝",
+            "故障解决文档22-如何更换蓄电池组",
+            "故障解决文档41-time battery low报警",
+            "故障解决文档43-VDR600 FFC600更换电池组说明-英文"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "您的问题“电池怎么换”可能对应多份文档，请确认您指的是以下哪种情况：\n\n1. **更换蓄电池组**（《故障解决文档22-如何更换蓄电池组》）\n2. **更换FFC600电池组**（《故障解决文档43-VDR600 FFC600更换电池组说明-英文》）\n3. **更换PSU电源板上的电池保险丝**（《故障解决文档20—PSU板上电池保险丝》）\n\n另外，如果您遇"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_oos_001",
+      "category": "out_of_scope",
+      "turns": [
+        {
+          "question": "今天天气怎么样",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 2717,
+          "hits": [],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "我只能回答与本产品、产品使用及相关原理有关的问题。请换一个与产品相关的问题。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_oos_002",
+      "category": "out_of_scope",
+      "turns": [
+        {
+          "question": "帮我写一首关于大海的诗",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 3249,
+          "hits": [],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "我只能回答与本产品、产品使用及相关原理有关的问题。请换一个与产品相关的问题。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_oos_003",
+      "category": "out_of_scope",
+      "turns": [
+        {
+          "question": "美国的首都是哪里",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 15529,
+          "hits": [],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "我只能回答与本产品、产品使用及相关原理有关的问题。请换一个与产品相关的问题。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_oos_004",
+      "category": "out_of_scope",
+      "turns": [
+        {
+          "question": "如何报销差旅费",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 10923,
+          "hits": [],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "我只能回答与本产品、产品使用及相关原理有关的问题。请换一个与产品相关的问题。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_oos_005",
+      "category": "out_of_scope",
+      "turns": [
+        {
+          "question": "推荐一部好看的电影",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 18639,
+          "hits": [],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "我只能回答与本产品、产品使用及相关原理有关的问题。请换一个与产品相关的问题。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_knw_001",
+      "category": "knowledge",
+      "turns": [
+        {
+          "question": "UTC时间在哪里看",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 20712,
+          "hits": [
+            "故障解决文档40-面板上的UTC时间"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据现有文档《故障解决文档40-面板上的UTC时间》，我可以帮您确认UTC时间在面板上的查看位置。不过，为了更准确地定位到您需要的具体步骤，请确认以下信息：\n\n1. 您使用的是哪款产品型号？\n2. 您提到的“面板”是指设备上的物理操作面板，还是软件界面中的某个面板？\n\n如果您能补充这些细节，我可以更精确地为您提供查看UTC时间的操作指引。"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_knw_002",
+      "category": "knowledge",
+      "turns": [
+        {
+          "question": "绝缘低报警怎么解决",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 22271,
+          "hits": [
+            "故障解决文本46—VDR600 如何屏蔽 DC24V解决绝缘低问题-中文"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "根据您的问题“绝缘低报警怎么解决”，我找到了相关文档：\n\n《故障解决文本46—VDR600 如何屏蔽 DC24V解决绝缘低问题-中文》\n\n该文档专门针对VDR600的绝缘低报警问题，提供了屏蔽DC24V的解决方法。\n\n请问您遇到的是否是VDR600设备的绝缘低报警？如果是，我可以为您提供该文档的具体操作步骤。如果不是，请补充设备型号或更多故障细节，以便我为您"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_fup_001",
+      "category": "follow_up",
+      "turns": [
+        {
+          "question": "如何使用U盘升级PDC",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 3030,
+          "hits": [
+            "故障解决文档11—如何U盘升级PDC"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档11—如何U盘升级PDC》，以下是文档完整内容："
+        },
+        {
+          "question": "还是失败怎么办",
+          "response_type": "ANSWERED",
+          "answer_mode": "PRODUCT_KNOWLEDGE",
+          "latency_ms": 29850,
+          "hits": [
+            "故障解决文档11—如何U盘升级PDC"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "按文档流程，U盘升级PDC失败时，可先对照文档中的关键条件逐项排查：\n\n**前置条件核对**\n- U盘格式必须是 FAT32，系统才能识别。\n- U盘内文件夹名称必须是 `update`，里面直接存放3个文本文件，不能文件夹套文件夹，否则系统找不到对应路径的文件。\n- 电脑IP需与VDR同一网段，推荐：172.16.8.175，子网掩码：255.255.25"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_fup_002",
+      "category": "follow_up",
+      "turns": [
+        {
+          "question": "如何更换故障PDC",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 2633,
+          "hits": [
+            "故障解决文档10—如何更换故障PDC"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档10—如何更换故障PDC》，以下是文档完整内容："
+        },
+        {
+          "question": "具体操作步骤是什么",
+          "response_type": "ANSWERED",
+          "answer_mode": "PRODUCT_KNOWLEDGE",
+          "latency_ms": 16308,
+          "hits": [
+            "故障解决文档10—如何更换故障PDC"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "**前置条件**\n- 准备工具：万用表、大十字螺丝刀、一字螺丝刀（2mm）、活口扳手、内六角扳手。\n- 先关闭 VDR 主机箱内 3 路电：AC220V、DC24V、BATTRY 24V。[IMG:S1]\n\n**操作步骤**\n1. 找到 PDC 的安装位置——通常情况下安装在罗经甲板上。\n2. 到罗经甲板 PDC 安放处，用扳手拆卸固定 PDC 的螺丝，拆下"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_fup_003",
+      "category": "follow_up",
+      "turns": [
+        {
+          "question": "检查麦克风",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 1254,
+          "hits": [
+            "故障解决文档35—检查麦克风"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档35—检查麦克风》，以下是文档完整内容："
+        },
+        {
+          "question": "怎么判断它是不是坏了",
+          "response_type": "ANSWERED",
+          "answer_mode": "PRODUCT_EXPLAINED",
+          "latency_ms": 42122,
+          "hits": [
+            "故障解决文档35—检查麦克风"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "按文档《故障解决文档35—检查麦克风》的排查流程，判断麦克风是否损坏需按以下步骤逐级确认：\n\n**前置条件**\n- 在OPU显示单元下方的报警列表提示单中，找到对应报警设备，确认报警指向麦克风通道。\n\n**判断步骤**\n1. 找到对应通道的麦克风位置，拆下麦克风，确认相关线缆是否正常。\n2. 确认本地麦克风硬件没有问题后，到主机箱内的麦克风接线位置（文档图片"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rag_fup_004",
+      "category": "follow_up",
+      "turns": [
+        {
+          "question": "如何升级FFC",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 648,
+          "hits": [
+            "故障解决文档16—如何升级FFC"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《故障解决文档16—如何升级FFC》，以下是文档完整内容："
+        },
+        {
+          "question": "FFC怎么检查接线盒",
+          "response_type": "ANSWERED",
+          "answer_mode": null,
+          "latency_ms": 13004,
+          "hits": [
+            "故障解决文档16—如何升级FFC",
+            "故障解决文档9—PDC 如何检查接线盒"
+          ],
+          "passed": false,
+          "problems": [
+            "未命中期望文档 keys=['FFC如何检查接线盒'] 实际=['故障解决文档16—如何升级FFC', '故障解决文档9—PDC 如何检查接线盒']"
+          ],
+          "answer_snippet": "根据你的问题“FFC怎么检查接线盒”，这涉及接线盒检查操作，与《故障解决文档9—PDC 如何检查接线盒》相关。但当前对话中你之前询问的是“如何升级FFC”，对应《故障解决文档16—如何升级FFC》。\n\n为了准确帮你定位，请确认一下你的具体需求：\n\n1. 你是想了解 **FFC升级** 的步骤（对应文档16）？\n2. 还是想了解 **接线盒检查** 的方法（对"
+        }
+      ],
+      "passed": false
+    },
+    {
+      "id": "rag_fup_005",
+      "category": "follow_up",
+      "turns": [
+        {
+          "question": "VDR600如何修改船名",
+          "response_type": "DOC_DELIVERED",
+          "answer_mode": null,
+          "latency_ms": 3098,
+          "hits": [
+            "VDR600如何修改船名"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "已为你找到《VDR600如何修改船名》，以下是文档完整内容："
+        },
+        {
+          "question": "在哪个界面操作",
+          "response_type": "ANSWERED",
+          "answer_mode": "PRODUCT_KNOWLEDGE",
+          "latency_ms": 19073,
+          "hits": [
+            "VDR600如何修改船名"
+          ],
+          "passed": true,
+          "problems": [],
+          "answer_snippet": "按文档说明，修改船名操作在 **VDR600 配置软件** 中进行，具体界面位置如下：\n\n- 打开配置软件后，点击上端 **功能菜单栏** 中的 **Get Configuration from VDR**，获取当前 VDR 内的配置。\n- 获取配置后，在对应的 **设置框** 内输入需要修改的船名（或 IMO 号）信息。\n- 修改完成后，点击 **Send"
+        }
+      ],
+      "passed": true
+    }
+  ]
+}
