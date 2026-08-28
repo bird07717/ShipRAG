@@ -140,11 +140,11 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
       </header>
       <div class="workflow-grid">
         <button type="button" @click="store.navigate('indexes')">
-          <span>Processing</span><strong>{{ store.buildingCount }}</strong>
+          <span>处理中（Processing）</span><strong>{{ store.buildingCount }}</strong>
           <small>{{ store.buildingCount ? "文档正在处理" : "当前没有处理任务" }}</small>
         </button>
         <button type="button" @click="store.navigate('indexes')">
-          <span>RAG Online</span>
+          <span>RAG 在线</span>
           <strong class="state-text">{{ store.activeIndex ? `v${store.activeIndex.version}` : "未就绪" }}</strong>
           <small>技术构建成功后自动切换</small>
         </button>
@@ -161,37 +161,37 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
     </section>
     <div v-if="overview" class="metric-grid">
       <MetricCard
-        label="Queries (7d)"
+        label="查询量（7天）"
         :value="overview.total_traces.toLocaleString()"
         :context="`${overview.unique_users} 个独立用户`"
         :icon="ChatDotRound"
       />
       <MetricCard
-        label="No-Answer Rate"
+        label="无答案率（No-Answer Rate）"
         :value="percent(overview.no_answer_rate)"
         :context="`UNCONFIRMED + OUT_OF_SCOPE / ${overview.classified_traces}`"
         :icon="Warning"
       />
       <MetricCard
-        label="Failure Rate"
+        label="失败率（Failure Rate）"
         :value="percent(overview.failure_rate)"
         :context="`失败 ${overview.failed} / ${overview.total_traces}`"
         :icon="Clock"
       />
       <MetricCard
-        label="P95 Latency"
+        label="P95 延迟（Latency）"
         :value="`${overview.latency.p95_ms.toLocaleString()} ms`"
         :context="`P50 ${overview.latency.p50_ms.toLocaleString()} ms`"
         :icon="Box"
       />
       <MetricCard
-        label="LLM Tokens (7d)"
+        label="LLM Token 数（7天）"
         :value="overview.tokens.llm_total.toLocaleString()"
         :context="`Rerank ${overview.tokens.rerank_total.toLocaleString()}`"
         :icon="Files"
       />
       <MetricCard
-        label="Doc Delivered"
+        label="文档交付（Doc Delivered）"
         :value="percent(overview.doc_delivered_rate)"
         :context="`零 LLM 快路径占比`"
         :icon="Notebook"
@@ -208,31 +208,31 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
     <section v-if="supportMetrics" class="panel">
       <header class="panel-header">
         <div>
-          <h3>Technical Support（7d）</h3>
-          <span class="sub">只统计 Support V2 Trace；Hit@1 与切换准确率在标注集离线评测中计算</span>
+          <h3>技术支持（Technical Support，7天）</h3>
+          <span class="sub">只统计 Support V2 链路追踪（Trace）；Hit@1 与切换准确率在标注集离线评测中计算</span>
         </div>
       </header>
       <div class="metric-grid support-metric-grid">
         <MetricCard
-          label="Support Turns"
+          label="Support 轮次（Support Turns）"
           :value="supportMetrics.support_turns.toLocaleString()"
           :context="`首轮 ${supportMetrics.first_turns} · 后续 ${supportMetrics.followup_turns}`"
           :icon="ChatDotRound"
         />
         <MetricCard
-          label="Document Delivery"
+          label="文档交付（Document Delivery）"
           :value="percent(supportMetrics.document_delivery_rate)"
           :context="`${supportMetrics.document_delivered} 次完整文档交付`"
           :icon="Notebook"
         />
         <MetricCard
-          label="Clarification"
+          label="澄清（Clarification）"
           :value="percent(supportMetrics.clarification_rate)"
           :context="`后续成功 ${percent(supportMetrics.clarification_resolution_rate)}`"
           :icon="Warning"
         />
         <MetricCard
-          label="Escalation"
+          label="升级处理（Escalation）"
           :value="percent(supportMetrics.escalation_rate)"
           :context="`Workflow 冲突 ${supportMetrics.workflow_conflicts} · P95 ${supportMetrics.followup_latency.p95_ms} ms`"
           :icon="Clock"
@@ -243,8 +243,8 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
     <section v-if="chartPoints.length" class="panel">
       <header class="panel-header">
         <div>
-          <h3>Query Volume &amp; No-Answer Rate</h3>
-          <span class="sub">最近 7 天 · 点击柱形下钻该时段的 Trace</span>
+          <h3>查询量与无答案率（Query Volume &amp; No-Answer Rate）</h3>
+          <span class="sub">最近 7 天 · 点击柱形下钻该时段的链路追踪（Trace）</span>
         </div>
       </header>
       <TrendChart :points="chartPoints" @select="openBucketDrilldown" />
@@ -253,8 +253,8 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
     <section class="panel">
       <header class="panel-header">
         <div>
-          <h3>Unanswered Questions</h3>
-          <span class="sub">知识库覆盖缺口 — 无答案问题下钻，点击行查看 Trace 归因</span>
+          <h3>未回答问题（Unanswered Questions）</h3>
+          <span class="sub">知识库覆盖缺口 — 无答案问题下钻，点击行查看链路追踪（Trace）归因</span>
         </div>
       </header>
       <el-table
@@ -265,19 +265,19 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
       >
         <el-table-column
           prop="question"
-          label="Question"
+          label="问题（Question）"
           min-width="280"
           show-overflow-tooltip
         />
-        <el-table-column prop="response_type" label="Response" width="150">
+        <el-table-column prop="response_type" label="响应（Response）" width="150">
           <template #default="scope">
             <StatusBadge :status="scope.row.response_type ?? 'UNKNOWN'" />
           </template>
         </el-table-column>
-        <el-table-column prop="user_id" label="User" width="140">
+        <el-table-column prop="user_id" label="用户（User）" width="140">
           <template #default="scope">{{ scope.row.user_id ?? "—" }}</template>
         </el-table-column>
-        <el-table-column label="Time" min-width="170">
+        <el-table-column label="时间（Time）" min-width="170">
           <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
         </el-table-column>
       </el-table>
@@ -285,15 +285,15 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
         v-else
         :icon="Warning"
         title="近期没有无答案问题"
-        description="当回答被判为 UNCONFIRMED 时，问题会出现在这里，用于定位知识库覆盖缺口。"
+        description="当回答被判为未确认（UNCONFIRMED）时，问题会出现在这里，用于定位知识库覆盖缺口。"
       />
     </section>
 
     <section class="panel">
       <header class="panel-header">
         <div>
-          <h3>Recent Activity</h3>
-          <span class="sub">最近的 Playground 与 Chat 查询，点击行查看 Trace</span>
+          <h3>近期活动（Recent Activity）</h3>
+          <span class="sub">最近的调试台（Playground）与对话（Chat）查询，点击行查看链路追踪（Trace）。</span>
         </div>
       </header>
       <el-table
@@ -304,20 +304,20 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
       >
         <el-table-column
           prop="question"
-          label="Query"
+          label="查询（Query）"
           min-width="280"
           show-overflow-tooltip
         />
-        <el-table-column prop="mode" label="Mode" width="120" />
-        <el-table-column label="Status" width="130">
+        <el-table-column prop="mode" label="模式（Mode）" width="120" />
+        <el-table-column label="状态（Status）" width="130">
           <template #default="scope"><StatusBadge :status="scope.row.status" /></template>
         </el-table-column>
-        <el-table-column label="Latency" width="110">
+        <el-table-column label="延迟（Latency）" width="110">
           <template #default="scope">
             <span class="mono">{{ scope.row.latency.total_ms ?? "—" }} ms</span>
           </template>
         </el-table-column>
-        <el-table-column label="Time" min-width="170">
+        <el-table-column label="时间（Time）" min-width="170">
           <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
         </el-table-column>
       </el-table>
@@ -325,13 +325,13 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
         v-else
         :icon="Clock"
         title="暂无最近查询"
-        description="在 RAG Playground 或 Demo Chat 中发起查询后，这里会展示最近的活动。"
+        description="在 RAG 调试台（RAG Playground）或问答测试（DemoChat）中发起查询后，这里会展示最近的活动。"
       />
     </section>
 
     <el-dialog
       :model-value="drilldown !== null"
-      :title="drilldown ? `Trace — ${drilldown.label}` : ''"
+      :title="drilldown ? `链路追踪（Trace）— ${drilldown.label}` : ''"
       width="720px"
       @update:model-value="drilldown = null"
     >
@@ -344,27 +344,27 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
       >
         <el-table-column
           prop="question"
-          label="Question"
+          label="问题（Question）"
           min-width="240"
           show-overflow-tooltip
         />
-        <el-table-column label="Response" width="140">
+        <el-table-column label="响应（Response）" width="140">
           <template #default="scope">
             <StatusBadge :status="scope.row.response_type ?? scope.row.status" />
           </template>
         </el-table-column>
-        <el-table-column label="Latency" width="100">
+        <el-table-column label="延迟（Latency）" width="100">
           <template #default="scope">
             <span class="mono">{{ scope.row.latency?.total_ms ?? "—" }} ms</span>
           </template>
         </el-table-column>
-        <el-table-column prop="user_id" label="User" width="120">
+        <el-table-column prop="user_id" label="用户（User）" width="120">
           <template #default="scope">{{ scope.row.user_id ?? "—" }}</template>
         </el-table-column>
       </el-table>
       <EmptyState
         v-if="!drilldownLoading && !drilldownTraces.length"
-        title="该时段没有 Trace"
+        title="该时段没有链路追踪（Trace）"
         description="试试点击相邻的柱形。"
       />
     </el-dialog>

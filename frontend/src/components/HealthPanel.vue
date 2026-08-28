@@ -41,7 +41,7 @@ onBeforeUnmount(() => controller?.abort());
   <section class="panel health-panel">
     <header class="panel-header">
       <div>
-        <h3>System Status</h3>
+        <h3>系统状态（System Status）</h3>
         <span class="sub">运行环境依赖检查</span>
       </div>
       <el-button size="small" :loading="loading" @click="refresh">重新检查</el-button>

@@ -44,8 +44,8 @@ function formattedError(trace: TraceSummary): string {
     <section class="panel">
       <header class="panel-header">
         <div>
-          <h3>{{ engine }} Errors</h3>
-          <span class="sub">仅显示 {{ engine }} 引擎失败 Trace，不混入另一条链路</span>
+          <h3>{{ engine }} 错误（Errors）</h3>
+          <span class="sub">仅显示 {{ engine }} 引擎失败链路追踪（Trace），不混入另一条链路</span>
         </div>
         <el-button :loading="loading" @click="emit('reload')">刷新</el-button>
       </header>
@@ -55,7 +55,7 @@ function formattedError(trace: TraceSummary): string {
             <div class="error-detail">
               <div><strong>错误详情</strong><pre>{{ formattedError(scope.row) }}</pre></div>
               <dl>
-                <dt>父 Trace</dt>
+                <dt>父链路（Trace）</dt>
                 <dd class="mono">{{ scope.row.parent_trace_id || "—" }}</dd>
                 <dt>降级来源</dt>
                 <dd>{{ scope.row.fallback_from || "—" }}</dd>
@@ -89,7 +89,7 @@ function formattedError(trace: TraceSummary): string {
         <el-table-column label="错误信息" min-width="240" show-overflow-tooltip>
           <template #default="scope">{{ errorMessage(scope.row) }}</template>
         </el-table-column>
-        <el-table-column label="Trace ID" min-width="230">
+        <el-table-column label="链路 ID（Trace ID）" min-width="230">
           <template #default="scope">
             <span class="mono">{{ scope.row.trace_id }}</span>
           </template>
@@ -97,7 +97,7 @@ function formattedError(trace: TraceSummary): string {
       </el-table>
       <EmptyState
         v-else
-        :title="`暂无 ${engine} 失败 Trace`"
+        :title="`暂无 ${engine} 失败链路追踪（Trace）`"
         description="当前筛选范围内没有该引擎的失败记录。"
       />
     </section>

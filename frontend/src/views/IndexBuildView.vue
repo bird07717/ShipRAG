@@ -108,7 +108,7 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
               :value="kb.id"
             />
           </el-select>
-          <span class="muted candidate-note">这里只处理 RAG 技术构建、任务诊断和回收；Support 审核请前往 Profile Review</span>
+          <span class="muted candidate-note">这里只处理 RAG 技术构建、任务诊断和回收；技术支持（Support）审核请前往 Profile 审核（Profile Review）。</span>
           <div class="spacer" />
           <el-button :disabled="!store.selectedKnowledgeId" @click="store.gcIndexes()">
             回收旧索引
@@ -185,7 +185,7 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
     <!-- Build detail drawer -->
     <el-drawer
       v-model="detailOpen"
-      :title="detailIndex ? `Index v${detailIndex.version}` : '构建详情'"
+      :title="detailIndex ? `索引（Index）v${detailIndex.version}` : '构建详情'"
       size="560px"
     >
       <template v-if="detailIndex">
@@ -196,15 +196,15 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
 
         <div class="detail-metrics">
           <div class="detail-metric">
-            <span>Documents</span>
+            <span>文档数（Documents）</span>
             <strong>{{ detailIndex.document_count }}</strong>
           </div>
           <div class="detail-metric">
-            <span>Elements</span>
+            <span>元素数（Elements）</span>
             <strong>{{ detailIndex.element_count }}</strong>
           </div>
           <div class="detail-metric">
-            <span>Chunks</span>
+            <span>切片数（Chunks）</span>
             <strong>{{ detailIndex.chunk_count }}</strong>
           </div>
         </div>
@@ -218,7 +218,7 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
           class="detail-alert"
         />
 
-        <h4 class="section-label">Pipeline</h4>
+        <h4 class="section-label">构建流程（Pipeline）</h4>
         <el-progress
           v-if="detailTask"
           :percentage="detailTask.progress"
@@ -254,10 +254,10 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
 
         <h4 class="section-label">构建信息</h4>
         <el-descriptions :column="1" border size="small">
-          <el-descriptions-item label="Embedding Model">
+          <el-descriptions-item label="向量模型（Embedding Model）">
             <span class="mono">{{ detailIndex.embedding_model_name }}</span>
           </el-descriptions-item>
-          <el-descriptions-item label="BM25 Engine">
+          <el-descriptions-item label="BM25 引擎（BM25 Engine）">
             <span class="mono">{{ detailIndex.bm25_engine }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="构建原因">
@@ -275,12 +275,12 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
         </el-descriptions>
 
         <template v-if="detailTask">
-          <h4 class="section-label">Task Log</h4>
+          <h4 class="section-label">任务日志（Task Log）</h4>
           <CodeBlock :code="store.formatJson(detailTask)" max-height="260px" />
         </template>
 
         <el-alert
-          title="此页面不处理 Support Profile。构建完成并通过技术校验后，RAG 会自动切换到该索引；请在 Profile Review 审核和发布 Support。"
+          title="此页面不处理 Support Profile。构建完成并通过技术校验后，RAG 会自动切换到该索引；请在 Profile 审核（Profile Review）中审核和发布技术支持（Support）配置。"
           type="info"
           :closable="false"
           show-icon

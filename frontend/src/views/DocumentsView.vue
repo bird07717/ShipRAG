@@ -93,9 +93,9 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
   <div class="documents-view">
     <section class="lifecycle-grid" aria-label="文档生命周期状态">
       <button type="button" class="lifecycle-card" @click="store.navigate('indexes')">
-        <span>Processing</span>
+        <span>处理中（Processing）</span>
         <el-tag :type="processingState.type" size="small">{{ processingState.label }}</el-tag>
-        <small>解析、图片处理、Chunk 与 Embedding</small>
+        <small>解析、图片处理、切片（Chunk）与向量化（Embedding）</small>
       </button>
       <button type="button" class="lifecycle-card" @click="store.navigate('indexes')">
         <span>RAG</span>
@@ -103,7 +103,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         <small>技术构建成功后，新会话自动使用</small>
       </button>
       <button type="button" class="lifecycle-card" @click="store.navigate('support-review')">
-        <span>Support</span>
+        <span>技术支持（Support）</span>
         <el-tag :type="supportState.type" size="small">{{ supportState.label }}</el-tag>
         <small>Profile 属性待上线前不影响 RAG</small>
       </button>
@@ -141,7 +141,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         :data="store.filteredDocuments"
         @row-click="(row: any) => store.inspectDocument(row)"
       >
-        <el-table-column label="File" min-width="260">
+        <el-table-column label="文件（File）" min-width="260">
           <template #default="scope">
             <div class="file-cell">
               <span class="file-type-badge">DOCX</span>
@@ -152,23 +152,23 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="Type" width="90">
-          <template #default><span class="muted">Word</span></template>
+        <el-table-column label="类型（Type）" width="90">
+          <template #default><span class="muted">Word 文档</span></template>
         </el-table-column>
-        <el-table-column label="Size" width="100">
+        <el-table-column label="大小（Size）" width="100">
           <template #default="scope">{{ formatSize(scope.row.file_size) }}</template>
         </el-table-column>
-        <el-table-column label="Status" width="130">
+        <el-table-column label="状态（Status）" width="130">
           <template #default="scope"><StatusBadge :status="scope.row.status" /></template>
         </el-table-column>
-        <el-table-column label="Profile" width="130">
+        <el-table-column label="文档属性（Profile）" width="130">
           <template #default="scope">
             <el-tag :type="profileTagType(documentProfileStatus(scope.row.id))" size="small">
               {{ profileLabels[documentProfileStatus(scope.row.id)] }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="Uploaded" min-width="170">
+        <el-table-column label="上传时间（Uploaded）" min-width="170">
           <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
         </el-table-column>
         <el-table-column label="" width="80" align="right">
@@ -187,7 +187,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         v-else
         :icon="Document"
         title="暂无文档"
-        description="上传 Word 文档后会自动完成解析、Chunk、Embedding，并在构建成功后切换 RAG；Support Profile 仍需单独审核发布。"
+        description="上传 Word 文档后会自动完成解析、切片（Chunk）、向量化（Embedding），并在构建成功后切换 RAG；Support Profile 仍需单独审核发布。"
       >
         <template #action>
           <el-button
@@ -273,17 +273,17 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
           <span class="mono muted">{{ store.documentInspectionIndexId || "无可检查索引" }}</span>
         </div>
         <el-tabs>
-          <el-tab-pane :label="`Elements · ${store.elements.length}`">
+          <el-tab-pane :label="`元素（Elements）· ${store.elements.length}`">
             <div class="scroll-list">
               <pre v-for="item in store.elements" :key="String(item.id)">{{ store.formatJson(item) }}</pre>
             </div>
           </el-tab-pane>
-          <el-tab-pane :label="`Chunks · ${store.chunks.length}`">
+          <el-tab-pane :label="`切片（Chunks）· ${store.chunks.length}`">
             <div class="scroll-list">
               <pre v-for="item in store.chunks" :key="String(item.id)">{{ store.formatJson(item) }}</pre>
             </div>
           </el-tab-pane>
-          <el-tab-pane label="Profile & Alias">
+          <el-tab-pane label="Profile 与别名（Alias）">
             <div v-if="store.documentProfileContext" class="profile-context">
               <template v-if="store.documentProfileContext.active_profile || store.documentProfileContext.pending_profile">
                 <div class="profile-card">
@@ -293,7 +293,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                     <h5>当前线上属性</h5>
                     <el-descriptions :column="1" border size="small">
                       <el-descriptions-item label="标准问题"><b>{{ intent.canonical_question }}</b></el-descriptions-item>
-                      <el-descriptions-item label="Alias"><div v-if="intent.aliases.length" class="tag-wrap"><el-tag v-for="alias in intent.aliases" :key="alias" size="small">{{ alias }}</el-tag></div><span v-else class="muted">无</span></el-descriptions-item>
+                      <el-descriptions-item label="别名（Alias）"><div v-if="intent.aliases.length" class="tag-wrap"><el-tag v-for="alias in intent.aliases" :key="alias" size="small">{{ alias }}</el-tag></div><span v-else class="muted">无</span></el-descriptions-item>
                       <el-descriptions-item label="路由摘要">{{ intent.routing_summary || "—" }}</el-descriptions-item>
                       <el-descriptions-item label="启用状态"><el-tag :type="intent.enabled !== false ? 'success' : 'info'" size="small">{{ intent.enabled !== false ? "启用" : "停用" }}</el-tag></el-descriptions-item>
                     </el-descriptions>
@@ -302,7 +302,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                     <h5>待上线属性</h5>
                     <el-descriptions :column="1" border size="small">
                       <el-descriptions-item label="标准问题"><b>{{ intent.canonical_question }}</b></el-descriptions-item>
-                      <el-descriptions-item label="Alias">
+                      <el-descriptions-item label="别名（Alias）">
                         <div v-if="intent.aliases.length" class="tag-wrap">
                           <el-tag
                             v-for="alias in intent.aliases"
@@ -325,7 +325,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                     :closable="false"
                     class="profile-pending"
                   />
-                  <el-button link type="primary" @click="store.navigate('support-review'); store.documentDrawerOpen = false">前往 Profile Review 编辑或上线</el-button>
+                  <el-button link type="primary" @click="store.navigate('support-review'); store.documentDrawerOpen = false">前往 Profile 审核（Profile Review）编辑或上线</el-button>
                 </div>
               </template>
               <template v-else>
@@ -333,13 +333,13 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                 <div v-if="store.documentProfileContext.published_profile" class="profile-card">
                   <div class="profile-card-head">
                     <h4>已发布 Profile</h4>
-                    <el-tag type="success" size="small">已发布 · 影响线上 Support</el-tag>
+                    <el-tag type="success" size="small">已发布 · 影响线上技术支持（Support）</el-tag>
                   </div>
                   <el-descriptions :column="1" border size="small">
                     <el-descriptions-item label="标准问题">
                       {{ store.documentProfileContext.published_profile.canonical_question }}
                     </el-descriptions-item>
-                    <el-descriptions-item label="Alias">
+                    <el-descriptions-item label="别名（Alias）">
                       <div v-if="store.documentProfileContext.published_profile.aliases.length" class="tag-wrap">
                         <el-tag
                           v-for="alias in store.documentProfileContext.published_profile.aliases"
@@ -349,7 +349,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                           {{ alias }}
                         </el-tag>
                       </div>
-                      <span v-else class="muted">空 Alias（无用户改写）</span>
+                      <span v-else class="muted">空别名（Alias；无用户改写）</span>
                     </el-descriptions-item>
                     <el-descriptions-item label="路由摘要">
                       <p class="wrapped-text">
@@ -370,7 +370,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                     <el-tag type="warning" size="small">不影响线上 Support</el-tag>
                   </div>
                   <el-descriptions :column="1" border size="small">
-                    <el-descriptions-item label="候选 Index 版本">
+                    <el-descriptions-item label="候选索引版本（Index）">
                       v{{ store.documentProfileContext.candidate_draft.index_version }}
                       <span class="muted">（{{ store.documentProfileContext.candidate_draft.release_status }}）</span>
                     </el-descriptions-item>
@@ -400,7 +400,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                     <el-descriptions-item label="标准问题">
                       {{ store.documentProfileContext.candidate_draft.canonical_question }}
                     </el-descriptions-item>
-                    <el-descriptions-item label="Alias">
+                    <el-descriptions-item label="别名（Alias）">
                       <div v-if="store.documentProfileContext.candidate_draft.aliases.length" class="tag-wrap">
                         <el-tag
                           v-for="alias in store.documentProfileContext.candidate_draft.aliases"
@@ -411,7 +411,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
                           {{ alias }}
                         </el-tag>
                       </div>
-                      <span v-else class="muted">空 Alias（无用户改写）</span>
+                      <span v-else class="muted">空别名（Alias；无用户改写）</span>
                     </el-descriptions-item>
                     <el-descriptions-item label="路由摘要">
                       {{ store.documentProfileContext.candidate_draft.routing_summary || "—" }}

@@ -102,7 +102,7 @@ function isDeleting(kb: KnowledgeBase): boolean {
         :show-header="true"
         @row-click="(row: any) => selectAndOpen(row)"
       >
-        <el-table-column label="Name" min-width="240">
+        <el-table-column label="名称（Name）" min-width="240">
           <template #default="scope">
             <div class="kb-name">
               <el-icon class="kb-icon"><Collection /></el-icon>
@@ -113,12 +113,12 @@ function isDeleting(kb: KnowledgeBase): boolean {
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="document_count" label="Documents" width="110" />
-        <el-table-column prop="active_chunk_count" label="Chunks" width="100" />
-        <el-table-column label="Status" width="120">
+        <el-table-column prop="document_count" label="文档数（Documents）" width="110" />
+        <el-table-column prop="active_chunk_count" label="切片数（Chunks）" width="100" />
+        <el-table-column label="状态（Status）" width="120">
           <template #default="scope"><StatusBadge :status="scope.row.runtime_state" /></template>
         </el-table-column>
-        <el-table-column label="Updated" min-width="170">
+        <el-table-column label="更新时间（Updated）" min-width="170">
           <template #default="scope">{{ store.formatDate(scope.row.updated_at) }}</template>
         </el-table-column>
         <el-table-column label="" width="60" align="right">
@@ -219,15 +219,15 @@ function isDeleting(kb: KnowledgeBase): boolean {
 
         <div class="detail-metrics">
           <div class="detail-metric">
-            <span>Documents</span>
+            <span>文档数（Documents）</span>
             <strong>{{ detailTarget.document_count }}</strong>
           </div>
           <div class="detail-metric">
-            <span>Active Chunks</span>
+            <span>生效切片（Active Chunks）</span>
             <strong>{{ detailTarget.active_chunk_count }}</strong>
           </div>
           <div class="detail-metric">
-            <span>Rebuild Required</span>
+            <span>需要重建（Rebuild Required）</span>
             <strong>{{ detailTarget.rebuild_required ? "是" : "否" }}</strong>
           </div>
         </div>
@@ -241,11 +241,11 @@ function isDeleting(kb: KnowledgeBase): boolean {
           <el-descriptions-item label="ID">
             <span class="mono">{{ detailTarget.id }}</span>
           </el-descriptions-item>
-          <el-descriptions-item label="Active Index">
+          <el-descriptions-item label="生效索引（Active Index）">
             <span class="mono">RAG：{{ detailTarget.rag_active_index_id ?? detailTarget.active_index_id ?? "—" }}</span>
             <span class="mono">Support：{{ detailTarget.support_active_index_id ?? "—" }}</span>
           </el-descriptions-item>
-          <el-descriptions-item label="Building Index">
+          <el-descriptions-item label="构建中索引（Building Index）">
             <span class="mono">{{ detailTarget.building_index_id ?? "—" }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="创建时间">

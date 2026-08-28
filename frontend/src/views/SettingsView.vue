@@ -57,7 +57,7 @@ async function clearCredential(): Promise<void> {
         </header>
         <div class="panel-body">
           <div class="form-section">
-            <h4>Service Token</h4>
+            <h4>服务凭证（Service Token）</h4>
             <p class="desc">
               如果部署环境已由反向代理统一注入凭据，无需在此配置；其他环境可在这里添加。凭据仅保存在当前浏览器会话（sessionStorage），关闭标签页后自动失效。
             </p>
@@ -81,7 +81,7 @@ async function clearCredential(): Promise<void> {
       <section v-show="activeSection === 'danger'" class="panel danger-zone">
         <header class="panel-header">
           <div>
-            <h3>Danger Zone</h3>
+            <h3>高风险操作区（Danger Zone）</h3>
             <span class="sub">以下操作立即生效且不可撤销</span>
           </div>
         </header>

@@ -91,7 +91,7 @@ watch(() => store.selectedKnowledgeId, () => { lastCheck.value = null; });
 <template>
   <div class="support-review">
     <el-alert
-      title="Profile 仅保留标准问题、Alias 和路由描述，用于高置信快速命中；低匹配或歧义时自动使用 RAG。"
+      title="Profile 仅保留标准问题、别名（Alias）和路由描述，用于高置信快速命中；低匹配或歧义时自动使用 RAG。"
       type="success"
       :closable="false"
       show-icon
@@ -201,7 +201,7 @@ watch(() => store.selectedKnowledgeId, () => { lastCheck.value = null; });
         show-icon
         class="editor-alert"
       /><el-form label-position="top">
-        <el-form-item label="标准问题"><el-input v-model="form.canonical_question" /></el-form-item><el-form-item label="Alias（每行一项，最多 5 项）">
+        <el-form-item label="标准问题"><el-input v-model="form.canonical_question" /></el-form-item><el-form-item label="别名（Alias；每行一项，最多 5 项）">
           <el-input
             :model-value="form.aliases.join('\n')"
             type="textarea"

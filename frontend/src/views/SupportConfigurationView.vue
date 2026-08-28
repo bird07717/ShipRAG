@@ -32,7 +32,7 @@ onMounted(() => void load());
       show-icon
     />
     <el-alert
-      title="该页面只检查 Profile Support 能力。总引擎策略请在 Engine Routing 页面管理。"
+      title="该页面只检查 Profile 支持（Profile Support）能力。总引擎策略请在引擎路由（Engine Routing）页面管理。"
       type="info"
       :closable="false"
       show-icon
@@ -40,7 +40,7 @@ onMounted(() => void load());
     <section class="panel">
       <header class="panel-header">
         <div>
-          <h3>Profile Support 配置状态</h3>
+          <h3>Profile 支持配置状态（Profile Support）</h3>
           <span class="sub">检查问题 Profile、完整文档映射和发布就绪状态</span>
         </div>
       </header>
@@ -60,7 +60,7 @@ onMounted(() => void load());
           :status="readinessPercentage === 100 ? 'success' : undefined"
         />
         <el-table v-if="support.profiles.length" :data="support.profiles">
-          <el-table-column prop="problem_code" label="Problem Code" width="180" />
+          <el-table-column prop="problem_code" label="问题编码（Problem Code）" width="180" />
           <el-table-column
             prop="canonical_question"
             label="标准问题"

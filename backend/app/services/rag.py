@@ -417,8 +417,17 @@ class RagService:
     async def _build_rerank_documents(
         self, index_id: UUID, candidates: list[RetrievalCandidate]
     ) -> list[RerankDocument]:
+        # Prefix the document title so the cross-encoder can disambiguate
+        # near-identical chunk bodies across documents (e.g. "FFC 如何检查
+        # 接线盒" vs "PDC 如何检查接线盒" whose chunks differ only by the
+        # device named in the title). Mirrors the Support router's rerank
+        # text enrichment.
+        def _text(candidate: RetrievalCandidate) -> str:
+            title = str(candidate.document or "").strip()
+            return f"文档标题：{title}\n{candidate.content}" if title else candidate.content
+
         if self.minio is None:
-            return [RerankDocument(candidate.content) for candidate in candidates]
+            return [RerankDocument(_text(candidate)) for candidate in candidates]
         all_asset_ids = [
             asset_id for candidate in candidates for asset_id in candidate.image_asset_ids
         ]
@@ -445,7 +454,7 @@ class RagService:
                 mime_type = str(asset["mime_type"])
                 remaining_bytes -= len(loaded)
                 break
-            documents.append(RerankDocument(candidate.content, image_bytes, mime_type))
+            documents.append(RerankDocument(_text(candidate), image_bytes, mime_type))
         return documents
 
     def _download_rerank_image(self, asset: dict[str, Any], remaining_bytes: int) -> bytes | None:
@@ -1256,41 +1265,39 @@ class RagService:
             )
 
         if decision.action == ACTION_CLARIFY:
-            context = "候选文档：\n" + self._render_doc_list(decision.pending_options)
-            prompt = render_prompt(
-                build_routing_prompt_template(product_name, scope_description),
-                context=context,
-                question=question,
-                history=turn.history,
-                max_chars=self.settings.m3_prompt_max_chars,
-            )
+            # The candidates are already deterministic here: a templated
+            # clarify answer is instant, always enumerates titles (the
+            # pending-resolution loop matches the user's next reply against
+            # exactly these titles), and removes a slow freeform LLM answer
+            # from the interactive critical path.
+            titles = self._render_doc_list(decision.pending_options)
+            if len(decision.pending_options) == 1:
+                fixed = "可能与您的问题相关的文档：\n" + titles + "\n请确认是否需要查看。"
+            else:
+                fixed = "找到多个可能相关的文档，请确认要查看哪一份：\n" + titles
             return _ChatPlan(
                 kind="ROUTING",
-                prompt=prompt,
                 routing=decision.to_dict(),
+                fixed_answer=fixed,
                 pending_after=decision.pending_options,
             )
 
         if decision.action == ACTION_OFFER_SWITCH and turn.focus_document_id is not None:
             current = await self.repository.get_document_source(turn.focus_document_id)
             target = decision.pending_options[0] if decision.pending_options else {}
-            context = (
-                "当前文档：《"
-                + str(current.get("display_name") or current.get("filename", ""))
-                + "》\n"
-                "候选文档：\n" + self._render_doc_list([target] if target else [])
-            )
-            prompt = render_prompt(
-                build_routing_prompt_template(product_name, scope_description),
-                context=context,
-                question=question,
-                history=turn.history,
-                max_chars=self.settings.m3_prompt_max_chars,
+            target_title = str(target.get("title", "")) or "另一份文档"
+            current_title = str(current.get("display_name") or current.get("filename") or "")
+            fixed = (
+                "当前问题可能属于《"
+                + target_title
+                + "》，是否切换焦点文档？\n（回复“确认”或文档名切换；继续处理《"
+                + current_title
+                + "》请直接追问）"
             )
             return _ChatPlan(
                 kind="ROUTING",
-                prompt=prompt,
                 routing=decision.to_dict(),
+                fixed_answer=fixed,
                 pending_after=decision.pending_options,
             )
 
@@ -1415,6 +1422,16 @@ class RagService:
             },
         )
         yield sse_event("source", {"sources": result.valid_sources})
+        # Templated routing answers (clarify / switch offers) are short
+        # text: stream them in small deltas so the chat UI renders
+        # progressively like LLM answers. Document delivery keeps its
+        # trace/source/done contract — its body renders from content
+        # blocks, not text deltas.
+        if plan.kind != "DELIVER":
+            answer_text = str(result.answer or "")
+            for offset in range(0, len(answer_text), 24):
+                yield sse_event("message", {"delta": answer_text[offset : offset + 24]})
+                await asyncio.sleep(0)
         await self._apply_post_state(plan, turn, "")
         await self.repository.complete_turn(
             turn,

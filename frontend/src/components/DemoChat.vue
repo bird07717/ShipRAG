@@ -356,7 +356,7 @@ onMounted(async () => {
 
 <template>
   <div class="demo-page">
-    <PageHeader title="DemoChat 问答测试" description="通过统一 Gateway 验证当前知识库的真实对外问答能力。">
+    <PageHeader title="问答测试（DemoChat）" description="通过统一 Gateway 验证当前知识库的真实对外问答能力。">
       <template #actions>
         <el-button :disabled="!visibleMessages.length" @click="clearChat">新会话</el-button>
       </template>
@@ -364,7 +364,7 @@ onMounted(async () => {
 
     <div class="chat-toolbar">
       <div class="chat-context">
-        <span class="context-label">Knowledge Base</span>
+        <span class="context-label">知识库（Knowledge Base）</span>
         <el-select
           v-model="selectedKb"
           placeholder="选择知识库"
@@ -391,7 +391,7 @@ onMounted(async () => {
         <h2>测试统一问答接口</h2>
         <p>{{ welcomeMessage }}</p>
         <div v-if="suggestions.length" class="hero-suggestions">
-          <span class="suggestion-label">Suggested Questions</span>
+          <span class="suggestion-label">推荐问题（Suggested Questions）</span>
           <button
             v-for="question in suggestions"
             :key="question"

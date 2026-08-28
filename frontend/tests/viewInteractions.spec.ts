@@ -480,8 +480,8 @@ describe("view interactions", () => {
     expect(adminApi.listElements).toHaveBeenLastCalledWith("doc-1", "idx-1");
     expect(adminApi.listChunks).toHaveBeenLastCalledWith("doc-1", "idx-1");
     expect(adminApi.getDocumentProfileContext).toHaveBeenCalledWith("doc-1");
-    expect(wrapper.text()).toContain("Elements · 1");
-    expect(wrapper.text()).toContain("Chunks · 1");
+    expect(wrapper.text()).toContain("元素（Elements）· 1");
+    expect(wrapper.text()).toContain("切片（Chunks）· 1");
 
     adminStore.documentSearch = "nothing";
     await flushPromises();
@@ -495,7 +495,7 @@ describe("view interactions", () => {
     await flushPromises();
     await wrapper
       .findAll(".el-tabs__item")
-      .find((tab) => tab.text().includes("Profile & Alias"))!
+      .find((tab) => tab.text().includes("Profile 与别名"))!
       .trigger("click");
     await flushPromises();
 
@@ -503,12 +503,12 @@ describe("view interactions", () => {
     expect(text).toContain("已发布 Profile");
     expect(text).not.toContain("PDC_UPGRADE");
     expect(text).toContain("PDC 怎么升级");
-    expect(text).toContain("已发布 · 影响线上 Support");
+    expect(text).toContain("已发布 · 影响线上技术支持（Support）");
     expect(text).toContain("候选草稿 · 未发布");
     expect(text).toContain("不影响线上 Support");
     expect(text).toContain("v4");
     expect(text).toContain("REVIEW_REQUIRED");
-    expect(text).toContain("空 Alias（无用户改写）");
+    expect(text).toContain("空别名（Alias；无用户改写）");
     expect(text).toContain("前往候选审核");
 
     await wrapper
@@ -525,7 +525,7 @@ describe("view interactions", () => {
     const wrapper = await mountView("support-review");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Profile 仅保留标准问题、Alias 和路由描述");
+    expect(wrapper.text()).toContain("Profile 仅保留标准问题、别名（Alias）和路由描述");
     expect(wrapper.text()).toContain("操作手册");
     expect(wrapper.text()).toContain("如何升级 PDC？");
     expect(wrapper.text()).toContain("待上线");
@@ -611,14 +611,14 @@ describe("view interactions", () => {
     const wrapper = await mountView("logs");
     const tracesTab = wrapper
       .findAll(".el-tabs__item")
-      .find((tab) => tab.text().includes("全量 Trace"));
+      .find((tab) => tab.text().includes("全部链路追踪"));
     await tracesTab!.trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("如何配置数据库？");
 
     await wrapper.get(".trace-row").trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("Timeline");
+    expect(wrapper.text()).toContain("时间线（Timeline）");
     expect(wrapper.text()).toContain("LLM Generation");
     expect(wrapper.text()).toContain("答案内容");
   });
@@ -817,7 +817,7 @@ describe("view interactions", () => {
     await wrapper.get(".el-table__row").trigger("click");
     await flushPromises();
     expect(adminStore.traceDrawerOpen).toBe(true);
-    expect(wrapper.text()).toContain("RAG Trace");
+    expect(wrapper.text()).toContain("RAG 链路追踪（Trace）");
     expect(wrapper.text()).toContain("答案内容");
   });
 });

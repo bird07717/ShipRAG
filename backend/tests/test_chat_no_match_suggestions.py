@@ -282,8 +282,9 @@ async def test_clarify_turn_has_no_next_suggestions():
         request_id="req-clarify",
     )
 
-    assert "候选文档" in llm.prompts[0]
-    assert "检索器弱候选" not in llm.prompts[0]
+    # Templated clarify: no LLM call, pending loop intact, no suggestions
+    assert llm.prompts == []
+    assert TITLE_A in result["answer"]
     assert len(repo.pending_updates) == 1
     assert result["next_suggestions"] == []
 

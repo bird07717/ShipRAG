@@ -39,41 +39,41 @@ const menuGroups: MenuGroup[] = [
   {
     label: "概览",
     items: [
-      { key: "dashboard", label: "Dashboard", subtitle: "知识与索引运行概况", icon: Odometer },
+      { key: "dashboard", label: "运行概览", subtitle: "知识库与索引运行概况", icon: Odometer },
     ],
   },
   {
     label: "知识管理",
     items: [
-      { key: "knowledge", label: "Knowledge Base", subtitle: "知识域与目录管理", icon: Notebook },
-      { key: "documents", label: "Documents", subtitle: "文档上传、内容与切片检查", icon: Files },
+      { key: "knowledge", label: "知识库（Knowledge Base）", subtitle: "知识域与目录管理", icon: Notebook },
+      { key: "documents", label: "文档管理（Documents）", subtitle: "文档上传、内容与切片检查", icon: Files },
     ],
   },
   {
     label: "运行与验证",
     items: [
-      { key: "engine-routing", label: "Engine Routing", subtitle: "统一配置新会话的问答引擎策略", icon: Operation },
-      { key: "support-chat", label: "DemoChat 问答测试", subtitle: "通过统一 Gateway 验证真实对外能力", icon: ChatDotRound },
+      { key: "engine-routing", label: "引擎路由（Engine Routing）", subtitle: "统一配置新会话的问答引擎策略", icon: Operation },
+      { key: "support-chat", label: "问答测试（DemoChat）", subtitle: "通过统一 Gateway 验证真实对外能力", icon: ChatDotRound },
     ],
   },
   {
     label: "Support 管理",
     items: [
-      { key: "support-review", label: "Profile Review", subtitle: "审核自动生成的 Support Profile 草稿", icon: Notebook },
+      { key: "support-review", label: "Profile 审核（Profile Review）", subtitle: "审核自动生成的 Support Profile 草稿", icon: Notebook },
     ],
   },
   {
     label: "运维",
     items: [
-      { key: "logs", label: "Logs & Traces", subtitle: "错误、失败任务与完整链路排查", icon: Tickets },
-      { key: "configuration", label: "模型、凭证与系统配置", subtitle: "模型、Prompt、RAG 参数与 Service Token", icon: Cpu },
+      { key: "logs", label: "日志与链路追踪（Logs & Traces）", subtitle: "错误、失败任务与完整链路排查", icon: Tickets },
+      { key: "configuration", label: "模型、凭证与系统配置", subtitle: "模型、Prompt、RAG 参数与服务凭证（Service Token）", icon: Cpu },
     ],
   },
   {
     label: "高级工具",
     items: [
-      { key: "indexes", label: "RAG Indexes", subtitle: "技术构建、快照与回收诊断", icon: Box },
-      { key: "playground", label: "RAG Playground", subtitle: "检索、Prompt 与答案调试", icon: Operation },
+      { key: "indexes", label: "RAG 索引（RAG Indexes）", subtitle: "技术构建、快照与回收诊断", icon: Box },
+      { key: "playground", label: "RAG 调试台（RAG Playground）", subtitle: "检索、Prompt 与答案调试", icon: Operation },
     ],
   },
 ];
@@ -169,7 +169,7 @@ const indexStats = computed(() => {
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark">R</span>
-        <div><strong>Support Studio</strong><small>Technical Documents</small></div>
+        <div><strong>技术支持工作台</strong><small>Support Studio</small></div>
       </div>
       <nav>
         <div v-for="group in menuGroups" :key="group.label" class="nav-group">
@@ -185,7 +185,7 @@ const indexStats = computed(() => {
           </button>
         </div>
       </nav>
-      <div class="sidebar-footer">V1 · DUAL ENGINE</div>
+      <div class="sidebar-footer">V1 · 双引擎（DUAL ENGINE）</div>
     </aside>
 
     <main class="main" :class="{ 'chat-mode': isDemoChat }">
@@ -227,7 +227,7 @@ const indexStats = computed(() => {
               </div>
               <div class="index-stat">
                 <strong>{{ indexStats.chunks.toLocaleString() }}</strong>
-                <span>已索引 Chunks</span>
+                <span>已索引切片（Chunks）</span>
               </div>
             </div>
           </section>

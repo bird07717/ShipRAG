@@ -82,7 +82,7 @@ onUnmounted(() => {
     <!-- Shared trace detail drawer (opened from Dashboard recent activity) -->
     <el-drawer
       v-model="store.traceDrawerOpen"
-      title="RAG Trace"
+      title="RAG 链路追踪（Trace）"
       size="560px"
     >
       <template v-if="store.selectedTrace">
@@ -94,10 +94,10 @@ onUnmounted(() => {
             <span class="mono muted">{{ store.selectedTrace.latency.total_ms ?? "—" }} ms</span>
           </div>
         </div>
-        <h4 class="section-label">Answer</h4>
+        <h4 class="section-label">回答（Answer）</h4>
         <!-- eslint-disable-next-line vue/no-v-html -- DOMPurify 消毒后的 Markdown 输出 -->
         <div class="trace-answer" v-html="renderMarkdown(store.selectedTrace.answer || '')"></div>
-        <h4 class="section-label">Raw JSON</h4>
+        <h4 class="section-label">原始 JSON（Raw JSON）</h4>
         <CodeBlock :code="store.formatJson(store.selectedTrace)" max-height="360px" />
       </template>
     </el-drawer>

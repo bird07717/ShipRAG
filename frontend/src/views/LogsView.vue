@@ -426,7 +426,7 @@ watch(
           <!-- 1. Request errors -->
           <el-tab-pane label="请求错误" name="request-errors">
             <el-alert
-              title="请求错误日志为全局口径，不随当前知识库筛选；请使用 Request ID 或路径定位。"
+              title="请求错误日志为全局口径，不随当前知识库筛选；请使用请求 ID（Request ID）或路径定位。"
               type="info"
               :closable="false"
               show-icon
@@ -434,7 +434,7 @@ watch(
             <div class="tab-toolbar">
               <el-input
                 v-model="requestErrorFilter.requestId"
-                placeholder="request_id 精确查询"
+                placeholder="请求 ID（request_id）精确查询"
                 clearable
                 class="tool-input"
                 @keyup.enter="requestErrorPage = 1; loadRequestErrors()"
@@ -512,7 +512,7 @@ watch(
                 min-width="200"
                 show-overflow-tooltip
               />
-              <el-table-column label="Request ID" width="200">
+              <el-table-column label="请求 ID（Request ID）" width="200">
                 <template #default="scope">
                   <span class="mono muted">{{ scope.row.request_id }}</span>
                 </template>
@@ -544,8 +544,8 @@ watch(
                 class="tool-select-wide"
                 @change="loadFailedTraces"
               >
-                <el-option label="Profile Support" value="SUPPORT" />
-                <el-option label="Generic RAG" value="RAG" />
+                <el-option label="Profile 支持（Profile Support）" value="SUPPORT" />
+                <el-option label="通用 RAG（Generic RAG）" value="RAG" />
               </el-select>
               <el-select
                 v-model="failedTraceFilter.errorCode"
@@ -699,7 +699,7 @@ watch(
               description="指定条件下没有触发升级人工的轮次。"
             />
           </el-tab-pane>
-          <el-tab-pane label="全量 Trace" name="traces" lazy>
+          <el-tab-pane label="全部链路追踪（Trace）" name="traces" lazy>
             <TracesView />
           </el-tab-pane>
         </el-tabs>
@@ -716,7 +716,7 @@ watch(
             size="small"
             class="drawer-descriptions"
           >
-            <el-descriptions-item label="Request ID">
+            <el-descriptions-item label="请求 ID（Request ID）">
               <span class="mono">{{ selectedRequestError.request_id }}</span>
             </el-descriptions-item>
             <el-descriptions-item label="时间">
@@ -776,7 +776,7 @@ watch(
             <el-descriptions-item label="问题">
               {{ selectedFailedTrace.question }}
             </el-descriptions-item>
-            <el-descriptions-item label="Request ID">
+            <el-descriptions-item label="请求 ID（Request ID）">
               <span class="mono">{{ selectedFailedTrace.request_id }}</span>
             </el-descriptions-item>
             <el-descriptions-item label="时间">
@@ -797,7 +797,7 @@ watch(
               查看会话回放
             </el-button>
           </div>
-          <h4 class="section-label">失败 Trace（含被拒草案摘要）</h4>
+          <h4 class="section-label">失败链路追踪（Trace，含被拒草案摘要）</h4>
           <CodeBlock :code="store.formatJson(selectedFailedTrace.retrieval_result)" max-height="420px" />
           <h4 class="section-label">完整错误 JSON</h4>
           <CodeBlock :code="store.formatJson(selectedFailedTrace.error)" max-height="200px" />

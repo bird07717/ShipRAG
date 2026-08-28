@@ -196,7 +196,7 @@ async function selectTrace(traceId: string): Promise<void> {
     <section class="panel trace-list">
       <header class="panel-header">
         <div>
-          <h3>Traces</h3>
+          <h3>链路追踪（Traces）</h3>
           <span class="sub">{{ filteredTraces.length }} 条记录</span>
         </div>
       </header>
@@ -285,8 +285,8 @@ async function selectTrace(traceId: string): Promise<void> {
         </button>
         <EmptyState
           v-if="!loadingTraces && !loadError && !filteredTraces.length"
-          title="暂无 Trace"
-          description="发起 Playground 查询或 Demo Chat 对话后，这里会记录完整链路。"
+          title="暂无链路追踪（Trace）"
+          description="发起 RAG 调试台（Playground）查询或问答测试（DemoChat）对话后，这里会记录完整链路。"
         />
       </div>
     </section>
@@ -324,7 +324,7 @@ async function selectTrace(traceId: string): Promise<void> {
           <el-alert
             v-if="activeTraceDetail.parent_trace_id"
             :title="`由 ${activeTraceDetail.fallback_from ?? 'SUPPORT'} 降级到当前引擎`"
-            :description="`原因：${activeTraceDetail.fallback_reason ?? '未记录'} · 父 Trace：${activeTraceDetail.parent_trace_id}`"
+            :description="`原因：${activeTraceDetail.fallback_reason ?? '未记录'} · 父链路（Trace）：${activeTraceDetail.parent_trace_id}`"
             type="info"
             :closable="false"
             show-icon
@@ -336,7 +336,7 @@ async function selectTrace(traceId: string): Promise<void> {
                 size="small"
                 @click="selectTrace(activeTraceDetail.parent_trace_id!)"
               >
-                查看父 Trace
+                查看父链路（Trace）
               </el-button>
             </template>
           </el-alert>
@@ -357,10 +357,10 @@ async function selectTrace(traceId: string): Promise<void> {
             show-icon
             class="detail-error"
           />
-          <h4 class="section-label">Answer</h4>
+          <h4 class="section-label">回答（Answer）</h4>
           <p class="detail-answer">{{ activeTraceDetail.answer || "（无答案）" }}</p>
           <section v-if="supportTrace" class="support-trace">
-            <h4>Technical Support 决策</h4>
+            <h4>技术支持决策（Technical Support）</h4>
             <dl>
               <dt>聚焦文档</dt><dd class="mono">{{ supportTrace.focus_document_id ?? "—" }}</dd>
               <dt>支持模式</dt><dd>{{ supportTrace.support_mode ?? "—" }}</dd>
@@ -370,7 +370,7 @@ async function selectTrace(traceId: string): Promise<void> {
             <CodeBlock :code="store.formatJson({ workflow_before: supportTrace.workflow_before, workflow_after: supportTrace.workflow_after, document_claims: supportTrace.document_claims, escalation: supportTrace.escalation, failure: supportTrace.failure })" max-height="220px" />
           </section>
 
-          <h4 class="section-label">Sources（答案引用来源）</h4>
+          <h4 class="section-label">引用来源（Sources）</h4>
           <ul v-if="detailSources.length" class="source-list">
             <li v-for="source in detailSources" :key="String(source.source_id)">
               <b>{{ source.document }}</b>
@@ -383,7 +383,7 @@ async function selectTrace(traceId: string): Promise<void> {
           <p v-else class="muted detail-empty">（答案未引用任何来源）</p>
 
           <div v-if="detailUsage" class="usage-row">
-            <h4 class="section-label">Model Usage</h4>
+            <h4 class="section-label">模型使用量（Model Usage）</h4>
             <span class="mono">
               prompt {{ detailUsage.prompt_tokens ?? 0 }} · completion
               {{ detailUsage.completion_tokens ?? 0 }} · total
@@ -391,7 +391,7 @@ async function selectTrace(traceId: string): Promise<void> {
             </span>
           </div>
 
-          <h4 class="section-label">Timeline</h4>
+          <h4 class="section-label">时间线（Timeline）</h4>
           <ol class="latency-timeline">
             <li v-for="step in timeline" :key="step.key" :class="{ total: step.key === 'total_ms' }">
               <span class="step-name">{{ step.label }}</span>
@@ -401,16 +401,16 @@ async function selectTrace(traceId: string): Promise<void> {
           </ol>
 
           <el-collapse class="detail-collapse">
-            <el-collapse-item title="Retrieval" name="retrieval">
+            <el-collapse-item title="检索（Retrieval）" name="retrieval">
               <CodeBlock :code="store.formatJson(activeTraceDetail.retrieval_result)" max-height="280px" />
             </el-collapse-item>
-            <el-collapse-item title="Rerank" name="rerank">
+            <el-collapse-item title="重排序（Rerank）" name="rerank">
               <CodeBlock :code="store.formatJson(activeTraceDetail.rerank_result)" max-height="280px" />
             </el-collapse-item>
-            <el-collapse-item title="Prompt" name="prompt">
+            <el-collapse-item title="提示词（Prompt）" name="prompt">
               <CodeBlock :code="activeTraceDetail.prompt ?? '(empty)'" max-height="280px" />
             </el-collapse-item>
-            <el-collapse-item title="Raw JSON" name="raw">
+            <el-collapse-item title="原始 JSON（Raw JSON）" name="raw">
               <CodeBlock :code="store.formatJson(activeTraceDetail)" />
             </el-collapse-item>
           </el-collapse>
@@ -419,7 +419,7 @@ async function selectTrace(traceId: string): Promise<void> {
       <EmptyState
         v-else
         :icon="SetUp"
-        title="未选择 Trace"
+        title="未选择链路追踪（Trace）"
         description="从左侧列表选择一条记录，查看请求时间线、检索过程与生成详情。"
       />
     </section>

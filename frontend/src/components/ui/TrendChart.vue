@@ -88,7 +88,7 @@ const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
     <div class="legend">
       <span class="legend-item"><i class="swatch bar" />查询量</span>
       <span class="legend-item"><i class="swatch line" />无答案率</span>
-      <span class="legend-hint">点击柱形查看该时段 Trace</span>
+      <span class="legend-hint">点击柱形查看该时段链路追踪（Trace）</span>
     </div>
     <svg
       :viewBox="`0 0 ${layout.width} ${layout.height}`"

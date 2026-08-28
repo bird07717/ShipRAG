@@ -66,7 +66,7 @@ onMounted(() => void load());
       show-icon
     />
     <el-alert
-      title="配置按 Engine Routing 策略生效。知识库选择哪种策略，就在每次新请求中使用该策略的检索参数；会话仍固定在创建时的索引版本。"
+      title="配置按引擎路由（Engine Routing）策略生效。知识库选择哪种策略，就在每次新请求中使用该策略的检索参数；会话仍固定在创建时的索引版本。"
       type="warning"
       :closable="false"
       show-icon

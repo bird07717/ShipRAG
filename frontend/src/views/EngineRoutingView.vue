@@ -79,7 +79,7 @@ onMounted(() => void load());
       <header class="panel-header">
         <div>
           <h3>问答引擎路由</h3>
-          <span class="sub">统一控制 Gateway 对新会话暴露的问答能力</span>
+          <span class="sub">统一控制网关（Gateway）对新会话暴露的问答能力</span>
         </div>
       </header>
 
@@ -103,7 +103,7 @@ onMounted(() => void load());
         <template v-if="shared.selectedKnowledgeId">
           <div class="readiness-grid">
             <article :class="['readiness-card', { ready: supportReady }]">
-              <span>Profile Support</span>
+              <span>Profile 支持（Profile Support）</span>
               <strong>{{ supportReady ? "READY" : "NOT READY" }}</strong>
               <small>{{ supportReadiness?.ready_profile_count ?? 0 }} / {{ supportReadiness?.profile_count ?? 0 }} 个 Profile 已发布就绪</small>
               <small v-if="supportReadiness?.blockers.length">{{ supportReadiness.blockers.join("；") }}</small>
@@ -111,7 +111,7 @@ onMounted(() => void load());
               <small>Support Index：{{ selectedKnowledge?.support_active_index_id || "无" }}</small>
             </article>
             <article :class="['readiness-card', { ready: ragReady }]">
-              <span>Generic RAG</span>
+              <span>通用 RAG（Generic RAG）</span>
               <strong>{{ ragReady ? "READY" : "NOT READY" }}</strong>
               <small v-if="ragReadiness?.blockers.length">{{ ragReadiness.blockers.join("；") }}</small>
               <small>RAG Active Index：{{ selectedKnowledge?.rag_active_index_id || selectedKnowledge?.active_index_id || "无" }}</small>
@@ -119,7 +119,7 @@ onMounted(() => void load());
           </div>
 
           <el-alert
-            title="策略修改只影响新会话；会话保存策略快照，但 Hybrid 会在每轮重新决定是否需要 RAG 兜底。"
+            title="策略修改只影响新会话；会话保存策略快照，但混合模式（Hybrid）会在每轮重新决定是否需要 RAG 兜底。"
             type="info"
             :closable="false"
             show-icon

@@ -61,7 +61,7 @@ function send(): void {
       ref="textarea"
       rows="1"
       :value="modelValue"
-      :placeholder="placeholder ?? 'Ask a question...'"
+      :placeholder="placeholder ?? '请输入问题…'"
       :disabled="disabled"
       @input="onInput"
       @keydown="onKeydown"

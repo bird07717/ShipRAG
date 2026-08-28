@@ -213,15 +213,15 @@ async function saveEdit(): Promise<void> {
 <template>
   <div class="configuration-view">
     <el-tabs v-model="activeTab" class="config-tabs">
-      <el-tab-pane label="Models" name="models">
+      <el-tab-pane label="模型配置（Models）" name="models">
         <div class="panel">
           <el-table v-if="store.models.length" :data="store.models">
-            <el-table-column label="Type" width="110">
+            <el-table-column label="类型（Type）" width="110">
               <template #default="scope">
                 <span class="type-badge">{{ TYPE_LABELS[scope.row.model_type] ?? scope.row.model_type }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="Model" min-width="200">
+            <el-table-column label="模型（Model）" min-width="200">
               <template #default="scope">
                 <div class="cell-primary">
                   <b>{{ scope.row.model_name }}</b>
@@ -231,16 +231,16 @@ async function saveEdit(): Promise<void> {
             </el-table-column>
             <el-table-column
               prop="name"
-              label="Config Name"
+              label="配置名称（Config Name）"
               min-width="160"
               show-overflow-tooltip
             />
-            <el-table-column label="Base URL" min-width="220" show-overflow-tooltip>
+            <el-table-column label="请求地址（Base URL）" min-width="220" show-overflow-tooltip>
               <template #default="scope">
                 <span class="mono params-preview">{{ scope.row.base_url }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="API Key" width="140">
+            <el-table-column label="API 密钥（API Key）" width="140">
               <template #default="scope">
                 <span :class="scope.row.api_key_configured ? 'key-ok' : 'key-missing'">
                   {{
@@ -253,12 +253,12 @@ async function saveEdit(): Promise<void> {
                 </span>
               </template>
             </el-table-column>
-            <el-table-column label="Status" width="110">
+            <el-table-column label="状态（Status）" width="110">
               <template #default="scope">
                 <StatusBadge :status="scope.row.enabled ? 'ENABLED' : 'DISABLED'" />
               </template>
             </el-table-column>
-            <el-table-column label="Parameters" min-width="200">
+            <el-table-column label="参数（Parameters）" min-width="200">
               <template #default="scope">
                 <span class="mono params-preview">{{ store.formatJson(scope.row.parameters) }}</span>
               </template>
@@ -284,7 +284,7 @@ async function saveEdit(): Promise<void> {
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="Prompts" name="prompts">
+      <el-tab-pane label="Prompt 模板（Prompts）" name="prompts">
         <div class="panel prompt-scope-note">
           <p>
             运行时内置模板是 Chat 主路径（文档问答、澄清与切换）实际使用的 Prompt，与解析逻辑强耦合，
@@ -298,7 +298,7 @@ async function saveEdit(): Promise<void> {
           <section class="panel prompt-list">
             <header class="panel-header">
               <div>
-                <h3>Prompt Templates</h3>
+                <h3>Prompt 模板（Prompt Templates）</h3>
                 <span class="sub">{{ store.prompts.length }} 个模板</span>
               </div>
             </header>
@@ -360,7 +360,7 @@ async function saveEdit(): Promise<void> {
                 <StatusBadge v-else-if="currentPrompt.active" status="ACTIVE" />
               </header>
               <div class="panel-body">
-                <h4 class="section-label">System Prompt</h4>
+                <h4 class="section-label">系统 Prompt（System Prompt）</h4>
                 <CodeBlock :code="currentPrompt.content" max-height="480px" />
               </div>
             </template>
@@ -386,10 +386,10 @@ async function saveEdit(): Promise<void> {
       <template v-if="editingModel">
         <div class="dialog-form">
           <div class="dialog-field">
-            <label>Provider</label>
+            <label>服务商（Provider）</label>
             <el-select
               v-model="editForm.provider"
-              placeholder="选择 Provider"
+              placeholder="选择服务商（Provider）"
               @change="handleProviderChange"
             >
               <el-option
@@ -409,7 +409,7 @@ async function saveEdit(): Promise<void> {
             <p class="desc">{{ modelConfigurationHint }}</p>
           </div>
           <div class="dialog-field">
-            <label>Base URL</label>
+            <label>请求地址（Base URL）</label>
             <el-input v-model="editForm.base_url" placeholder="以 http(s):// 开头并以 / 结尾" />
           </div>
           <template v-if="editingModel.model_type === 'LLM'">
@@ -423,7 +423,7 @@ async function saveEdit(): Promise<void> {
               <p class="desc">关闭可加快响应；开启会消耗部分输出 Token 预算</p>
             </div>
             <div class="dialog-field">
-              <label>Temperature</label>
+              <label>温度（Temperature）</label>
               <el-input-number
                 v-model="editForm.temperature"
                 :min="0"
@@ -432,7 +432,7 @@ async function saveEdit(): Promise<void> {
               />
             </div>
             <div class="dialog-field">
-              <label>Max Tokens</label>
+              <label>最大 Token 数（Max Tokens）</label>
               <el-input-number
                 v-model="editForm.max_tokens"
                 :min="100"
@@ -457,7 +457,7 @@ async function saveEdit(): Promise<void> {
             </div>
           </div>
           <div class="dialog-field">
-            <label>API 密钥（数据库密钥优先于环境变量）</label>
+            <label>API 密钥（API Key；数据库密钥优先于环境变量）</label>
             <el-input
               v-model="editForm.api_key"
               type="password"

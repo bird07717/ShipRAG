@@ -365,8 +365,10 @@ async def test_ambiguous_match_clarifies_then_reply_resolves():
     assert repo.pending_updates[0]["query"] == "PDC怎么处理"
     options = repo.pending_updates[0]["options"]
     assert [option["document_id"] for option in options] == [str(DOC_A), str(DOC_B)]
-    assert "候选文档" in llm.prompts[0]
-    assert TITLE_A in llm.prompts[0]
+    # Clarify answers are templated: no LLM call, titles always enumerated
+    assert llm.prompts == []
+    assert TITLE_A in result["answer"]
+    assert TITLE_B in result["answer"]
 
     # second turn: user picks option 2 -> deliver DOC_B without LLM
     repo.turn = _turn(chat_context={"pending_options": options, "pending_query": "PDC怎么处理"})
@@ -414,6 +416,9 @@ async def test_doc_focus_offer_switch_and_affirmative_reply():
     offer_options = repo.pending_updates[0]["options"]
     assert offer_options[0]["document_id"] == str(DOC_B)
     assert repo.completed["doc_routing"]["decision"] == "OFFER_SWITCH"
+    # Templated switch offer: no LLM call, the target title is enumerated
+    assert llm.prompts == []
+    assert TITLE_B in result["answer"]
 
     # user affirms -> switch to DOC_B
     repo.turn = _turn(
@@ -500,8 +505,9 @@ async def test_single_eligible_candidate_clarifies_with_pending():
     )
 
     assert result["response_type"] == "ANSWERED"
-    assert "候选文档" in llm.prompts[0]
-    assert TITLE_A in llm.prompts[0]
+    # Templated clarify: no LLM call, the pending title is in the answer
+    assert llm.prompts == []
+    assert TITLE_A in result["answer"]
     assert len(repo.pending_updates) == 1
     assert repo.pending_updates[0]["options"][0]["document_id"] == str(DOC_A)
 
@@ -746,8 +752,12 @@ async def test_chat_stream_routing_answer_streams_without_mode_tag():
     ]
     events = await _collect(frames)
 
+    # The templated clarify answer streams verbatim (no mode-tag machinery
+    # involved) and always enumerates the candidate titles.
     deltas = [payload["delta"] for name, payload in events if name == "message"]
-    assert "".join(deltas) == "你想解决升级还是更换问题？"
+    joined = "".join(deltas)
+    assert TITLE_A in joined
+    assert TITLE_B in joined
     done_payload = events[-1][1]
     assert done_payload["response_type"] == "ANSWERED"
     assert done_payload["references"] == []
@@ -873,9 +883,11 @@ async def test_chat_stream_degraded_chunk_rag_strips_mode_tag():
 
 @pytest.mark.asyncio
 async def test_generate_llm_failure_raises_and_marks_failed():
+    # No retrieval candidates -> NO_MATCH -> the routing prompt still calls
+    # the LLM, whose upstream failure must surface as a retryable ApiError.
     repo = _RoutingRepository(
         turn=_turn(),
-        candidates=[_candidate(DOC_A, 1)],
+        candidates=[],
     )
 
     class _FailProvider:

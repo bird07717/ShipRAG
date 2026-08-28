@@ -60,7 +60,7 @@ const paramLabels: Record<string, string> = {
       <section class="panel">
         <header class="panel-header">
           <div>
-            <h3>Query</h3>
+            <h3>问题（Query）</h3>
             <span class="sub">运行完整 RAG 链路：检索 → 融合 → 重排 → 生成</span>
           </div>
         </header>
@@ -90,7 +90,7 @@ const paramLabels: Record<string, string> = {
         <template v-if="store.playgroundTrace">
           <header class="panel-header">
             <div>
-              <h3>Result</h3>
+              <h3>结果（Result）</h3>
               <div class="result-meta">
                 <StatusBadge :status="store.playgroundTrace.status" />
                 <span v-if="latencyMs" class="muted mono">{{ latencyMs }} ms</span>
@@ -100,7 +100,7 @@ const paramLabels: Record<string, string> = {
           </header>
           <div class="panel-body">
             <el-tabs>
-              <el-tab-pane label="Answer">
+              <el-tab-pane label="回答（Answer）">
                 <p class="answer-text">{{ store.playgroundTrace.answer || "（无答案）" }}</p>
 
                 <template v-if="sources.length">
@@ -132,18 +132,18 @@ const paramLabels: Record<string, string> = {
                 </template>
               </el-tab-pane>
 
-              <el-tab-pane label="Retrieval">
+              <el-tab-pane label="检索（Retrieval）">
                 <div class="retrieval-sections">
-                  <h4 class="section-label">Vector / BM25 Retrieval</h4>
+                  <h4 class="section-label">向量 / BM25 检索（Vector / BM25 Retrieval）</h4>
                   <CodeBlock :code="store.formatJson(store.playgroundTrace.retrieval_result)" max-height="300px" />
-                  <h4 class="section-label">Rerank</h4>
+                  <h4 class="section-label">重排序（Rerank）</h4>
                   <CodeBlock :code="store.formatJson(store.playgroundTrace.rerank_result)" max-height="300px" />
-                  <h4 class="section-label">Citations</h4>
+                  <h4 class="section-label">引用来源（Citations）</h4>
                   <CodeBlock :code="store.formatJson(store.playgroundTrace.citation_result)" max-height="300px" />
                 </div>
               </el-tab-pane>
 
-              <el-tab-pane label="Raw">
+              <el-tab-pane label="原始数据（Raw）">
                 <CodeBlock :code="store.formatJson(store.playgroundTrace)" />
               </el-tab-pane>
             </el-tabs>
@@ -165,14 +165,14 @@ const paramLabels: Record<string, string> = {
     <aside class="panel playground-settings">
       <header class="panel-header">
         <div>
-          <h3>Retrieval Settings</h3>
+          <h3>检索设置（Retrieval Settings）</h3>
           <span class="sub">参数调整后立即生效</span>
         </div>
       </header>
       <div class="panel-body">
         <div class="form-section">
-          <h4>Knowledge Base</h4>
-          <p class="desc">查询目标知识库及其 Active Index</p>
+          <h4>知识库（Knowledge Base）</h4>
+          <p class="desc">查询目标知识库及其生效索引（Active Index）</p>
           <el-select
             v-model="store.selectedKnowledgeId"
             placeholder="选择知识库"
