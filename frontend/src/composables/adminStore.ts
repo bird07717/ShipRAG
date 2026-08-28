@@ -1,7 +1,7 @@
 import { reactive } from "vue";
 import { ElMessageBox, ElNotification } from "element-plus";
 
-import { adminApi } from "@/api/admin";
+import { adminApi, ApiRequestError } from "@/api/admin";
 import type {
   DocumentItem,
   DocumentProfileContext,
@@ -284,19 +284,22 @@ export const adminStore = reactive({
       if (result.status !== "fulfilled") continue;
       const [trackedTask, task] = result.value;
       this.syncPolledTask(task);
-      if (task.status !== "SUCCEEDED" && task.status !== "FAILED") continue;
+      if (!["SUCCEEDED", "FAILED", "CANCELLED"].includes(task.status)) continue;
       this.trackedTasks = this.trackedTasks.filter((item) => item.taskId !== trackedTask.taskId);
       writeTrackedTasks(this.trackedTasks);
       const succeeded = task.status === "SUCCEEDED";
+      const cancelled = task.status === "CANCELLED";
       const message = succeeded
         ? trackedTask.successMessage
-        : task.error_message || "后台任务执行失败，请在任务中心查看详情";
+        : cancelled
+          ? "生成任务已停止；已完成文档的待上线属性保留，可继续编辑或重新生成"
+          : task.error_message || "后台任务执行失败，请在任务中心查看详情";
       this.notice = message;
       ElNotification({
-        title: succeeded ? "任务已完成" : "任务执行失败",
+        title: cancelled ? "任务已停止" : succeeded ? "任务已完成" : "任务执行失败",
         message,
-        type: succeeded ? "success" : "error",
-        duration: succeeded ? 5_000 : 0,
+        type: cancelled ? "warning" : succeeded ? "success" : "error",
+        duration: succeeded || cancelled ? 5_000 : 0,
       });
       if (succeeded) {
         this.trackChainedProfileTask(task, trackedTask);
@@ -309,7 +312,7 @@ export const adminStore = reactive({
           this.documentDrawerOpen = false;
         }
         await this.loadKnowledgeBases();
-      } else if (succeeded && trackedTask.knowledgeId === this.selectedKnowledgeId) {
+      } else if ((succeeded || cancelled) && trackedTask.knowledgeId === this.selectedKnowledgeId) {
         await this.refreshOperationalState();
         await this.loadKnowledgeProfiles();
         const releaseId = this.taskReleaseId(task, trackedTask);
@@ -369,16 +372,22 @@ export const adminStore = reactive({
   },
 
   trackChainedProfileTask(task: TaskRecord, trackedTask: TrackedTask): void {
-    /* An orchestrated Profile rebuild returns an INDEX_BUILD task whose
-     * completion only means the refresh was *submitted*; the worker chains
-     * the PROFILE_REFRESH task id in metadata so tracking follows through. */
+    /* An INDEX_BUILD can enqueue either a legacy index-bound Profile refresh
+     * or the independent document-attribute generator.  Its completion only
+     * means that follow-up was submitted, so continue tracking it here. */
     const chainedId = task.metadata?.profile_task_id;
     if (typeof chainedId !== "string" || !chainedId) return;
     if (this.trackedTasks.some((item) => item.taskId === chainedId)) return;
+    const chainedType = task.metadata?.profile_task_type;
+    const taskType = typeof chainedType === "string" && chainedType
+      ? chainedType
+      : "PROFILE_REFRESH";
     this.trackedTasks.push({
       taskId: chainedId,
-      taskType: "PROFILE_REFRESH",
-      successMessage: "Profile 重建已完成，请前往 Profile Review 审核候选草稿",
+      taskType,
+      successMessage: taskType === "DOCUMENT_PROFILE_GENERATE"
+        ? "Profile 属性已生成，请前往 Profile Review 检查并上线"
+        : "Profile 重建已完成，请前往 Profile Review 审核候选草稿",
       knowledgeId: trackedTask.knowledgeId,
     });
     writeTrackedTasks(this.trackedTasks);
@@ -704,6 +713,17 @@ export const adminStore = reactive({
     });
   },
 
+  async cancelDocumentProfileTask(taskId: string): Promise<void> {
+    /* Cooperative stop: the backend flips task status to CANCELLED, the
+     * worker observes it between documents, and the next poll settles the
+     * UI.  In-flight documents finish; the rest are skipped. */
+    await this.runAction(`task-cancel:${taskId}`, async () => {
+      const task = await adminApi.cancelTask(taskId);
+      this.syncPolledTask(task);
+      this.notice = "已请求停止任务；正在处理的文档完成后即停止";
+    });
+  },
+
   async updateDocumentProfile(documentId: string, payload: DocumentProfileIntent): Promise<void> {
     if (!this.selectedKnowledgeId) return;
     await this.runAction(`document-profile-edit:${documentId}`, async () => {
@@ -746,11 +766,14 @@ export const adminStore = reactive({
       if (build.task_id) {
         this.trackTask(
           { task_id: build.task_id, task_type: "INDEX_BUILD", status: "QUEUED", replayed: build.coalesced },
-          { successMessage: "候选索引构建已完成，请在 Profile Review 审核", knowledgeId: this.selectedKnowledgeId },
+          {
+            successMessage: "RAG 索引构建已完成并自动生效；Profile 将在后台单独生成",
+            knowledgeId: this.selectedKnowledgeId,
+          },
         );
       }
       await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
-    }, "候选索引构建已提交，完成后请在 Profile Review 审核");
+    }, "RAG 索引构建已提交；完成后自动生效，Profile 将在后台单独生成");
   },
 
   async refreshProfileDrafts(indexId: string): Promise<void> {
@@ -881,9 +904,34 @@ export const adminStore = reactive({
       return;
     }
     await this.run(async () => {
-      await adminApi.deleteIndex(indexId);
+      let forced = false;
+      let released = 0;
+      try {
+        await adminApi.deleteIndex(indexId);
+      } catch (cause) {
+        const frozenCount =
+          cause instanceof ApiRequestError && cause.status === 409
+            ? Number(cause.details.frozen_conversation_count ?? 0)
+            : 0;
+        if (frozenCount <= 0) throw cause;
+        const confirmed = await ElMessageBox.confirm(
+          `该索引仍被 ${frozenCount} 个冻结会话引用。强制删除会解绑这些会话（焦点会话将重置，聊天历史保留），是否继续？`,
+          "强制删除索引",
+          { type: "warning", confirmButtonText: "强制删除", cancelButtonText: "取消" },
+        )
+          .then(() => true)
+          .catch(() => false);
+        if (!confirmed) return;
+        forced = true;
+        released = (await adminApi.deleteIndex(indexId, true)).released_conversation_count ?? 0;
+      }
       await this.loadKnowledgeDetails();
-    }, "索引已删除");
+      this.notice = forced
+        ? released
+          ? `索引已删除；解绑 ${released} 个冻结会话引用`
+          : "索引已删除"
+        : "索引已删除";
+    });
   },
 
   async askPlayground(): Promise<void> {
@@ -918,10 +966,15 @@ export const adminStore = reactive({
   },
 
   async saveModelConfig(modelId: string, payload: ModelConfigUpdatePayload): Promise<void> {
+    let successMessage = "模型配置已保存，下一轮对话生效";
     await this.run(async () => {
-      await adminApi.updateModel(modelId, payload);
+      const result = await adminApi.updateModel(modelId, payload);
       this.models = await adminApi.listModels();
-    }, "模型配置已保存，下一轮对话生效");
+      if (payload.rebuild_all_confirmed && result.rebuilds?.length) {
+        successMessage = `模型配置已保存；已对 ${result.rebuilds.length} 个知识库自动发起 RAG 全量重建`;
+      }
+    }, "");
+    if (!this.error) this.notice = successMessage;
   },
 
   async putModelApiKey(modelId: string, apiKey: string): Promise<void> {

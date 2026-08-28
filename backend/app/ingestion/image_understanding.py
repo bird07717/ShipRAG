@@ -9,6 +9,12 @@ import httpx
 
 from app.core.config import Settings
 from app.ingestion.models import ImageUnderstandingResult
+from app.rag.model_providers import (
+    environment_api_key,
+    environment_base_url,
+    get_provider_capability,
+    normalize_provider,
+)
 from app.rag.models import ModelSnapshot
 
 ImageCapability = Literal["OCR", "VISION"]
@@ -206,22 +212,30 @@ def create_ocr_provider(
     mode = settings.m4_ocr_provider
     if mode == "disabled":
         return DisabledImageUnderstandingProvider("OCR")
-    # DB model_config snapshot wins (admin-managed); env settings are the
-    # bootstrap fallback (same priority chain as chat-side providers).
-    api_key = (snapshot.api_key if snapshot else None) or settings.siliconflow_api_key
+    provider = normalize_provider(snapshot.provider) if snapshot else "siliconflow"
+    if get_provider_capability("OCR", provider) is None:
+        return UnavailableImageUnderstandingProvider(
+            "OCR", (snapshot.model_name if snapshot else None) or "unconfigured"
+        )
+    api_key = (snapshot.api_key if snapshot else None) or environment_api_key(
+        settings, "OCR", provider
+    )
     if mode == "fake" or (mode == "auto" and not settings.has_secret(api_key)):
         return FakeImageUnderstandingProvider("OCR")
     if not settings.has_secret(api_key):
         return UnavailableImageUnderstandingProvider(
             "OCR",
-            (snapshot.model_name if snapshot else None) or settings.siliconflow_ocr_model,
+            (snapshot.model_name if snapshot else None)
+            or settings.siliconflow_ocr_model,
         )
     assert api_key is not None
     return OpenAiCompatibleImageProvider(
         capability="OCR",
-        provider="siliconflow",
+        provider=provider,
         model_name=(snapshot.model_name if snapshot else None) or settings.siliconflow_ocr_model,
-        base_url=(snapshot.base_url if snapshot else None) or settings.siliconflow_base_url,
+        base_url=(snapshot.base_url if snapshot else None)
+        or environment_base_url(settings, "OCR", provider)
+        or settings.siliconflow_base_url,
         api_key=api_key.get_secret_value(),
         timeout_seconds=settings.m4_provider_timeout_seconds,
         max_tokens=settings.m4_ocr_max_tokens,
@@ -235,7 +249,14 @@ def create_vision_provider(
     mode = settings.m4_vision_provider
     if mode == "disabled":
         return DisabledImageUnderstandingProvider("VISION")
-    api_key = (snapshot.api_key if snapshot else None) or settings.zhipu_api_key
+    provider = normalize_provider(snapshot.provider) if snapshot else "zhipu"
+    if get_provider_capability("VISION", provider) is None:
+        return UnavailableImageUnderstandingProvider(
+            "VISION", (snapshot.model_name if snapshot else None) or "unconfigured"
+        )
+    api_key = (snapshot.api_key if snapshot else None) or environment_api_key(
+        settings, "VISION", provider
+    )
     if mode == "fake" or (mode == "auto" and not settings.has_secret(api_key)):
         return FakeImageUnderstandingProvider("VISION")
     if not settings.has_secret(api_key):
@@ -246,9 +267,11 @@ def create_vision_provider(
     assert api_key is not None
     return OpenAiCompatibleImageProvider(
         capability="VISION",
-        provider="zhipu",
+        provider=provider,
         model_name=(snapshot.model_name if snapshot else None) or settings.zhipu_vision_model,
-        base_url=(snapshot.base_url if snapshot else None) or settings.zhipu_base_url,
+        base_url=(snapshot.base_url if snapshot else None)
+        or environment_base_url(settings, "VISION", provider)
+        or settings.zhipu_base_url,
         api_key=api_key.get_secret_value(),
         timeout_seconds=settings.m4_provider_timeout_seconds,
         max_tokens=settings.m4_vision_max_tokens,

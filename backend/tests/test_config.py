@@ -35,6 +35,12 @@ def test_csv_settings_are_normalized() -> None:
     assert settings.postgres_extension_list == ("vector", "pg_search")
 
 
+def test_worker_name_is_configurable_for_independent_queue_workers() -> None:
+    settings = Settings(_env_file=None, rq_worker_name="rag-index-worker")
+
+    assert settings.rq_worker_name == "rag-index-worker"
+
+
 def test_chat_execution_mode_only_supports_formal_and_manual_rollback() -> None:
     assert Settings(_env_file=None).chat_execution_mode == "technical_support"
     assert (

@@ -24,9 +24,10 @@ class DocumentProfileRepository:
     async def list_for_knowledge(self, knowledge_id: UUID) -> dict[str, Any]:
         async with self.engine.connect() as connection:
             rows = (
-                await connection.execute(
-                    text(
-                        """
+                (
+                    await connection.execute(
+                        text(
+                            """
                         SELECT d.id AS document_id, d.display_name AS document_name, d.status AS document_status,
                                p.active_payload, p.pending_payload, p.pending_state,
                                p.pending_error_code, p.pending_error_message,
@@ -36,16 +37,21 @@ class DocumentProfileRepository:
                         WHERE d.kb_id = :knowledge_id AND d.status <> 'DELETED'
                         ORDER BY d.created_at DESC, d.id
                         """
-                    ),
-                    {"knowledge_id": knowledge_id},
+                        ),
+                        {"knowledge_id": knowledge_id},
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         profiles = [self._summary(dict(row)) for row in rows]
         return {
             "knowledge_id": str(knowledge_id),
             "online_count": sum(item["profile_status"] == "ONLINE" for item in profiles),
             "pending_count": sum(item["profile_status"] == "PENDING_ONLINE" for item in profiles),
-            "attention_count": sum(item["profile_status"] == "NEEDS_ATTENTION" for item in profiles),
+            "attention_count": sum(
+                item["profile_status"] == "NEEDS_ATTENTION" for item in profiles
+            ),
             "failed_count": sum(item["profile_status"] == "FAILED" for item in profiles),
             # Running tasks are supplied by the service because task rows do
             # not belong to a single attribute row in an all-document run.
@@ -56,9 +62,10 @@ class DocumentProfileRepository:
     async def document_context(self, document_id: UUID) -> dict[str, Any] | None:
         async with self.engine.connect() as connection:
             row = (
-                await connection.execute(
-                    text(
-                        """
+                (
+                    await connection.execute(
+                        text(
+                            """
                         SELECT d.id AS document_id, d.display_name AS document_name, d.status AS document_status,
                                p.active_payload, p.pending_payload, p.pending_state,
                                p.pending_error_code, p.pending_error_message,
@@ -67,10 +74,13 @@ class DocumentProfileRepository:
                         LEFT JOIN document_profile p ON p.document_id = d.id
                         WHERE d.id = :document_id
                         """
-                    ),
-                    {"document_id": document_id},
+                        ),
+                        {"document_id": document_id},
+                    )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         return self._summary(dict(row)) if row else None
 
     async def generation_documents(
@@ -83,28 +93,39 @@ class DocumentProfileRepository:
         """
         async with self.engine.connect() as connection:
             rows = (
-                await connection.execute(
-                    text(
-                        """
+                (
+                    await connection.execute(
+                        text(
+                            """
                         SELECT d.id AS document_id, d.kb_id, d.display_name, d.filename,
                                COALESCE(string_agg(
                                    CASE WHEN e.element_type IN ('TEXT', 'TABLE') THEN e.content ELSE '' END,
                                    E'\n\n' ORDER BY e.sequence_no
-                               ), '') AS content
+                               ), '') AS content,
+                               p.content_hash AS profile_content_hash,
+                               p.pending_source, p.pending_state,
+                               p.pending_error_code,
+                               (p.active_payload IS NOT NULL) AS has_active_profile
                         FROM document_source d
                         LEFT JOIN knowledge_base kb ON kb.id = d.kb_id
                         LEFT JOIN document_element e
                           ON e.document_id = d.id
                          AND e.index_id = COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                        LEFT JOIN document_profile p ON p.document_id = d.id
                         WHERE d.kb_id = :knowledge_id AND d.status = 'STORED'
                           AND (CAST(:document_id AS uuid) IS NULL OR d.id = CAST(:document_id AS uuid))
-                        GROUP BY d.id, d.kb_id, d.display_name, d.filename
+                        GROUP BY d.id, d.kb_id, d.display_name, d.filename,
+                                 p.content_hash, p.pending_source, p.pending_state,
+                                 p.pending_error_code, p.active_payload
                         ORDER BY d.created_at, d.id
                         """
-                    ),
-                    {"knowledge_id": knowledge_id, "document_id": document_id},
+                        ),
+                        {"knowledge_id": knowledge_id, "document_id": document_id},
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         return [dict(row) for row in rows]
 
     async def upsert_pending(
@@ -118,6 +139,7 @@ class DocumentProfileRepository:
         state: str,
         error_code: str | None = None,
         error_message: str | None = None,
+        content_hash: str | None = None,
     ) -> dict[str, Any]:
         async with self.engine.begin() as connection:
             await self._assert_live_document(connection, knowledge_id, document_id)
@@ -126,10 +148,11 @@ class DocumentProfileRepository:
                     """
                     INSERT INTO document_profile (
                         document_id, kb_id, pending_payload, pending_source, pending_confidence,
-                        pending_state, pending_error_code, pending_error_message, pending_updated_at
+                        pending_state, pending_error_code, pending_error_message, pending_updated_at,
+                        content_hash
                     ) VALUES (
                         :document_id, :knowledge_id, CAST(:payload AS jsonb), :source, :confidence,
-                        :state, :error_code, :error_message, now()
+                        :state, :error_code, :error_message, now(), :content_hash
                     )
                     ON CONFLICT (document_id) DO UPDATE SET
                         pending_payload = EXCLUDED.pending_payload,
@@ -138,7 +161,8 @@ class DocumentProfileRepository:
                         pending_state = EXCLUDED.pending_state,
                         pending_error_code = EXCLUDED.pending_error_code,
                         pending_error_message = EXCLUDED.pending_error_message,
-                        pending_updated_at = now(), updated_at = now()
+                        pending_updated_at = now(), updated_at = now(),
+                        content_hash = COALESCE(EXCLUDED.content_hash, document_profile.content_hash)
                     """
                 ),
                 {
@@ -150,6 +174,7 @@ class DocumentProfileRepository:
                     "state": state,
                     "error_code": error_code,
                     "error_message": error_message,
+                    "content_hash": content_hash,
                 },
             )
         result = await self.document_context(document_id)
@@ -174,7 +199,9 @@ class DocumentProfileRepository:
             )
         return result.rowcount or 0
 
-    async def pending_rows(self, knowledge_id: UUID, *, connection: AsyncConnection | None = None) -> list[dict[str, Any]]:
+    async def pending_rows(
+        self, knowledge_id: UUID, *, connection: AsyncConnection | None = None
+    ) -> list[dict[str, Any]]:
         query = text(
             """
             SELECT p.*, d.display_name AS document_name, d.status AS document_status
@@ -185,10 +212,16 @@ class DocumentProfileRepository:
             """
         )
         if connection is not None:
-            rows = (await connection.execute(query, {"knowledge_id": knowledge_id})).mappings().all()
+            rows = (
+                (await connection.execute(query, {"knowledge_id": knowledge_id})).mappings().all()
+            )
         else:
             async with self.engine.connect() as read_connection:
-                rows = (await read_connection.execute(query, {"knowledge_id": knowledge_id})).mappings().all()
+                rows = (
+                    (await read_connection.execute(query, {"knowledge_id": knowledge_id}))
+                    .mappings()
+                    .all()
+                )
         return [dict(row) for row in rows]
 
     async def publish(self, knowledge_id: UUID, report: dict[str, Any]) -> dict[str, Any]:
@@ -196,20 +229,25 @@ class DocumentProfileRepository:
             # Serializes a KB publish and locks its staged attributes.  No
             # active matcher row can observe a partially published batch.
             await connection.execute(
-                text("SELECT id FROM knowledge_base WHERE id = :id FOR UPDATE"), {"id": knowledge_id}
+                text("SELECT id FROM knowledge_base WHERE id = :id FOR UPDATE"),
+                {"id": knowledge_id},
             )
             rows = (
-                await connection.execute(
-                    text(
-                        """
+                (
+                    await connection.execute(
+                        text(
+                            """
                         SELECT * FROM document_profile
                         WHERE kb_id = :knowledge_id AND pending_state = 'PENDING_ONLINE'
                         FOR UPDATE
                         """
-                    ),
-                    {"knowledge_id": knowledge_id},
+                        ),
+                        {"knowledge_id": knowledge_id},
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             for row in rows:
                 document_id = UUID(str(row["document_id"]))
                 payload = dict(row["pending_payload"] or {})
@@ -247,20 +285,22 @@ class DocumentProfileRepository:
         return {"knowledge_id": str(knowledge_id), "published_count": len(rows)}
 
     async def _replace_match_terms(
-        self, connection: AsyncConnection, knowledge_id: UUID, document_id: UUID, payload: dict[str, Any]
+        self,
+        connection: AsyncConnection,
+        knowledge_id: UUID,
+        document_id: UUID,
+        payload: dict[str, Any],
     ) -> None:
         await connection.execute(
             text("DELETE FROM document_profile_match_term WHERE document_id = :document_id"),
             {"document_id": document_id},
         )
         for intent in self.intents(payload):
-            intent_key = str(intent["problem_code"])
+            intent_key = str(intent.get("problem_code") or document_id)
             terms: list[tuple[str, str, float]] = [
                 ("CANONICAL_QUESTION", str(intent["canonical_question"]), 1.0),
-                ("PROBLEM_CODE", intent_key, 1.0),
             ]
             terms.extend(("ALIAS", value, 0.95) for value in intent.get("aliases", []))
-            terms.extend(("KEYWORD", value, 0.6) for value in intent.get("keywords", []))
             for term_type, value, weight in terms:
                 normalized = self.normalize(value)
                 if not normalized:
@@ -274,8 +314,14 @@ class DocumentProfileRepository:
                         ON CONFLICT DO NOTHING
                         """
                     ),
-                    {"document_id": document_id, "knowledge_id": knowledge_id, "intent_key": intent_key,
-                     "term_type": term_type, "term": normalized, "weight": weight},
+                    {
+                        "document_id": document_id,
+                        "knowledge_id": knowledge_id,
+                        "intent_key": intent_key,
+                        "term_type": term_type,
+                        "term": normalized,
+                        "weight": weight,
+                    },
                 )
 
     @staticmethod
@@ -283,7 +329,9 @@ class DocumentProfileRepository:
         connection: AsyncConnection, knowledge_id: UUID, document_id: UUID
     ) -> None:
         row = await connection.scalar(
-            text("SELECT 1 FROM document_source WHERE id = :document_id AND kb_id = :knowledge_id AND status <> 'DELETED'"),
+            text(
+                "SELECT 1 FROM document_source WHERE id = :document_id AND kb_id = :knowledge_id AND status <> 'DELETED'"
+            ),
             {"document_id": document_id, "knowledge_id": knowledge_id},
         )
         if row is None:

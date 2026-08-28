@@ -9,6 +9,12 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from app.core.config import Settings
+from app.rag.model_providers import (
+    environment_api_key,
+    environment_base_url,
+    get_provider_capability,
+    normalize_provider,
+)
 from app.rag.models import ModelSnapshot
 from app.rag.prompt import RAG_SYSTEM_GUARD
 
@@ -151,33 +157,79 @@ class FakeLlmProvider:
 
 
 class ZhipuLlmProvider:
+    """OpenAI-compatible chat provider for the supported LLM vendors.
+
+    The class name is retained for backwards-compatible imports.  Provider
+    selection, credentials and endpoint fallback all come from the snapshot's
+    provider value.
+    """
+    # Utility calls cap their growth here: reasoning budget retries double a
+    # few times, but a prompt that needs more than this is a prompt problem.
+    _THINKING_MAX_TOKENS_CEILING = 16_384
+
     def __init__(
         self,
         settings: Settings,
         snapshot: ModelSnapshot,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        # DB-stored key (decrypted per turn) wins; the env setting is the
-        # bootstrap fallback (ADR-0005 priority chain).
-        api_key = snapshot.api_key or settings.zhipu_api_key
-        if not settings.has_secret(api_key):
-            raise LlmError("MODEL_NOT_CONFIGURED", "智谱 LLM 未配置", retryable=False)
-        if snapshot.provider.lower() != "zhipu":
+        self.provider = normalize_provider(snapshot.provider)
+        capability = get_provider_capability("LLM", self.provider)
+        if capability is None:
             raise LlmError("MODEL_NOT_CONFIGURED", "LLM Provider 不受支持", retryable=False)
+        # DB-stored key (decrypted per turn) wins; the provider's environment
+        # key is the bootstrap fallback.
+        api_key = snapshot.api_key or environment_api_key(settings, "LLM", self.provider)
+        if not settings.has_secret(api_key):
+            raise LlmError("MODEL_NOT_CONFIGURED", f"{self.provider} LLM 未配置", retryable=False)
         assert api_key is not None
         self.model_name = snapshot.model_name
         self.parameters = snapshot.parameters
         self.settings = settings
+        self._supports_json_mode = capability.supports_json_mode
         self.usage: dict[str, Any] = {}
+        # Set after the upstream rejects a thinking-control payload with
+        # "该模型始终思考" (HTTP 400, code 1210).  Always-thinking models
+        # (e.g. GLM-5.3-Flash) must not receive a thinking key at all.
+        self._thinking_unsupported = False
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
             # DB model_config.base_url wins (admin-adjustable per turn);
-            # the env setting is the fallback for legacy rows.
-            base_url=snapshot.base_url or settings.zhipu_base_url,
+            # the selected provider's endpoint is the fallback for legacy rows.
+            base_url=snapshot.base_url
+            or environment_base_url(settings, "LLM", self.provider)
+            or settings.zhipu_base_url,
             headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
             timeout=httpx.Timeout(settings.m3_provider_timeout_seconds),
             follow_redirects=False,
         )
+
+    @staticmethod
+    def _thinking_rejection(response: httpx.Response) -> bool:
+        if response.status_code != 400:
+            return False
+        body = response.text
+        return '"1210"' in body or "不支持关闭思考" in body or "始终思考" in body
+
+    @staticmethod
+    async def _stream_thinking_rejection(response: httpx.Response) -> bool:
+        """Inspect a streaming 400 only after consuming its response body.
+
+        ``httpx.Response.text`` is unavailable inside ``client.stream`` until
+        the response has been read. Accessing it first converted a normal
+        upstream thinking-control rejection into ``ResponseNotRead`` and then
+        an unrelated INTERNAL_ERROR in the RAG answer stage.
+        """
+        if response.status_code != 400:
+            return False
+        body = (await response.aread()).decode(errors="replace")
+        return '"1210"' in body or "不支持关闭思考" in body or "始终思考" in body
+
+    def _apply_thinking(self, payload: dict[str, Any], thinking: dict[str, Any]) -> None:
+        if self.provider == "zhipu":
+            payload["thinking"] = thinking
+        elif self.provider == "siliconflow":
+            payload["enable_thinking"] = thinking.get("type") == "enabled"
 
     def _payload(self, prompt: str) -> dict[str, Any]:
         max_tokens = int(self.parameters.get("max_tokens", self.settings.m3_llm_max_tokens))
@@ -193,11 +245,8 @@ class ZhipuLlmProvider:
             "temperature": temperature,
         }
         thinking = self.parameters.get("thinking")
-        if thinking is not None:
-            # DB model_config is authoritative. Omitting the key would fall
-            # back to the provider default (GLM-5.2: thinking enabled), which
-            # silently burns the max_tokens budget on reasoning.
-            payload["thinking"] = thinking
+        if isinstance(thinking, dict) and not self._thinking_unsupported:
+            self._apply_thinking(payload, thinking)
         return payload
 
     async def complete(
@@ -236,55 +285,29 @@ class ZhipuLlmProvider:
             "stream": False,
             "max_tokens": max_tokens,
             "temperature": temperature,
+        }
+        if not self._thinking_unsupported:
             # complete() serves short utility calls (e.g. query rewriting);
             # reasoning would only burn the token and latency budgets.
-            "thinking": {"type": "disabled"},
-        }
+            # Always-thinking models reject the key with HTTP 400/1210; the
+            # retry below strips it once and remembers for this provider.
+            self._apply_thinking(payload, {"type": "disabled"})
         if response_format is not None:
             payload["response_format"] = response_format
+        request_timeout = (
+            httpx.Timeout(timeout_seconds) if timeout_seconds is not None else None
+        )
         try:
-            response = await self.client.post(
-                "chat/completions",
-                json=payload,
-                timeout=httpx.Timeout(timeout_seconds) if timeout_seconds is not None else None,
-            )
-            if response.status_code == 429 or response.status_code >= 500:
-                raise LlmError(
-                    "UPSTREAM_UNAVAILABLE",
-                    "模型服务暂时不可用",
-                    retryable=True,
-                    detail=f"HTTP {response.status_code}",
+            effective_max_tokens = max_tokens
+            for _attempt in range(3):
+                payload["max_tokens"] = effective_max_tokens
+                response = await self.client.post(
+                    "chat/completions", json=payload, timeout=request_timeout
                 )
-            if response.is_error:
-                raise LlmError(
-                    "UPSTREAM_UNAVAILABLE",
-                    "模型服务请求失败",
-                    retryable=False,
-                    detail=f"HTTP {response.status_code}",
-                )
-            data = response.json()
-            if isinstance(data.get("usage"), dict):
-                self.usage = dict(data["usage"])
-            choices = data.get("choices")
-            if not isinstance(choices, list) or not choices:
-                raise LlmError("UPSTREAM_PROTOCOL_ERROR", "模型响应格式异常", retryable=False)
-            message = choices[0].get("message") if isinstance(choices[0], dict) else None
-            content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(content, str) or not content.strip():
-                raise LlmError("UPSTREAM_PROTOCOL_ERROR", "模型响应为空", retryable=False)
-            return content.strip()
-        except LlmError:
-            raise
-        except httpx.TimeoutException as exc:
-            raise LlmError("UPSTREAM_TIMEOUT", "模型服务响应超时", retryable=True) from exc
-        except httpx.RequestError as exc:
-            raise LlmError("UPSTREAM_UNAVAILABLE", "模型服务暂时不可用", retryable=True) from exc
-
-    async def stream(self, prompt: str) -> AsyncIterator[str]:
-        try:
-            async with self.client.stream(
-                "POST", "chat/completions", json=self._payload(prompt)
-            ) as response:
+                if self.provider == "zhipu" and self._thinking_rejection(response):
+                    self._thinking_unsupported = True
+                    payload.pop("thinking", None)
+                    continue
                 if response.status_code == 429 or response.status_code >= 500:
                     raise LlmError(
                         "UPSTREAM_UNAVAILABLE",
@@ -299,29 +322,102 @@ class ZhipuLlmProvider:
                         retryable=False,
                         detail=f"HTTP {response.status_code}",
                     )
-                async for line in response.aiter_lines():
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith(":") or not stripped.startswith("data:"):
+                data = response.json()
+                if isinstance(data.get("usage"), dict):
+                    self.usage = dict(data["usage"])
+                choices = data.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    raise LlmError("UPSTREAM_PROTOCOL_ERROR", "模型响应格式异常", retryable=False)
+                message = choices[0].get("message") if isinstance(choices[0], dict) else None
+                content = message.get("content") if isinstance(message, dict) else None
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+                # Always-thinking models spend completion tokens on reasoning
+                # before any visible content: a length-finish with reasoning
+                # means the budget, not the model, ran out.  Grow it and retry.
+                finish_reason = (
+                    choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
+                )
+                has_reasoning = isinstance(message, dict) and bool(message.get("reasoning_content"))
+                if (
+                    finish_reason == "length"
+                    and has_reasoning
+                    and effective_max_tokens < self._THINKING_MAX_TOKENS_CEILING
+                ):
+                    effective_max_tokens = min(
+                        self._THINKING_MAX_TOKENS_CEILING, effective_max_tokens * 4
+                    )
+                    continue
+                raise LlmError("UPSTREAM_PROTOCOL_ERROR", "模型响应为空", retryable=False)
+            raise LlmError("UPSTREAM_PROTOCOL_ERROR", "模型响应为空", retryable=False)
+        except LlmError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise LlmError("UPSTREAM_TIMEOUT", "模型服务响应超时", retryable=True) from exc
+        except httpx.RequestError as exc:
+            raise LlmError("UPSTREAM_UNAVAILABLE", "模型服务暂时不可用", retryable=True) from exc
+
+    async def stream(self, prompt: str) -> AsyncIterator[str]:
+        payload = self._payload(prompt)
+        try:
+            for _attempt in range(2):
+                async with self.client.stream(
+                    "POST", "chat/completions", json=payload
+                ) as response:
+                    if self.provider == "zhipu" and await self._stream_thinking_rejection(response):
+                        # Always-thinking model: drop the key, retry once and
+                        # remember so later calls skip the doomed round trip.
+                        self._thinking_unsupported = True
+                        payload.pop("thinking", None)
                         continue
-                    data = stripped[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(data)
-                    except json.JSONDecodeError as exc:
+                    if response.status_code == 429 or response.status_code >= 500:
                         raise LlmError(
-                            "UPSTREAM_PROTOCOL_ERROR", "模型流响应格式异常", retryable=False
-                        ) from exc
-                    if isinstance(event.get("usage"), dict):
-                        self.usage = dict(event["usage"])
-                    choices = event.get("choices")
-                    if not isinstance(choices, list) or not choices:
-                        continue
-                    choice = choices[0]
-                    delta = choice.get("delta") if isinstance(choice, dict) else None
-                    content = delta.get("content") if isinstance(delta, dict) else None
-                    if isinstance(content, str) and content:
-                        yield content
+                            "UPSTREAM_UNAVAILABLE",
+                            "模型服务暂时不可用",
+                            retryable=True,
+                            detail=f"HTTP {response.status_code}",
+                        )
+                    if response.is_error:
+                        raise LlmError(
+                            "UPSTREAM_UNAVAILABLE",
+                            "模型服务请求失败",
+                            retryable=False,
+                            detail=f"HTTP {response.status_code}",
+                        )
+                    async for line in response.aiter_lines():
+                        stripped = line.strip()
+                        if (
+                            not stripped
+                            or stripped.startswith(":")
+                            or not stripped.startswith("data:")
+                        ):
+                            continue
+                        data = stripped[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(data)
+                        except json.JSONDecodeError as exc:
+                            raise LlmError(
+                                "UPSTREAM_PROTOCOL_ERROR", "模型流响应格式异常", retryable=False
+                            ) from exc
+                        if isinstance(event.get("usage"), dict):
+                            self.usage = dict(event["usage"])
+                        choices = event.get("choices")
+                        if not isinstance(choices, list) or not choices:
+                            continue
+                        choice = choices[0]
+                        delta = choice.get("delta") if isinstance(choice, dict) else None
+                        content = delta.get("content") if isinstance(delta, dict) else None
+                        if isinstance(content, str) and content:
+                            yield content
+                    return
+            raise LlmError(
+                "UPSTREAM_UNAVAILABLE",
+                "模型服务请求失败",
+                retryable=False,
+                detail="thinking 控制被上游拒绝",
+            )
         except LlmError:
             raise
         except httpx.TimeoutException as exc:
@@ -351,7 +447,7 @@ class ZhipuLlmProvider:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 timeout_seconds=timeout_seconds,
-                response_format={"type": "json_object"},
+                response_format={"type": "json_object"} if self._supports_json_mode else None,
             )
             self.usage["structured_attempts"] = attempt + 1
             try:
@@ -419,9 +515,10 @@ async def _complete_structured(
 
 def create_llm_provider(settings: Settings, snapshot: ModelSnapshot) -> LlmProvider:
     mode = settings.m3_llm_provider
-    has_any_key = settings.has_secret(settings.zhipu_api_key) or settings.has_secret(
-        snapshot.api_key
-    )
+    provider = normalize_provider(snapshot.provider)
+    has_any_key = settings.has_secret(
+        environment_api_key(settings, "LLM", provider)
+    ) or settings.has_secret(snapshot.api_key)
     if mode == "fake":
         if settings.app_env in {"staging", "production"}:
             raise LlmError(

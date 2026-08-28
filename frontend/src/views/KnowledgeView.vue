@@ -207,7 +207,7 @@ function isDeleting(kb: KnowledgeBase): boolean {
     </el-drawer>
 
     <!-- Knowledge base detail drawer -->
-    <el-drawer v-model="detailOpen" title="知识库详情" size="520px">
+    <el-drawer v-model="detailOpen" title="知识库详情" size="560px">
       <template v-if="detailTarget">
         <div class="detail-head">
           <div class="cell-primary">
@@ -327,9 +327,16 @@ function isDeleting(kb: KnowledgeBase): boolean {
 
 .drawer-footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 20px;
+}
+
+/* Wrap instead of overflowing left when the action row exceeds the drawer
+ * width; the spacer keeps the destructive action separated when it fits. */
+.drawer-footer .spacer {
+  flex: 1;
 }
 
 .detail-head {

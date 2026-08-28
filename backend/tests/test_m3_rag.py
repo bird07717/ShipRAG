@@ -483,3 +483,165 @@ def test_sse_event_uses_utf8_json_frame() -> None:
     assert sse_event("message", {"delta": "中文"}).decode() == (
         'event: message\ndata: {"delta":"中文"}\n\n'
     )
+
+
+def test_query_embedding_prefers_matching_db_snapshot_over_env() -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        m2_embedding_provider="siliconflow",
+        siliconflow_api_key=SecretStr("sk-test"),
+    )
+    env_only = RagService(cast(RagRepository, object()), settings)
+    turn = _turn()
+    turn = replace(
+        turn,
+        embedding=ModelSnapshot("siliconflow", "embedding-model", {}),
+    )
+    assert env_only._select_query_embedding_provider(turn).model_name == "embedding-model"
+
+
+def test_query_embedding_falls_back_to_env_when_db_snapshot_diverged() -> None:
+    # Admin changed the DB config but the fleet rebuild has not switched the
+    # active index yet: the env provider still matches the frozen index.
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        m2_embedding_provider="siliconflow",
+        siliconflow_embedding_model="old-index-model",
+        siliconflow_api_key=SecretStr("sk-test"),
+    )
+    service = RagService(cast(RagRepository, object()), settings)
+    turn = replace(
+        _turn(),
+        embedding_model_name="old-index-model",
+        embedding=ModelSnapshot("siliconflow", "newly-configured-model", {}),
+    )
+    provider = service._select_query_embedding_provider(turn)
+    assert provider.model_name == "old-index-model"
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_without_thinking_on_always_thinking_model() -> None:
+    """Always-thinking models (e.g. GLM-5.3-Flash) reject thinking control
+    with HTTP 400/1210; the provider must strip the key, retry once and
+    remember for subsequent calls."""
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload)
+        if "thinking" in payload:
+            return httpx.Response(
+                400,
+                json={"error": {"code": "1210", "message": "该模型始终思考，不支持关闭思考"}},
+            )
+        body = (
+            'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'
+            "data: [DONE]\n\n"
+        )
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+
+    settings = Settings(
+        _env_file=None, app_env="test", zhipu_api_key=SecretStr("not-a-real-key")
+    )
+    snapshot = ModelSnapshot(
+        "zhipu", "glm-always-thinking", {"thinking": {"type": "disabled"}}
+    )
+    async with httpx.AsyncClient(
+        base_url=settings.zhipu_base_url, transport=httpx.MockTransport(handler)
+    ) as client:
+        provider = ZhipuLlmProvider(settings, snapshot, client)
+        chunks = [chunk async for chunk in provider.stream("prompt")]
+        # The learned flag keeps later calls from repeating the doomed round trip.
+        chunks += [chunk async for chunk in provider.stream("prompt")]
+
+    assert chunks == ["OK", "OK"]
+    assert "thinking" in calls[0]
+    assert "thinking" not in calls[1]
+    assert len(calls) == 3  # retry + second call goes straight through
+    assert "thinking" not in calls[2]
+
+
+@pytest.mark.asyncio
+async def test_stream_thinking_rejection_reads_unconsumed_response_body() -> None:
+    """A streaming 400 must not access response.text before aread()."""
+
+    class _BodyStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield '{"error":{"code":"1210","message":"该模型始终思考"}}'.encode()
+
+        async def aclose(self) -> None:
+            return None
+
+    response = httpx.Response(400, stream=_BodyStream())
+
+    assert await ZhipuLlmProvider._stream_thinking_rejection(response)
+    assert response.is_stream_consumed
+
+
+@pytest.mark.asyncio
+async def test_complete_strips_thinking_on_always_thinking_model() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload)
+        if "thinking" in payload:
+            return httpx.Response(
+                400,
+                json={"error": {"code": "1210", "message": "该模型始终思考，不支持关闭思考"}},
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    settings = Settings(
+        _env_file=None, app_env="test", zhipu_api_key=SecretStr("not-a-real-key")
+    )
+    snapshot = ModelSnapshot("zhipu", "glm-always-thinking", {})
+    async with httpx.AsyncClient(
+        base_url=settings.zhipu_base_url, transport=httpx.MockTransport(handler)
+    ) as client:
+        provider = ZhipuLlmProvider(settings, snapshot, client)
+        result = await provider.complete("prompt", system="s", max_tokens=8, temperature=0.1)
+
+    assert result == "OK"
+    assert "thinking" in calls[0]  # utility calls disable thinking by default
+    assert "thinking" not in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_complete_grows_token_budget_when_reasoning_exhausts_it() -> None:
+    """Always-thinking models spend completion tokens on reasoning first; a
+    length-finish with empty content must grow max_tokens and retry."""
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(int(payload["max_tokens"]))
+        if payload["max_tokens"] <= 1_024:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {"content": "", "reasoning_content": "thinking..."},
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    settings = Settings(
+        _env_file=None, app_env="test", zhipu_api_key=SecretStr("not-a-real-key")
+    )
+    snapshot = ModelSnapshot("zhipu", "glm-always-thinking", {})
+    async with httpx.AsyncClient(
+        base_url=settings.zhipu_base_url, transport=httpx.MockTransport(handler)
+    ) as client:
+        provider = ZhipuLlmProvider(settings, snapshot, client)
+        result = await provider.complete("prompt", system="s", max_tokens=1_024, temperature=0.1)
+
+    assert result == "OK"
+    assert calls[0] == 1_024
+    assert calls[1] == 4_096  # budget grew 4x after reasoning exhausted it

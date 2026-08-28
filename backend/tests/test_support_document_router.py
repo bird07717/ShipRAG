@@ -228,4 +228,4 @@ async def test_document_router_reranks_title_and_profile_metadata_then_delivers(
     assert route.trace["rerank"]["status"] == "PASSED"
     assert "文档标题：PDC 固件升级指南" in reranker.documents[0]
     assert "标准问题：如何使用U盘升级PDC" in reranker.documents[0]
-    assert "症状：升级失败" in reranker.documents[0]
+    assert "路由摘要：PDC U盘固件升级操作" in reranker.documents[0]

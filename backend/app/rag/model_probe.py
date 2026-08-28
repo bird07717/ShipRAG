@@ -15,32 +15,21 @@ from pydantic import SecretStr
 
 from app.core.config import Settings
 from app.m0.fixtures import image_data_url
-
-_ENV_KEY_FOR: dict[str, tuple[str, str]] = {
-    # model_type -> (settings base_url attr, settings api_key attr)
-    "LLM": ("zhipu_base_url", "zhipu_api_key"),
-    "VISION": ("zhipu_base_url", "zhipu_api_key"),
-    "EMBEDDING": ("siliconflow_base_url", "siliconflow_api_key"),
-    "RERANK": ("siliconflow_base_url", "siliconflow_api_key"),
-    "OCR": ("siliconflow_base_url", "siliconflow_api_key"),
-}
-
-_SUPPORTED_PROVIDERS: dict[str, set[str]] = {
-    "LLM": {"zhipu"},
-    "VISION": {"zhipu"},
-    "EMBEDDING": {"siliconflow"},
-    "RERANK": {"siliconflow"},
-    "OCR": {"siliconflow"},
-}
+from app.rag.model_providers import (
+    environment_api_key,
+    environment_base_url,
+    is_supported_provider,
+    normalize_provider,
+    supported_providers,
+)
 
 
 def _effective_settings(
     settings: Settings, model_type: str, provider: str
 ) -> tuple[str, SecretStr | None]:
-    base_url_attr, key_attr = _ENV_KEY_FOR[model_type]
     return (
-        getattr(settings, base_url_attr),
-        getattr(settings, key_attr) if provider in _SUPPORTED_PROVIDERS[model_type] else None,
+        environment_base_url(settings, model_type, provider) or "",
+        environment_api_key(settings, model_type, provider),
     )
 
 
@@ -135,11 +124,14 @@ async def probe_model(
         "detail": "",
         "dimension": None,
     }
-    if model_type not in _ENV_KEY_FOR:
+    if not supported_providers(model_type):
         result["detail"] = f"不支持的模型类型：{model_type}"
         return result
-    if provider not in _SUPPORTED_PROVIDERS[model_type]:
-        result["detail"] = f"Provider 不受支持：{provider}"
+    provider = normalize_provider(provider)
+    result["provider"] = provider
+    if not is_supported_provider(model_type, provider):
+        supported = "、".join(supported_providers(model_type))
+        result["detail"] = f"Provider 不受支持：{provider}（支持：{supported}）"
         return result
 
     env_base_url, env_key = _effective_settings(settings, model_type, provider)

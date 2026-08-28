@@ -338,8 +338,8 @@ const documentProfileSummary = {
       document_name: "操作手册",
       document_status: "STORED",
       profile_status: "PENDING_ONLINE" as const,
-      active_profile: { intents: [{ problem_code: "PDC_UPGRADE", canonical_question: "如何升级 PDC？", aliases: [], keywords: [] }] },
-      pending_profile: { intents: [{ problem_code: "PDC_UPGRADE", canonical_question: "如何升级 PDC？", aliases: ["PDC 怎么升级"], keywords: ["升级"] }] },
+      active_profile: { intents: [{ problem_code: "PDC_UPGRADE", canonical_question: "如何升级 PDC？", aliases: [], keywords: [], routing_summary: "PDC 升级" }] },
+      pending_profile: { intents: [{ problem_code: "PDC_UPGRADE", canonical_question: "如何升级 PDC？", aliases: ["PDC 怎么升级"], keywords: ["升级"], routing_summary: "PDC 升级" }] },
       pending_state: "PENDING_ONLINE",
       pending_error_code: null,
       pending_error_message: null,
@@ -501,7 +501,7 @@ describe("view interactions", () => {
 
     const text = wrapper.text();
     expect(text).toContain("已发布 Profile");
-    expect(text).toContain("PDC_UPGRADE");
+    expect(text).not.toContain("PDC_UPGRADE");
     expect(text).toContain("PDC 怎么升级");
     expect(text).toContain("已发布 · 影响线上 Support");
     expect(text).toContain("候选草稿 · 未发布");
@@ -525,7 +525,7 @@ describe("view interactions", () => {
     const wrapper = await mountView("support-review");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Profile 是文档的高置信快速命中属性");
+    expect(wrapper.text()).toContain("Profile 仅保留标准问题、Alias 和路由描述");
     expect(wrapper.text()).toContain("操作手册");
     expect(wrapper.text()).toContain("如何升级 PDC？");
     expect(wrapper.text()).toContain("待上线");

@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 
 from app.api.chat import router as chat_router
+from app.api.conversations import router as conversations_router
 from app.api.dependencies import get_app_settings, require_service_token
 from app.api.ingestion import router as ingestion_router
 from app.api.logs import router as logs_router
@@ -16,6 +17,7 @@ from app.core.config import Settings
 
 router = APIRouter(dependencies=[Depends(require_service_token)])
 router.include_router(chat_router)
+router.include_router(conversations_router)
 router.include_router(ingestion_router)
 router.include_router(logs_router)
 router.include_router(metrics_router)

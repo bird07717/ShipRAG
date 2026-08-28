@@ -98,26 +98,14 @@ class DocumentProfileContextResponse(BaseModel):
 
 
 class DocumentProfilePatchRequest(BaseModel):
-    """A one-intent edit submitted from Profile Review.
+    """The three user-maintained fields of a document Profile."""
 
-    The stored payload supports multiple intents, while the first UI release
-    keeps the existing familiar single-Profile editor.  This prevents an
-    unnecessary workflow change and remains forward compatible.
-    """
-
-    problem_code: str = Field(min_length=1, max_length=100)
     canonical_question: str = Field(min_length=1, max_length=500)
-    aliases: list[str] = Field(default_factory=list, max_length=10)
-    keywords: list[str] = Field(default_factory=list, max_length=12)
-    product_name: str | None = Field(default=None, max_length=200)
-    model_names: list[str] = Field(default_factory=list, max_length=10)
-    task_type: str | None = Field(default=None, max_length=50)
-    routing_summary: str = Field(default="", max_length=1_000)
-    symptoms: list[str] = Field(default_factory=list, max_length=12)
-    exclusions: list[str] = Field(default_factory=list, max_length=8)
+    aliases: list[str] = Field(default_factory=list, max_length=5)
+    routing_summary: str = Field(default="", max_length=500)
     enabled: bool = True
 
-    @field_validator("aliases", "keywords", "model_names", "symptoms", "exclusions")
+    @field_validator("aliases")
     @classmethod
     def non_empty_items(cls, value: list[str]) -> list[str]:
         if any(not item.strip() for item in value):
@@ -199,6 +187,7 @@ class GarbageCollectionResponse(BaseModel):
     skipped_count: int = 0
     purged_conversation_ids: list[str] = []
     purged_conversation_count: int = 0
+    released_conversation_count: int = 0
 
 
 class DocumentUploadResponse(BaseModel):
@@ -351,6 +340,46 @@ class WelcomeResponse(BaseModel):
     knowledge_base: dict[str, Any]
     message: str
     suggestions: list[str]
+
+
+class ConversationListItem(BaseModel):
+    id: UUID
+    knowledge_id: UUID
+    user_id: str | None = None
+    title: str | None = None
+    message_count: int
+    last_execution_engine: str | None = None
+    conversation_mode: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationListResponse(BaseModel):
+    items: list[ConversationListItem]
+
+
+class ConversationDetailResponse(ConversationListItem):
+    rag_index_id: UUID | None = None
+    support_index_id: UUID | None = None
+    focus_index_id: UUID | None = None
+
+
+class ConversationMessageItem(BaseModel):
+    id: UUID
+    role: str
+    content: str
+    status: str
+    sources: list[dict[str, Any]] = []
+    created_at: datetime
+
+
+class ConversationMessageListResponse(BaseModel):
+    items: list[ConversationMessageItem]
+
+
+class ConversationDeleteResponse(BaseModel):
+    conversation_id: UUID
+    deleted: bool
 
 
 class RuntimePolicyUpdate(BaseModel):
@@ -662,8 +691,12 @@ class ModelConfigResponse(BaseModel):
     enabled: bool
     api_key_configured: bool
     api_key_source: Literal["DATABASE", "ENV"] | None = None
+    supported_providers: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+    # Fleet rebuilds that were auto-triggered by an EMBEDDING identity
+    # change (absent for every other update).
+    rebuilds: list[dict[str, Any]] | None = None
 
 
 class ApiKeyUpdate(BaseModel):
@@ -707,11 +740,35 @@ def _validate_model_parameters(parameters: dict[str, Any]) -> None:
         raise ValueError('parameters.thinking 必须是 {"type": "enabled" | "disabled"}')
 
 
+# Typographic dash codepoints (U+2010..U+2015, U+2212, U+FF0D).  Model ids
+# pasted from docs/slides often carry these; upstreams reject them outright
+# ("modelCode: 不存在"), so they are normalized to the ASCII hyphen.
+_MODEL_NAME_DASHES = str.maketrans({chr(codepoint): "-" for codepoint in range(0x2010, 0x2016)})
+_MODEL_NAME_DASHES[chr(0x2212)] = "-"
+_MODEL_NAME_DASHES[chr(0xFF0D)] = "-"
+
+
 class ModelConfigUpdate(BaseModel):
+    provider: str | None = Field(default=None, min_length=1, max_length=64)
     model_name: str | None = Field(default=None, min_length=1, max_length=200)
     base_url: str | None = Field(default=None, max_length=2_000)
+    api_key: str | None = Field(default=None, min_length=1, max_length=4_096)
     parameters: dict[str, Any] | None = None
     enabled: bool | None = None
+    # Changing the EMBEDDING identity (model_name / base_url) reshapes the
+    # vector space and requires a full RAG rebuild of every knowledge base.
+    # The flag is the admin's explicit acknowledgement of that cost.
+    rebuild_all_confirmed: bool = False
+
+    @field_validator("model_name")
+    @classmethod
+    def normalize_model_name(cls, value: str) -> str:
+        return value.strip().translate(_MODEL_NAME_DASHES).replace(" ", "")
+
+    @field_validator("provider")
+    @classmethod
+    def normalize_provider(cls, value: str | None) -> str | None:
+        return value.strip().lower() if value is not None else None
 
     @field_validator("base_url")
     @classmethod
@@ -726,7 +783,9 @@ class ModelConfigUpdate(BaseModel):
     def require_update_field(self) -> Self:
         if (
             self.model_name is None
+            and self.provider is None
             and self.base_url is None
+            and self.api_key is None
             and self.parameters is None
             and self.enabled is None
         ):
@@ -933,6 +992,8 @@ class ChatResponse(BaseModel):
     execution_engine: Literal["SUPPORT", "RAG"] | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int
+    # Clickable retry questions for NO_MATCH routing turns; empty otherwise.
+    next_suggestions: list[str] = Field(default_factory=list)
 
 
 class ProblemProfileUpsert(BaseModel):

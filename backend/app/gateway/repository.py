@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.gateway.models import ChatEngine, ConversationMode, ExecutionPolicy, ResolvedPolicy
+from app.rag.model_providers import environment_api_key
 
 _DEFAULT_FALLBACK_CONDITIONS = ("NO_MATCH",)
 
@@ -54,9 +55,7 @@ class GatewayRepository:
                 if conversation["execution_policy_snapshot"]:
                     return ResolvedPolicy(
                         knowledge_id=knowledge_id,
-                        policy=ExecutionPolicy(
-                            str(conversation["execution_policy_snapshot"])
-                        ),
+                        policy=ExecutionPolicy(str(conversation["execution_policy_snapshot"])),
                         config_version=int(conversation["engine_config_version"] or 0),
                         fallback_conditions=_DEFAULT_FALLBACK_CONDITIONS,
                         conversation_mode=(
@@ -190,7 +189,7 @@ class GatewayRepository:
                         SELECT model_type, provider, model_name,
                                api_key_ciphertext IS NOT NULL AS stored_key_configured
                         FROM model_config
-                        WHERE enabled AND model_type IN ('LLM', 'RERANK')
+                        WHERE enabled AND model_type IN ('LLM', 'RERANK', 'EMBEDDING')
                         """
                     )
                 )
@@ -215,7 +214,9 @@ class GatewayRepository:
             rag_blockers.append("LLM 模型未启用")
         elif str(llm["provider"]) != "fake" and not (
             bool(llm["stored_key_configured"])
-            or self.settings.has_secret(self.settings.zhipu_api_key)
+            or self.settings.has_secret(
+                environment_api_key(self.settings, "LLM", str(llm["provider"]))
+            )
         ):
             support_blockers.append("LLM API Key 未配置")
             rag_blockers.append("LLM API Key 未配置")
@@ -232,19 +233,33 @@ class GatewayRepository:
             rag_blockers.append("Rerank 模型未启用")
         elif str(rerank["provider"]) != "fake" and not (
             bool(rerank["stored_key_configured"])
-            or self.settings.has_secret(self.settings.siliconflow_api_key)
+            or self.settings.has_secret(
+                environment_api_key(self.settings, "RERANK", str(rerank["provider"]))
+            )
         ):
             rag_blockers.append("Rerank API Key 未配置")
 
-        embedding_uses_fake = self.settings.m2_embedding_provider == "fake" or (
-            self.settings.m2_embedding_provider == "auto"
-            and not self.settings.has_secret(self.settings.siliconflow_api_key)
-        )
-        query_embedding_model = (
-            "deterministic-shake256"
-            if embedding_uses_fake
-            else self.settings.siliconflow_embedding_model
-        )
+        embedding = models.get("EMBEDDING")
+        if embedding is None:
+            rag_blockers.append("Embedding 模型未启用")
+            query_embedding_model = ""
+        else:
+            embedding_uses_fake = self.settings.m2_embedding_provider == "fake" or (
+                self.settings.m2_embedding_provider == "auto"
+                and not (
+                    bool(embedding["stored_key_configured"])
+                    or self.settings.has_secret(
+                        environment_api_key(
+                            self.settings, "EMBEDDING", str(embedding["provider"])
+                        )
+                    )
+                )
+            )
+            query_embedding_model = (
+                "deterministic-shake256"
+                if embedding_uses_fake
+                else str(embedding["model_name"])
+            )
         if (
             kb["rag_active_index_id"] is not None
             and str(kb["embedding_model_name"]) != query_embedding_model
@@ -390,3 +405,97 @@ class GatewayRepository:
                     "reason": reason,
                 },
             )
+
+    async def list_conversations(
+        self, knowledge_id: UUID, user_id: str | None, limit: int
+    ) -> list[dict[str, Any]]:
+        """List conversations for platform-side history, newest activity first.
+
+        ``user_id`` is the caller-side isolation key; when provided only
+        conversations owned by that user are returned.  Anonymous rows
+        (DemoChat, legacy) are visible only without the filter.
+        """
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT id, knowledge_id, user_id, title, last_execution_engine,
+                           conversation_mode, created_at, updated_at,
+                           (SELECT count(*) FROM message m
+                            WHERE m.conversation_id = conversation.id
+                              AND m.status = 'COMPLETED') AS message_count
+                    FROM conversation
+                    WHERE knowledge_id = :knowledge_id
+                      AND (CAST(:user_id AS varchar) IS NULL OR user_id = :user_id)
+                    ORDER BY updated_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"knowledge_id": knowledge_id, "user_id": user_id, "limit": limit},
+            )
+            return [dict(row) for row in result.mappings()]
+
+    async def get_conversation(self, conversation_id: UUID) -> dict[str, Any] | None:
+        """Fetch one conversation row for ownership checks and detail views."""
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT id, knowledge_id, user_id, title, last_execution_engine,
+                           conversation_mode, rag_index_id, support_index_id,
+                           focus_index_id, focus_document_id, focus_epoch,
+                           created_at, updated_at,
+                           (SELECT count(*) FROM message m
+                            WHERE m.conversation_id = conversation.id
+                              AND m.status = 'COMPLETED') AS message_count
+                    FROM conversation
+                    WHERE id = :conversation_id
+                    """
+                ),
+                {"conversation_id": conversation_id},
+            )
+            row = result.mappings().one_or_none()
+            return dict(row) if row is not None else None
+
+    async def list_conversation_messages(
+        self, conversation_id: UUID, limit: int
+    ) -> list[dict[str, Any]]:
+        """Return the newest finished messages in chronological order.
+
+        STREAMING rows (interrupted turns) are never exposed; FAILED turns
+        are included so the platform can render what the user actually saw.
+        """
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT id, role, content, status, sources, created_at
+                    FROM (
+                        SELECT id, role, content, status, sources, created_at,
+                               sequence_no
+                        FROM message
+                        WHERE conversation_id = :conversation_id
+                          AND status IN ('COMPLETED', 'FAILED')
+                        ORDER BY sequence_no DESC
+                        LIMIT :limit
+                    ) recent
+                    ORDER BY sequence_no
+                    """
+                ),
+                {"conversation_id": conversation_id, "limit": limit},
+            )
+            return [dict(row) for row in result.mappings()]
+
+    async def delete_conversation(self, conversation_id: UUID) -> bool:
+        """Delete a conversation row; messages cascade and traces survive.
+
+        rag_trace rows keep their payload with ``conversation_id`` set to
+        NULL (ON DELETE SET NULL), so observability outlives user deletions
+        and the frozen index references die with the row.
+        """
+        async with self.engine.begin() as connection:
+            result = await connection.execute(
+                text("DELETE FROM conversation WHERE id = :id RETURNING id"),
+                {"id": conversation_id},
+            )
+            return result.scalar_one_or_none() is not None

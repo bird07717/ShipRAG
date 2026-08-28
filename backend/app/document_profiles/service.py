@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from typing import Any
 from uuid import UUID
 
@@ -16,6 +17,35 @@ from app.rag.llm import LlmError, LlmProvider, create_llm_provider
 from app.support.repository import SupportRepository
 from app.tasks.maintenance import enqueue_maintenance_task
 from app.tasks.repository import TaskRecordRepository
+
+
+def _content_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _needs_generation(document: dict[str, Any], *, content_hash: str) -> bool:
+    """Delta filter for full-knowledge runs: skip documents whose Profile was
+    already generated from identical RAG content.
+
+    - Manual pending edits are never clobbered by an automatic run.
+    - Failed generations are retried (their hash was never recorded).
+    - Error fallbacks (NEEDS_ATTENTION with an error code) are retried even
+      though a hash exists: the hash only proves the content was read, not
+      that a usable Profile came out of it.
+    - A matching hash alone is not enough when nothing is left to keep:
+      a discarded pending (no active, no pending) must regenerate.
+    - Explicit single-document runs bypass this filter entirely.
+    """
+    if document.get("pending_source") == "MANUAL" and document.get("pending_state"):
+        return False
+    if document.get("pending_state") == "FAILED":
+        return True
+    stored = document.get("profile_content_hash")
+    if stored is None or stored != content_hash:
+        return True
+    if document.get("pending_state"):
+        return document.get("pending_error_code") is not None
+    return not document.get("has_active_profile")
 
 
 class DocumentProfileService:
@@ -58,6 +88,44 @@ class DocumentProfileService:
     async def request_generation(
         self, knowledge_id: UUID, *, document_id: UUID | None = None
     ) -> dict[str, Any]:
+        # Deferred import: app.tasks.recovery pulls in app.tasks.ingestion,
+        # which imports this module — a top-level import is circular.
+        from app.tasks.recovery import _RUNNING_STALE_SECONDS, _age_seconds
+
+        # Zombie guard: a worker crash mid-run leaves the task row RUNNING
+        # forever, and the replay branch below would keep returning it.  A
+        # heartbeat-stale RUNNING row is failed here so generation can proceed
+        # without waiting for a maintenance-worker restart to reconcile it.
+        records = TaskRecordRepository(self.repository.engine)
+        async with self.repository.engine.connect() as connection:
+            active_probe = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                    SELECT id, status, updated_at FROM task_record
+                    WHERE kb_id = :knowledge_id AND task_type = 'DOCUMENT_PROFILE_GENERATE'
+                      AND status IN ('QUEUED', 'RUNNING')
+                    ORDER BY created_at DESC LIMIT 1
+                    """
+                        ),
+                        {"knowledge_id": knowledge_id},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if active_probe is not None and active_probe["status"] == "RUNNING":
+            age = _age_seconds(dict(active_probe), "updated_at")
+            if age is not None and age > _RUNNING_STALE_SECONDS:
+                await records.fail(
+                    UUID(str(active_probe["id"])),
+                    ApiError(
+                        "TASK_HEARTBEAT_TIMEOUT",
+                        "任务长时间无进度心跳，已判定为孤儿任务",
+                        409,
+                    ),
+                )
         async with self.repository.engine.begin() as connection:
             exists = await connection.scalar(
                 text("SELECT 1 FROM knowledge_base WHERE id = :id AND status <> 'DELETING'"),
@@ -119,16 +187,39 @@ class DocumentProfileService:
         knowledge_id = UUID(str(metadata.get("knowledge_id") or task["kb_id"]))
         document_id = UUID(str(task["document_id"])) if task.get("document_id") else None
         documents = await self.repository.generation_documents(knowledge_id, document_id)
+        # Incremental full-KB runs: unchanged documents keep their Profile.
+        # Single-document requests are explicit and always regenerate.
+        skipped_count = 0
+        if document_id is None:
+            selected: list[dict[str, Any]] = []
+            for document in documents:
+                digest = _content_hash(str(document["content"]))
+                if _needs_generation(document, content_hash=digest):
+                    selected.append(document)
+            skipped_count = len(documents) - len(selected)
+            documents = selected
         provider: LlmProvider | None = None
         provider_error: str | None = None
         generator = DocumentProfileGenerator(self.settings)
-        try:
-            try:
-                snapshot = await SupportRepository(self.repository.engine, self.settings).get_llm()
-                provider = create_llm_provider(self.settings, snapshot)
-            except (ApiError, LlmError) as exc:
-                provider_error = getattr(exc, "code", type(exc).__name__)
-            for position, document in enumerate(documents, start=1):
+        # Documents are independent rows, so they are generated with bounded
+        # concurrency inside the single maintenance job instead of serially.
+        concurrency = max(1, min(self.settings.profile_generation_concurrency, len(documents) or 1))
+        semaphore = asyncio.Semaphore(concurrency)
+        completed = 0
+        stop_requested = False
+        cancelled = False
+        failed_documents: list[dict[str, str]] = []
+
+        async def _process(document: dict[str, Any]) -> str:
+            nonlocal completed, provider_error, stop_requested
+            async with semaphore:
+                # Cooperative cancellation: the admin API flips task status to
+                # CANCELLED and running workers observe it between documents.
+                if stop_requested:
+                    return "CANCELLED"
+                if await task_records.status(task_id) != "RUNNING":
+                    stop_requested = True
+                    return "CANCELLED"
                 profile, source, error, quality, notes = await generator.generate(
                     document, provider
                 )
@@ -136,34 +227,66 @@ class DocumentProfileService:
                     provider_error = error
                 state = "PENDING_ONLINE" if quality == "PASS" else "NEEDS_ATTENTION"
                 message = "；".join(notes) if notes else None
-                await self.repository.upsert_pending(
-                    knowledge_id=knowledge_id,
-                    document_id=UUID(str(document["document_id"])),
-                    payload={"intents": [{**profile.model_dump(mode="json"), "enabled": True}]},
-                    source="AUTO",
-                    confidence=profile.confidence,
-                    state=state,
-                    error_code=error,
-                    error_message=message,
-                )
+                try:
+                    await self.repository.upsert_pending(
+                        knowledge_id=knowledge_id,
+                        document_id=UUID(str(document["document_id"])),
+                        payload={"intents": [{**profile.model_dump(mode="json"), "enabled": True}]},
+                        source="AUTO",
+                        confidence=0.8 if error is None else 0.35,
+                        state=state,
+                        error_code=error,
+                        error_message=message,
+                        # Record the hash only for real generations.  An error
+                        # fallback (e.g. upstream LLM unavailable) must be
+                        # retried by later runs, not skipped as "unchanged".
+                        content_hash=(
+                            _content_hash(str(document["content"])) if error is None else None
+                        ),
+                    )
+                except ApiError as exc:
+                    # A single stale/deleted document must not abort the whole
+                    # knowledge-base run; record it and keep the others going.
+                    failed_documents.append(
+                        {
+                            "document_id": str(document["document_id"]),
+                            "error_code": str(getattr(exc, "code", type(exc).__name__)),
+                            "error_message": str(getattr(exc, "message", "") or "")[:200],
+                        }
+                    )
+                    return "ERROR"
+                completed += 1
                 await task_records.progress(
                     task_id,
                     stage="GENERATING",
-                    progress=5 + int(position * 90 / max(1, len(documents))),
+                    progress=5 + int(completed * 90 / max(1, len(documents))),
                     metadata={
-                        "generated_count": position,
+                        "generated_count": completed,
                         "document_count": len(documents),
                         "pending_state": state,
                     },
                 )
+                return "OK"
+
+        try:
+            try:
+                snapshot = await SupportRepository(self.repository.engine, self.settings).get_llm()
+                provider = create_llm_provider(self.settings, snapshot)
+            except (ApiError, LlmError) as exc:
+                provider_error = getattr(exc, "code", type(exc).__name__)
+            results = await asyncio.gather(*(_process(document) for document in documents))
+            cancelled = "CANCELLED" in results
         finally:
             if provider is not None:
                 await provider.aclose()
         return {
             "knowledge_id": str(knowledge_id),
-            "generated_count": len(documents),
+            "generated_count": completed,
             "document_count": len(documents),
+            "skipped_count": skipped_count,
             "provider_error": provider_error,
+            "cancelled": cancelled,
+            "failed_documents": failed_documents,
         }
 
     async def edit(
@@ -213,14 +336,11 @@ class DocumentProfileService:
                 )
                 continue
             for intent in intents:
-                if (
-                    not str(intent.get("problem_code") or "").strip()
-                    or not str(intent.get("canonical_question") or "").strip()
-                ):
+                if not str(intent.get("canonical_question") or "").strip():
                     errors.append(
                         {
                             "code": "PROFILE_REQUIRED_FIELD",
-                            "message": f"《{document_name}》缺少问题编码或标准问法。",
+                            "message": f"《{document_name}》缺少标准问题。",
                         }
                     )
                 for alias in intent.get("aliases", []):

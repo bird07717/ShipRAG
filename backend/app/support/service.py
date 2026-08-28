@@ -261,7 +261,7 @@ class TechnicalSupportService:
             # Profile resolution is intentionally deterministic.  The RAG
             # fallback below handles natural-language misses using document
             # evidence, avoiding an online LLM scan over the full catalog.
-            resolver = ProblemResolver()
+            resolver = ProblemResolver(settings=self.settings)
             # Pending choices are conversation state, not model workflow
             # memory.  Bind V1 candidates to the focus epoch that produced
             # them so an old switch prompt cannot change a newer focus.
@@ -405,6 +405,11 @@ class TechnicalSupportService:
                         )
                         response["routing"]["source"] = "PROFILE"
                     else:
+                        profile_resolution = {
+                            "method": resolution.method,
+                            "decision": resolution.decision.value,
+                            "confidence": resolution.confidence,
+                        }
                         route = None
                         if self.settings.support_rag_fallback_enabled and self.document_router:
                             current_stage = "RAG_DOCUMENT_RESOLUTION"
@@ -437,6 +442,7 @@ class TechnicalSupportService:
                             response["routing"] = {
                                 **response["routing"],
                                 "source": "RAG_FALLBACK",
+                                "profile_resolution": profile_resolution,
                                 "document_routing": route.trace.get("document_routing", {}),
                             }
                         else:
@@ -477,6 +483,7 @@ class TechnicalSupportService:
                                             "method": "RAG_FALLBACK",
                                             "decision": ACTION_CLARIFY,
                                             "confidence": route.confidence,
+                                            "profile_resolution": profile_resolution,
                                             "document_routing": route.trace.get(
                                                 "document_routing", {}
                                             ),
@@ -491,48 +498,6 @@ class TechnicalSupportService:
                                         "origin_document_id": None,
                                     }
                                     for option in pending_options
-                                ]
-                                context = discovery_context(
-                                    turn.chat_context,
-                                    last_clarification_question=clean_question,
-                                )
-                            elif resolution.choices:
-                                options = [
-                                    {
-                                        "choice_id": f"match_{number}",
-                                        "document_id": str(item.document_id),
-                                        "problem_code": item.problem_code,
-                                        "title": item.canonical_question,
-                                    }
-                                    for number, item in enumerate(resolution.choices, start=1)
-                                ]
-                                response.update(
-                                    {
-                                        "response_type": "CLARIFICATION_REQUIRED",
-                                        "answer": "请确认你要处理的文档。",
-                                        "clarification": {
-                                            "type": "DOCUMENT_CHOICE",
-                                            "message": "请确认你要处理的文档。",
-                                            "choices": options,
-                                        },
-                                        "routing": {
-                                            "source": "PROFILE",
-                                            "method": resolution.method,
-                                            "decision": resolution.decision.value,
-                                            "rag_fallback": route.trace
-                                            if route is not None
-                                            else None,
-                                        },
-                                        "latency_ms": _elapsed(started),
-                                    }
-                                )
-                                pending_options = [
-                                    {
-                                        **option,
-                                        "origin_focus_epoch": turn.focus_epoch,
-                                        "origin_document_id": None,
-                                    }
-                                    for option in options
                                 ]
                                 context = discovery_context(
                                     turn.chat_context,
@@ -558,6 +523,7 @@ class TechnicalSupportService:
                                             if route is not None
                                             else resolution.method,
                                             "decision": "NO_MATCH",
+                                            "profile_resolution": profile_resolution,
                                             "rag_fallback": route.trace
                                             if route is not None
                                             else None,

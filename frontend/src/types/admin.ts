@@ -55,6 +55,7 @@ export interface GarbageCollectionResult {
   skipped_count?: number;
   purged_conversation_ids?: string[];
   purged_conversation_count?: number;
+  released_conversation_count?: number;
 }
 
 export interface DocumentDeleteResult {
@@ -101,7 +102,7 @@ export interface IndexTask {
 export interface TaskRecord {
   id: string;
   task_type: string;
-  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
   stage: string;
   progress: number;
   attempt: number;
@@ -160,9 +161,17 @@ export interface ModelConfig {
   enabled: boolean;
   api_key_configured: boolean;
   api_key_source?: "DATABASE" | "ENV" | null;
+  supported_providers?: string[];
   parameters: Record<string, unknown>;
   created_at?: string;
   updated_at?: string;
+  rebuilds?: Array<{
+    knowledge_id: string;
+    index_id: string | null;
+    task_id: string | null;
+    coalesced: boolean;
+    enqueued: boolean;
+  }> | null;
 }
 
 export interface ModelProbeResult {
@@ -185,10 +194,13 @@ export interface RagConfig {
 }
 
 export type ModelConfigUpdatePayload = {
+  provider?: string;
   model_name?: string;
   base_url?: string;
+  api_key?: string;
   enabled?: boolean;
   parameters?: Record<string, unknown>;
+  rebuild_all_confirmed?: boolean;
 };
 
 export type RagConfigUpdatePayload = Partial<Omit<RagConfig, "updated_at">>;
@@ -318,16 +330,9 @@ export type DocumentProfileStatus =
   | "FAILED";
 
 export interface DocumentProfileIntent {
-  problem_code: string;
   canonical_question: string;
   aliases: string[];
-  keywords: string[];
-  product_name?: string | null;
-  model_names?: string[];
-  task_type?: string | null;
-  routing_summary?: string;
-  symptoms?: string[];
-  exclusions?: string[];
+  routing_summary: string;
   enabled?: boolean;
   confidence?: number;
 }

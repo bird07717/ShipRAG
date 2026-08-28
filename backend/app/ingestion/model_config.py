@@ -17,18 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
+from app.rag.model_providers import is_supported_provider
 from app.rag.models import ModelSnapshot
 
 logger = structlog.get_logger(__name__)
 
 BUILD_MODEL_TYPES = ("EMBEDDING", "OCR", "VISION")
-
-_EXPECTED_PROVIDER = {
-    "EMBEDDING": "siliconflow",
-    "OCR": "siliconflow",
-    "VISION": "zhipu",
-}
-
 
 @dataclass(frozen=True, slots=True)
 class BuildModelConfig:
@@ -68,9 +62,9 @@ async def load_build_models(engine: AsyncEngine, settings: Settings) -> dict[str
         for raw in rows.mappings():
             row = dict(raw)
             model_type = str(row["model_type"])
-            if model_type not in _EXPECTED_PROVIDER:
+            if model_type not in BUILD_MODEL_TYPES:
                 continue
-            if str(row["provider"]).lower() != _EXPECTED_PROVIDER[model_type]:
+            if not is_supported_provider(model_type, str(row["provider"])):
                 # Unsupported provider would break provider construction;
                 # keep the build alive on env settings and surface the
                 # misconfiguration through task metadata.
@@ -79,7 +73,7 @@ async def load_build_models(engine: AsyncEngine, settings: Settings) -> dict[str
                     "build_model_provider_mismatch",
                     model_type=model_type,
                     provider=str(row["provider"]),
-                    expected=_EXPECTED_PROVIDER[model_type],
+                    supported="all configured providers",
                 )
                 continue
             api_key = None

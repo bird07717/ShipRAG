@@ -129,9 +129,30 @@ services:
     tmpfs: [/tmp]
     restart: unless-stopped
 
-  worker:
+  worker-index:
     image: ${BACKEND_IMAGE:-enterprise-rag-backend:1.0.0}
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      RQ_QUEUES: index_build
+      RQ_WORKER_NAME: rag-index-worker
+    command: ["rag-worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs: [/tmp]
+    restart: unless-stopped
+
+  worker-maintenance:
+    image: ${BACKEND_IMAGE:-enterprise-rag-backend:1.0.0}
+    environment:
+      <<: *app-environment
+      RQ_QUEUES: ingestion,maintenance
+      RQ_WORKER_NAME: rag-maintenance-worker
     command: ["rag-worker"]
     depends_on:
       migrate:

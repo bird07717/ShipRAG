@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { ElMessageBox } from "element-plus";
 
 import { useAdminStore } from "@/composables/adminStore";
@@ -11,10 +11,20 @@ const editorOpen = ref(false);
 const editing = ref<DocumentProfileSummary | null>(null);
 const lastCheck = ref<ProfilePublishCheck | null>(null);
 const form = ref<DocumentProfileIntent>(emptyIntent());
+let profileRefreshTimer: ReturnType<typeof setInterval> | undefined;
+
+onMounted(() => {
+  // RAG builds enqueue document Profile generation from a worker, so this
+  // page may not have a browser-originated task to poll. Keep the review
+  // snapshot current while it is open.
+  void store.loadKnowledgeProfiles();
+  profileRefreshTimer = setInterval(() => void store.loadKnowledgeProfiles(), 3_000);
+});
+
+onUnmounted(() => clearInterval(profileRefreshTimer));
 
 function emptyIntent(): DocumentProfileIntent {
-  return { problem_code: "", canonical_question: "", aliases: [], keywords: [], product_name: null,
-    model_names: [], task_type: null, routing_summary: "", symptoms: [], exclusions: [], enabled: true };
+  return { canonical_question: "", aliases: [], routing_summary: "", enabled: true };
 }
 function firstIntent(row: DocumentProfileSummary): DocumentProfileIntent {
   const source = row.pending_profile?.intents[0] ?? row.active_profile?.intents[0];
@@ -25,6 +35,20 @@ const profiles = computed(() => store.knowledgeProfileSummary?.profiles ?? []);
 const summary = computed(() => store.knowledgeProfileSummary);
 const task = computed(() => store.latestDocumentProfileTasks[store.selectedKnowledgeId]);
 const taskActive = computed(() => Boolean(task.value && ["QUEUED", "RUNNING"].includes(task.value.status)));
+async function cancel(): Promise<void> {
+  const current = task.value;
+  if (!current) return;
+  try {
+    await ElMessageBox.confirm(
+      "将停止本次生成任务：正在处理的文档会完成当前步骤，其余文档不再处理；已生成的待上线属性会保留。",
+      "停止生成任务",
+      { type: "warning", confirmButtonText: "确认停止", cancelButtonText: "继续运行" },
+    );
+  } catch {
+    return;
+  }
+  await store.cancelDocumentProfileTask(current.id);
+}
 const publishReason = computed(() => {
   if (!store.selectedKnowledgeId) return "请选择知识库";
   if (!summary.value?.pending_count) return "没有可上线的待上线属性";
@@ -40,7 +64,12 @@ function statusType(status: string): "success" | "warning" | "danger" | "info" {
 function openEditor(row: DocumentProfileSummary): void { editing.value = row; form.value = firstIntent(row); editorOpen.value = true; }
 async function save(): Promise<void> {
   if (!editing.value) return;
-  await store.updateDocumentProfile(editing.value.document_id, { ...form.value, problem_code: form.value.problem_code.trim(), canonical_question: form.value.canonical_question.trim(), product_name: form.value.product_name?.trim() || null, task_type: form.value.task_type?.trim() || null });
+  await store.updateDocumentProfile(editing.value.document_id, {
+    canonical_question: form.value.canonical_question.trim(),
+    aliases: form.value.aliases,
+    routing_summary: form.value.routing_summary.trim(),
+    enabled: form.value.enabled,
+  });
   if (!store.error) { editorOpen.value = false; lastCheck.value = null; }
 }
 async function regenerate(row?: DocumentProfileSummary): Promise<void> { if (row) await store.generateDocumentProfile(row.document_id); else await store.generateKnowledgeProfiles(); }
@@ -62,7 +91,7 @@ watch(() => store.selectedKnowledgeId, () => { lastCheck.value = null; });
 <template>
   <div class="support-review">
     <el-alert
-      title="Profile 是文档的高置信快速命中属性；未生成、低置信或有歧义时，问答仍自动使用 RAG。"
+      title="Profile 仅保留标准问题、Alias 和路由描述，用于高置信快速命中；低匹配或歧义时自动使用 RAG。"
       type="success"
       :closable="false"
       show-icon
@@ -99,7 +128,18 @@ watch(() => store.selectedKnowledgeId, () => { lastCheck.value = null; });
     <div class="review-metrics"><div class="metric-card compact"><span>线上属性</span><strong>{{ summary?.online_count ?? 0 }}</strong></div><div class="metric-card compact"><span>待上线</span><strong>{{ summary?.pending_count ?? 0 }}</strong></div><div class="metric-card compact"><span>需处理</span><strong>{{ summary?.attention_count ?? 0 }}</strong></div><div class="metric-card compact"><span>生成失败</span><strong>{{ summary?.failed_count ?? 0 }}</strong></div><div class="metric-card compact"><span>生成中</span><strong>{{ summary?.generating_count ?? 0 }}</strong></div></div>
     <section v-if="task" class="panel">
       <div class="panel-body task-panel">
-        <b>{{ taskActive ? "当前生成任务" : "最近生成任务" }}</b><span class="muted">{{ task.stage }} · {{ task.progress }}%</span><el-progress :percentage="task.progress" :status="task.status === 'FAILED' ? 'exception' : task.status === 'SUCCEEDED' ? 'success' : undefined" /><small v-if="store.taskMetadata(task, 'document_count')" class="muted">已处理 {{ store.taskMetadata(task, "generated_count") ?? 0 }} / {{ store.taskMetadata(task, "document_count") }} 篇文档</small><el-alert
+        <div class="task-header">
+          <b>{{ taskActive ? "当前生成任务" : "最近生成任务" }}</b><span class="muted">{{ task.status === "CANCELLED" ? "已停止" : task.stage }} · {{ task.progress }}%</span><div class="spacer" /><el-button
+            v-if="taskActive"
+            size="small"
+            type="warning"
+            plain
+            :loading="store.isActionLoading(`task-cancel:${task.id}`)"
+            @click="cancel"
+          >
+            停止任务
+          </el-button>
+        </div><el-progress :percentage="task.progress" :status="task.status === 'FAILED' ? 'exception' : task.status === 'SUCCEEDED' ? 'success' : task.status === 'CANCELLED' ? 'warning' : undefined" /><small v-if="store.taskMetadata(task, 'document_count')" class="muted">已处理 {{ store.taskMetadata(task, "generated_count") ?? 0 }} / {{ store.taskMetadata(task, "document_count") }} 篇文档</small><el-alert
           v-if="task.error_message"
           :title="task.error_message"
           type="error"
@@ -133,7 +173,7 @@ watch(() => store.selectedKnowledgeId, () => { lastCheck.value = null; });
     <section class="panel">
       <div class="panel-header"><div><h3>文档 Profile 属性</h3><p>待上线值不会影响线上快速命中；RAG 始终可用。</p></div><el-button :disabled="!profiles.some((row) => row.pending_state)" @click="discard">取消全部待上线变更</el-button></div>
       <el-table v-if="profiles.length" :data="profiles" size="small">
-        <el-table-column label="文档" min-width="180"><template #default="scope"><b>{{ scope.row.document_name }}</b><small class="muted block">{{ scope.row.document_status }}</small></template></el-table-column><el-table-column label="Profile 状态" width="120"><template #default="scope"><el-tag :type="statusType(scope.row.profile_status)" size="small">{{ statusLabel(scope.row.profile_status) }}</el-tag></template></el-table-column><el-table-column label="当前线上属性" min-width="190"><template #default="scope"><template v-if="scope.row.active_profile?.intents?.length"><div v-for="intent in scope.row.active_profile.intents" :key="intent.problem_code">{{ intent.canonical_question }} <small class="mono">{{ intent.problem_code }}</small></div></template><span v-else class="muted">无（RAG 仍可用）</span></template></el-table-column><el-table-column label="待上线属性" min-width="210"><template #default="scope"><template v-if="scope.row.pending_profile?.intents?.length"><div v-for="intent in scope.row.pending_profile.intents" :key="intent.problem_code">{{ intent.canonical_question }} <small class="mono">{{ intent.problem_code }}</small></div></template><span v-else-if="scope.row.pending_error_message" class="muted">{{ scope.row.pending_error_message }}</span><span v-else class="muted">—</span></template></el-table-column><el-table-column label="操作" width="180" align="right">
+        <el-table-column label="文档" min-width="180"><template #default="scope"><b>{{ scope.row.document_name }}</b><small class="muted block">{{ scope.row.document_status }}</small></template></el-table-column><el-table-column label="Profile 状态" width="120"><template #default="scope"><el-tag :type="statusType(scope.row.profile_status)" size="small">{{ statusLabel(scope.row.profile_status) }}</el-tag></template></el-table-column><el-table-column label="当前线上属性" min-width="190"><template #default="scope"><template v-if="scope.row.active_profile?.intents?.length"><div v-for="(intent, index) in scope.row.active_profile.intents" :key="`active-${index}`">{{ intent.canonical_question }}</div></template><span v-else class="muted">暂无线上 Profile（RAG 文档仍可检索）</span></template></el-table-column><el-table-column label="待上线属性" min-width="210"><template #default="scope"><template v-if="scope.row.pending_profile?.intents?.length"><div v-for="(intent, index) in scope.row.pending_profile.intents" :key="`pending-${index}`">{{ intent.canonical_question }}</div><small v-if="scope.row.pending_state === 'NEEDS_ATTENTION' && scope.row.pending_error_message" class="quality-note">{{ scope.row.pending_error_message }}</small></template><span v-else-if="scope.row.pending_error_message" class="muted">{{ scope.row.pending_error_message }}</span><span v-else class="muted">—</span></template></el-table-column><el-table-column label="操作" width="180" align="right">
           <template #default="scope">
             <el-button link @click="openEditor(scope.row)">编辑属性</el-button><el-button
               link
@@ -161,19 +201,12 @@ watch(() => store.selectedKnowledgeId, () => { lastCheck.value = null; });
         show-icon
         class="editor-alert"
       /><el-form label-position="top">
-        <div class="form-grid"><el-form-item label="问题编码"><el-input v-model="form.problem_code" /></el-form-item><el-form-item label="标准问题"><el-input v-model="form.canonical_question" /></el-form-item><el-form-item label="产品"><el-input v-model="form.product_name" /></el-form-item><el-form-item label="任务类型"><el-input v-model="form.task_type" /></el-form-item></div><el-form-item label="Alias（每行一项）">
+        <el-form-item label="标准问题"><el-input v-model="form.canonical_question" /></el-form-item><el-form-item label="Alias（每行一项，最多 5 项）">
           <el-input
             :model-value="form.aliases.join('\n')"
             type="textarea"
             :rows="3"
             @update:model-value="form.aliases = lines($event)"
-          />
-        </el-form-item><el-form-item label="关键词（每行一项）">
-          <el-input
-            :model-value="form.keywords.join('\n')"
-            type="textarea"
-            :rows="3"
-            @update:model-value="form.keywords = lines($event)"
           />
         </el-form-item><el-form-item label="路由摘要"><el-input v-model="form.routing_summary" type="textarea" :rows="3" /></el-form-item><el-form-item><el-switch v-model="form.enabled" active-text="启用快速命中" inactive-text="停用快速命中" /></el-form-item>
       </el-form><template #footer><el-button @click="editorOpen = false">取消</el-button><el-button type="primary" :loading="editing ? store.isActionLoading(`document-profile-edit:${editing.document_id}`) : false" @click="save">保存为待上线属性</el-button></template>
@@ -182,5 +215,5 @@ watch(() => store.selectedKnowledgeId, () => { lastCheck.value = null; });
 </template>
 
 <style scoped>
-.support-review { display: grid; gap: 16px; }.review-toolbar, .panel-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }.spacer { flex: 1; }.action-hint { display: block; padding: 0 20px 14px; color: var(--el-text-color-secondary); }.review-metrics { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)); gap: 12px; }.metric-card { padding: 14px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-bg-color); }.metric-card span, .muted { color: var(--el-text-color-secondary); }.metric-card strong { display: block; font-size: 24px; margin-top: 4px; }.task-panel, .alerts { display: grid; gap: 8px; }.block { display: block; margin-top: 3px; }.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }.editor-alert { margin-bottom: 14px; }@media (max-width: 900px) { .review-metrics { grid-template-columns: repeat(2, 1fr); }.form-grid { grid-template-columns: 1fr; } }
+.support-review { display: grid; gap: 16px; }.review-toolbar, .panel-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }.spacer { flex: 1; }.action-hint { display: block; padding: 0 20px 14px; color: var(--el-text-color-secondary); }.review-metrics { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)); gap: 12px; }.metric-card { padding: 14px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-bg-color); }.metric-card span, .muted { color: var(--el-text-color-secondary); }.metric-card strong { display: block; font-size: 24px; margin-top: 4px; }.task-panel, .alerts { display: grid; gap: 8px; }.task-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }.block { display: block; margin-top: 3px; }.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }.quality-note { display: block; margin-top: 3px; color: var(--warning); }.editor-alert { margin-bottom: 14px; }@media (max-width: 900px) { .review-metrics { grid-template-columns: repeat(2, 1fr); } }
 </style>

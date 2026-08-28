@@ -27,12 +27,12 @@ describe("admin API", () => {
       vi.fn().mockResolvedValue({
         ok: false,
         status: 409,
-        json: () => Promise.resolve({ error: { message: "已有构建正在运行" } }),
+        json: () => Promise.resolve({ error: { message: "已有构建正在运行", details: { task_id: "task-1" } } }),
       }),
     );
 
     await expect(apiRequest("/indexes")).rejects.toEqual(
-      new ApiRequestError("已有构建正在运行", 409),
+      new ApiRequestError("已有构建正在运行", 409, { task_id: "task-1" }),
     );
   });
 

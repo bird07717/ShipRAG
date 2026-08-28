@@ -119,12 +119,13 @@ async def test_problem_resolver_matches_normalized_alias_and_pending_choice() ->
 
 
 @pytest.mark.asyncio
-async def test_problem_resolver_handles_ambiguity_rules_and_closed_catalog() -> None:
+async def test_problem_resolver_sends_exact_conflicts_to_rag_without_classifier() -> None:
     first, second = _profile(alias="same"), _profile(alias="same")
     ambiguous = await ProblemResolver().resolve(question="same", profiles=[first, second])
-    assert ambiguous.decision == ProblemDecision.AMBIGUOUS
-    deterministic = await ProblemResolver().resolve(question="请升级PDC", profiles=[first])
-    assert deterministic.method == "DETERMINISTIC_RULE"
+    assert ambiguous.decision == ProblemDecision.NO_MATCH
+    assert ambiguous.method == "ALIAS_CONFLICT_RAG"
+    weak = await ProblemResolver().resolve(question="请升级PDC", profiles=[first])
+    assert weak.decision == ProblemDecision.NO_MATCH
 
     async def classifier(_: str, __: list[ProblemProfile]) -> str | None:
         return first.problem_code
@@ -132,11 +133,11 @@ async def test_problem_resolver_handles_ambiguity_rules_and_closed_catalog() -> 
     classified = await ProblemResolver(classifier).resolve(
         question="完全不同的问题", profiles=[first]
     )
-    assert classified.method == "LLM_CATALOG"
+    assert classified.decision == ProblemDecision.NO_MATCH
 
 
 @pytest.mark.asyncio
-async def test_problem_resolver_uses_anchor_symptom_exclusion_and_structured_ambiguity() -> None:
+async def test_problem_resolver_uses_weighted_alias_and_ignores_legacy_fields() -> None:
     upgrade = _profile(alias="PDC U盘升级")
     upgrade.product_name = "PDC"
     upgrade.task_type = "UPGRADE"
@@ -147,15 +148,14 @@ async def test_problem_resolver_uses_anchor_symptom_exclusion_and_structured_amb
         question="PDC U盘升级失败后怎么重新操作？", profiles=[upgrade]
     )
     assert anchor.decision == ProblemDecision.MATCHED
-    assert anchor.method == "ALIAS_ANCHOR"
+    assert anchor.method == "WEIGHTED_PROFILE"
 
     symptom = await ProblemResolver().resolve(question="PDC升级后无法启动", profiles=[upgrade])
-    assert symptom.decision == ProblemDecision.MATCHED
-    assert symptom.method == "DETERMINISTIC_RULE"
+    assert symptom.decision == ProblemDecision.NO_MATCH
 
     excluded = await ProblemResolver().resolve(question="PDC网口升级失败", profiles=[upgrade])
     assert excluded.decision == ProblemDecision.NO_MATCH
-    assert excluded.method == "EXCLUSION"
+    assert excluded.method == "NO_MATCH"
 
     replacement = _profile(alias="PDC 硬件更换")
     replacement.product_name = "PDC"
@@ -163,13 +163,11 @@ async def test_problem_resolver_uses_anchor_symptom_exclusion_and_structured_amb
     ambiguous = await ProblemResolver().resolve(
         question="PDC需要升级", profiles=[upgrade, replacement]
     )
-    assert ambiguous.decision == ProblemDecision.AMBIGUOUS
-    assert ambiguous.method == "STRUCTURED_CONFLICT"
-    assert ambiguous.choices == [upgrade, replacement]
+    assert ambiguous.decision == ProblemDecision.NO_MATCH
 
 
 @pytest.mark.asyncio
-async def test_problem_resolver_does_not_anchor_a_generic_alias() -> None:
+async def test_problem_resolver_does_not_directly_match_a_generic_alias() -> None:
     profile = _profile(alias="设备升级失败")
     profile.product_name = None
     profile.model_names = []
@@ -1143,8 +1141,8 @@ async def test_support_document_delivery_failure_records_delivery_stage() -> Non
 async def test_support_service_uses_only_profiles_from_selected_knowledge_base() -> None:
     selected_knowledge_id = uuid4()
     other_knowledge_id = uuid4()
-    selected_profile = _profile(alias="相同入口问题")
-    other_profile = _profile(alias="相同入口问题")
+    selected_profile = _profile(alias="PDC入口问题")
+    other_profile = _profile(alias="PDC入口问题")
     selected_profile.knowledge_id = selected_knowledge_id
     other_profile.knowledge_id = other_knowledge_id
     selected_document = _document()
@@ -1178,7 +1176,7 @@ async def test_support_service_uses_only_profiles_from_selected_knowledge_base()
     response = await service.handle(
         knowledge_id=selected_knowledge_id,
         conversation_id=None,
-        question="相同入口问题",
+        question="PDC入口问题",
         request_id="request-kb-isolation",
     )
 
@@ -1409,19 +1407,31 @@ async def test_support_service_preserves_profile_fast_path_without_rag() -> None
 
 
 @pytest.mark.asyncio
-async def test_support_service_requires_choice_for_ambiguous_catalog_match() -> None:
+async def test_support_service_does_not_offer_a_profile_choice_for_alias_conflict() -> None:
     knowledge_id = uuid4()
     first = _profile(alias="相同问题")
     second = _profile(alias="相同问题")
     first.knowledge_id = second.knowledge_id = knowledge_id
+    document = _document()
+    first.document_id = document.id
+    router = _StubDocumentRouter(
+        SupportDocumentRoute(
+            action="CLARIFY",
+            confidence=0.62,
+            options=[{"document_id": str(document.id), "title": document.title}],
+            trace={"source": "RAG_FALLBACK", "document_routing": {"decision": "CLARIFY"}},
+        )
+    )
     repository = _SupportServiceRepository(
         knowledge_id=knowledge_id,
         profile=first,
-        document=_document(),
+        document=document,
     )
     repository.profiles = [first, second]
     service = TechnicalSupportService(
-        cast(SupportRepository, repository), Settings(_env_file=None, app_env="test")
+        cast(SupportRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        document_router=cast(Any, router),
     )
 
     response = await service.handle(
@@ -1432,11 +1442,12 @@ async def test_support_service_requires_choice_for_ambiguous_catalog_match() -> 
     )
 
     assert response["response_type"] == "CLARIFICATION_REQUIRED"
-    assert response["clarification"]["type"] == "DOCUMENT_CHOICE"
-    assert len(response["clarification"]["choices"]) == 2
+    assert response["routing"]["source"] == "RAG_FALLBACK"
+    assert response["routing"]["profile_resolution"]["method"] == "ALIAS_CONFLICT_RAG"
+    assert len(router.calls) == 1
     assert repository.finished is not None
     assert repository.finished["focus_document_id"] is None
-    assert len(repository.finished["pending_switch_options"]) == 2
+    assert len(repository.finished["pending_switch_options"]) == 1
 
 
 @pytest.mark.asyncio

@@ -150,9 +150,7 @@ async def _link_document(
         )
 
 
-async def _insert_elements(
-    engine: AsyncEngine, index_id: UUID, document_id: UUID
-) -> None:
+async def _insert_elements(engine: AsyncEngine, index_id: UUID, document_id: UUID) -> None:
     async with engine.begin() as connection:
         index_document_id = (
             await connection.execute(
@@ -290,15 +288,11 @@ async def _insert_live_profile(
 
 async def _fetch_one(engine: AsyncEngine, query: str, **params: Any) -> dict[str, Any]:
     async with engine.connect() as connection:
-        row = (
-            await connection.execute(text(query), params)
-        ).mappings().one_or_none()
+        row = (await connection.execute(text(query), params)).mappings().one_or_none()
     return dict(row) if row is not None else {}
 
 
-async def _seed_rebase_scenario(
-    engine: AsyncEngine, knowledge_id: UUID
-) -> dict[str, UUID]:
+async def _seed_rebase_scenario(engine: AsyncEngine, knowledge_id: UUID) -> dict[str, UUID]:
     """Old candidate on v1 (docs A, B); current RAG index v2 (docs A', C)."""
     old_index = await _insert_index(engine, knowledge_id, 1, "DEPRECATED")
     new_index = await _insert_index(engine, knowledge_id, 2, "ACTIVE")
@@ -404,18 +398,14 @@ async def test_rebase_reuses_human_drafts_and_suggests_remove() -> None:
                 )["ids"]
             ]
             removed = next(
-                row
-                for row in drafts
-                if UUID(str(row["document_id"])) == seeded["document_b"]
+                row for row in drafts if UUID(str(row["document_id"])) == seeded["document_b"]
             )
             assert removed["operation"] == "REMOVE"
             assert UUID(str(removed["target_profile_id"])) == seeded["profile_b"]
             assert removed["status"] == "DRAFT"
             assert removed["quality_status"] == "REVIEW_REQUIRED"
             changed = next(
-                row
-                for row in drafts
-                if UUID(str(row["document_id"])) == seeded["document_a"]
+                row for row in drafts if UUID(str(row["document_id"])) == seeded["document_a"]
             )
             assert changed["status"] == "DRAFT"
             assert changed["quality_status"] == "REVIEW_REQUIRED"
@@ -544,9 +534,7 @@ async def test_publish_remove_draft_disables_profile_and_snapshots() -> None:
             index = await _insert_index(engine, knowledge_id, 1, "ACTIVE")
             document = await _insert_document(engine, knowledge_id, "待移除", FILE_HASH_A1)
             await _link_document(engine, index, document, FILE_HASH_A1)
-            profile = await _insert_live_profile(
-                engine, knowledge_id, document, "REMOVE_ME"
-            )
+            profile = await _insert_live_profile(engine, knowledge_id, document, "REMOVE_ME")
             release = await _insert_release(engine, knowledge_id, index)
             await _insert_draft(
                 engine,
@@ -608,9 +596,7 @@ async def test_support_rollback_restores_snapshot_and_disables_newer_profiles() 
             document = await _insert_document(engine, knowledge_id, "文档A", FILE_HASH_A1)
             await _link_document(engine, index, document, FILE_HASH_A1)
             await _insert_elements(engine, index, document)
-            profile = await _insert_live_profile(
-                engine, knowledge_id, document, "ROLLBACK_CODE"
-            )
+            profile = await _insert_live_profile(engine, knowledge_id, document, "ROLLBACK_CODE")
             first_release = await _insert_release(engine, knowledge_id, index)
             await _insert_draft(
                 engine,
@@ -727,9 +713,7 @@ async def test_support_rollback_requires_snapshot() -> None:
             index = await _insert_index(engine, knowledge_id, 1, "ACTIVE")
             release = await _insert_release(engine, knowledge_id, index, status="PUBLISHED")
             with pytest.raises(ApiError) as raised:
-                await ReleaseRepository(engine).rollback_support_release(
-                    knowledge_id, release
-                )
+                await ReleaseRepository(engine).rollback_support_release(knowledge_id, release)
             assert raised.value.code == "RELEASE_SNAPSHOT_MISSING"
 
 
@@ -907,3 +891,84 @@ async def test_purge_expired_conversations_releases_frozen_references() -> None:
                 id=conversation_id,
             )
             assert remaining["total"] == 0
+
+
+async def test_release_frozen_conversation_references_unblocks_force_delete() -> None:
+    async with _engine() as engine:
+        async with _knowledge_base(engine) as knowledge_id:
+            index = await _insert_index(engine, knowledge_id, 1, "DEPRECATED")
+            document_id = await _insert_document(engine, knowledge_id, "force-delete-doc", "e" * 64)
+            release_id = await _insert_release(engine, knowledge_id, index, status="CANCELLED")
+            settings = Settings(_env_file=None, app_env="test")
+            repository = IngestionRepository(engine, settings)
+
+            rag_conversation = uuid4()
+            focus_conversation = uuid4()
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO conversation (
+                            id, knowledge_id, rag_index_id
+                        ) VALUES (:id, :kb_id, :index_id)
+                        """
+                    ),
+                    {"id": rag_conversation, "kb_id": knowledge_id, "index_id": index},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO conversation (
+                            id, knowledge_id, support_index_id, support_release_id,
+                            focus_index_id, focus_document_id, chat_context,
+                            pending_switch_options
+                        ) VALUES (
+                            :id, :kb_id, :index_id, :release_id, :index_id,
+                            :document_id, '{"legacy": true}'::jsonb,
+                            '[{"document_id": "stale"}]'::jsonb
+                        )
+                        """
+                    ),
+                    {
+                        "id": focus_conversation,
+                        "kb_id": knowledge_id,
+                        "index_id": index,
+                        "release_id": release_id,
+                        "document_id": document_id,
+                    },
+                )
+
+            blockers = await repository.get_index_deletion_blockers(index)
+            assert blockers is not None
+            assert blockers["frozen_conversation_count"] == 2
+            assert await repository.mark_index_deleting(index) is None
+
+            released = await repository.release_frozen_conversation_references(index)
+
+            assert released == 3
+            rag_row = await _fetch_one(
+                engine,
+                "SELECT rag_index_id FROM conversation WHERE id = :id",
+                id=rag_conversation,
+            )
+            focus_row = await _fetch_one(
+                engine,
+                """
+                SELECT support_index_id, support_release_id, focus_index_id,
+                       focus_document_id, chat_context, pending_switch_options
+                FROM conversation WHERE id = :id
+                """,
+                id=focus_conversation,
+            )
+            assert rag_row["rag_index_id"] is None
+            assert focus_row["support_index_id"] is None
+            assert focus_row["support_release_id"] is None
+            assert focus_row["focus_index_id"] is None
+            assert focus_row["focus_document_id"] is None
+            assert focus_row["chat_context"] == {}
+            assert focus_row["pending_switch_options"] == []
+            after = await repository.get_index_deletion_blockers(index)
+            assert after is not None
+            assert after["frozen_conversation_count"] == 0
+            assert await repository.mark_index_deleting(index) is not None
+            assert await repository.delete_index(index) is True

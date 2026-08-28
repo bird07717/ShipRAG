@@ -3,21 +3,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import Settings
-from app.rag.llm import LlmError, LlmProvider
+from app.rag.llm import LlmError, LlmProvider, StructuredModel
 
-_SCOPE_SYSTEM = """你是企业技术文档范围提取器。只依据单篇文档正文（标题仅作辅助），
-识别该文档实际解决的一个核心对象和任务。列出正文可验证的症状、明确不适用范围，以及支持这些结论的短摘录。输出严格 JSON。"""
-_PROFILE_SYSTEM = """你是企业技术文档目录编辑。根据给定的文档范围和正文生成一个可审核的问题 Profile 草稿。
-只描述范围内的一个核心问题；不得编造文档没有的产品、型号、版本、错误码或步骤。输出严格 JSON。"""
-_REVIEW_SYSTEM = """你是企业技术文档 Profile 质量审核员。核对 Profile 的问题主体、别名、关键词、症状和排除范围是否都有文档证据。输出修订后的 Profile、质量状态、简短原因和证据，严格 JSON。"""
+_PROFILE_SYSTEM = """你是企业技术文档目录编辑。只依据单篇文档正文生成一个简洁、可审核的 Profile 草稿。
+Profile 只包含三项：
+1. canonical_question：用户会提出的一个标准问题；
+2. aliases：不超过 5 个、确实等价的常见问法或术语；
+3. routing_summary：一句话说明该文档处理什么问题、何时适用。
 
-_PROFILE_SOURCE_MAX_CHARS = 20_000
+不得编造文档中没有的产品、型号、版本、错误码、步骤或适用范围。不要输出问题编码、关键词、产品型号、任务类型、症状、排除项、置信度、证据或审核结论。输出严格 JSON。"""
+
+_PROFILE_SOURCE_MAX_CHARS = 6_000
 _PROFILE_SIGNAL_PATTERN = re.compile(
     r"(?:[A-Za-z]+[-_ ]?\d+[A-Za-z0-9_-]*|"
     r"错误码|故障码|告警码|报警码|升级|更新|更换|替换|配置|设置|检查|检测|"
@@ -64,49 +67,53 @@ def build_profile_source(content: str, *, max_chars: int = _PROFILE_SOURCE_MAX_C
     return "\n\n".join(segment for segment in segments if segment)[:max_chars]
 
 
-class ProfileEvidence(BaseModel):
-    field: str = Field(min_length=1, max_length=80)
-    excerpt: str = Field(min_length=1, max_length=1_000)
-    element_hint: str | None = Field(default=None, max_length=120)
-
-
-class ProfileScope(BaseModel):
-    core_subject: str = Field(min_length=1, max_length=300)
-    task: str | None = Field(default=None, max_length=300)
-    symptoms: list[str] = Field(default_factory=list, max_length=12)
-    exclusions: list[str] = Field(default_factory=list, max_length=8)
-    evidence: list[ProfileEvidence] = Field(default_factory=list, max_length=12)
-
-
 class GeneratedProfile(BaseModel):
-    problem_code: str = Field(min_length=1, max_length=100)
     canonical_question: str = Field(min_length=1, max_length=500)
-    aliases: list[str] = Field(default_factory=list, max_length=10)
-    keywords: list[str] = Field(default_factory=list, max_length=12)
-    product_name: str | None = Field(default=None, max_length=200)
-    model_names: list[str] = Field(default_factory=list, max_length=10)
-    task_type: str | None = Field(default=None, max_length=50)
-    routing_summary: str = Field(default="", max_length=1_000)
-    symptoms: list[str] = Field(default_factory=list, max_length=12)
-    exclusions: list[str] = Field(default_factory=list, max_length=8)
-    confidence: float = Field(default=0.5, ge=0, le=1)
+    aliases: list[str] = Field(default_factory=list, max_length=5)
+    routing_summary: str = Field(default="", max_length=500)
 
-    @field_validator("aliases", "keywords", "model_names", "symptoms", "exclusions")
+    @field_validator("aliases")
     @classmethod
     def clean_items(cls, value: list[str]) -> list[str]:
         return list(dict.fromkeys(item.strip() for item in value if item.strip()))
 
 
-class ProfileQualityReview(BaseModel):
-    profile: GeneratedProfile
-    quality_status: str
-    quality_notes: list[str] = Field(default_factory=list, max_length=12)
-    evidence: list[ProfileEvidence] = Field(default_factory=list, max_length=16)
-
-
 class DocumentProfileGenerator:
+    # A single short retry bounds the delay of a whole knowledge-base run.
+    _RETRY_BACKOFF_SECONDS = (2.0,)
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+
+    async def _complete_structured(
+        self,
+        provider: LlmProvider,
+        prompt: str,
+        *,
+        system: str,
+        schema: type[StructuredModel],
+        max_tokens: int,
+    ) -> StructuredModel:
+        """Run the one Profile draft call with one bounded transient retry."""
+        attempts = max(1, self.settings.profile_llm_retry_attempts)
+        for attempt in range(attempts):
+            try:
+                return await provider.complete_structured(
+                    prompt,
+                    system=system,
+                    schema=schema,
+                    max_tokens=max_tokens,
+                    temperature=0,
+                    timeout_seconds=self.settings.profile_llm_timeout_seconds,
+                )
+            except LlmError as exc:
+                if not exc.retryable or attempt >= attempts - 1:
+                    raise
+                delay = self._RETRY_BACKOFF_SECONDS[
+                    min(attempt, len(self._RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable")
 
     async def generate(
         self, document: dict[str, Any], provider: LlmProvider | None
@@ -124,21 +131,12 @@ class DocumentProfileGenerator:
         source = build_profile_source(str(document.get("content") or ""))
         prompt = f"文档标题：{title}\n\n文档正文：\n{source}"
         try:
-            scope = await provider.complete_structured(
+            generated = await self._complete_structured(
+                provider,
                 prompt,
-                system=_SCOPE_SYSTEM,
-                schema=ProfileScope,
-                max_tokens=800,
-                temperature=0,
-                timeout_seconds=self.settings.m3_provider_timeout_seconds,
-            )
-            generated = await provider.complete_structured(
-                f"{prompt}\n\n文档范围：\n{scope.model_dump_json()}",
                 system=_PROFILE_SYSTEM,
                 schema=GeneratedProfile,
-                max_tokens=1_024,
-                temperature=0,
-                timeout_seconds=self.settings.m3_provider_timeout_seconds,
+                max_tokens=600,
             )
         except LlmError as exc:
             return (
@@ -146,53 +144,14 @@ class DocumentProfileGenerator:
                 "FALLBACK",
                 exc.code,
                 "FALLBACK",
-                [f"离线范围提取或生成失败：{exc.code}"],
+                [f"Profile 草稿生成失败：{exc.code}"],
             )
-        try:
-            review = await provider.complete_structured(
-                f"{prompt}\n\n文档范围：\n{scope.model_dump_json()}\n\n待审核 Profile：\n{generated.model_dump_json()}",
-                system=_REVIEW_SYSTEM,
-                schema=ProfileQualityReview,
-                max_tokens=1_024,
-                temperature=0,
-                timeout_seconds=self.settings.m3_provider_timeout_seconds,
-            )
-        except LlmError as exc:
-            return generated, "LLM", exc.code, "REVIEW_REQUIRED", [f"离线质量复核失败：{exc.code}"]
-        return review.profile, "LLM", None, review.quality_status, review.quality_notes
+        return generated, "LLM", None, "PASS", []
 
     @staticmethod
     def _fallback(title: str, document: dict[str, Any]) -> GeneratedProfile:
-        words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{1,30}", title)
-        code = "_".join(word.upper().replace("-", "_") for word in words[:5]).strip("_")
-        code = code or f"DOC_{str(document['document_id']).replace('-', '')[:8].upper()}"
-        task_type = next(
-            (
-                value
-                for token, value in (
-                    ("升级", "UPGRADE"),
-                    ("更换", "REPLACEMENT"),
-                    ("检查", "CHECK"),
-                    ("配置", "CONFIGURATION"),
-                    ("设置", "CONFIGURATION"),
-                    ("报警", "ALARM"),
-                )
-                if token in title
-            ),
-            None,
-        )
         return GeneratedProfile(
-            problem_code=code,
             canonical_question=title.rstrip("？?。 ") + "？",
-            keywords=[
-                term
-                for term in ("升级", "更换", "检查", "配置", "设置", "报警", "故障")
-                if term in title
-            ],
-            model_names=[word.upper() for word in words if any(char.isdigit() for char in word)][
-                :5
-            ],
-            task_type=task_type,
-            routing_summary=f"《{title}》的保守路由摘要：需由管理员根据正文确认。",
-            confidence=0.35,
+            aliases=[],
+            routing_summary=f"《{title}》的待人工确认 Profile 草稿。",
         )

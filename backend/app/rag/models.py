@@ -39,6 +39,9 @@ class Turn:
     llm: ModelSnapshot
     history: list[dict[str, str]]
     rerank: ModelSnapshot | None = None
+    # Enabled EMBEDDING row snapshot at turn start.  Query-side embedding
+    # prefers it when it matches the active index; None falls back to env.
+    embedding: ModelSnapshot | None = None
     focus_document_id: UUID | None = None
     focus_epoch: int = 0
     context_version: int = 0

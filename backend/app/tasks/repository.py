@@ -131,6 +131,56 @@ class TaskRecordRepository:
             row = result.mappings().one_or_none()
         return dict(row) if row is not None else None
 
+    async def status(self, task_id: UUID) -> str | None:
+        """Cheap cooperative-cancellation probe used inside worker loops."""
+        async with self.engine.connect() as connection:
+            return await connection.scalar(
+                text("SELECT status FROM task_record WHERE id = :id"), {"id": task_id}
+            )
+
+    async def request_cancel(self, task_id: UUID) -> bool:
+        """Terminal-cancel an active task; returns False when already terminal.
+
+        The worker polls task_record.status between documents, so a cancelled
+        row is enough to stop an in-flight run; no queue surgery is needed.
+        """
+        async with self.engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE task_record
+                    SET status = 'CANCELLED', stage = 'CANCELLED', finished_at = now(),
+                        updated_at = now(),
+                        metadata = metadata || CAST(:metadata AS jsonb)
+                    WHERE id = :id AND status IN ('QUEUED', 'RUNNING')
+                    """
+                ),
+                {"id": task_id, "metadata": json.dumps({"cancelled": True})},
+            )
+            return (result.rowcount or 0) > 0
+
+    async def list_active_by_type(self, task_type: str) -> list[dict[str, Any]]:
+        """Active tasks of one type, for orphan reconciliation at worker start."""
+        async with self.engine.connect() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                        SELECT id, status, kb_id, created_at, updated_at
+                        FROM task_record
+                        WHERE task_type = :task_type AND status IN ('QUEUED', 'RUNNING')
+                        ORDER BY created_at
+                        """
+                        ),
+                        {"task_type": task_type},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [dict(row) for row in rows]
+
     async def start(self, task_id: UUID, *, stage: str) -> bool:
         async with self.engine.begin() as connection:
             result = await connection.execute(
@@ -183,7 +233,7 @@ class TaskRecordRepository:
                     SET status = 'SUCCEEDED', stage = 'COMPLETED', progress = 100,
                         finished_at = now(), updated_at = now(), error_code = NULL,
                         error_message = NULL, metadata = metadata || CAST(:metadata AS jsonb)
-                    WHERE id = :id
+                    WHERE id = :id AND status = 'RUNNING'
                     """
                 ),
                 {"id": task_id, "metadata": json.dumps(metadata or {}, ensure_ascii=False)},
@@ -202,7 +252,7 @@ class TaskRecordRepository:
                     UPDATE task_record
                     SET status = 'FAILED', stage = 'FAILED', error_code = :error_code,
                         error_message = :error_message, finished_at = now(), updated_at = now()
-                    WHERE id = :id
+                    WHERE id = :id AND status IN ('QUEUED', 'RUNNING')
                     """
                 ),
                 {

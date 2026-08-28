@@ -14,6 +14,7 @@ from app.common.errors import ApiError
 from app.common.text import estimate_tokens
 from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
+from app.rag.model_providers import environment_api_key, supported_providers
 from app.rag.models import ModelSnapshot, RetrievalCandidate, RetrievalConfig, Turn
 
 
@@ -50,10 +51,10 @@ class RagRepository:
             int(row["api_key_key_version"] or 1),
         )
 
-    def _api_key_source(self, model_type: str, stored_key: bool) -> str | None:
+    def _api_key_source(self, model_type: str, provider: str, stored_key: bool) -> str | None:
         if stored_key:
             return "DATABASE"
-        environment_key = self._environment_key_for(model_type)
+        environment_key = self._environment_key_for(model_type, provider)
         if environment_key is not None and environment_key.get_secret_value().strip():
             return "ENV"
         return None
@@ -121,14 +122,19 @@ class RagRepository:
                 await connection.execute(
                     text(
                         """
-                        INSERT INTO conversation (id, knowledge_id, rag_index_id)
-                        VALUES (:id, :knowledge_id, :rag_index_id)
+                        INSERT INTO conversation (
+                            id, knowledge_id, rag_index_id, user_id, title
+                        ) VALUES (
+                            :id, :knowledge_id, :rag_index_id, :user_id, :title
+                        )
                         """
                     ),
                     {
                         "id": resolved_conversation_id,
                         "knowledge_id": knowledge_id,
                         "rag_index_id": effective_index_id,
+                        "user_id": user_id,
+                        "title": question.strip()[:200] or None,
                     },
                 )
             else:
@@ -273,6 +279,35 @@ class RagRepository:
             rerank_row = rerank_result.mappings().one_or_none()
             if rerank_row is None:
                 raise ApiError("MODEL_NOT_CONFIGURED", "Rerank 模型未配置", 503)
+
+            # Optional: the enabled EMBEDDING row lets the query side use the
+            # admin-managed provider/key instead of env-only settings.  A
+            # missing row keeps the env fallback.
+            embedding_result = await connection.execute(
+                text(
+                    """
+                    SELECT provider, model_name, base_url,
+                           api_key_ciphertext, api_key_nonce, api_key_key_version
+                    FROM model_config WHERE model_type = 'EMBEDDING' AND enabled
+                    """
+                )
+            )
+            embedding_row = embedding_result.mappings().one_or_none()
+            embedding_snapshot = (
+                ModelSnapshot(
+                    provider=str(embedding_row["provider"]),
+                    model_name=str(embedding_row["model_name"]),
+                    parameters={},
+                    base_url=(
+                        str(embedding_row["base_url"])
+                        if embedding_row["base_url"] is not None
+                        else None
+                    ),
+                    api_key=self._decrypt_api_key(dict(embedding_row)),
+                )
+                if embedding_row is not None
+                else None
+            )
 
             config_result = await connection.execute(
                 text(
@@ -440,6 +475,7 @@ class RagRepository:
                 ),
                 api_key=self._decrypt_api_key(dict(rerank_row)),
             ),
+            embedding=embedding_snapshot,
             focus_document_id=focus_document_id,
             focus_epoch=focus_epoch,
             context_version=context_version,
@@ -1211,17 +1247,13 @@ class RagRepository:
             result = await connection.execute(text(query), parameters)
             return [dict(row) for row in result.mappings()]
 
-    def _environment_key_for(self, model_type: str) -> Any:
-        return {
-            "LLM": self.settings.zhipu_api_key,
-            "VISION": self.settings.zhipu_api_key,
-            "EMBEDDING": self.settings.siliconflow_api_key,
-            "RERANK": self.settings.siliconflow_api_key,
-            "OCR": self.settings.siliconflow_api_key,
-        }.get(model_type)
+    def _environment_key_for(self, model_type: str, provider: str) -> Any:
+        return environment_api_key(self.settings, model_type, provider)
 
-    def _api_key_configured(self, model_type: str, stored_key_configured: bool) -> bool:
-        environment_key = self._environment_key_for(model_type)
+    def _api_key_configured(
+        self, model_type: str, provider: str, stored_key_configured: bool
+    ) -> bool:
+        environment_key = self._environment_key_for(model_type, provider)
         return stored_key_configured or (
             environment_key is not None and bool(environment_key.get_secret_value().strip())
         )
@@ -1244,9 +1276,13 @@ class RagRepository:
             for raw in result.mappings():
                 row = dict(raw)
                 model_type = str(row["model_type"])
+                provider = str(row["provider"])
                 stored_key = bool(row.pop("stored_key_configured"))
-                row["api_key_configured"] = self._api_key_configured(model_type, stored_key)
-                row["api_key_source"] = self._api_key_source(model_type, stored_key)
+                row["api_key_configured"] = self._api_key_configured(
+                    model_type, provider, stored_key
+                )
+                row["api_key_source"] = self._api_key_source(model_type, provider, stored_key)
+                row["supported_providers"] = list(supported_providers(model_type))
                 rows.append(row)
             return rows
 
@@ -1285,10 +1321,14 @@ class RagRepository:
 
     def _public_model_row(self, row: dict[str, Any]) -> dict[str, Any]:
         model_type = str(row["model_type"])
+        provider = str(row["provider"])
         stored_key = row.get("api_key_ciphertext") is not None
         public = {key: value for key, value in row.items() if not key.startswith("api_key_")}
-        public["api_key_configured"] = self._api_key_configured(model_type, stored_key)
-        public["api_key_source"] = self._api_key_source(model_type, stored_key)
+        public["api_key_configured"] = self._api_key_configured(
+            model_type, provider, stored_key
+        )
+        public["api_key_source"] = self._api_key_source(model_type, provider, stored_key)
+        public["supported_providers"] = list(supported_providers(model_type))
         return public
 
     async def set_api_key(self, model_id: UUID, api_key: str, *, actor: str) -> dict[str, Any]:
@@ -1387,8 +1427,10 @@ class RagRepository:
         self,
         model_id: UUID,
         *,
+        provider: str | None = None,
         model_name: str | None = None,
         base_url: str | None = None,
+        api_key: str | None = None,
         parameters: dict[str, Any] | None = None,
         enabled: bool | None = None,
         actor: str = "system",
@@ -1417,6 +1459,10 @@ class RagRepository:
             assignments: list[str] = []
             params: dict[str, Any] = {"id": model_id}
             changed_fields: list[str] = []
+            if provider is not None:
+                assignments.append("provider = :provider")
+                params["provider"] = provider
+                changed_fields.append("provider")
             if model_name is not None:
                 assignments.append("model_name = :model_name")
                 params["model_name"] = model_name
@@ -1425,6 +1471,24 @@ class RagRepository:
                 assignments.append("base_url = :base_url")
                 params["base_url"] = base_url
                 changed_fields.append("base_url")
+            if api_key is not None:
+                box = self._require_secret_box()
+                ciphertext, nonce = box.encrypt(api_key)
+                assignments.extend(
+                    [
+                        "api_key_ciphertext = :api_key_ciphertext",
+                        "api_key_nonce = :api_key_nonce",
+                        "api_key_key_version = :api_key_key_version",
+                    ]
+                )
+                params.update(
+                    {
+                        "api_key_ciphertext": ciphertext,
+                        "api_key_nonce": nonce,
+                        "api_key_key_version": box.version,
+                    }
+                )
+                changed_fields.append("api_key")
             if parameters is not None:
                 assignments.append("parameters = CAST(:parameters AS jsonb)")
                 params["parameters"] = json.dumps(parameters, ensure_ascii=False)

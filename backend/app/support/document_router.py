@@ -305,16 +305,10 @@ class SupportDocumentRouter:
         )
         metadata: list[str] = [f"文档标题：{candidate.document}"]
         if profile is not None:
-            product_models = [*profile.model_names[:5]]
-            if profile.product_name:
-                product_models.append(profile.product_name)
             metadata.extend(
                 [
                     f"标准问题：{profile.canonical_question}",
                     f"别名：{'；'.join(profile.aliases[:5])}",
-                    f"产品型号：{'；'.join(product_models)}",
-                    f"任务类型：{profile.task_type or ''}",
-                    f"症状：{'；'.join(profile.symptoms[:5])}",
                     f"路由摘要：{profile.routing_summary[:500]}",
                 ]
             )

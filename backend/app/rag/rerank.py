@@ -9,6 +9,12 @@ from typing import Protocol
 import httpx
 
 from app.core.config import Settings
+from app.rag.model_providers import (
+    environment_api_key,
+    environment_base_url,
+    get_provider_capability,
+    normalize_provider,
+)
 from app.rag.models import ModelSnapshot, RerankDocument, RerankItem, RerankOutcome
 
 
@@ -59,36 +65,37 @@ class FakeRerankProvider:
 
 
 class SiliconFlowRerankProvider:
-    provider = "siliconflow"
-
     def __init__(
         self,
         settings: Settings,
         snapshot: ModelSnapshot,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        # DB-stored key (decrypted per turn) wins; the env setting is the
-        # bootstrap fallback (ADR-0005 priority chain).
-        api_key = snapshot.api_key or settings.siliconflow_api_key
-        if not settings.has_secret(api_key):
-            raise RerankError("MODEL_NOT_CONFIGURED", "SiliconFlow Rerank 未配置", degradable=False)
-        if snapshot.provider.lower() != "siliconflow":
+        self.provider = normalize_provider(snapshot.provider)
+        if get_provider_capability("RERANK", self.provider) is None:
             raise RerankError("MODEL_NOT_CONFIGURED", "Rerank Provider 不受支持", degradable=False)
+        # DB-stored key (decrypted per turn) wins; the selected provider's
+        # environment key is the bootstrap fallback.
+        api_key = snapshot.api_key or environment_api_key(settings, "RERANK", self.provider)
+        if not settings.has_secret(api_key):
+            raise RerankError(
+                "MODEL_NOT_CONFIGURED", f"{self.provider} Rerank 未配置", degradable=False
+            )
         assert api_key is not None
         self.model_name = snapshot.model_name
+        self._supports_multimodal_documents = self.provider == "siliconflow"
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
-            # DB model_config.base_url wins (admin-adjustable per turn);
-            # the env setting is the fallback for legacy rows.
-            base_url=snapshot.base_url or settings.siliconflow_base_url,
+            base_url=snapshot.base_url
+            or environment_base_url(settings, "RERANK", self.provider)
+            or settings.siliconflow_base_url,
             headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
             timeout=httpx.Timeout(settings.m5_provider_timeout_seconds),
             follow_redirects=False,
         )
 
-    @staticmethod
-    def _document_payload(document: RerankDocument) -> str | dict[str, str]:
-        if document.image_bytes is None:
+    def _document_payload(self, document: RerankDocument) -> str | dict[str, str]:
+        if document.image_bytes is None or not self._supports_multimodal_documents:
             return document.text
         mime_type = document.image_mime_type or "image/png"
         encoded = base64.b64encode(document.image_bytes).decode("ascii")
@@ -185,9 +192,10 @@ class SiliconFlowRerankProvider:
 
 def create_rerank_provider(settings: Settings, snapshot: ModelSnapshot) -> RerankProvider:
     mode = settings.m5_rerank_provider
-    has_any_key = settings.has_secret(settings.siliconflow_api_key) or settings.has_secret(
-        snapshot.api_key
-    )
+    provider = normalize_provider(snapshot.provider)
+    has_any_key = settings.has_secret(
+        environment_api_key(settings, "RERANK", provider)
+    ) or settings.has_secret(snapshot.api_key)
     if mode == "fake" or (mode == "auto" and not has_any_key):
         return FakeRerankProvider()
     return SiliconFlowRerankProvider(settings, snapshot)

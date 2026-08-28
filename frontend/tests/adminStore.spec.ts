@@ -377,6 +377,46 @@ describe("adminStore", () => {
     ]);
   });
 
+  it("tracks the document Profile task submitted after an automatic RAG build", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.trackTask(
+      { task_id: "task-build", task_type: "INDEX_BUILD", status: "QUEUED", replayed: false },
+      { successMessage: "RAG 索引构建完成", knowledgeId: kb.id },
+    );
+    vi.spyOn(adminApi, "getTask").mockResolvedValue({
+      id: "task-build",
+      task_type: "INDEX_BUILD",
+      status: "SUCCEEDED",
+      stage: "COMPLETED",
+      progress: 100,
+      attempt: 1,
+      kb_id: kb.id,
+      index_id: "idx-1",
+      document_id: null,
+      error_code: null,
+      error_message: null,
+      metadata: {
+        profile_task_id: "task-document-profile",
+        profile_task_type: "DOCUMENT_PROFILE_GENERATE",
+      },
+      created_at: "2026-08-26T00:00:00Z",
+      started_at: "2026-08-26T00:00:01Z",
+      finished_at: "2026-08-26T00:00:02Z",
+      updated_at: "2026-08-26T00:00:02Z",
+    });
+
+    await adminStore.pollTrackedTasks();
+
+    expect(adminStore.trackedTasks).toEqual([
+      expect.objectContaining({
+        taskId: "task-document-profile",
+        taskType: "DOCUMENT_PROFILE_GENERATE",
+        knowledgeId: kb.id,
+      }),
+    ]);
+  });
+
   it("loads document profile context in parallel and drops stale responses", async () => {
     stubApi();
     adminStore.knowledgeBases = [kb];

@@ -187,6 +187,38 @@ class IngestionService:
         await self._enqueue_reference(build)
         return build
 
+    async def request_rebuild_all(
+        self, *, reason: str, activate_on_success: bool = True
+    ) -> list[dict[str, Any]]:
+        """Fleet-wide rebuild, used when a build-bound model identity changes.
+
+        Queue delivery failures are reported per KB but never abort the loop:
+        every KB also carries rebuild_required=true so the console keeps
+        surfacing the drift until a build succeeds.
+        """
+        builds = await self.repository.request_rebuild_for_all_knowledge_bases(
+            reason, activate_on_success=activate_on_success
+        )
+        results: list[dict[str, Any]] = []
+        for knowledge_id, build in builds:
+            entry: dict[str, Any] = {
+                "knowledge_id": str(knowledge_id),
+                "index_id": str(build.index_id) if build.index_id else None,
+                "task_id": str(build.task_id) if build.task_id else None,
+                "coalesced": build.coalesced,
+                "enqueued": True,
+            }
+            try:
+                await self._enqueue_reference(build)
+            except Exception:
+                # Mirror the single-build path: without this the index row
+                # would sit BUILDING with a task no worker will ever pick up.
+                if build.index_id is not None and build.task_id is not None:
+                    await self.repository.mark_build_enqueue_failed(build.index_id, build.task_id)
+                entry["enqueued"] = False
+            results.append(entry)
+        return results
+
     async def delete_document(
         self, document_id: UUID, *, request_build: bool = True
     ) -> dict[str, Any]:
@@ -337,26 +369,96 @@ class IngestionService:
             "purged_conversation_count": len(purged_conversation_ids),
         }
 
-    async def delete_index(self, index_id: UUID) -> dict[str, Any]:
-        """Force delete a specific index regardless of retention policy."""
+    async def delete_index(self, index_id: UUID, *, force: bool = False) -> dict[str, Any]:
+        """Force delete a specific index regardless of retention policy.
+
+        ``force`` first detaches conversations frozen to this index so their
+        references stop blocking deletion; the conversations survive and
+        re-bind to the current active index on their next message.
+        """
         index = await self.repository.get_index(index_id)
         if index["status"] in ("ACTIVE", "BUILDING"):
-            raise ApiError("FORBIDDEN", "不能删除 ACTIVE 或 BUILDING 状态的索引", 409)
+            raise ApiError(
+                "FORBIDDEN",
+                "不能删除 ACTIVE 或 BUILDING 状态的索引",
+                409,
+                details={"index_status": index["status"]},
+            )
+
+        released = 0
+        if force:
+            released = await self.repository.release_frozen_conversation_references(index_id)
+            if released:
+                logger.info(
+                    "Force delete released %s frozen conversation reference(s) from index %s",
+                    released,
+                    index_id,
+                )
 
         if index["status"] != "DELETING":
             marked = await self.repository.mark_index_deleting(index_id)
             if marked is None:
-                raise ApiError("INDEX_NOT_FOUND", "索引不存在或仍被线上引用", 404)
+                blockers = await self.repository.get_index_deletion_blockers(index_id)
+                self._raise_index_delete_blocked(blockers)
 
         image_assets = await self.repository.list_image_assets_for_index(index_id)
         deleted = await self.repository.delete_index(index_id)
         if not deleted:
-            raise ApiError(
-                "INDEX_REFERENCE_PROTECTED", "索引仍被线上版本或冻结会话引用，已取消删除", 409
+            self._raise_index_delete_blocked(
+                await self.repository.get_index_deletion_blockers(index_id)
             )
         for asset in image_assets:
             await self._remove_minio_object(asset["minio_bucket"], asset["minio_object_key"])
-        return {"deleted_index_ids": [str(index_id)], "deleted_count": 1}
+        return {
+            "deleted_index_ids": [str(index_id)],
+            "deleted_count": 1,
+            "released_conversation_count": released,
+        }
+
+    @staticmethod
+    def _raise_index_delete_blocked(blockers: dict[str, Any] | None) -> None:
+        if blockers is None:
+            raise ApiError("INDEX_NOT_FOUND", "索引不存在", 404)
+
+        details: dict[str, Any] = {
+            key: int(blockers.get(key, 0))
+            for key in (
+                "active_index_pointer_count",
+                "rag_active_pointer_count",
+                "support_active_pointer_count",
+                "support_active_release_count",
+                "open_release_count",
+                "active_task_count",
+                "frozen_conversation_count",
+            )
+        }
+        details["index_status"] = str(blockers["status"])
+        labels: list[str] = []
+        if details["active_index_pointer_count"] or details["rag_active_pointer_count"]:
+            labels.append("RAG 在线索引")
+        if details["support_active_pointer_count"]:
+            labels.append("Support 在线索引")
+        if details["support_active_release_count"]:
+            labels.append("Support 在线版本")
+        if details["open_release_count"]:
+            labels.append(f"{details['open_release_count']} 个未取消 Release")
+        if details["active_task_count"]:
+            labels.append(f"{details['active_task_count']} 个运行中任务")
+        if details["frozen_conversation_count"]:
+            labels.append(f"{details['frozen_conversation_count']} 个冻结会话")
+        if labels:
+            raise ApiError(
+                "INDEX_REFERENCE_PROTECTED",
+                f"索引仍被引用，无法删除：{'、'.join(labels)}",
+                409,
+                details=details,
+            )
+        raise ApiError(
+            "INDEX_NOT_DELETABLE",
+            f"索引当前状态为 {details['index_status']}，只有 DEPRECATED 或 FAILED 索引可以删除",
+            409,
+            details=details,
+        )
 
     async def _enqueue_reference(self, build: BuildReference) -> None:
         if (
