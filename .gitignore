@@ -31,4 +31,7 @@ Thumbs.db
 *.log
 .cache/
 
+# Generated acceptance-run reports (archive intentional baselines outside Git)
+rag-acceptance/reports/
+
 /VDR600/

@@ -8,6 +8,7 @@ import type {
   ProfileQualityStatus,
 } from "@/types/admin";
 import EmptyState from "@/components/ui/EmptyState.vue";
+import ListSkeleton from "@/components/ui/ListSkeleton.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 
 const store = useAdminStore();
@@ -136,12 +137,13 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         </div>
       </div>
 
+      <ListSkeleton v-if="store.loading && !store.documents.length" :columns="7" />
       <el-table
-        v-if="store.filteredDocuments.length"
+        v-else-if="store.filteredDocuments.length"
         :data="store.filteredDocuments"
         @row-click="(row: any) => store.inspectDocument(row)"
       >
-        <el-table-column label="文件（File）" min-width="260">
+        <el-table-column label="文件" min-width="260">
           <template #default="scope">
             <div class="file-cell">
               <span class="file-type-badge">DOCX</span>
@@ -152,23 +154,23 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="类型（Type）" width="90">
+        <el-table-column label="类型" width="90">
           <template #default><span class="muted">Word 文档</span></template>
         </el-table-column>
-        <el-table-column label="大小（Size）" width="100">
+        <el-table-column label="大小" width="100">
           <template #default="scope">{{ formatSize(scope.row.file_size) }}</template>
         </el-table-column>
-        <el-table-column label="状态（Status）" width="130">
+        <el-table-column label="状态" width="130">
           <template #default="scope"><StatusBadge :status="scope.row.status" /></template>
         </el-table-column>
-        <el-table-column label="文档属性（Profile）" width="130">
+        <el-table-column label="文档属性" width="130">
           <template #default="scope">
             <el-tag :type="profileTagType(documentProfileStatus(scope.row.id))" size="small">
               {{ profileLabels[documentProfileStatus(scope.row.id)] }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="上传时间（Uploaded）" min-width="170">
+        <el-table-column label="上传时间" min-width="170">
           <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
         </el-table-column>
         <el-table-column label="" width="80" align="right">

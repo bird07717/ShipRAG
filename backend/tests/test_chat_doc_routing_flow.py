@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, ClassVar, cast
 from uuid import uuid4
@@ -929,3 +930,170 @@ async def test_generate_llm_failure_raises_and_marks_failed():
     assert repo.failed["retryable"] is True
     assert repo.failed["detail"] == "HTTP 429"
     assert repo.pending_updates == []
+
+
+class _SlowEmbeddingProvider:
+    """Simulates a hung upstream: never finishes within the turn deadline."""
+
+    provider = "fake"
+    model_name = "slow-embedding"
+
+    async def embed(self, inputs: Any) -> list[list[float]]:
+        await asyncio.sleep(30.0)
+        return []
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _SlowStreamLlmProvider:
+    """Streams one delta, then hangs past the turn deadline."""
+
+    usage: ClassVar[dict[str, Any]] = {}
+
+    async def stream(self, prompt: str) -> Any:
+        yield "回答开头。"
+        await asyncio.sleep(30.0)
+        yield "不应到达的结尾"
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_turn_deadline_bounds_hung_retrieval():
+    # A hung embedding upstream must fail the turn within the configured
+    # deadline instead of exposing the provider-level 90s timeout, and the
+    # failure must be recorded on the trace as retryable.
+    repo = _RoutingRepository(turn=_turn(), candidates=[])
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        m2_embedding_provider="fake",
+        m3_llm_provider="fake",
+        m3_turn_deadline_seconds=1.0,
+    )
+    service = RagService(
+        cast(RagRepository, repo),
+        settings,
+        embedding_factory=lambda _: cast(Any, _SlowEmbeddingProvider()),
+        llm_factory=lambda s, snap: cast(LlmProvider, _RecordingLlmProvider([])),
+        rerank_factory=lambda s, snap: FakeRerankProvider(),
+    )
+
+    with pytest.raises(ApiError) as exc_info:
+        await service.generate(
+            knowledge_id=repo.turn.knowledge_id,
+            conversation_id=None,
+            question="如何升级",
+            request_id="req-deadline",
+        )
+
+    assert exc_info.value.code == "TURN_DEADLINE_EXCEEDED"
+    assert exc_info.value.status_code == 504
+    assert repo.failed is not None
+    assert repo.failed["status"] == "FAILED"
+    assert repo.failed["stage"] == "turn_deadline"
+    assert repo.failed["retryable"] is True
+    assert repo.completed is None
+
+
+@pytest.mark.asyncio
+async def test_llm_deadline_finalizes_partial_answer_with_marker():
+    # When the LLM exceeds the remaining turn budget mid-stream, the turn
+    # is completed (not failed) with the partial answer plus a truncation
+    # marker, and the timeout is recorded in the trace timings.
+    repo = _RoutingRepository(turn=_turn(), candidates=[])
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        m2_embedding_provider="fake",
+        m3_llm_provider="fake",
+        m3_turn_deadline_seconds=1.0,
+    )
+    service = RagService(
+        cast(RagRepository, repo),
+        settings,
+        embedding_factory=lambda _: FakeEmbeddingProvider(1024),
+        llm_factory=lambda s, snap: cast(LlmProvider, _SlowStreamLlmProvider()),
+        rerank_factory=lambda s, snap: FakeRerankProvider(),
+    )
+
+    result = await service.generate(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=None,
+        question="如何升级",
+        request_id="req-llm-deadline",
+    )
+
+    assert result["response_type"] == "ANSWERED"
+    assert "回答开头。" in result["answer"]
+    assert "超时被截断" in result["answer"]
+    assert "不应到达的结尾" not in result["answer"]
+    assert repo.failed is None
+    assert repo.completed is not None
+    assert repo.completed["timings"].get("llm_deadline_exceeded") is True
+
+
+@pytest.mark.asyncio
+async def test_meta_ack_short_circuits_focused_doc_qa():
+    # "换一个问题" is a topic-change announcement with no document intent:
+    # it must get the instant fixed ack instead of a full DOC_QA pass over
+    # the focus document (which produced a 38s canned refusal in production
+    # traces) and must clear any pending clarify options.
+    repo = _RoutingRepository(
+        turn=_turn(
+            focus_document_id=DOC_A,
+            chat_context={
+                "pending_options": [
+                    {"document_id": str(DOC_B), "title": TITLE_B}
+                ]
+            },
+        ),
+        candidates=[_candidate(DOC_A, 1)],
+    )
+    llm = _RecordingLlmProvider(["不应被调用"])
+    service = _service(repo, llm)
+
+    frames = [
+        frame
+        async for frame in service.chat_stream(
+            knowledge_id=repo.turn.knowledge_id,
+            conversation_id=None,
+            question="换一个问题",
+            request_id="req-meta-ack",
+        )
+    ]
+    events = await _collect(frames)
+
+    assert llm.prompts == []
+    deltas = [payload["delta"] for name, payload in events if name == "message"]
+    joined = "".join(deltas)
+    assert joined == "好的，请问您想了解什么？我将基于产品文档为您解答。"
+    done_payload = events[-1][1]
+    assert done_payload["response_type"] == "ANSWERED"
+    assert repo.pending_clears == 1
+    assert repo.pending_updates == []
+
+
+@pytest.mark.asyncio
+async def test_meta_ack_length_guard_keeps_real_questions_on_doc_qa():
+    # A real question that merely contains the phrase must stay on the
+    # normal DOC_QA path.
+    repo = _RoutingRepository(
+        turn=_turn(focus_document_id=DOC_A),
+        candidates=[_candidate(DOC_A, 1)],
+    )
+    llm = _RecordingLlmProvider(["[MODE:PRODUCT_KNOWLEDGE]\n按步骤操作。"])
+    service = _service(repo, llm)
+
+    result = await service.generate(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=None,
+        question="帮我换一个问题：LRU怎么更换",
+        request_id="req-meta-guard",
+    )
+
+    assert llm.prompts, "real question must reach the LLM"
+    assert result["response_type"] == "ANSWERED"
+    assert result["answer_mode"] == "PRODUCT_KNOWLEDGE"

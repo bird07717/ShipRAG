@@ -204,10 +204,17 @@ class IndexPipeline:
 
         await self._update_task(task_id, "RUNNING", "EMBEDDING", progress, metadata=task_metadata)
         await self._update_document_status(index_document_id, "EMBEDDING")
+        # Image/mixed chunks embed caption-free text (see chunker): the vision
+        # caption drives retrieval toward components the body text never
+        # covers. The image itself still reaches multimodal embedding.
         vectors = await self.embedding_provider.embed(
             [
                 EmbeddingInput(
-                    text=chunk.content,
+                    text=(
+                        chunk.search_text
+                        if chunk.chunk_type in {"IMAGE", "MIXED"} and chunk.search_text.strip()
+                        else chunk.content
+                    ),
                     image_bytes=chunk.image_bytes,
                     image_mime_type=chunk.image_mime_type,
                 )

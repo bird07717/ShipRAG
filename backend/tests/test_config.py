@@ -42,10 +42,10 @@ def test_worker_name_is_configurable_for_independent_queue_workers() -> None:
 
 
 def test_chat_execution_mode_only_supports_formal_and_manual_rollback() -> None:
-    assert Settings(_env_file=None).chat_execution_mode == "technical_support"
+    assert Settings(_env_file=None).chat_execution_mode == "legacy_rag"
     assert (
-        Settings(_env_file=None, chat_execution_mode="legacy_rag").chat_execution_mode
-        == "legacy_rag"
+        Settings(_env_file=None, chat_execution_mode="technical_support").chat_execution_mode
+        == "technical_support"
     )
     with pytest.raises(ValidationError):
         Settings(_env_file=None, chat_execution_mode="shadow")

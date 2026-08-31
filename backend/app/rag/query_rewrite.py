@@ -40,16 +40,33 @@ _FOLLOW_UP_PATTERN = re.compile(
     r"它|他|她|这|那|上述|上面|前面|刚才|继续|另外|还有|再|呢|是不是|要不要"
 )
 
+_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9]")
+
+# Questions at or below this length without any product/code token are
+# treated as likely elliptical ("在哪个界面操作") and still qualify for a
+# rewrite; anything longer or carrying an identifier is self-contained.
+_SHORT_ELLIPTICAL_CHARS = 12
+
 _QUOTES = "\"'“”\u2018\u2019«»"
 
 
 def should_rewrite(question: str, history: list[dict[str, str]], *, max_chars: int) -> bool:
-    """Gate the rewrite call: only follow-up-looking questions pay the cost."""
+    """Gate the rewrite call: only follow-up-looking questions pay the cost.
+
+    The old rule rewrote every short question with history, which billed a
+    full LLM round-trip (1-8s, measured) even for self-contained questions
+    like "如何升级FFC" and for out-of-scope one-liners. Now a question only
+    qualifies when it carries an explicit follow-up signal, or is very
+    short AND contains no product/model/code identifier.
+    """
     if not history or not question.strip():
         return False
-    if len(question) <= max_chars:
+    if _FOLLOW_UP_PATTERN.search(question):
         return True
-    return bool(_FOLLOW_UP_PATTERN.search(question))
+    stripped = question.strip()
+    is_short_ellipsis = len(stripped) <= min(_SHORT_ELLIPTICAL_CHARS, max_chars)
+    has_identifier = bool(_IDENTIFIER_PATTERN.search(stripped))
+    return is_short_ellipsis and not has_identifier
 
 
 async def rewrite_query(

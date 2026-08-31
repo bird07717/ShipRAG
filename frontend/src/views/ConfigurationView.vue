@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { ElMessageBox } from "element-plus";
+import { EditPen } from "@element-plus/icons-vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 import type { ModelConfig, PromptTemplate } from "@/types/admin";
@@ -265,14 +266,20 @@ async function saveEdit(): Promise<void> {
             </el-table-column>
             <el-table-column label="操作" width="90" fixed="right">
               <template #default="scope">
-                <el-button
+                <el-tooltip
                   v-if="EDITABLE_TYPES.has(scope.row.model_type)"
-                  link
-                  type="primary"
-                  @click="openEdit(scope.row)"
+                  content="编辑模型配置"
+                  placement="top"
                 >
-                  编辑
-                </el-button>
+                  <el-button
+                    link
+                    circle
+                    type="primary"
+                    :icon="EditPen"
+                    aria-label="编辑模型配置"
+                    @click="openEdit(scope.row)"
+                  />
+                </el-tooltip>
               </template>
             </el-table-column>
           </el-table>
@@ -287,11 +294,13 @@ async function saveEdit(): Promise<void> {
       <el-tab-pane label="Prompt 模板（Prompts）" name="prompts">
         <div class="panel prompt-scope-note">
           <p>
-            运行时内置模板是 Chat 主路径（文档问答、澄清与切换）实际使用的 Prompt，与解析逻辑强耦合，
+            运行时内置模板是 Chat 主路径实际使用的 Prompt（聚焦文档问答、超长文档降级问答、
+            未命中可信文档时的路由回答），与解析逻辑强耦合，
             由代码版本化管理（<span class="mono">backend/app/rag/prompt.py</span>），此处只读展示；
             模板中的 <span class="mono">__PRODUCT_NAME__</span> /
             <span class="mono">__SCOPE_DESCRIPTION__</span> 占位符按请求注入。
-            数据库模板仅在片段检索降级路径（CHUNK_RAG）生效。
+            多候选澄清与文档切换确认使用固定模板回复（不经过 LLM），不在此列。
+            数据库模板仅在 Playground 调试路径生效。
           </p>
         </div>
         <div v-if="store.prompts.length" class="prompt-layout">
@@ -324,7 +333,7 @@ async function saveEdit(): Promise<void> {
                 </button>
               </template>
               <template v-if="databasePrompts.length">
-                <div class="prompt-group-label">数据库模板（降级路径）</div>
+                <div class="prompt-group-label">数据库模板（Playground 路径）</div>
                 <button
                   v-for="prompt in databasePrompts"
                   :key="prompt.id"

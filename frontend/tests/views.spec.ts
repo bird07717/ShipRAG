@@ -214,7 +214,7 @@ describe("view smoke", () => {
     );
     const wrapper = mount(App, { global: { plugins: [ElementPlus] } });
     await flushPromises();
-    expect(wrapper.text()).toContain("Support Studio");
+    expect(wrapper.text()).toContain("技术支持工作台");
     wrapper.unmount();
   });
 

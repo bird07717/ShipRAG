@@ -60,6 +60,15 @@ EmbeddingFactory = Callable[[Settings], EmbeddingProvider]
 LlmFactory = Callable[[Settings, Any], LlmProvider]
 RerankFactory = Callable[[Settings, ModelSnapshot], RerankProvider]
 _CITATION_PATTERN = re.compile(r"\[S([1-9][0-9]*)\]")
+# Topic-change announcements carry no document intent: routing them through
+# DOC_QA burns a full LLM call on the whole focus document (tens of seconds)
+# only to produce a canned refusal that misreads the intent. The anchors and
+# the length guard keep longer sentences containing these phrases (e.g.
+# "帮我换一个问题：LRU怎么换") on the normal path.
+_META_ACK_PATTERN = re.compile(
+    r"^(?:换一?个(?:问题|话题)|算了|先?不问了)[呀啊吧。！!，,\s]*$"
+)
+_META_ACK_MESSAGE = "好的，请问您想了解什么？我将基于产品文档为您解答。"
 
 
 def _elapsed_ms(started_at: float) -> int:
@@ -162,6 +171,47 @@ class RagService:
             parent_trace_id=parent_trace_id,
             fallback_reason=fallback_reason,
         )
+        # One overall interactive deadline per turn: a hung upstream
+        # (embedding / rerank / LLM) must never hold a chat request for the
+        # provider-level 90-120s timeouts. Bounded failure is better UX
+        # than an unbounded wait, and fail_turn keeps the trace honest.
+        try:
+            async with asyncio.timeout(self.settings.m3_turn_deadline_seconds):
+                return await self._prepare_retrieval(
+                    turn=turn,
+                    started_at=started_at,
+                    normalized_question=normalized_question,
+                    mode=mode,
+                    retrieval_overrides=retrieval_overrides,
+                )
+        except TimeoutError as exc:
+            await self.repository.fail_turn(
+                turn,
+                status="FAILED",
+                code="TURN_DEADLINE_EXCEEDED",
+                message="本轮处理超过总时限",
+                partial_answer="",
+                timings={
+                    "turn_deadline_seconds": int(
+                        self.settings.m3_turn_deadline_seconds * 1000
+                    )
+                },
+                stage="turn_deadline",
+                retryable=True,
+            )
+            raise ApiError(
+                "TURN_DEADLINE_EXCEEDED", "本次请求处理超时，请稍后重试", 504
+            ) from exc
+
+    async def _prepare_retrieval(
+        self,
+        *,
+        turn: Turn,
+        started_at: float,
+        normalized_question: str,
+        mode: str,
+        retrieval_overrides: dict[str, int] | None,
+    ) -> PreparedRag:
         # Effective retrieval knobs: DB rag_config snapshot from begin_turn,
         # optionally overridden per-call (playground overrides win so the
         # playground keeps working independently of the stored config).
@@ -217,7 +267,7 @@ class RagService:
             async def retrieve_bm25() -> list[RetrievalCandidate]:
                 stage_started = time.perf_counter()
                 result = await self.repository.bm25_search(
-                    knowledge_id=knowledge_id,
+                    knowledge_id=turn.knowledge_id,
                     index_id=turn.index_id,
                     query=retrieval_query,
                     limit=retrieval.bm25_top_k,
@@ -233,7 +283,7 @@ class RagService:
                 raise EmbeddingError("查询 Embedding 维度异常")
             vector_started = time.perf_counter()
             vector_candidates = await self.repository.vector_search(
-                knowledge_id=knowledge_id,
+                knowledge_id=turn.knowledge_id,
                 index_id=turn.index_id,
                 embedding=embeddings[0],
                 limit=retrieval.vector_top_k,
@@ -808,25 +858,42 @@ class RagService:
         try:
             provider = self.llm_factory(self.settings, turn.llm)
             prompt = plan.prompt
-            async for delta in provider.stream(prompt):
-                if not delta:
-                    continue
-                prepared.answer_parts.append(delta)
-                if not mode_detected:
-                    mode_buffer += delta
-                    if "]" in mode_buffer:
-                        mode_tag_end = mode_buffer.find("]") + 1
-                        after_tag = mode_buffer[mode_tag_end:].lstrip("\n")
-                        mode_detected = True
-                        if after_tag:
-                            yield sse_event("message", {"delta": after_tag})
-                    elif len(mode_buffer) > 200:
-                        mode_detected = True
-                        yield sse_event("message", {"delta": mode_buffer})
-                    continue
-                yield sse_event("message", {"delta": delta})
+            # The LLM consumes whatever is left of the turn deadline; on
+            # expiry the partial answer is finalized with a truncation
+            # marker instead of waiting for the provider's own 120s timeout.
+            llm_timed_out = False
+            try:
+                async with asyncio.timeout(
+                    max(
+                        1.0,
+                        self.settings.m3_turn_deadline_seconds
+                        - (time.perf_counter() - prepared.started_at),
+                    )
+                ):
+                    async for delta in provider.stream(prompt):
+                        if not delta:
+                            continue
+                        prepared.answer_parts.append(delta)
+                        if not mode_detected:
+                            mode_buffer += delta
+                            if "]" in mode_buffer:
+                                mode_tag_end = mode_buffer.find("]") + 1
+                                after_tag = mode_buffer[mode_tag_end:].lstrip("\n")
+                                mode_detected = True
+                                if after_tag:
+                                    yield sse_event("message", {"delta": after_tag})
+                            elif len(mode_buffer) > 200:
+                                mode_detected = True
+                                yield sse_event("message", {"delta": mode_buffer})
+                            continue
+                        yield sse_event("message", {"delta": delta})
+            except TimeoutError:
+                llm_timed_out = True
+                prepared.timings["llm_deadline_exceeded"] = True
 
             raw_answer = "".join(prepared.answer_parts)
+            if llm_timed_out:
+                raw_answer += "\n\n（本次回答因超时被截断，如需完整内容请重试或追问。）"
             result = self._finalize_chat_result(plan, raw_answer)
 
             prepared.timings["llm_ms"] = _elapsed_ms(llm_started)
@@ -1000,10 +1067,24 @@ class RagService:
             provider = self.llm_factory(self.settings, turn.llm)
             prompt = plan.prompt
             answer_parts: list[str] = []
-            async for delta in provider.stream(prompt):
-                if delta:
-                    answer_parts.append(delta)
+            llm_timed_out = False
+            try:
+                async with asyncio.timeout(
+                    max(
+                        1.0,
+                        self.settings.m3_turn_deadline_seconds
+                        - (time.perf_counter() - prepared.started_at),
+                    )
+                ):
+                    async for delta in provider.stream(prompt):
+                        if delta:
+                            answer_parts.append(delta)
+            except TimeoutError:
+                llm_timed_out = True
+                prepared.timings["llm_deadline_exceeded"] = True
             raw_answer = "".join(answer_parts)
+            if llm_timed_out:
+                raw_answer += "\n\n（本次回答因超时被截断，如需完整内容请重试或追问。）"
             result = self._finalize_chat_result(plan, raw_answer)
             prepared.timings["llm_ms"] = _elapsed_ms(llm_started)
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
@@ -1128,6 +1209,7 @@ class RagService:
             stay_score=self.settings.m3_doc_stay_score,
             switch_gap=self.settings.m3_doc_switch_gap,
             lock_best_floor=self.settings.m3_doc_lock_best_floor,
+                single_clarify_best_floor=self.settings.m3_doc_single_clarify_best_floor,
         )
         had_pending = bool(turn.chat_context.get("pending_options"))
 
@@ -1163,6 +1245,17 @@ class RagService:
 
         clear_pending_after = had_pending
         catalog: list[dict[str, Any]] | None = None
+
+        meta_ack = self._match_meta_ack(question)
+        if meta_ack is not None:
+            routing = decision.to_dict()
+            routing["resolved_from"] = "META_ACK"
+            return _ChatPlan(
+                kind="ROUTING",
+                routing=routing,
+                fixed_answer=meta_ack,
+                clear_pending_after=had_pending,
+            )
 
         # Catalog-title resolution: the user explicitly names a document
         # (typically confirming a previous routing suggestion verbatim).
@@ -1499,6 +1592,13 @@ class RagService:
                 require_citations=plan.require_citations,
             )
         return build_assist_result(raw_answer)
+
+    @staticmethod
+    def _match_meta_ack(question: str) -> str | None:
+        normalized = re.sub(r"\s+", "", question)
+        if not normalized or len(normalized) > 12:
+            return None
+        return _META_ACK_MESSAGE if _META_ACK_PATTERN.match(normalized) else None
 
     @staticmethod
     def _render_doc_list(docs: list[dict[str, Any]]) -> str:

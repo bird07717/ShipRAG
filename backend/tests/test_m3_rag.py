@@ -645,3 +645,44 @@ async def test_complete_grows_token_budget_when_reasoning_exhausts_it() -> None:
     assert result == "OK"
     assert calls[0] == 1_024
     assert calls[1] == 4_096  # budget grew 4x after reasoning exhausted it
+
+
+def test_elements_from_rows_drops_decorative_image_strips() -> None:
+    # Converted documents export highlighted text as flat colour strips
+    # (<= 65px tall) whose OCR text is hallucinated on a solid rectangle:
+    # they must vanish from delivery and doc-QA context, while real
+    # screenshots and dimension-less assets stay.
+    from app.rag.repository import elements_from_rows
+
+    def row(element_type: str, content: str, asset_id=None, w=None, h=None, seq=1):
+        return {
+            "id": uuid4(),
+            "element_type": element_type,
+            "content": content,
+            "section_path": ["章节"],
+            "asset_id": asset_id,
+            "vision_caption": "终端截图",
+            "ocr_text": "幻觉内容",
+            "asset_width": w,
+            "asset_height": h,
+            "sequence_no": seq,
+        }
+
+    real_asset, strip_asset = uuid4(), uuid4()
+    rows = [
+        row("TEXT", "打开FFC胶囊，检查接触点。", seq=1),
+        row("IMAGE", "图片文字：幻觉", asset_id=strip_asset, w=333, h=50, seq=2),
+        row("IMAGE", "图片文字：真实截图", asset_id=real_asset, w=1145, h=764, seq=3),
+        row("IMAGE", "图片文字：维度缺失保留", asset_id=uuid4(), w=None, h=None, seq=4),
+        row("TABLE", "| a | b |", seq=5),
+    ]
+    elements = elements_from_rows(rows)
+    assert [element["element_type"] for element in elements] == [
+        "TEXT",
+        "IMAGE",
+        "IMAGE",
+        "TABLE",
+    ]
+    assert elements[1]["image_asset_id"] == real_asset
+    assert elements[1]["image_caption"] == "终端截图"
+    assert all(element["image_asset_id"] != strip_asset for element in elements)

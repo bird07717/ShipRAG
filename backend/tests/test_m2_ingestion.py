@@ -759,3 +759,41 @@ async def test_delete_knowledge_base_repository_rejects_an_active_build() -> Non
     assert raised.value.code == "KNOWLEDGE_BASE_BUILD_IN_PROGRESS"
     assert raised.value.status_code == 409
     assert len(engine.connection.executed) == 1
+
+
+def test_image_chunk_search_text_excludes_caption() -> None:
+    # Vision captions are low-trust matching signals: they inflated document
+    # routing toward components the body text never covers (2026-08-31 trace:
+    # "压力释放器" matched a "压力传感器" caption). Captions must stay in
+    # `content` (generation context) but disappear from `search_text` (BM25).
+    elements = [
+        ParsedElement("TEXT", "打开FFC胶囊，检查接触点是否正常。", ["故障处理"]),
+        ParsedElement(
+            "IMAGE",
+            "图片描述：黑色圆柱形压力传感器特写",
+            ["故障处理"],
+        ),
+        ParsedElement("TEXT", "清洁完成后重新安装。", ["故障处理"]),
+    ]
+
+    chunks = build_chunks(elements, target_chars=100, max_chars=300)
+
+    mixed = next(chunk for chunk in chunks if chunk.chunk_type == "MIXED")
+    assert "压力传感器" in mixed.content
+    assert "图片：" in mixed.content
+    assert "压力传感器" not in mixed.search_text
+    assert "图片：" not in mixed.search_text
+    assert "打开FFC胶囊" in mixed.search_text
+    assert "清洁完成后重新安装" in mixed.search_text
+
+    image_only = [
+        ParsedElement(
+            "IMAGE",
+            "图片描述：接口细节图",
+            ["附件"],
+        )
+    ]
+    image_chunks = build_chunks(image_only, target_chars=100, max_chars=300)
+    assert image_chunks[0].chunk_type == "IMAGE"
+    assert "接口细节图" in image_chunks[0].content
+    assert "接口细节图" not in image_chunks[0].search_text

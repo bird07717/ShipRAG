@@ -154,7 +154,9 @@ async def test_image_enrichment_degrades_one_capability_and_builds_mixed_chunk()
     assert "图片文字：模拟OCR文本" in elements[1].content
     assert [chunk.chunk_type for chunk in chunks] == ["TEXT", "MIXED", "TEXT"]
     assert "数据库配置步骤" in chunks[1].search_text
-    assert "模拟OCR文本" in chunks[1].search_text
+    # OCR/vision text is generation context only, never matching text.
+    assert "模拟OCR文本" in chunks[1].content
+    assert "模拟OCR文本" not in chunks[1].search_text
     assert chunks[1].image_bytes == b"image-bytes"
 
 
@@ -210,7 +212,10 @@ def test_standalone_image_builds_image_chunk_with_understanding_text() -> None:
 
     assert len(chunks) == 1
     assert chunks[0].chunk_type == "IMAGE"
-    assert "STATUS OK" in chunks[0].search_text
+    # Understanding text stays in content (generation context) but is
+    # excluded from search_text: vision output must not drive matching.
+    assert "STATUS OK" in chunks[0].content
+    assert "STATUS OK" not in chunks[0].search_text
     assert chunks[0].image_bytes == b"image"
 
 

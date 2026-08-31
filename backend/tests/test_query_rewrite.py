@@ -334,3 +334,21 @@ async def test_prepare_skips_rewrite_when_disabled() -> None:
 
     assert repo.bm25_queries == ["那它的密码呢"]
     assert "query_rewrite" not in repo.saved["rerank_result"]
+
+
+def test_should_rewrite_false_for_short_question_with_identifier() -> None:
+    # Self-contained questions carrying a product/code token never pay the
+    # rewrite round-trip, even with history present.
+    assert should_rewrite("如何升级FFC", _HISTORY, max_chars=40) is False
+    assert should_rewrite("PDC怎么升级", _HISTORY, max_chars=40) is False
+
+
+def test_should_rewrite_true_for_short_ellipsis_without_identifier() -> None:
+    # Very short questions without any identifier are likely elliptical
+    # ("在哪个界面操作") and still qualify.
+    assert should_rewrite("在哪个界面操作", _HISTORY, max_chars=40) is True
+
+
+def test_should_rewrite_false_for_medium_standalone_question() -> None:
+    # Between the ellipsis window and the follow-up pattern: no rewrite.
+    assert should_rewrite("复位按钮卡住怎么办呀请问一下", _HISTORY, max_chars=40) is False

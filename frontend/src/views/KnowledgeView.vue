@@ -5,6 +5,7 @@ import { Collection, MoreFilled, Search } from "@element-plus/icons-vue";
 import { useAdminStore } from "@/composables/adminStore";
 import type { KnowledgeBase } from "@/types/admin";
 import EmptyState from "@/components/ui/EmptyState.vue";
+import ListSkeleton from "@/components/ui/ListSkeleton.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 
 const store = useAdminStore();
@@ -96,13 +97,14 @@ function isDeleting(kb: KnowledgeBase): boolean {
         </div>
       </div>
 
+      <ListSkeleton v-if="store.loading && !store.knowledgeBases.length" :columns="5" />
       <el-table
-        v-if="store.filteredKnowledgeBases.length"
+        v-else-if="store.filteredKnowledgeBases.length"
         :data="store.filteredKnowledgeBases"
         :show-header="true"
         @row-click="(row: any) => selectAndOpen(row)"
       >
-        <el-table-column label="名称（Name）" min-width="240">
+        <el-table-column label="名称" min-width="240">
           <template #default="scope">
             <div class="kb-name">
               <el-icon class="kb-icon"><Collection /></el-icon>
@@ -113,12 +115,12 @@ function isDeleting(kb: KnowledgeBase): boolean {
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="document_count" label="文档数（Documents）" width="110" />
-        <el-table-column prop="active_chunk_count" label="切片数（Chunks）" width="100" />
-        <el-table-column label="状态（Status）" width="120">
+        <el-table-column prop="document_count" label="文档数" width="110" />
+        <el-table-column prop="active_chunk_count" label="切片数" width="100" />
+        <el-table-column label="状态" width="120">
           <template #default="scope"><StatusBadge :status="scope.row.runtime_state" /></template>
         </el-table-column>
-        <el-table-column label="更新时间（Updated）" min-width="170">
+        <el-table-column label="更新时间" min-width="170">
           <template #default="scope">{{ store.formatDate(scope.row.updated_at) }}</template>
         </el-table-column>
         <el-table-column label="" width="60" align="right">

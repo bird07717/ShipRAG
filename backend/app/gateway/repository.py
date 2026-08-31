@@ -22,9 +22,8 @@ class GatewayRepository:
     def _default_policy(self) -> ExecutionPolicy:
         if self.settings.chat_execution_mode == "legacy_rag":
             return ExecutionPolicy.RAG_ONLY
-        # The normal operating mode starts with the curated Support workflow.
-        # A NO_MATCH then continues in Generic RAG, instead of ending the
-        # conversation prematurely when a Profile has no suitable match.
+        # Compatibility mode: the curated Support workflow handles the turn
+        # first and a NO_MATCH continues in Generic RAG.
         return ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK
 
     async def resolve_policy(

@@ -6,6 +6,7 @@ import { useAdminStore } from "@/composables/adminStore";
 import type { IndexTask, KnowledgeIndex } from "@/types/admin";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
+import ListSkeleton from "@/components/ui/ListSkeleton.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
 
 const store = useAdminStore();
@@ -123,8 +124,9 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
         </div>
       </div>
 
+      <ListSkeleton v-if="store.loading && !store.indexes.length" :columns="5" />
       <el-table
-        v-if="store.indexes.length"
+        v-else-if="store.indexes.length"
         :data="store.indexes"
         @row-click="(row: any) => openDetail(row)"
       >

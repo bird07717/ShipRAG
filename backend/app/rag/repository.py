@@ -17,6 +17,46 @@ from app.core.secrets import ModelSecretBox
 from app.rag.model_providers import environment_api_key, supported_providers
 from app.rag.models import ModelSnapshot, RetrievalCandidate, RetrievalConfig, Turn
 
+# Converted documents ("conv") export the original file's highlighted text
+# regions as flat images: solid-colour strips (all <= 65px tall in this
+# corpus, real screenshots start at 220px). Their OCR text is hallucinated
+# garbage on a pure-colour rectangle, so they are dropped from delivery and
+# doc-QA context entirely instead of shown as colour blocks.
+_DECORATIVE_IMAGE_MAX_PX = 80
+
+
+def elements_from_rows(rows: Any) -> list[dict[str, Any]]:
+    """Map element rows to delivery blocks, dropping decorative image strips."""
+    elements: list[dict[str, Any]] = []
+    for row in rows:
+        asset_id = UUID(str(row["asset_id"])) if row["asset_id"] else None
+        if asset_id is not None:
+            width = row.get("asset_width")
+            height = row.get("asset_height")
+            too_small = (
+                width is not None
+                and height is not None
+                and (
+                    int(width) < _DECORATIVE_IMAGE_MAX_PX
+                    or int(height) < _DECORATIVE_IMAGE_MAX_PX
+                )
+            )
+            if too_small:
+                continue
+        elements.append(
+            {
+                "element_id": UUID(str(row["id"])),
+                "element_type": str(row["element_type"]),
+                "content": str(row["content"] or ""),
+                "section_path": list(row["section_path"] or []),
+                "image_asset_id": asset_id,
+                "image_caption": (
+                    str(row["vision_caption"] or row["ocr_text"] or "") if asset_id else ""
+                ),
+            }
+        )
+    return elements
+
 
 class RagRepository:
     def __init__(self, engine: AsyncEngine, settings: Settings) -> None:
@@ -1144,7 +1184,8 @@ class RagRepository:
                 text(
                     """
                     SELECT e.id, e.element_type, e.content, e.section_path,
-                           a.id AS asset_id, a.ocr_text, a.vision_caption
+                           a.id AS asset_id, a.ocr_text, a.vision_caption,
+                           a.width AS asset_width, a.height AS asset_height
                     FROM document_element e
                     LEFT JOIN image_asset a ON a.element_id = e.id
                     WHERE e.index_id = :index_id AND e.document_id = :document_id
@@ -1154,25 +1195,10 @@ class RagRepository:
                 {"index_id": index_id, "document_id": document_id},
             )
             rows = element_result.mappings().all()
-        elements: list[dict[str, Any]] = []
-        for row in rows:
-            asset_id = UUID(str(row["asset_id"])) if row["asset_id"] else None
-            elements.append(
-                {
-                    "element_id": UUID(str(row["id"])),
-                    "element_type": str(row["element_type"]),
-                    "content": str(row["content"] or ""),
-                    "section_path": list(row["section_path"] or []),
-                    "image_asset_id": asset_id,
-                    "image_caption": (
-                        str(row["vision_caption"] or row["ocr_text"] or "") if asset_id else ""
-                    ),
-                }
-            )
         return {
             "document_id": str(doc_row["id"]),
             "title": str(doc_row["display_name"] or doc_row["filename"]),
-            "elements": elements,
+            "elements": elements_from_rows(rows),
         }
 
     async def get_trace(self, trace_id: UUID) -> dict[str, Any]:

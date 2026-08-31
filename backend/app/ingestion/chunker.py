@@ -142,10 +142,16 @@ def _image_chunk(elements: list[ParsedElement], index: int) -> ChunkDraft:
     body_parts = [*nearby_text, f"图片：{image_description}"]
     body = "\n\n".join(body_parts)
     content = f"{_section_prefix(image.section_path)}{body}".strip()
+    # Matching text excludes the vision-generated image description: caption
+    # terms are OCR/vision output with lower trust than body text and can
+    # inflate document-routing scores for components the document never
+    # actually covers. Captions stay in `content` for generation context.
+    nearby_body = "\n\n".join(nearby_text)
+    search_text = f"{_section_prefix(image.section_path)}{nearby_body}".strip()
     return ChunkDraft(
         chunk_type="MIXED" if nearby_text else "IMAGE",
         content=content,
-        search_text=content,
+        search_text=search_text,
         section_path=list(image.section_path),
         element_indexes=adjacent_indexes,
         token_count=estimate_tokens(content),

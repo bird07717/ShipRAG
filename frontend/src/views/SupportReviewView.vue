@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { ElMessageBox } from "element-plus";
+import { EditPen, RefreshRight } from "@element-plus/icons-vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 import type { DocumentProfileIntent, DocumentProfileSummary, ProfilePublishCheck } from "@/types/admin";
@@ -175,14 +176,27 @@ watch(() => store.selectedKnowledgeId, () => { lastCheck.value = null; });
       <el-table v-if="profiles.length" :data="profiles" size="small">
         <el-table-column label="文档" min-width="180"><template #default="scope"><b>{{ scope.row.document_name }}</b><small class="muted block">{{ scope.row.document_status }}</small></template></el-table-column><el-table-column label="Profile 状态" width="120"><template #default="scope"><el-tag :type="statusType(scope.row.profile_status)" size="small">{{ statusLabel(scope.row.profile_status) }}</el-tag></template></el-table-column><el-table-column label="当前线上属性" min-width="190"><template #default="scope"><template v-if="scope.row.active_profile?.intents?.length"><div v-for="(intent, index) in scope.row.active_profile.intents" :key="`active-${index}`">{{ intent.canonical_question }}</div></template><span v-else class="muted">暂无线上 Profile（RAG 文档仍可检索）</span></template></el-table-column><el-table-column label="待上线属性" min-width="210"><template #default="scope"><template v-if="scope.row.pending_profile?.intents?.length"><div v-for="(intent, index) in scope.row.pending_profile.intents" :key="`pending-${index}`">{{ intent.canonical_question }}</div><small v-if="scope.row.pending_state === 'NEEDS_ATTENTION' && scope.row.pending_error_message" class="quality-note">{{ scope.row.pending_error_message }}</small></template><span v-else-if="scope.row.pending_error_message" class="muted">{{ scope.row.pending_error_message }}</span><span v-else class="muted">—</span></template></el-table-column><el-table-column label="操作" width="180" align="right">
           <template #default="scope">
-            <el-button link @click="openEditor(scope.row)">编辑属性</el-button><el-button
-              link
-              :loading="store.isActionLoading(`document-profile-generate:${scope.row.document_id}`)"
-              :disabled="taskActive"
-              @click="regenerate(scope.row)"
-            >
-              重新生成
-            </el-button>
+            <el-tooltip content="编辑属性" placement="top">
+              <el-button
+                link
+                circle
+                type="primary"
+                :icon="EditPen"
+                aria-label="编辑属性"
+                @click="openEditor(scope.row)"
+              />
+            </el-tooltip>
+            <el-tooltip content="重新生成属性" placement="top">
+              <el-button
+                link
+                circle
+                :icon="RefreshRight"
+                :loading="store.isActionLoading(`document-profile-generate:${scope.row.document_id}`)"
+                :disabled="taskActive"
+                aria-label="重新生成属性"
+                @click="regenerate(scope.row)"
+              />
+            </el-tooltip>
           </template>
         </el-table-column>
       </el-table>

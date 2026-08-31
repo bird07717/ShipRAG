@@ -160,6 +160,8 @@ async def test_get_document_blocks_orders_elements_and_assets() -> None:
                     "asset_id": asset_id,
                     "ocr_text": "OCR 文本",
                     "vision_caption": "截图描述",
+                    "asset_width": 1145,
+                    "asset_height": 764,
                 }
             ],
         ]

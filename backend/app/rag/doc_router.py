@@ -235,6 +235,7 @@ def decide_doc_routing(
     stay_score: float,
     switch_gap: float = 0.25,
     lock_best_floor: float = 0.75,
+    single_clarify_best_floor: float = 0.65,
 ) -> DocRoutingDecision:
     thresholds: dict[str, Any] = {
         "t_high": t_high,
@@ -245,6 +246,7 @@ def decide_doc_routing(
         "stay_score": stay_score,
         "switch_gap": switch_gap,
         "lock_best_floor": lock_best_floor,
+        "single_clarify_best_floor": single_clarify_best_floor,
     }
     phase = "DOC_FOCUS" if focus_document_id is not None else "ALIGNING"
 
@@ -293,7 +295,15 @@ def decide_doc_routing(
                     thresholds=thresholds,
                 )
             eligible = [item for item in doc_scores if item.hits >= 1 and item.score >= t_low][:3]
-            if eligible:
+            # A single-option clarify must be confident: a lone weak-best
+            # candidate (e.g. generic hardware steps that merely share the
+            # product identifier) would hijack the templated clarify and
+            # mislead, while the catalog-aware routing answer can still
+            # surface the dedicated document semantically. Multiple options
+            # keep the clarify: the user sees the comparison either way.
+            if eligible and not (
+                len(eligible) == 1 and eligible[0].best < single_clarify_best_floor
+            ):
                 # Ask once with the candidates recorded as pending options so
                 # the loop converges: the user's next reply (affirmative,
                 # ordinal, or the document title itself) resolves to DELIVER

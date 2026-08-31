@@ -1,18 +1,15 @@
 import { reactive } from "vue";
 
 import { adminApi } from "@/api/admin";
-import { adminStore } from "@/composables/adminStore";
 import type {
   EngineRetrievalConfig,
   RagConfig,
   RagConfigUpdatePayload,
-  TraceSummary,
 } from "@/types/admin";
 
 export const ragAdminStore = reactive({
   config: null as RagConfig | null,
   engineConfigs: [] as EngineRetrievalConfig[],
-  errors: [] as TraceSummary[],
   loading: false,
   error: "",
   notice: "",
@@ -57,14 +54,6 @@ export const ragAdminStore = reactive({
     }, "该路由策略的检索配置已保存，下一轮请求生效");
   },
 
-  async loadErrors(): Promise<void> {
-    const knowledgeId = adminStore.selectedKnowledgeId || undefined;
-    this.errors = await adminApi.listTraces(knowledgeId, {
-      engine: "RAG",
-      status: "FAILED",
-      limit: 100,
-    });
-  },
 });
 
 export function useRagAdminStore() {

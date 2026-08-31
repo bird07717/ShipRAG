@@ -156,6 +156,7 @@ class SupportDocumentRouter:
                 stay_score=self.settings.m3_doc_stay_score,
                 switch_gap=self.settings.m3_doc_switch_gap,
                 lock_best_floor=self.settings.m3_doc_lock_best_floor,
+                single_clarify_best_floor=self.settings.m3_doc_single_clarify_best_floor,
             )
             routing = decision.to_dict()
             if rerank_trace.get("status") == "DEGRADED" and decision.action == ACTION_DELIVER:

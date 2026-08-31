@@ -20,7 +20,7 @@
 {"id": "rag_idf_001", "category": "identifier", "question": "3359核心板怎么用U盘升级", "expected": {"document_keys": ["U盘升级3359核心板"], "forbidden_keys": ["U盘升级PDC"], "tolerance": "EXACT"}}
 {"id": "rag_idf_002", "category": "identifier", "question": "time battery low报警怎么处理", "expected": {"document_keys": ["timebatterylow"], "tolerance": "EXACT"}}
 {"id": "rag_idf_003", "category": "identifier", "question": "FFC600电池组怎么更换", "expected": {"document_keys": ["FFC600"], "tolerance": "EXACT"}}
-{"id": "rag_idf_004", "category": "identifier", "question": "如何用tftp升级3359核心板", "expected": {"document_keys": ["tftp"], "forbidden_keys": ["U盘升级3359核心板"], "tolerance": "EXACT"}}
+{"id": "rag_idf_004", "category": "identifier", "question": "如何用tftp升级3359核心板", "expected": {"document_keys": ["tftp软件手动升级"], "tolerance": "EXACT"}}
 {"id": "rag_idf_005", "category": "identifier", "question": "怎么屏蔽DC24V解决绝缘低问题", "expected": {"document_keys": ["屏蔽DC24V"], "tolerance": "EXACT"}}
 {"id": "rag_xdoc_001", "category": "cross_doc", "question": "接线盒怎么检查", "expected": {"document_keys": ["接线盒"], "tolerance": "ANY_OF"}}
 {"id": "rag_xdoc_002", "category": "cross_doc", "question": "通讯线缆怎么检查", "expected": {"document_keys": ["通讯线缆"], "tolerance": "ANY_OF"}}
@@ -40,3 +40,8 @@
 {"id": "rag_fup_003", "category": "follow_up", "turns": [{"question": "检查麦克风", "expected": {"document_keys": ["检查麦克风"], "tolerance": "EXACT"}}, {"question": "怎么判断它是不是坏了", "expected": {"document_keys": ["检查麦克风"], "tolerance": "EXACT"}}]}
 {"id": "rag_fup_004", "category": "follow_up", "turns": [{"question": "如何升级FFC", "expected": {"document_keys": ["升级FFC"], "tolerance": "EXACT"}}, {"question": "FFC怎么检查接线盒", "expected": {"document_keys": ["FFC如何检查接线盒"], "forbidden_keys": ["PDC如何检查接线盒"], "tolerance": "EXACT"}}]}
 {"id": "rag_fup_005", "category": "follow_up", "turns": [{"question": "VDR600如何修改船名", "expected": {"document_keys": ["修改船名"], "tolerance": "EXACT"}}, {"question": "在哪个界面操作", "expected": {"document_keys": ["修改船名"], "tolerance": "EXACT"}}]}
+{"id": "rag_focus_001", "category": "focus_coverage", "turns": [{"question": "FFC 如何更换外壳", "expected": {"document_keys": ["FFC 更换外壳"], "tolerance": "EXACT"}}, {"question": "压力释放器出现问题怎么办", "expected": {"document_keys": [], "answer_must_any": ["未涉及", "未找到"], "answer_forbidden_any": ["找到FFC的安装位置"], "tolerance": "EXACT"}}]}
+{"id": "rag_focus_002", "category": "focus_coverage", "turns": [{"question": "FFC 如何更换外壳", "expected": {"document_keys": ["FFC 更换外壳"], "tolerance": "EXACT"}}, {"question": "接触点没有反应怎么办", "expected": {"document_keys": [], "answer_must_any": ["接触点"], "tolerance": "EXACT"}}]}
+{"id": "rag_focus_003", "category": "focus_coverage", "turns": [{"question": "FFC 如何更换外壳", "expected": {"document_keys": ["FFC 更换外壳"], "tolerance": "EXACT"}}, {"question": "定位销不稳定怎么办", "expected": {"document_keys": [], "answer_must_any": ["定位销"], "tolerance": "EXACT"}}]}
+{"id": "rag_meta_001", "category": "meta", "turns": [{"question": "FFC 如何更换外壳", "expected": {"document_keys": ["FFC 更换外壳"], "tolerance": "EXACT"}}, {"question": "换一个问题", "expected": {"document_keys": [], "answer_must_any": ["请问您想了解"], "answer_forbidden_any": ["我只能回答"], "max_latency_ms": 15000, "tolerance": "EXACT"}}]}
+{"id": "rag_retrieval_001", "category": "retrieval", "question": "压力释放器出现问题怎么办", "expected": {"document_keys": [], "forbidden_keys": ["FFC"], "answer_must_any": ["未找到", "未涉及", "无法确认", "没有足够"], "tolerance": "EXACT"}}

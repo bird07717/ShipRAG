@@ -102,13 +102,34 @@ def evaluate(expected: dict[str, Any], hits: set[str]) -> tuple[bool, list[str]]
             problems.append(f"范围外问题命中了文档: {sorted(hits)}")
         return (not problems, problems)
 
-    matched = any(any(k in h for k in keys) for h in hit_norms) if keys else False
+    # document_keys is optional: an empty list means "no must-hit document"
+    # (refusal / meta-utterance turns), leaving forbidden_keys as the only
+    # document-level constraint.
+    matched = any(any(k in h for k in keys) for h in hit_norms) if keys else True
     if not matched:
         problems.append(f"未命中期望文档 keys={expected.get('document_keys')} 实际={sorted(hits)}")
-    bad = {h for h in hits if any(f in h for f in forbidden)}
+    bad = {h for h in hit_norms if any(f in h for f in forbidden)}
     if bad:
         problems.append(f"命中了禁止文档: {sorted(bad)}")
     return (not problems, problems)
+
+
+def evaluate_answer(expected: dict[str, Any], answer: str) -> list[str]:
+    """Answer-text assertions for turns whose quality is not document hits.
+
+    answer_must_any: normalized answer must contain at least one entry.
+    answer_forbidden_any: normalized answer must contain none of the entries.
+    """
+    answer_norm = normalize(answer)
+    problems: list[str] = []
+    must_any = [normalize(k) for k in expected.get("answer_must_any") or []]
+    forbidden_any = [normalize(k) for k in expected.get("answer_forbidden_any") or []]
+    if must_any and not any(k in answer_norm for k in must_any):
+        problems.append(f"回答缺少必需内容 any={expected.get('answer_must_any')}")
+    leaked = [k for k in forbidden_any if k in answer_norm]
+    if leaked:
+        problems.append(f"回答包含禁止内容: {leaked}")
+    return problems
 
 
 def percentile(values: list[float], ratio: float) -> float:
@@ -219,6 +240,12 @@ async def main() -> int:
                 conversation_id = str(payload.get("conversation_id") or conversation_id or "")
                 hits = extract_hits(payload, catalog_norm)
                 passed, problems = evaluate(turn["expected"], hits)
+                problems = list(problems)
+                problems += evaluate_answer(turn["expected"], str(payload.get("answer") or ""))
+                max_latency = turn["expected"].get("max_latency_ms")
+                if max_latency is not None and latency_ms > int(max_latency):
+                    problems.append(f"延迟超限 {latency_ms}ms > {max_latency}ms")
+                passed = not problems
                 case_result["turns"].append(
                     {
                         "question": turn["question"],

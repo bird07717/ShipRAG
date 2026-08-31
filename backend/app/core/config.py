@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     m3_question_max_chars: int = 4_000
     m3_prompt_max_chars: int = 60_000
     m3_prompt_token_budget: int = 30_000
+    m3_turn_deadline_seconds: float = 45.0
     m3_llm_max_tokens: int = 2_048
     m3_llm_temperature: float = 0.1
     m3_trace_retain_prompt: bool = True
@@ -99,9 +100,9 @@ class Settings(BaseSettings):
     profile_alias_weight: float = 0.15
     profile_generic_alias_penalty: float = 0.35
 
-    # Formal Support is the default. Legacy RAG remains only as a simple,
-    # explicit rollback for the compatibility /chat endpoints.
-    chat_execution_mode: Literal["legacy_rag", "technical_support"] = "technical_support"
+    # RAG is the default chat chain. Setting "technical_support" restores the
+    # Support-first route (with RAG fallback) for compatibility.
+    chat_execution_mode: Literal["legacy_rag", "technical_support"] = "legacy_rag"
     support_history_max_messages: int = 8
     support_llm_max_tokens: int = 2_048
     support_llm_temperature: float = 0.1
@@ -114,13 +115,20 @@ class Settings(BaseSettings):
     m3_doc_agg_max_hits: int = 3
     m3_doc_stay_score: float = 0.35
     m3_doc_switch_gap: float = 0.25
-    m3_doc_lock_best_floor: float = 0.75
+    # Caption-free search_text costs image-heavy documents a few points of
+    # best-chunk rerank score; 0.70 keeps strong multi-hit aggregates
+    # (score >= t_high with >= min_hits) locking while still blocking the
+    # mediocre keyword-overlap case the floor exists for (best ~0.5).
+    m3_doc_lock_best_floor: float = 0.70
+    # A single-option clarify needs a confident best chunk; a lone weak
+    # candidate falls through to the catalog-aware routing answer instead.
+    m3_doc_single_clarify_best_floor: float = 0.65
     m3_doc_delivery_max_tokens: int = 8_000
 
     m3_query_rewrite_enabled: bool = True
     m3_query_rewrite_max_chars: int = 40
     m3_query_rewrite_max_tokens: int = 192
-    m3_query_rewrite_timeout_seconds: float = 8.0
+    m3_query_rewrite_timeout_seconds: float = 3.0
 
     m4_ocr_provider: Literal["auto", "siliconflow", "fake", "disabled"] = "auto"
     m4_vision_provider: Literal["auto", "zhipu", "fake", "disabled"] = "auto"
@@ -334,6 +342,13 @@ class Settings(BaseSettings):
     def validate_m3_prompt_token_budget(cls, value: int) -> int:
         if not 1_000 <= value <= 200_000:
             raise ValueError("M3 prompt token budget must be between 1000 and 200000")
+        return value
+
+    @field_validator("m3_turn_deadline_seconds")
+    @classmethod
+    def validate_m3_turn_deadline(cls, value: float) -> float:
+        if not 1.0 <= value <= 300.0:
+            raise ValueError("M3 turn deadline must be between 1 and 300 seconds")
         return value
 
     @field_validator("m3_llm_temperature")

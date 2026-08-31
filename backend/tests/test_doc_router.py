@@ -532,3 +532,57 @@ def test_decision_trace_dict_shape():
     assert payload["phase_after"] == "DOC_FOCUS"
     assert payload["doc_scores"][0]["hits"] == 2
     assert payload["thresholds"]["t_high"] == 0.9
+
+
+def test_aligning_lone_weak_candidate_falls_through_to_no_match():
+    # Aggregate reaches t_low but the single best chunk is mediocre (e.g.
+    # generic hardware steps sharing only the product identifier): a
+    # templated single-option clarify would mislead, so hand the turn to the
+    # catalog-aware routing answer instead.
+    candidates = [
+        _candidate(DOC_A, 1, 0.56),
+        _candidate(DOC_A, 2, 0.30),
+    ]
+    decision = decide_doc_routing(
+        question="FFC600电池组怎么更换",
+        candidates=candidates,
+        focus_document_id=None,
+        chat_context={},
+        **_settings_kwargs(),
+    )
+    assert decision.action == ACTION_NO_MATCH
+    assert decision.pending_options == []
+    assert decision.thresholds["single_clarify_best_floor"] == 0.65
+
+
+def test_aligning_lone_confident_candidate_still_clarifies():
+    # A single option with a strong best chunk remains a templated clarify:
+    # the pending-resolution loop converges without an LLM call.
+    candidates = [_candidate(DOC_A, 1, 0.80)]
+    decision = decide_doc_routing(
+        question="如何升级",
+        candidates=candidates,
+        focus_document_id=None,
+        chat_context={},
+        **_settings_kwargs(),
+    )
+    assert decision.action == ACTION_CLARIFY
+    assert len(decision.pending_options) == 1
+
+
+def test_aligning_two_weak_candidates_still_clarify():
+    # The floor only guards the single-option case; multiple weak options
+    # still produce the comparison clarify.
+    candidates = [
+        _candidate(DOC_A, 1, 0.55),
+        _candidate(DOC_B, 2, 0.50),
+    ]
+    decision = decide_doc_routing(
+        question="接线盒怎么检查",
+        candidates=candidates,
+        focus_document_id=None,
+        chat_context={},
+        **_settings_kwargs(),
+    )
+    assert decision.action == ACTION_CLARIFY
+    assert len(decision.pending_options) == 2
