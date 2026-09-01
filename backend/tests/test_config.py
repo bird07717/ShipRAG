@@ -11,6 +11,43 @@ def test_production_requires_service_token() -> None:
         Settings(_env_file=None, app_env="production", service_token=None)
 
 
+@pytest.mark.parametrize(
+    "assistant_token",
+    [None, "change-me-for-assistant-integration", "too-short"],
+)
+def test_production_requires_a_strong_assistant_token(assistant_token: str | None) -> None:
+    with pytest.raises(ValidationError, match="ASSISTANT_SERVICE_TOKEN"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            service_token="admin-token",
+            assistant_service_token=assistant_token,
+        )
+
+
+def test_production_accepts_a_strong_assistant_token_and_rotation_value() -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        service_token="admin-token",
+        assistant_service_token="a" * 32,
+        assistant_service_token_previous="b" * 32,
+    )
+
+    assert settings.assistant_service_token is not None
+
+
+def test_production_rejects_duplicate_assistant_rotation_token() -> None:
+    with pytest.raises(ValidationError, match="must differ"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            service_token="admin-token",
+            assistant_service_token="a" * 32,
+            assistant_service_token_previous="a" * 32,
+        )
+
+
 @pytest.mark.parametrize("app_env", ["staging", "production"])
 def test_deployed_environments_reject_fake_llm(app_env: str) -> None:
     with pytest.raises(ValidationError, match="fake is forbidden"):
@@ -18,6 +55,7 @@ def test_deployed_environments_reject_fake_llm(app_env: str) -> None:
             _env_file=None,
             app_env=app_env,
             service_token="configured",
+            assistant_service_token="a" * 32 if app_env == "production" else None,
             m3_llm_provider="fake",
         )
 

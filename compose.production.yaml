@@ -4,6 +4,10 @@ x-app-environment: &app-environment
   APP_ENV: production
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   SERVICE_TOKEN: ${SERVICE_TOKEN:?SERVICE_TOKEN is required}
+  # This credential is accepted only by /api/v1/assistant/* and must remain
+  # server-side. Compose fails before starting any app container if it is absent.
+  ASSISTANT_SERVICE_TOKEN: ${ASSISTANT_SERVICE_TOKEN:?ASSISTANT_SERVICE_TOKEN is required}
+  ASSISTANT_SERVICE_TOKEN_PREVIOUS: ${ASSISTANT_SERVICE_TOKEN_PREVIOUS:-}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://127.0.0.1:18080}
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-rag_platform}
   REQUIRED_POSTGRES_EXTENSIONS: vector,pg_search

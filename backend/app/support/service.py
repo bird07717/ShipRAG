@@ -726,6 +726,8 @@ class TechnicalSupportService:
             current_stage = "LLM"
             await self.repository.set_stage(turn, current_stage)
             llm = await self.repository.get_llm()
+            if isinstance(self.repository, SupportRepository):
+                await self.repository.record_trace_llm_snapshot(trace_id=turn.trace_id, model=llm)
             provider = create_llm_provider(self.settings, llm)
             try:
                 assistant = FocusedSupportAssistant(
@@ -892,6 +894,18 @@ class TechnicalSupportService:
                 return response
             finally:
                 await provider.aclose()
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self.repository.fail_turn(
+                    turn,
+                    code="CLIENT_DISCONNECTED",
+                    message="客户端已断开",
+                    trace=_failure_trace(turn, "CLIENT_DISCONNECTED"),
+                    stage=current_stage,
+                    cancelled=True,
+                )
+            )
+            raise
         except ApiError as exc:
             await self.repository.fail_turn(
                 turn,

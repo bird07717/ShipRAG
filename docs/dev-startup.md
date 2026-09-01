@@ -3,8 +3,7 @@
 ## 一键启动（推荐）
 
 ```bash
-docker compose up -d --wait   # 基础设施：Postgres/Redis/MinIO，阻塞到 healthcheck 全绿
-.venv/bin/honcho start        # API + 双 worker + 前端，统一前缀彩色日志
+bash scripts/dev-up.sh        # 基础设施 + Alembic + API + 双 worker + 前端
 ```
 
 `Ctrl-C` 一次优雅停掉全部进程（worker 释放队列锁、API 关闭连接、Vite 退出，无残留进程）。
@@ -13,7 +12,7 @@ docker compose up -d --wait   # 基础设施：Postgres/Redis/MinIO，阻塞到 
 
 | 旧流程 | 新流程 |
 | --- | --- |
-| 终端1: `alembic upgrade head` + `uvicorn ...` | `api` 条目：等待基础设施 → 迁移 → `uvicorn --reload`（自动、幂等） |
+| 终端1: `alembic upgrade head` + `uvicorn ...` | 全部后端进程先经过共享迁移门槛（串行、幂等）→ `api` 再启动 `uvicorn --reload` |
 | 终端2: `RQ_QUEUES=ingestion,maintenance ... app.worker` | `worker-maintenance` 条目（同名环境变量已写入 Procfile） |
 | 终端3: `RQ_QUEUES=index_build ... app.worker` | `worker-index` 条目 |
 | 终端4: `npm run dev` | `frontend` 条目 |
@@ -23,7 +22,9 @@ docker compose up -d --wait   # 基础设施：Postgres/Redis/MinIO，阻塞到 
 
 - `Procfile` — 进程编排的唯一真相源（含 worker 队列分配）
 - `scripts/wait-infra.sh` — 基础设施端口就绪等待（兜底，最多 30s）
-- `scripts/dev-api.sh` — API 启动链：等基础设施 → `alembic upgrade head`（幂等）→ `uvicorn --reload`
+- `scripts/dev-migrate.sh` — 等基础设施 → 使用文件锁串行执行 `alembic upgrade head`。
+- `scripts/dev-api.sh` — 通过迁移门槛后启动 `uvicorn --reload`。
+- `scripts/dev-up.sh` — 启动 Docker Compose 并交给 Honcho 运行全部开发进程。
 - `honcho` 已加入 `backend/pyproject.toml` dev 依赖并锁定于 `requirements.lock`
 
 ## 设计说明
@@ -55,3 +56,7 @@ honcho start worker-index frontend   # 任意子集
 这套流程**仅用于开发**。周一上线使用 `compose.production.yaml`（迁移一次性容器门控、
 健康检查依赖链、`restart: unless-stopped`、`read_only` 加固），不要用手工/honcho 流程
 跑生产。
+
+生产部署还必须在项目根目录的部署 `.env`（或 CI/CD Secret 注入）中设置
+`ASSISTANT_SERVICE_TOKEN`；不能使用 `.env.example` 的示例值。生成方式及业务后台对接要求见
+[Assistant 接口对接文档](integration/assistant-api-integration-guide.md)。

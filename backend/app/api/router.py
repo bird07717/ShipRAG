@@ -4,9 +4,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from app.api.assistant import router as assistant_router
 from app.api.chat import router as chat_router
 from app.api.conversations import router as conversations_router
-from app.api.dependencies import get_app_settings, require_service_token
+from app.api.dependencies import (
+    get_app_settings,
+    require_assistant_service_token,
+    require_service_token,
+)
 from app.api.ingestion import router as ingestion_router
 from app.api.logs import router as logs_router
 from app.api.metrics import router as metrics_router
@@ -24,6 +29,11 @@ router.include_router(metrics_router)
 router.include_router(rag_router)
 router.include_router(releases_router)
 router.include_router(support_router)
+
+# The business-backend contract intentionally has a separate credential from
+# the administrative surface above.  Do not nest it under the admin router.
+assistant_api_router = APIRouter(dependencies=[Depends(require_assistant_service_token)])
+assistant_api_router.include_router(assistant_router)
 
 
 @router.get("/system/info", tags=["system"])

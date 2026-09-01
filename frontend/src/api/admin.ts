@@ -185,6 +185,8 @@ export const adminApi = {
       errorCode?: string;
       conversationId?: string;
       engine?: "SUPPORT" | "RAG";
+      source?: "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND";
+      requestId?: string;
       from?: string;
       to?: string;
       limit?: number;
@@ -199,6 +201,8 @@ export const adminApi = {
     if (filters.errorCode) search.set("error_code", filters.errorCode);
     if (filters.conversationId) search.set("conversation_id", filters.conversationId);
     if (filters.engine) search.set("engine", filters.engine);
+    if (filters.source) search.set("source", filters.source);
+    if (filters.requestId) search.set("request_id", filters.requestId);
     if (filters.from) search.set("from", filters.from);
     if (filters.to) search.set("to", filters.to);
     if (filters.limit) search.set("limit", String(filters.limit));

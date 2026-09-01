@@ -376,11 +376,12 @@ class SupportRepository:
                 INSERT INTO rag_trace (
                     id, trace_id, request_id, kb_id, index_id, conversation_id,
                     message_id, question, mode, status, user_id, engine, stage,
-                    support_release_id
+                    support_release_id, runtime_snapshot
                 ) VALUES (
                     :id, :trace_id, :request_id, :kb_id, :index_id, :conversation_id,
                     :message_id, :question, 'CHAT', 'RUNNING', :user_id,
-                    'SUPPORT', 'PROFILE_RESOLUTION', :support_release_id
+                    'SUPPORT', 'PROFILE_RESOLUTION', :support_release_id,
+                    CAST(:runtime_snapshot AS jsonb)
                 )
             """),
                 {
@@ -394,6 +395,17 @@ class SupportRepository:
                     "question": question,
                     "user_id": user_id,
                     "support_release_id": support_release_id,
+                    "runtime_snapshot": json.dumps(
+                        {
+                            "schema_version": 1,
+                            "engine": "SUPPORT",
+                            "index": {"id": str(effective_index_id)},
+                            "release_id": str(support_release_id)
+                            if support_release_id is not None
+                            else None,
+                        },
+                        ensure_ascii=False,
+                    ),
                 },
             )
             if idempotency_key:
@@ -469,6 +481,35 @@ class SupportRepository:
             base_url=str(data["base_url"]) if data["base_url"] else None,
             api_key=self._decrypt_api_key(data),
         )
+
+    async def record_trace_llm_snapshot(self, *, trace_id: UUID, model: ModelSnapshot) -> None:
+        """Persist the public LLM selection actually used by a Support turn.
+
+        Credentials remain outside the snapshot; it is solely for operational
+        reproduction in the Trace console.
+        """
+        snapshot = {
+            "models": {
+                "llm": {
+                    "provider": model.provider,
+                    "model_name": model.model_name,
+                    "base_url": model.base_url,
+                    "parameters": model.parameters,
+                }
+            }
+        }
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE rag_trace
+                    SET runtime_snapshot = COALESCE(runtime_snapshot, '{}'::jsonb)
+                        || CAST(:snapshot AS jsonb)
+                    WHERE trace_id = :trace_id
+                    """
+                ),
+                {"trace_id": trace_id, "snapshot": json.dumps(snapshot)},
+            )
 
     async def get_rerank_model(self) -> ModelSnapshot | None:
         """Return the currently enabled reranker for the optional Support fallback."""
@@ -748,7 +789,7 @@ class SupportRepository:
                         ELSE focus_epoch
                     END,
                     support_context_version = support_context_version + 1,
-                    updated_at = now()
+                    updated_at = now(), last_activity_at = now()
                 WHERE id = :id AND support_context_version = :expected_version
             """),
                 {
@@ -859,6 +900,7 @@ class SupportRepository:
         stage: str | None = None,
         retryable: bool | None = None,
         detail: dict[str, Any] | str | None = None,
+        cancelled: bool = False,
     ) -> None:
         # Mirror RagRepository.fail_turn's error payload: code/message plus the
         # optional stage/retryable/detail diagnostics the review page needs.
@@ -872,14 +914,14 @@ class SupportRepository:
         async with self.engine.begin() as conn:
             await conn.execute(
                 text(
-                    "UPDATE message SET status = 'FAILED', updated_at = now() WHERE id = :id AND status = 'STREAMING'"
+                    "UPDATE message SET status = :status, updated_at = now() WHERE id = :id AND status = 'STREAMING'"
                 ),
-                {"id": turn.assistant_message_id},
+                {"id": turn.assistant_message_id, "status": "CANCELLED" if cancelled else "FAILED"},
             )
             await conn.execute(
                 text("""
                 UPDATE rag_trace SET error = CAST(:error AS jsonb), retrieval_result = CAST(:trace AS jsonb),
-                    stage = COALESCE(:stage, stage), status = 'FAILED', finished_at = now()
+                    stage = COALESCE(:stage, stage), status = :status, finished_at = now()
                 WHERE trace_id = :trace_id AND status = 'RUNNING'
             """),
                 {
@@ -887,6 +929,7 @@ class SupportRepository:
                     "error": json.dumps(error, ensure_ascii=False),
                     "trace": json.dumps(trace or {}, ensure_ascii=False),
                     "stage": stage,
+                    "status": "CANCELLED" if cancelled else "FAILED",
                 },
             )
             if turn.idempotency_key:

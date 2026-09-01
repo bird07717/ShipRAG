@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.health import router as health_router
-from app.api.router import router as api_router
+from app.api.router import assistant_api_router, router as api_router
 from app.common.errors import SERVER_BUSY_MESSAGE, ApiError, user_safe_chat_message
 from app.common.middleware import RequestContextMiddleware
 from app.core.config import Settings, get_settings
@@ -68,11 +68,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_origins=resolved_settings.cors_origin_list,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
+        allow_headers=[
+            "Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key",
+            "X-External-User-ID",
+        ],
         expose_headers=["X-Request-ID"],
     )
     app.include_router(health_router)
     app.include_router(api_router, prefix=resolved_settings.api_prefix)
+    app.include_router(assistant_api_router, prefix=resolved_settings.api_prefix)
 
     def _is_user_chat_path(request: Request) -> bool:
         # Chat answer endpoints are end-user facing (the integrator forwards

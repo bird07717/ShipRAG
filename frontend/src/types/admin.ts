@@ -121,6 +121,7 @@ export interface TaskRecord {
 export interface TraceSummary {
   trace_id: string;
   request_id?: string;
+  source?: "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND";
   mode: "CHAT" | "PLAYGROUND";
   kb_id: string;
   index_id: string;
@@ -149,6 +150,7 @@ export interface RagTrace extends TraceSummary {
   sources: Array<Record<string, unknown>>;
   citation_result: Record<string, unknown>;
   model_usage: Record<string, unknown>;
+  runtime_snapshot?: Record<string, unknown>;
 }
 
 export interface ModelConfig {

@@ -1,0 +1,253 @@
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Annotated, Any
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi.responses import Response, StreamingResponse
+
+from app.api.dependencies import get_resources
+from app.api.engine_dependencies import (
+    get_assistant_facade,
+    get_gateway_repository,
+    get_rag_repository,
+)
+from app.api.schemas import (
+    AssistantChatStreamRequest,
+    AssistantConversationItem,
+    AssistantConversationListResponse,
+    AssistantKnowledgeBaseListResponse,
+    AssistantMessageListResponse,
+    AssistantWelcomeResponse,
+)
+from app.assistant.service import AssistantFacadeService, decode_cursor, encode_cursor
+from app.common.errors import ApiError
+from app.core.resources import AppResources
+from app.gateway.repository import GatewayRepository
+from app.observability.recorder import observe_stream_errors
+from app.rag.repository import RagRepository
+from app.rag.welcome import build_welcome
+
+
+def external_user_id(
+    value: Annotated[str, Header(alias="X-External-User-ID", min_length=1, max_length=100)],
+) -> str:
+    return value
+
+
+router = APIRouter(
+    prefix="/assistant", tags=["assistant"], dependencies=[Depends(external_user_id)]
+)
+
+
+def _conversation(row: dict[str, Any], retention_days: int) -> dict[str, Any]:
+    return {
+        "conversation_id": row["conversation_id"],
+        "knowledge": {"knowledge_id": row["knowledge_id"], "name": row["knowledge_name"]},
+        "title": row["title"],
+        "message_count": row["message_count"],
+        "created_at": row["created_at"],
+        "last_activity_at": row["last_activity_at"],
+        "expires_at": (
+            row["last_activity_at"] + timedelta(days=retention_days) if retention_days > 0 else None
+        ),
+        "status": "ACTIVE",
+    }
+
+
+def _message(row: dict[str, Any]) -> dict[str, Any]:
+    payload, trace_error = dict(row.get("response_payload") or {}), row.get("trace_error") or {}
+    status = "GENERATING" if str(row["status"]) == "STREAMING" else str(row["status"])
+    error = None
+    if status in {"FAILED", "CANCELLED"} and isinstance(trace_error, dict):
+        error = {
+            "code": str(trace_error.get("code", "ANSWER_FAILED")),
+            "message": str(trace_error.get("message", "回答未完成")),
+            "retryable": trace_error.get("retryable"),
+        }
+    return {
+        "message_id": row["id"],
+        "conversation_id": row["conversation_id"],
+        "role": row["role"],
+        "status": status,
+        "content": row["content"],
+        "trace_id": row.get("trace_id"),
+        "response_type": row.get("response_type") or payload.get("response_type"),
+        "content_blocks": row.get("content_blocks") or payload.get("content") or [],
+        "sections": payload.get("sections") or [],
+        "document": payload.get("document"),
+        "references": payload.get("references") or [],
+        "clarification": payload.get("clarification"),
+        "escalation": payload.get("escalation"),
+        "disclaimer": payload.get("disclaimer"),
+        "error": error,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+@router.get("/knowledge-bases", response_model=AssistantKnowledgeBaseListResponse)
+async def list_knowledge_bases(
+    repository: Annotated[GatewayRepository, Depends(get_gateway_repository)],
+) -> dict[str, Any]:
+    return {"items": await repository.list_assistant_knowledge_bases()}
+
+
+@router.get("/knowledge-bases/{knowledge_id}/welcome", response_model=AssistantWelcomeResponse)
+async def welcome(
+    knowledge_id: UUID, repository: Annotated[RagRepository, Depends(get_rag_repository)]
+) -> dict[str, Any]:
+    return build_welcome(
+        await repository.get_knowledge_base_summary(knowledge_id),
+        await repository.list_kb_documents(knowledge_id),
+    )
+
+
+@router.get("/conversations", response_model=AssistantConversationListResponse)
+async def list_conversations(
+    knowledge_id: UUID,
+    repository: Annotated[GatewayRepository, Depends(get_gateway_repository)],
+    user_id: Annotated[str, Depends(external_user_id)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query(max_length=500)] = None,
+) -> dict[str, Any]:
+    before_activity, before_id = decode_cursor(cursor) if cursor else (None, None)
+    rows = await repository.list_assistant_conversations(
+        knowledge_id=knowledge_id,
+        external_user_id=user_id,
+        limit=limit + 1,
+        before_activity=before_activity,
+        before_id=before_id,
+    )
+    page, more = rows[:limit], len(rows) > limit
+    return {
+        "items": [
+            _conversation(row, repository.settings.conversation_retention_days) for row in page
+        ],
+        "next_cursor": encode_cursor(page[-1]["last_activity_at"], page[-1]["conversation_id"])
+        if more and page
+        else None,
+    }
+
+
+@router.get("/conversations/{conversation_id}", response_model=AssistantConversationItem)
+async def conversation(
+    conversation_id: UUID,
+    repository: Annotated[GatewayRepository, Depends(get_gateway_repository)],
+    user_id: Annotated[str, Depends(external_user_id)],
+) -> dict[str, Any]:
+    row = await repository.get_assistant_conversation(
+        conversation_id=conversation_id, external_user_id=user_id
+    )
+    if row is None:
+        raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
+    return _conversation(row, repository.settings.conversation_retention_days)
+
+
+@router.get(
+    "/conversations/{conversation_id}/messages", response_model=AssistantMessageListResponse
+)
+async def messages(
+    conversation_id: UUID,
+    repository: Annotated[GatewayRepository, Depends(get_gateway_repository)],
+    user_id: Annotated[str, Depends(external_user_id)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    before: Annotated[str | None, Query(max_length=32)] = None,
+) -> dict[str, Any]:
+    if (
+        await repository.get_assistant_conversation(
+            conversation_id=conversation_id, external_user_id=user_id
+        )
+        is None
+    ):
+        raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
+    try:
+        before_sequence = int(before) if before else None
+    except ValueError as exc:
+        raise ApiError("INVALID_CURSOR", "分页游标无效", 422) from exc
+    rows = await repository.list_assistant_messages(
+        conversation_id=conversation_id, limit=limit + 1, before_sequence=before_sequence
+    )
+    page, more = rows[:limit], len(rows) > limit
+    return {
+        "items": [_message(row) for row in page],
+        "next_before": str(page[0]["sequence_no"]) if more and page else None,
+    }
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    payload: AssistantChatStreamRequest,
+    request: Request,
+    facade: Annotated[AssistantFacadeService, Depends(get_assistant_facade)],
+    user_id: Annotated[str, Depends(external_user_id)],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=200)],
+) -> StreamingResponse:
+    source = facade.stream(
+        external_user_id=user_id,
+        knowledge_id=payload.knowledge_id,
+        conversation_id=payload.conversation_id,
+        question=payload.question,
+        choice_id=payload.choice_id,
+        include_images=payload.include_images,
+        idempotency_key=idempotency_key,
+        request_id=str(request.state.request_id),
+    )
+    return StreamingResponse(
+        observe_stream_errors(request, source, user_facing=True),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _asset_response(
+    resources: AppResources, asset: dict[str, Any], *, filename: str | None = None
+) -> Response:
+    try:
+        upstream = resources.minio.get_object(asset["minio_bucket"], asset["minio_object_key"])
+        try:
+            body = bytes(upstream.read())
+        finally:
+            upstream.close()
+            upstream.release_conn()
+    except Exception as exc:
+        raise ApiError("ASSET_UNAVAILABLE", "资源暂时不可用", 503) from exc
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'} if filename else {}
+    return Response(
+        content=body,
+        media_type=asset.get("mime_type") or "application/octet-stream",
+        headers=headers,
+    )
+
+
+@router.get("/knowledge-bases/{knowledge_id}/documents/{document_id}/content")
+async def document_content(
+    knowledge_id: UUID,
+    document_id: UUID,
+    repository: Annotated[GatewayRepository, Depends(get_gateway_repository)],
+    resources: Annotated[AppResources, Depends(get_resources)],
+) -> Response:
+    asset = await repository.assistant_document(knowledge_id=knowledge_id, document_id=document_id)
+    return _asset_response(
+        resources, asset, filename=str(asset.get("filename") or asset["display_name"])
+    )
+
+
+@router.get("/knowledge-bases/{knowledge_id}/image-assets/{image_asset_id}/content")
+async def image_content(
+    knowledge_id: UUID,
+    image_asset_id: UUID,
+    repository: Annotated[GatewayRepository, Depends(get_gateway_repository)],
+    resources: Annotated[AppResources, Depends(get_resources)],
+) -> Response:
+    return _asset_response(
+        resources,
+        await repository.assistant_image_asset(
+            knowledge_id=knowledge_id, image_asset_id=image_asset_id
+        ),
+    )

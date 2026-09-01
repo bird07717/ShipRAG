@@ -332,8 +332,16 @@ class IngestionService:
         retention_count = self.settings.index_gc_retention_count
         retention_days = self.settings.index_gc_retention_days
 
-        purged_conversation_ids = await self.repository.purge_expired_conversations(
-            self.settings.conversation_retention_days, kb_id=kb_id
+        purged_conversation_ids = (
+            await self.repository.purge_expired_conversations(
+                self.settings.conversation_retention_days, kb_id=kb_id
+            )
+            if self.settings.conversation_retention_days > 0
+            else []
+        )
+        trace_retention = await self.repository.retain_traces(
+            self.settings.trace_full_retention_days,
+            self.settings.trace_summary_retention_days,
         )
         stuck = await self.repository.find_deleting_indexes()
         deletable = await self.repository.find_deletable_indexes(retention_count, retention_days)
@@ -367,6 +375,7 @@ class IngestionService:
             "skipped_count": len(skipped_ids),
             "purged_conversation_ids": purged_conversation_ids[:100],
             "purged_conversation_count": len(purged_conversation_ids),
+            "trace_retention": trace_retention,
         }
 
     async def delete_index(self, index_id: UUID, *, force: bool = False) -> dict[str, Any]:

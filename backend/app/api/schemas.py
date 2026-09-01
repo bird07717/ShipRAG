@@ -419,6 +419,7 @@ class RagTraceResponse(BaseModel):
     id: UUID
     trace_id: UUID
     request_id: str
+    source: Literal["ASSISTANT_API", "INTERNAL_CHAT", "PLAYGROUND"] = "INTERNAL_CHAT"
     mode: Literal["CHAT", "PLAYGROUND"]
     kb_id: UUID
     index_id: UUID
@@ -432,6 +433,7 @@ class RagTraceResponse(BaseModel):
     answer: str | None
     sources: list[dict[str, Any]]
     model_usage: dict[str, Any]
+    runtime_snapshot: dict[str, Any] = Field(default_factory=dict)
     latency: dict[str, Any]
     citation_result: dict[str, Any]
     status: Literal["RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
@@ -489,6 +491,7 @@ class PlaygroundRequest(BaseModel):
 class TraceSummaryResponse(BaseModel):
     trace_id: UUID
     request_id: str
+    source: Literal["ASSISTANT_API", "INTERNAL_CHAT", "PLAYGROUND"] = "INTERNAL_CHAT"
     mode: Literal["CHAT", "PLAYGROUND"]
     kb_id: UUID
     index_id: UUID
@@ -987,6 +990,92 @@ class ChatResponse(BaseModel):
     latency_ms: int
     # Clickable retry questions for NO_MATCH routing turns; empty otherwise.
     next_suggestions: list[str] = Field(default_factory=list)
+
+
+# External Assistant API ---------------------------------------------------
+# Keep these separate from the internal/admin schemas.  In particular, the
+# public request must reject model, engine, prompt, and policy override keys.
+
+
+class AssistantStrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class AssistantChatStreamRequest(AssistantStrictModel):
+    knowledge_id: UUID
+    conversation_id: UUID | None = None
+    question: str = Field(min_length=1, max_length=4_000)
+    choice_id: str | None = Field(default=None, min_length=1, max_length=100)
+    include_images: bool = True
+
+
+class AssistantKnowledgeBaseItem(BaseModel):
+    knowledge_id: UUID
+    name: str
+    description: str | None = None
+    ready: bool
+
+
+class AssistantKnowledgeBaseListResponse(BaseModel):
+    items: list[AssistantKnowledgeBaseItem]
+
+
+class AssistantWelcomeResponse(BaseModel):
+    knowledge_id: UUID
+    message: str
+    suggestions: list[str]
+
+
+class AssistantConversationKnowledge(BaseModel):
+    knowledge_id: UUID
+    name: str
+
+
+class AssistantConversationItem(BaseModel):
+    conversation_id: UUID
+    knowledge: AssistantConversationKnowledge
+    title: str | None = None
+    message_count: int
+    created_at: datetime
+    last_activity_at: datetime
+    expires_at: datetime | None = None
+    status: Literal["ACTIVE"] = "ACTIVE"
+
+
+class AssistantConversationListResponse(BaseModel):
+    items: list[AssistantConversationItem]
+    next_cursor: str | None = None
+
+
+class AssistantMessageError(BaseModel):
+    code: str
+    message: str
+    retryable: bool | None = None
+
+
+class AssistantMessageResponse(BaseModel):
+    message_id: UUID
+    conversation_id: UUID
+    role: Literal["USER", "ASSISTANT"]
+    status: Literal["GENERATING", "COMPLETED", "FAILED", "CANCELLED"]
+    content: str
+    trace_id: UUID | None = None
+    response_type: str | None = None
+    content_blocks: list[dict[str, Any]] = Field(default_factory=list)
+    sections: list[dict[str, Any]] = Field(default_factory=list)
+    document: dict[str, Any] | None = None
+    references: list[dict[str, Any]] = Field(default_factory=list)
+    clarification: dict[str, Any] | None = None
+    escalation: dict[str, Any] | None = None
+    disclaimer: str | None = None
+    error: AssistantMessageError | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssistantMessageListResponse(BaseModel):
+    items: list[AssistantMessageResponse]
+    next_before: str | None = None
 
 
 class ProblemProfileUpsert(BaseModel):

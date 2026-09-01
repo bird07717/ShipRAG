@@ -40,3 +40,21 @@ async def require_service_token(
         raise ApiError("AUTHENTICATION_REQUIRED", "需要服务访问凭据", 401)
     if not secrets.compare_digest(credentials.credentials, configured.get_secret_value()):
         raise ApiError("AUTHENTICATION_REQUIRED", "服务访问凭据无效", 401)
+
+
+async def require_assistant_service_token(
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> None:
+    """Authenticate the narrow business-backend integration surface only."""
+    configured = settings.assistant_service_token
+    previous = settings.assistant_service_token_previous
+    if configured is None and settings.app_env in {"development", "test"}:
+        return
+    if credentials is None or credentials.scheme.lower() != "bearer" or configured is None:
+        raise ApiError("AUTHENTICATION_REQUIRED", "需要服务访问凭据", 401)
+    candidates = [configured.get_secret_value()]
+    if previous is not None:
+        candidates.append(previous.get_secret_value())
+    if not any(secrets.compare_digest(credentials.credentials, value) for value in candidates):
+        raise ApiError("AUTHENTICATION_REQUIRED", "服务访问凭据无效", 401)

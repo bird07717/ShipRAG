@@ -31,16 +31,28 @@ const RESPONSE_TYPES = [
   "ESCALATION_REQUIRED",
 ] as const;
 const STATUSES = ["RUNNING", "COMPLETED", "FAILED", "CANCELLED"] as const;
+const SOURCES = [
+  { value: "ASSISTANT_API", label: "线上 Assistant" },
+  { value: "INTERNAL_CHAT", label: "DemoChat / 内部聊天" },
+  { value: "PLAYGROUND", label: "调试台" },
+] as const;
+const sourceLabel: Record<(typeof SOURCES)[number]["value"], string> = Object.fromEntries(
+  SOURCES.map((item) => [item.value, item.label]),
+) as Record<(typeof SOURCES)[number]["value"], string>;
 
 const traceFilter = ref<{
   status: string;
   responseType: string;
+  source: "" | (typeof SOURCES)[number]["value"];
   userId: string;
+  requestId: string;
   range: [Date, Date] | null;
 }>({
   status: "",
   responseType: "",
+  source: "",
   userId: "",
+  requestId: "",
   range: null,
 });
 const traces = ref<TraceSummary[]>([]);
@@ -53,7 +65,9 @@ async function loadTraces(): Promise<void> {
     traces.value = await adminApi.listTraces(store.selectedKnowledgeId || undefined, {
       status: traceFilter.value.status || undefined,
       responseType: traceFilter.value.responseType || undefined,
+      source: traceFilter.value.source || undefined,
       userId: traceFilter.value.userId.trim() || undefined,
+      requestId: traceFilter.value.requestId.trim() || undefined,
       from: traceFilter.value.range?.[0]?.toISOString(),
       to: traceFilter.value.range?.[1]?.toISOString(),
       limit: 200,
@@ -67,7 +81,14 @@ async function loadTraces(): Promise<void> {
 }
 
 function resetFilters(): void {
-  traceFilter.value = { status: "", responseType: "", userId: "", range: null };
+  traceFilter.value = {
+    status: "",
+    responseType: "",
+    source: "",
+    userId: "",
+    requestId: "",
+    range: null,
+  };
   void loadTraces();
 }
 
@@ -216,6 +237,20 @@ async function selectTrace(traceId: string): Promise<void> {
           />
         </el-select>
         <el-select
+          v-model="traceFilter.source"
+          placeholder="调用来源"
+          clearable
+          class="filter-select"
+          @change="loadTraces"
+        >
+          <el-option
+            v-for="item in SOURCES"
+            :key="item.value"
+            :label="item.label"
+            :value="item.value"
+          />
+        </el-select>
+        <el-select
           v-model="traceFilter.responseType"
           placeholder="响应类型"
           clearable
@@ -232,6 +267,14 @@ async function selectTrace(traceId: string): Promise<void> {
         <el-input
           v-model="traceFilter.userId"
           placeholder="用户 ID"
+          clearable
+          class="filter-user"
+          @keyup.enter="loadTraces"
+          @clear="loadTraces"
+        />
+        <el-input
+          v-model="traceFilter.requestId"
+          placeholder="请求 ID"
           clearable
           class="filter-user"
           @keyup.enter="loadTraces"
@@ -269,7 +312,9 @@ async function selectTrace(traceId: string): Promise<void> {
           <div class="trace-row-main">
             <b class="trace-question">{{ trace.question }}</b>
             <small class="trace-meta">
-              {{ trace.engine ?? "RAG" }} · {{ trace.mode }} · {{ store.formatDate(trace.created_at) }}
+              {{ trace.source ? sourceLabel[trace.source] : "DemoChat / 内部聊天" }} ·
+              {{ trace.engine ?? "RAG" }} ·
+              {{ trace.mode }} · {{ store.formatDate(trace.created_at) }}
               <template v-if="trace.user_id"> · {{ trace.user_id }}</template>
               <template v-if="trace.error?.code"> · ⚠ {{ trace.error.code }}</template>
             </small>
@@ -309,6 +354,7 @@ async function selectTrace(traceId: string): Promise<void> {
                 用户 {{ activeTraceDetail.user_id }}
               </span>
               <span class="mono muted">{{ activeTraceDetail.trace_id }}</span>
+              <span class="mono muted">请求 {{ activeTraceDetail.request_id }}</span>
               <el-button
                 v-if="activeTraceDetail.conversation_id"
                 text
@@ -401,6 +447,9 @@ async function selectTrace(traceId: string): Promise<void> {
           </ol>
 
           <el-collapse class="detail-collapse">
+            <el-collapse-item title="运行快照（模型、策略与索引）" name="runtime-snapshot">
+              <CodeBlock :code="store.formatJson(activeTraceDetail.runtime_snapshot)" max-height="280px" />
+            </el-collapse-item>
             <el-collapse-item title="检索（Retrieval）" name="retrieval">
               <CodeBlock :code="store.formatJson(activeTraceDetail.retrieval_result)" max-height="280px" />
             </el-collapse-item>

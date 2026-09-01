@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from typing import Any
@@ -37,8 +38,7 @@ def elements_from_rows(rows: Any) -> list[dict[str, Any]]:
                 width is not None
                 and height is not None
                 and (
-                    int(width) < _DECORATIVE_IMAGE_MAX_PX
-                    or int(height) < _DECORATIVE_IMAGE_MAX_PX
+                    int(width) < _DECORATIVE_IMAGE_MAX_PX or int(height) < _DECORATIVE_IMAGE_MAX_PX
                 )
             )
             if too_small:
@@ -367,6 +367,7 @@ class RagRepository:
                     rerank_top_n=self.settings.m5_rerank_top_n,
                     context_max_chunks=self.settings.m3_context_max_chunks,
                 )
+
             else:
                 retrieval = RetrievalConfig(
                     vector_top_k=int(config_row["vector_top_k"]),
@@ -375,6 +376,48 @@ class RagRepository:
                     rerank_top_n=int(config_row["rerank_top_n"]),
                     context_max_chunks=int(config_row["context_max_chunks"]),
                 )
+
+            def model_snapshot(model: ModelSnapshot | None) -> dict[str, Any] | None:
+                if model is None:
+                    return None
+                return {
+                    "provider": model.provider,
+                    "model_name": model.model_name,
+                    "base_url": model.base_url,
+                    "parameters": model.parameters,
+                }
+
+            runtime_snapshot = {
+                "schema_version": 1,
+                "engine": "RAG",
+                "index": {
+                    "id": str(effective_index_id),
+                    "embedding_model_name": embedding_model_name,
+                },
+                "models": {
+                    "llm": {
+                        "provider": str(llm_row["provider"]),
+                        "model_name": str(llm_row["model_name"]),
+                        "base_url": str(llm_row["base_url"])
+                        if llm_row["base_url"] is not None
+                        else None,
+                        "parameters": dict(llm_row["parameters"] or {}),
+                    },
+                    "rerank": {
+                        "provider": str(rerank_row["provider"]),
+                        "model_name": str(rerank_row["model_name"]),
+                        "base_url": str(rerank_row["base_url"])
+                        if rerank_row["base_url"] is not None
+                        else None,
+                        "parameters": dict(rerank_row["parameters"] or {}),
+                    },
+                    "embedding": model_snapshot(embedding_snapshot),
+                },
+                "retrieval": retrieval.model_dump(),
+                "prompt": {
+                    "sha256": hashlib.sha256(str(prompt_template).encode()).hexdigest(),
+                },
+            }
 
             if reuse_messages:
                 if parent_trace_id is not None:
@@ -452,7 +495,8 @@ class RagRepository:
                     INSERT INTO rag_trace (
                         id, trace_id, request_id, kb_id, index_id, conversation_id,
                         message_id, question, mode, status, user_id, engine, stage,
-                        parent_trace_id, fallback_from, fallback_reason
+                        parent_trace_id, fallback_from, fallback_reason, source,
+                        runtime_snapshot
                     ) VALUES (
                         :id, :trace_id, :request_id, :kb_id, :index_id, :conversation_id,
                         :message_id, :question, :mode, 'RUNNING', :user_id,
@@ -461,7 +505,7 @@ class RagRepository:
                             WHEN CAST(:parent_trace_id AS uuid) IS NULL THEN NULL
                             ELSE 'SUPPORT'
                         END,
-                        :fallback_reason
+                        :fallback_reason, :source, CAST(:runtime_snapshot AS jsonb)
                     )
                     """
                 ),
@@ -478,6 +522,8 @@ class RagRepository:
                     "user_id": user_id,
                     "parent_trace_id": parent_trace_id,
                     "fallback_reason": fallback_reason,
+                    "source": "PLAYGROUND" if mode == "PLAYGROUND" else "INTERNAL_CHAT",
+                    "runtime_snapshot": json.dumps(runtime_snapshot, ensure_ascii=False),
                 },
             )
             await connection.execute(
@@ -896,7 +942,10 @@ class RagRepository:
                 },
             )
             await connection.execute(
-                text("UPDATE conversation SET updated_at = now() WHERE id = :id"),
+                text(
+                    "UPDATE conversation SET updated_at = now(), last_activity_at = now() "
+                    "WHERE id = :id"
+                ),
                 {"id": turn.conversation_id},
             )
 
@@ -1221,8 +1270,10 @@ class RagRepository:
         user_id: str | None = None,
         response_type: str | None = None,
         engine: str | None = None,
+        source: str | None = None,
         error_code: str | None = None,
         conversation_id: UUID | None = None,
+        request_id: str | None = None,
         created_from: datetime | None = None,
         created_to: datetime | None = None,
         limit: int = 50,
@@ -1247,12 +1298,18 @@ class RagRepository:
         if engine is not None:
             clauses.append("engine = :engine")
             parameters["engine"] = engine
+        if source is not None:
+            clauses.append("source = :source")
+            parameters["source"] = source
         if error_code is not None:
             clauses.append("error ->> 'code' = :error_code")
             parameters["error_code"] = error_code
         if conversation_id is not None:
             clauses.append("conversation_id = :conversation_id")
             parameters["conversation_id"] = conversation_id
+        if request_id is not None:
+            clauses.append("request_id = :request_id")
+            parameters["request_id"] = request_id
         if created_from is not None:
             clauses.append("created_at >= :created_from")
             parameters["created_from"] = created_from
@@ -1260,7 +1317,7 @@ class RagRepository:
             clauses.append("created_at < :created_to")
             parameters["created_to"] = created_to
         query = f"""
-            SELECT trace_id, request_id, mode, kb_id, index_id, question, status,
+            SELECT trace_id, request_id, source, mode, kb_id, index_id, question, status,
                    user_id, response_type, answer_mode, latency, error,
                    created_at, finished_at, engine, stage, parent_trace_id,
                    fallback_from, fallback_reason
@@ -1350,9 +1407,7 @@ class RagRepository:
         provider = str(row["provider"])
         stored_key = row.get("api_key_ciphertext") is not None
         public = {key: value for key, value in row.items() if not key.startswith("api_key_")}
-        public["api_key_configured"] = self._api_key_configured(
-            model_type, provider, stored_key
-        )
+        public["api_key_configured"] = self._api_key_configured(model_type, provider, stored_key)
         public["api_key_source"] = self._api_key_source(model_type, provider, stored_key)
         public["supported_providers"] = list(supported_providers(model_type))
         return public

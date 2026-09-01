@@ -399,7 +399,11 @@ async def list_traces(
         Query(),
     ] = None,
     engine: Annotated[Literal["SUPPORT", "RAG"] | None, Query()] = None,
+    source: Annotated[
+        Literal["ASSISTANT_API", "INTERNAL_CHAT", "PLAYGROUND"] | None, Query()
+    ] = None,
     user_id: Annotated[str | None, Query(max_length=100)] = None,
+    request_id: Annotated[str | None, Query(max_length=200)] = None,
     error_code: Annotated[str | None, Query(max_length=100)] = None,
     conversation_id: Annotated[UUID | None, Query()] = None,
     created_from: Annotated[datetime | None, Query(alias="from")] = None,
@@ -413,8 +417,10 @@ async def list_traces(
         user_id=user_id,
         response_type=response_type,
         engine=engine,
+        source=source,
         error_code=error_code,
         conversation_id=conversation_id,
+        request_id=request_id,
         created_from=created_from,
         created_to=created_to,
         limit=limit,

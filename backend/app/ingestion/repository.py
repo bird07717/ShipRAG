@@ -1447,7 +1447,7 @@ class IngestionRepository:
         """
         query = """
             DELETE FROM conversation
-            WHERE updated_at < now() - INTERVAL '1 day' * :retention_days
+            WHERE last_activity_at < now() - INTERVAL '1 day' * :retention_days
         """
         parameters: dict[str, Any] = {"retention_days": retention_days}
         if kb_id is not None:
@@ -1457,6 +1457,34 @@ class IngestionRepository:
         async with self.engine.begin() as connection:
             result = await connection.execute(text(query), parameters)
             return [UUID(str(row[0])) for row in result]
+
+    async def retain_traces(
+        self, full_retention_days: int, summary_retention_days: int
+    ) -> dict[str, int]:
+        """Redact detailed trace data before deleting its operations summary."""
+        async with self.engine.begin() as connection:
+            redacted = await connection.execute(
+                text(
+                    """
+                    UPDATE rag_trace
+                    SET retrieval_result = '{}'::jsonb, rerank_result = '{}'::jsonb,
+                        selected_context = '[]'::jsonb, prompt = NULL, answer = NULL,
+                        sources = '[]'::jsonb, model_usage = '{}'::jsonb,
+                        runtime_snapshot = '{}'::jsonb, redacted_at = now()
+                    WHERE redacted_at IS NULL
+                      AND created_at < now() - INTERVAL '1 day' * :full_days
+                    """
+                ),
+                {"full_days": full_retention_days},
+            )
+            deleted = await connection.execute(
+                text(
+                    "DELETE FROM rag_trace WHERE created_at < now() "
+                    "- INTERVAL '1 day' * :summary_days"
+                ),
+                {"summary_days": summary_retention_days},
+            )
+        return {"redacted": int(redacted.rowcount or 0), "deleted": int(deleted.rowcount or 0)}
 
     async def retry_index(
         self, index_id: UUID, *, activate_on_success: bool = False
@@ -1961,9 +1989,6 @@ class IngestionRepository:
                     {"index_id": index_id},
                 )
                 return False
-            await connection.execute(
-                text("DELETE FROM rag_trace WHERE index_id = :index_id"), {"index_id": index_id}
-            )
             result = await connection.execute(
                 text(
                     """

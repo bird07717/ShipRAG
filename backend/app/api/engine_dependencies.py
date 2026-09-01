@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import Depends
 
 from app.api.dependencies import get_app_settings, get_resources
+from app.assistant.service import AssistantFacadeService
 from app.core.config import Settings
 from app.core.resources import AppResources
 from app.gateway.repository import GatewayRepository
@@ -57,3 +58,10 @@ def get_chat_gateway(
     rag: Annotated[RagService, Depends(get_rag_service)],
 ) -> ChatGatewayService:
     return ChatGatewayService(repository, support, rag)
+
+
+def get_assistant_facade(
+    repository: Annotated[GatewayRepository, Depends(get_gateway_repository)],
+    gateway: Annotated[ChatGatewayService, Depends(get_chat_gateway)],
+) -> AssistantFacadeService:
+    return AssistantFacadeService(repository, gateway)

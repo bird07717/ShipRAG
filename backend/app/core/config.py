@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     api_prefix: str = "/api/v1"
     service_token: SecretStr | None = None
+    # The external Assistant API has a deliberately narrower credential than
+    # the administrative API.  Keeping the previous value supports a safe
+    # rolling rotation at the reverse-proxy / business-backend boundary.
+    assistant_service_token: SecretStr | None = None
+    assistant_service_token_previous: SecretStr | None = None
     cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
 
     database_url: SecretStr = SecretStr(
@@ -169,6 +174,12 @@ class Settings(BaseSettings):
     # them forever.
     conversation_retention_days: int = 7
 
+    # Conversation content is visible for seven days.  Trace payload is
+    # redacted after that window and retained as a minimal operations record
+    # for a further period.
+    trace_full_retention_days: int = 7
+    trace_summary_retention_days: int = 30
+
     # Failed-request log retention; 0 disables pruning (keep forever).
     request_error_log_retention_days: int = 30
 
@@ -211,6 +222,13 @@ class Settings(BaseSettings):
     def validate_conversation_retention_days(cls, value: int) -> int:
         if not 0 <= value <= 3_650:
             raise ValueError("conversation retention days must be between 0 and 3650")
+        return value
+
+    @field_validator("trace_full_retention_days", "trace_summary_retention_days")
+    @classmethod
+    def validate_trace_retention_days(cls, value: int) -> int:
+        if not 0 <= value <= 3_650:
+            raise ValueError("trace retention days must be between 0 and 3650")
         return value
 
     @field_validator("request_error_log_retention_days")
@@ -529,6 +547,44 @@ class Settings(BaseSettings):
     def validate_production_security(self) -> Self:
         if self.app_env == "production" and not self.service_token:
             raise ValueError("SERVICE_TOKEN is required in production")
+        if self.app_env == "production":
+            assistant_token = (
+                self.assistant_service_token.get_secret_value()
+                if self.assistant_service_token is not None
+                else ""
+            )
+            forbidden_assistant_tokens = {
+                "change-me-for-assistant-integration",
+                "change-me",
+            }
+            if (
+                len(assistant_token) < 32
+                or assistant_token != assistant_token.strip()
+                or assistant_token in forbidden_assistant_tokens
+            ):
+                raise ValueError(
+                    "ASSISTANT_SERVICE_TOKEN must be a non-placeholder random value "
+                    "of at least 32 characters in production"
+                )
+
+            previous_token = (
+                self.assistant_service_token_previous.get_secret_value()
+                if self.assistant_service_token_previous is not None
+                else ""
+            )
+            if previous_token and (
+                len(previous_token) < 32
+                or previous_token != previous_token.strip()
+                or previous_token in forbidden_assistant_tokens
+            ):
+                raise ValueError(
+                    "ASSISTANT_SERVICE_TOKEN_PREVIOUS must be a non-placeholder "
+                    "random value of at least 32 characters"
+                )
+            if previous_token and previous_token == assistant_token:
+                raise ValueError(
+                    "ASSISTANT_SERVICE_TOKEN_PREVIOUS must differ from ASSISTANT_SERVICE_TOKEN"
+                )
         if self.app_env in {"staging", "production"} and self.m3_llm_provider == "fake":
             raise ValueError("M3_LLM_PROVIDER=fake is forbidden in staging and production")
         return self
