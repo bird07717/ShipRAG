@@ -1044,11 +1044,7 @@ async def test_meta_ack_short_circuits_focused_doc_qa():
     repo = _RoutingRepository(
         turn=_turn(
             focus_document_id=DOC_A,
-            chat_context={
-                "pending_options": [
-                    {"document_id": str(DOC_B), "title": TITLE_B}
-                ]
-            },
+            chat_context={"pending_options": [{"document_id": str(DOC_B), "title": TITLE_B}]},
         ),
         candidates=[_candidate(DOC_A, 1)],
     )

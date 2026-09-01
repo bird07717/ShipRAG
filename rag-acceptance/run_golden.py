@@ -1,9 +1,11 @@
 """RAG 链路黄金集运行器（黑盒，经 HTTP 调用真实链路）。
 
 用法：
-    .venv/bin/python rag-acceptance/run_golden.py [--base-url URL] [--kb-id ID]
+    .venv/bin/python rag-acceptance/run_golden.py [--api-mode admin|assistant]
+        [--base-url URL] [--kb-id ID]
 
-凭据从环境变量 GOLDEN_TOKEN / SERVICE_TOKEN 读取，或回退到项目根目录 .env。
+管理模式凭据从 GOLDEN_TOKEN / SERVICE_TOKEN 读取；Assistant 模式凭据从
+GOLDEN_ASSISTANT_TOKEN / ASSISTANT_SERVICE_TOKEN 读取，均可回退到项目根目录 .env。
 结果写入 rag-acceptance/reports/<run_id>.json，并在终端打印分类摘要。
 """
 
@@ -16,7 +18,6 @@ import re
 import sys
 import time
 import unicodedata
-import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -30,24 +31,48 @@ BOOK_TITLE_PATTERN = re.compile(r"《([^》]{2,120})》")
 def normalize(value: str) -> str:
     value = unicodedata.normalize("NFKC", str(value or "")).casefold()
     return "".join(
-        ch
-        for ch in value
-        if not ch.isspace() and not unicodedata.category(ch).startswith("P")
+        ch for ch in value if not ch.isspace() and not unicodedata.category(ch).startswith("P")
     )
 
 
-def load_token() -> str:
+def _env_value(*names: str) -> str | None:
     import os
 
-    token = os.environ.get("GOLDEN_TOKEN") or os.environ.get("SERVICE_TOKEN")
-    if token:
-        return token
+    for name in names:
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
     env_file = ROOT / ".env"
     if env_file.exists():
         for line in env_file.read_text(encoding="utf-8").splitlines():
-            if line.startswith("SERVICE_TOKEN="):
-                return line.split("=", 1)[1].strip()
-    raise SystemExit("未找到服务凭据：设置 GOLDEN_TOKEN 或在项目根目录 .env 中配置 SERVICE_TOKEN")
+            key, separator, value = line.partition("=")
+            if separator and key.strip() in names and value.strip():
+                normalized = value.strip()
+                if (
+                    len(normalized) >= 2
+                    and normalized[0] == normalized[-1]
+                    and normalized[0] in "\"'"
+                ):
+                    normalized = normalized[1:-1]
+                return normalized
+    return None
+
+
+def load_token(api_mode: str) -> str:
+    if api_mode == "assistant":
+        token = _env_value("GOLDEN_ASSISTANT_TOKEN", "ASSISTANT_SERVICE_TOKEN")
+        if token:
+            return token
+        raise SystemExit(
+            "未找到 Assistant 凭据：设置 GOLDEN_ASSISTANT_TOKEN，或在项目根目录 "
+            ".env 中配置 ASSISTANT_SERVICE_TOKEN"
+        )
+    token = _env_value("GOLDEN_TOKEN", "SERVICE_TOKEN")
+    if token:
+        return token
+    raise SystemExit(
+        "未找到管理服务凭据：设置 GOLDEN_TOKEN，或在项目根目录 .env 中配置 SERVICE_TOKEN"
+    )
 
 
 def _fuzzy_title_match(mention_norm: str, title_norm: str) -> bool:
@@ -57,7 +82,9 @@ def _fuzzy_title_match(mention_norm: str, title_norm: str) -> bool:
     if not mention_norm or not title_norm:
         return False
     shorter, longer = (
-        (mention_norm, title_norm) if len(mention_norm) <= len(title_norm) else (title_norm, mention_norm)
+        (mention_norm, title_norm)
+        if len(mention_norm) <= len(title_norm)
+        else (title_norm, mention_norm)
     )
     if len(shorter) >= 6 and shorter in longer:
         return True
@@ -76,6 +103,13 @@ def extract_hits(response: dict[str, Any], catalog_norm: dict[str, str]) -> set[
     answer = str(response.get("answer") or "")
     for match in BOOK_TITLE_PATTERN.findall(answer):
         mentioned.add(match)
+
+    # The external Assistant contract intentionally has no document-catalog
+    # endpoint. Its public references already carry document titles, so the
+    # Assistant Golden run evaluates those titles directly. Admin mode keeps
+    # catalog-assisted fuzzy matching for backward-compatible baselines.
+    if not catalog_norm:
+        return mentioned
 
     hits: set[str] = set()
     for candidate in mentioned:
@@ -136,7 +170,7 @@ def percentile(values: list[float], ratio: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
-    index = min(len(ordered) - 1, int(round(ratio * (len(ordered) - 1))))
+    index = min(len(ordered) - 1, round(ratio * (len(ordered) - 1)))
     return ordered[index]
 
 
@@ -148,9 +182,63 @@ async def run_turn(
     question: str,
     conversation_id: str | None,
     request_id: str,
+    api_mode: str,
+    external_user_id: str,
 ) -> tuple[dict[str, Any] | None, int, str | None]:
     started = time.perf_counter()
     try:
+        if api_mode == "assistant":
+            headers = {
+                "Accept": "text/event-stream",
+                "X-External-User-ID": external_user_id,
+                "X-Request-ID": request_id,
+                "Idempotency-Key": request_id,
+            }
+            async with client.stream(
+                "POST",
+                f"{base_url}/api/v1/assistant/chat/stream",
+                headers=headers,
+                json={
+                    "knowledge_id": kb_id,
+                    "question": question,
+                    **({"conversation_id": conversation_id} if conversation_id else {}),
+                },
+                timeout=180.0,
+            ) as resp:
+                if resp.status_code != 200:
+                    body = (await resp.aread()).decode("utf-8", errors="replace")
+                    elapsed = int((time.perf_counter() - started) * 1000)
+                    return None, elapsed, f"HTTP {resp.status_code}: {body[:200]}"
+
+                event_name: str | None = None
+                data_lines: list[str] = []
+                async for line in resp.aiter_lines():
+                    if line.startswith(":"):
+                        continue
+                    if line.startswith("event:"):
+                        event_name = line[6:].strip()
+                        continue
+                    if line.startswith("data:"):
+                        data_lines.append(line[5:].lstrip())
+                        continue
+                    if line or not data_lines:
+                        continue
+                    try:
+                        payload = json.loads("\n".join(data_lines))
+                    except json.JSONDecodeError:
+                        payload = None
+                    if event_name == "complete" and isinstance(payload, dict):
+                        elapsed = int((time.perf_counter() - started) * 1000)
+                        return payload, elapsed, None
+                    if event_name == "error" and isinstance(payload, dict):
+                        elapsed = int((time.perf_counter() - started) * 1000)
+                        code = payload.get("code", "UNKNOWN")
+                        message = payload.get("message", "Assistant stream failed")
+                        return None, elapsed, f"SSE {code}: {message}"
+                    event_name, data_lines = None, []
+                elapsed = int((time.perf_counter() - started) * 1000)
+                return None, elapsed, "SSE 流在没有 complete/error 终态时结束"
+
         resp = await client.post(
             f"{base_url}/api/v1/chat",
             json={
@@ -174,17 +262,24 @@ async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:18000")
     parser.add_argument("--kb-id", default="5ae9881a-a568-436b-9330-2da5e9a2a9c9")
+    parser.add_argument("--api-mode", choices=("admin", "assistant"), default="admin")
+    parser.add_argument(
+        "--external-user-id",
+        help="Assistant 模式使用的稳定测试用户标识；默认按本次运行生成",
+    )
     parser.add_argument("--cases", default=str(ROOT / "rag-acceptance" / "cases.jsonl"))
     parser.add_argument("--out-dir", default=str(ROOT / "rag-acceptance" / "reports"))
     args = parser.parse_args()
 
-    token = load_token()
+    token = load_token(args.api_mode)
     cases = [
         json.loads(line)
         for line in Path(args.cases).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
 
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    external_user_id = args.external_user_id or f"golden-assistant-{run_id}"
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(headers=headers) as client:
         ready = await client.get(f"{args.base_url}/health/live", timeout=10.0)
@@ -192,18 +287,46 @@ async def main() -> int:
             print(f"后端不可用: HTTP {ready.status_code}")
             return 2
 
-        docs_resp = await client.get(
-            f"{args.base_url}/api/v1/knowledge-bases/{args.kb_id}/documents",
-            params={"page_size": 200},
-            timeout=30.0,
-        )
-        docs = docs_resp.json()
-        docs = docs if isinstance(docs, list) else docs.get("items", [])
-        catalog = [str(d.get("display_name") or d.get("filename") or "") for d in docs]
-        catalog_norm = {t: normalize(t) for t in catalog if t}
-        print(f"知识库目录: {len(catalog_norm)} 份文档")
+        if args.api_mode == "assistant":
+            kb_resp = await client.get(
+                f"{args.base_url}/api/v1/assistant/knowledge-bases",
+                headers={"X-External-User-ID": external_user_id},
+                timeout=30.0,
+            )
+            if kb_resp.status_code != 200:
+                print(
+                    f"Assistant 知识库接口不可用: HTTP {kb_resp.status_code} {kb_resp.text[:200]}"
+                )
+                return 2
+            available = {
+                str(item.get("knowledge_id")): item
+                for item in kb_resp.json().get("items", [])
+                if isinstance(item, dict)
+            }
+            selected = available.get(str(args.kb_id))
+            if selected is None:
+                print(f"Assistant 不可见目标知识库: {args.kb_id}")
+                return 2
+            if not bool(selected.get("ready")):
+                print(f"Assistant 目标知识库未就绪: {args.kb_id}")
+                return 2
+            catalog_norm: dict[str, str] = {}
+            print(f"Assistant 知识库: {selected.get('name')} ({args.kb_id})")
+        else:
+            docs_resp = await client.get(
+                f"{args.base_url}/api/v1/knowledge-bases/{args.kb_id}/documents",
+                params={"page_size": 200},
+                timeout=30.0,
+            )
+            if docs_resp.status_code != 200:
+                print(f"知识库目录接口不可用: HTTP {docs_resp.status_code} {docs_resp.text[:200]}")
+                return 2
+            docs = docs_resp.json()
+            docs = docs if isinstance(docs, list) else docs.get("items", [])
+            catalog = [str(d.get("display_name") or d.get("filename") or "") for d in docs]
+            catalog_norm = {t: normalize(t) for t in catalog if t}
+            print(f"知识库目录: {len(catalog_norm)} 份文档")
 
-        run_id = time.strftime("%Y%m%d-%H%M%S")
         results: list[dict[str, Any]] = []
         turn_total = 0
 
@@ -228,10 +351,16 @@ async def main() -> int:
                     question=turn["question"],
                     conversation_id=conversation_id,
                     request_id=request_id,
+                    api_mode=args.api_mode,
+                    external_user_id=external_user_id,
                 )
                 if error is not None or payload is None:
                     case_result["turns"].append(
-                        {"question": turn["question"], "error": error, "latency_ms": latency_ms}
+                        {
+                            "question": turn["question"],
+                            "error": error,
+                            "latency_ms": latency_ms,
+                        }
                     )
                     case_result["passed"] = False
                     print(f"[FAIL] {case['id']}#{step} {turn['question'][:24]} -> {error}")
@@ -282,6 +411,7 @@ async def main() -> int:
     passed = sum(1 for c in results if c["passed"])
     report = {
         "run_id": run_id,
+        "api_mode": args.api_mode,
         "base_url": args.base_url,
         "knowledge_id": args.kb_id,
         "total_cases": total,
@@ -292,9 +422,7 @@ async def main() -> int:
             cat: {
                 "cases": stats["cases"],
                 "passed": stats["passed"],
-                "pass_rate": round(stats["passed"] / stats["cases"], 4)
-                if stats["cases"]
-                else 0.0,
+                "pass_rate": round(stats["passed"] / stats["cases"], 4) if stats["cases"] else 0.0,
             }
             for cat, stats in sorted(by_category.items())
         },
@@ -312,6 +440,7 @@ async def main() -> int:
     out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print("\n===== 黄金集基线报告 =====")
+    print(f"接口模式: {args.api_mode}")
     print(f"用例: {total} | 通过: {passed} | 通过率: {report['pass_rate']:.1%}")
     for cat, stats in report["by_category"].items():
         print(f"  {cat:<14} {stats['passed']}/{stats['cases']}  ({stats['pass_rate']:.0%})")

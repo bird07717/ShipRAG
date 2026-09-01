@@ -1062,9 +1062,7 @@ async def test_support_service_delivers_complete_document_without_llm() -> None:
     assert repository.finished["focus_document_id"] == document.id
     assert repository.finished["context"]["support_workflow"]["index_id"] == str(document.index_id)
     assert repository.catalog_requests[0]["index_id"] == document.index_id
-    assert repository.profile_requests == [
-        {"method": "code", "index_id": document.index_id}
-    ]
+    assert repository.profile_requests == [{"method": "code", "index_id": document.index_id}]
     assert repository.document_requests[0]["index_id"] == document.index_id
 
 
@@ -1094,9 +1092,7 @@ async def test_support_service_explicit_document_uses_frozen_index() -> None:
 
     assert response["response_type"] == "DOCUMENT_DELIVERED"
     assert repository.catalog_requests[0]["index_id"] == document.index_id
-    assert repository.profile_requests == [
-        {"method": "document", "index_id": document.index_id}
-    ]
+    assert repository.profile_requests == [{"method": "document", "index_id": document.index_id}]
     assert repository.document_requests[0]["index_id"] == document.index_id
 
 
@@ -1338,9 +1334,7 @@ async def test_confirmed_switch_preserves_origin_question_and_frozen_index() -> 
     repository.focus_document_id = original_profile.document_id
     repository.focus_epoch = 3
     origin_question = "FFC 接线盒进水后报警怎么处理？"
-    repository.chat_context = discovery_context(
-        {}, last_clarification_question=origin_question
-    )
+    repository.chat_context = discovery_context({}, last_clarification_question=origin_question)
     repository.pending_switch_options = [
         {
             "choice_id": "switch_1",

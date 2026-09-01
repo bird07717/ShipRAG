@@ -13,6 +13,8 @@ from app.common.errors import ApiError
 from app.gateway.repository import GatewayRepository
 from app.gateway.service import ChatGatewayService
 
+HEARTBEAT_SECONDS = 15.0
+
 
 def sse(event: str, payload: dict[str, Any]) -> bytes:
     return (
@@ -24,6 +26,11 @@ def sse(event: str, payload: dict[str, Any]) -> bytes:
 
 def ping() -> bytes:
     return b": ping\n\n"
+
+
+def public_context(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize database-native identifiers before they reach the public stream."""
+    return {key: str(value) if isinstance(value, UUID) else value for key, value in payload.items()}
 
 
 def parse_sse(frame: bytes) -> tuple[str | None, dict[str, Any] | None]:
@@ -185,16 +192,26 @@ class AssistantFacadeService:
             # The facade owns idempotency; avoid collision with legacy support keys.
             idempotency_key=None,
         )
+        pending_frame: asyncio.Future[bytes] | None = None
         try:
             iterator = source.__aiter__()
             while True:
+                if pending_frame is None:
+                    # AsyncIterator.__anext__ is typed as an Awaitable, while
+                    # create_task accepts only coroutines.  ensure_future
+                    # preserves the frame across heartbeat timeouts either way.
+                    pending_frame = asyncio.ensure_future(iterator.__anext__())
                 try:
-                    frame = await asyncio.wait_for(iterator.__anext__(), timeout=15)
+                    frame = await asyncio.wait_for(
+                        asyncio.shield(pending_frame), timeout=HEARTBEAT_SECONDS
+                    )
                 except TimeoutError:
                     yield ping()
                     continue
                 except StopAsyncIteration:
+                    pending_frame = None
                     break
+                pending_frame = None
                 event, payload = parse_sse(frame)
                 payload = payload or {}
                 if event == "status":
@@ -216,7 +233,7 @@ class AssistantFacadeService:
                         conversation_id=UUID(str(payload["conversation_id"])),
                         trace_id=UUID(str(payload["trace_id"])),
                     )
-                    known_context.update(context)
+                    known_context.update(public_context(context))
                     await self.repository.set_assistant_request_context(
                         request_id=durable_id,
                         conversation_id=UUID(str(known_context["conversation_id"])),
@@ -254,7 +271,7 @@ class AssistantFacadeService:
                             conversation_id=UUID(str(context["conversation_id"])),
                             trace_id=UUID(str(context["trace_id"])),
                         )
-                        context.update(resolved)
+                        context.update(public_context(resolved))
                         yield sse("context", context)
                     await self.repository.complete_assistant_request(
                         request_id=durable_id,
@@ -322,3 +339,8 @@ class AssistantFacadeService:
             }
             await self.repository.fail_assistant_request(request_id=durable_id, payload=error)
             yield sse("error", error)
+        finally:
+            if pending_frame is not None and not pending_frame.done():
+                pending_frame.cancel()
+                await asyncio.gather(pending_frame, return_exceptions=True)
+            await source.aclose()

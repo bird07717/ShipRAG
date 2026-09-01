@@ -1,4 +1,3 @@
-# ruff: noqa: E501
 """Document Profile incremental generation: content hash per profile row.
 
 Revision ID: 0037

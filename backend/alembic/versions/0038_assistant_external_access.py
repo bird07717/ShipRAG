@@ -13,15 +13,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE conversation ADD COLUMN IF NOT EXISTS last_activity_at timestamptz"
-    )
+    op.execute("ALTER TABLE conversation ADD COLUMN IF NOT EXISTS last_activity_at timestamptz")
     op.execute(
         "UPDATE conversation SET last_activity_at = updated_at WHERE last_activity_at IS NULL"
     )
-    op.execute(
-        "ALTER TABLE conversation ALTER COLUMN last_activity_at SET NOT NULL"
-    )
+    op.execute("ALTER TABLE conversation ALTER COLUMN last_activity_at SET NOT NULL")
     op.execute("ALTER TABLE conversation ALTER COLUMN last_activity_at SET DEFAULT now()")
     op.execute(
         "CREATE INDEX IF NOT EXISTS ix_conversation_user_kb_activity "
@@ -67,8 +63,7 @@ def upgrade() -> None:
         "ON assistant_request (conversation_id) WHERE status = 'RUNNING' AND conversation_id IS NOT NULL"
     )
     op.execute(
-        "CREATE INDEX ix_assistant_request_status_updated "
-        "ON assistant_request (status, updated_at)"
+        "CREATE INDEX ix_assistant_request_status_updated ON assistant_request (status, updated_at)"
     )
 
 
@@ -83,7 +78,9 @@ def downgrade() -> None:
         "ALTER TABLE rag_trace ADD CONSTRAINT rag_trace_index_id_fkey "
         "FOREIGN KEY (index_id) REFERENCES knowledge_index(id) ON DELETE RESTRICT"
     )
-    op.execute("ALTER TABLE rag_trace DROP COLUMN IF EXISTS redacted_at, DROP COLUMN IF EXISTS runtime_snapshot")
+    op.execute(
+        "ALTER TABLE rag_trace DROP COLUMN IF EXISTS redacted_at, DROP COLUMN IF EXISTS runtime_snapshot"
+    )
     op.execute("ALTER TABLE message DROP COLUMN IF EXISTS response_payload")
     op.execute("DROP INDEX IF EXISTS ix_conversation_user_kb_activity")
     op.execute("ALTER TABLE conversation DROP COLUMN IF EXISTS last_activity_at")

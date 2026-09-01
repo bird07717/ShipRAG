@@ -249,8 +249,8 @@ async def run(
             "m2_embedding_provider": embedding_provider,
             "m3_llm_provider": llm_provider,
             "m5_rerank_provider": rerank_provider,
-            # This smoke verifies the legacy generic-RAG SSE contract
-            # (trace/source/message/done); the runtime default routes /chat to
+            # This smoke verifies the generic-RAG SSE contract
+            # (gateway status, then trace/source/message/done); the runtime default routes /chat to
             # the technical-support workflow whose stream has no trace event.
             "chat_execution_mode": "legacy_rag",
         }
@@ -311,9 +311,12 @@ async def run(
                 message_response.raise_for_status()
                 return events, trace_response.json(), message_response.json()
 
-        events, trace, messages = await asyncio.to_thread(call_api)
+        events, trace, message_page = await asyncio.to_thread(call_api)
+        messages = message_page.get("items") if isinstance(message_page, dict) else None
+        if not isinstance(messages, list):
+            raise RuntimeError("M3 conversation messages did not return an items page")
         event_names = [event for event, _ in events]
-        if event_names[:2] != ["trace", "source"] or event_names[-1] != "done":
+        if event_names[:3] != ["status", "trace", "source"] or event_names[-1] != "done":
             raise RuntimeError(f"M3 SSE event order invalid: {event_names}")
         if "message" not in event_names:
             raise RuntimeError("M3 SSE stream had no message delta")

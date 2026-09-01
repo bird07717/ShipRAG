@@ -1050,9 +1050,7 @@ class ReleaseRepository:
                     ),
                     {"release_id": target_release_id},
                 )
-                existing_target_ids = {
-                    UUID(str(row[0])) for row in existing_target_drafts
-                }
+                existing_target_ids = {UUID(str(row[0])) for row in existing_target_drafts}
 
                 live_profiles = await connection.execute(
                     text(
@@ -1249,9 +1247,7 @@ class ReleaseRepository:
                 "aliases": json.dumps(list(draft.get("aliases") or []), ensure_ascii=False),
                 "keywords": json.dumps(list(draft.get("keywords") or []), ensure_ascii=False),
                 "product_name": draft.get("product_name"),
-                "model_names": json.dumps(
-                    list(draft.get("model_names") or []), ensure_ascii=False
-                ),
+                "model_names": json.dumps(list(draft.get("model_names") or []), ensure_ascii=False),
                 "task_type": draft.get("task_type"),
                 "enabled": bool(draft.get("enabled", True)),
                 "routing_summary": str(draft.get("routing_summary") or ""),

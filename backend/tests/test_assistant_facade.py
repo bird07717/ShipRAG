@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -8,9 +9,16 @@ import pytest
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import SecretStr, ValidationError
 
+import app.assistant.service as assistant_service_module
 from app.api.dependencies import require_assistant_service_token
 from app.api.schemas import AssistantChatStreamRequest
-from app.assistant.service import AssistantFacadeService, decode_cursor, encode_cursor, parse_sse
+from app.assistant.service import (
+    AssistantFacadeService,
+    decode_cursor,
+    encode_cursor,
+    parse_sse,
+    ping,
+)
 from app.common.errors import ApiError
 from app.core.config import Settings
 
@@ -53,10 +61,12 @@ class _Repository:
 
     async def assistant_turn_context(self, **_: object) -> dict:
         return {
-            "conversation_id": str(CONVERSATION_ID),
-            "user_message_id": str(USER_MESSAGE_ID),
-            "assistant_message_id": str(ASSISTANT_MESSAGE_ID),
-            "trace_id": str(TRACE_ID),
+            # Match asyncpg/SQLAlchemy's real UUID return values.  The facade
+            # must normalize these before emitting or persisting public JSON.
+            "conversation_id": CONVERSATION_ID,
+            "user_message_id": USER_MESSAGE_ID,
+            "assistant_message_id": ASSISTANT_MESSAGE_ID,
+            "trace_id": TRACE_ID,
         }
 
     async def set_assistant_request_context(self, **kwargs: object) -> None:
@@ -97,6 +107,13 @@ class _BrokenGateway:
     async def stream(self, **_: object):  # type: ignore[no-untyped-def]
         raise RuntimeError("provider unavailable")
         yield b""  # pragma: no cover - makes this an async generator
+
+
+class _SlowGateway(_Gateway):
+    async def stream(self, **kwargs: object):  # type: ignore[no-untyped-def]
+        await asyncio.sleep(0.02)
+        async for frame in super().stream(**kwargs):
+            yield frame
 
 
 CONVERSATION_ID = uuid4()
@@ -182,6 +199,31 @@ async def test_facade_persists_unexpected_stream_failure() -> None:
     assert event == "error"
     assert payload and payload["code"] == "INTERNAL_ERROR"
     assert repository.failed is not None
+
+
+@pytest.mark.asyncio
+async def test_facade_heartbeat_does_not_cancel_slow_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(assistant_service_module, "HEARTBEAT_SECONDS", 0.001)
+    service = AssistantFacadeService(_Repository(), _SlowGateway())  # type: ignore[arg-type]
+
+    frames = [
+        frame
+        async for frame in service.stream(
+            external_user_id="business-user-1",
+            knowledge_id=KNOWLEDGE_ID,
+            conversation_id=None,
+            question="怎么做",
+            choice_id=None,
+            include_images=True,
+            idempotency_key="slow-key-1",
+            request_id="slow-request-1",
+        )
+    ]
+
+    assert ping() in frames
+    assert _event(frames[-1])[0] == "complete"
 
 
 def test_external_request_rejects_internal_engine_selection() -> None:

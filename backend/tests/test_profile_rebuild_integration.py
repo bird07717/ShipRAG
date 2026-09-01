@@ -70,9 +70,7 @@ async def _engine_cm() -> AsyncIterator[AsyncEngine]:
 
 async def _fetch_one(engine: AsyncEngine, sql: str, **parameters: Any) -> Any:
     async with engine.connect() as connection:
-        return (
-            await connection.execute(text(sql), parameters)
-        ).mappings().one_or_none()
+        return (await connection.execute(text(sql), parameters)).mappings().one_or_none()
 
 
 @asynccontextmanager
@@ -361,7 +359,8 @@ async def test_rebuild_creates_candidate_build_when_no_editable_release() -> Non
         task = await _task(engine, UUID(str(resolution["task_id"])))
         assert task["metadata"]["profile_refresh_after_build"] is True
         release = await _fetch_one(
-            engine, "SELECT status FROM knowledge_release WHERE index_id = :index_id",
+            engine,
+            "SELECT status FROM knowledge_release WHERE index_id = :index_id",
             index_id=new_index_id,
         )
         assert release is not None and release["status"] == "DRAFT"
@@ -372,7 +371,8 @@ async def test_rebuild_creates_candidate_build_when_no_editable_release() -> Non
         )
         assert old_release is not None and old_release["status"] == "PUBLISHED"
         created_index = await _fetch_one(
-            engine, "SELECT status, build_reason FROM knowledge_index WHERE id = :id",
+            engine,
+            "SELECT status, build_reason FROM knowledge_index WHERE id = :id",
             id=new_index_id,
         )
         assert created_index is not None
@@ -628,20 +628,26 @@ async def test_submit_post_build_profile_refreshes_when_intent_present() -> None
             settings,
             _Resources(),  # type: ignore[arg-type]
             IndexBuildResult(
-                index_id=index_id, document_count=1, element_count=1, chunk_count=1,
+                index_id=index_id,
+                document_count=1,
+                element_count=1,
+                chunk_count=1,
                 followup_build=None,
             ),
             build_task_id,
         )
 
+        # Current contract: post-build profile generation is unconditional
+        # (the legacy intent flag no longer gates it) and lands as a
+        # DOCUMENT_PROFILE_GENERATE task linked back from the build record.
         profile_task = await _fetch_one(
             engine,
             "SELECT id, task_type, status FROM task_record "
-            "WHERE index_id = :index_id AND task_type LIKE 'PROFILE_%'",
-            index_id=index_id,
+            "WHERE kb_id = :kb_id AND task_type = 'DOCUMENT_PROFILE_GENERATE'",
+            kb_id=knowledge_id,
         )
         assert profile_task is not None
-        assert profile_task["task_type"] == "PROFILE_REFRESH"
+        assert profile_task["task_type"] == "DOCUMENT_PROFILE_GENERATE"
         build_task = await _task(engine, build_task_id)
         assert build_task["metadata"]["profile_task_id"] == str(profile_task["id"])
 
@@ -668,7 +674,10 @@ async def test_submit_post_build_profile_generates_without_intent() -> None:
             settings,
             _Resources(),  # type: ignore[arg-type]
             IndexBuildResult(
-                index_id=index_id, document_count=1, element_count=1, chunk_count=1,
+                index_id=index_id,
+                document_count=1,
+                element_count=1,
+                chunk_count=1,
                 followup_build=None,
             ),
             build_task_id,
@@ -676,20 +685,23 @@ async def test_submit_post_build_profile_generates_without_intent() -> None:
 
         profile_task = await _fetch_one(
             engine,
-            "SELECT task_type FROM task_record "
-            "WHERE index_id = :index_id AND task_type LIKE 'PROFILE_%'",
-            index_id=index_id,
+            "SELECT id, task_type FROM task_record "
+            "WHERE kb_id = :kb_id AND task_type = 'DOCUMENT_PROFILE_GENERATE'",
+            kb_id=knowledge_id,
         )
         assert profile_task is not None
-        assert profile_task["task_type"] == "PROFILE_GENERATE"
+        assert profile_task["task_type"] == "DOCUMENT_PROFILE_GENERATE"
+        build_task = await _task(engine, build_task_id)
+        assert build_task["metadata"]["profile_task_id"] == str(profile_task["id"])
 
 
-async def test_submit_post_build_profile_intent_failure_fails_task() -> None:
+async def test_submit_post_build_profile_generation_failure_never_fails_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async with _knowledge_base() as (engine, knowledge_id, document_id):
         assert document_id is not None
         index_id = await _create_index(engine, knowledge_id, 1, "READY")
-        # A published release is not editable: the refresh submission fails.
-        await _create_release(engine, knowledge_id, index_id, "PUBLISHED")
+        await _create_release(engine, knowledge_id, index_id)
         build_task_id = await _create_task(
             engine,
             task_type="INDEX_BUILD",
@@ -703,24 +715,42 @@ async def test_submit_post_build_profile_intent_failure_fails_task() -> None:
         class _Resources:
             database = engine
 
-        with pytest.raises(ApiError):
-            await _submit_post_build_profile(
-                settings,
-                _Resources(),  # type: ignore[arg-type]
-                IndexBuildResult(
-                    index_id=index_id, document_count=1, element_count=1, chunk_count=1,
-                    followup_build=None,
-                ),
-                build_task_id,
-            )
+        # Queue outage during submission must not fail the completed build:
+        # profile generation is best-effort by contract.
+        def _enqueue_failure(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("queue down")
+
+        monkeypatch.setattr(
+            "app.document_profiles.service.enqueue_maintenance_task", _enqueue_failure
+        )
+
+        await _submit_post_build_profile(
+            settings,
+            _Resources(),  # type: ignore[arg-type]
+            IndexBuildResult(
+                index_id=index_id,
+                document_count=1,
+                element_count=1,
+                chunk_count=1,
+                followup_build=None,
+            ),
+            build_task_id,
+        )
 
         task = await _task(engine, build_task_id)
-        assert task["status"] == "FAILED"
-        assert task["error_code"] == "RELEASE_NOT_EDITABLE"
-        assert "已发布或已取消" in task["error_message"]
+        assert task["status"] == "SUCCEEDED"
+        profile_task = await _fetch_one(
+            engine,
+            "SELECT status, error_code FROM task_record "
+            "WHERE kb_id = :kb_id AND task_type = 'DOCUMENT_PROFILE_GENERATE'",
+            kb_id=knowledge_id,
+        )
+        assert profile_task is not None
+        assert profile_task["status"] == "FAILED"
+        assert profile_task["error_code"] == "RuntimeError"
 
 
-async def test_submit_post_build_profile_carries_intent_to_followup() -> None:
+async def test_submit_post_build_profile_defers_when_followup_build_exists() -> None:
     from app.ingestion.repository import BuildReference
 
     async with _knowledge_base() as (engine, knowledge_id, document_id):
@@ -747,11 +777,16 @@ async def test_submit_post_build_profile_carries_intent_to_followup() -> None:
         class _Resources:
             database = engine
 
+        # A follow-up build supersedes this one: profile generation is
+        # deferred to the follow-up's completion instead of running twice.
         await _submit_post_build_profile(
             settings,
             _Resources(),  # type: ignore[arg-type]
             IndexBuildResult(
-                index_id=index_id, document_count=1, element_count=1, chunk_count=1,
+                index_id=index_id,
+                document_count=1,
+                element_count=1,
+                chunk_count=1,
                 followup_build=BuildReference(
                     requested=True,
                     coalesced=False,
@@ -763,15 +798,17 @@ async def test_submit_post_build_profile_carries_intent_to_followup() -> None:
             build_task_id,
         )
 
-        followup_task = await _task(engine, followup_task_id)
-        assert followup_task["metadata"]["profile_refresh_after_build"] is True
         profile_tasks = await _fetch_one(
             engine,
             "SELECT count(*) AS total FROM task_record "
-            "WHERE index_id = :index_id AND task_type LIKE 'PROFILE_%'",
-            index_id=index_id,
+            "WHERE kb_id = :kb_id AND task_type = 'DOCUMENT_PROFILE_GENERATE'",
+            kb_id=knowledge_id,
         )
         assert profile_tasks["total"] == 0
+        followup_task = await _task(engine, followup_task_id)
+        assert "profile_task_id" not in (followup_task["metadata"] or {})
+        build_task = await _task(engine, build_task_id)
+        assert "profile_task_id" not in (build_task["metadata"] or {"profile_task_id": None})
 
 
 async def test_service_rebuild_enqueue_failure_fails_task() -> None:

@@ -186,9 +186,7 @@ class TestProviderKeyPrecedence:
         )
         assert isinstance(create_rerank_provider(settings, snapshot), SiliconFlowRerankProvider)
 
-    def test_zhipu_rerank_uses_zhipu_fallback_key(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_zhipu_rerank_uses_zhipu_fallback_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from app.core.config import Settings
 
         monkeypatch.setenv("ZHIPU_API_KEY", "")
@@ -232,6 +230,7 @@ class TestProbeModel:
             client=httpx.AsyncClient(transport=transport),
         )
         assert result["ok"] is True
+
     async def test_embedding_probe_reports_dimension(self) -> None:
         from app.core.config import Settings
 

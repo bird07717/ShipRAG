@@ -144,9 +144,7 @@ async def observe_stream_errors(
             message=exc.message,
             detail=exc.details or {"stream": True},
         )
-        message = (
-            user_safe_chat_message(exc) if user_facing else exc.message
-        )
+        message = user_safe_chat_message(exc) if user_facing else exc.message
         yield _sse(
             "error",
             {"code": exc.code, "message": message, "request_id": request_id},
@@ -157,9 +155,7 @@ async def observe_stream_errors(
             "error",
             {
                 "code": "INTERNAL_ERROR",
-                "message": (
-                    SERVER_BUSY_MESSAGE if user_facing else "流式请求处理失败"
-                ),
+                "message": (SERVER_BUSY_MESSAGE if user_facing else "流式请求处理失败"),
                 "request_id": request_id,
             },
         )

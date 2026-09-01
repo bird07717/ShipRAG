@@ -138,6 +138,14 @@ class SupportRepository:
                         raise ApiError("IDEMPOTENCY_KEY_REUSED", "幂等键已用于不同请求", 409)
                     if existing["status"] == "COMPLETED" and isinstance(existing["response"], dict):
                         response = dict(existing["response"])
+                        await conn.execute(
+                            text("""
+                                UPDATE support_idempotency
+                                SET replay_count = replay_count + 1, updated_at = now()
+                                WHERE kb_id = :kb_id AND idempotency_key = :key
+                            """),
+                            {"kb_id": knowledge_id, "key": idempotency_key},
+                        )
                         return SupportTurn(
                             trace_id=UUID(str(response["trace_id"])),
                             conversation_id=UUID(str(response["conversation_id"])),

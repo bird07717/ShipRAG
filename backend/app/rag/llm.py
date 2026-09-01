@@ -163,6 +163,7 @@ class ZhipuLlmProvider:
     selection, credentials and endpoint fallback all come from the snapshot's
     provider value.
     """
+
     # Utility calls cap their growth here: reasoning budget retries double a
     # few times, but a prompt that needs more than this is a prompt problem.
     _THINKING_MAX_TOKENS_CEILING = 16_384
@@ -294,9 +295,7 @@ class ZhipuLlmProvider:
             self._apply_thinking(payload, {"type": "disabled"})
         if response_format is not None:
             payload["response_format"] = response_format
-        request_timeout = (
-            httpx.Timeout(timeout_seconds) if timeout_seconds is not None else None
-        )
+        request_timeout = httpx.Timeout(timeout_seconds) if timeout_seconds is not None else None
         try:
             effective_max_tokens = max_tokens
             for _attempt in range(3):
@@ -361,9 +360,7 @@ class ZhipuLlmProvider:
         payload = self._payload(prompt)
         try:
             for _attempt in range(2):
-                async with self.client.stream(
-                    "POST", "chat/completions", json=payload
-                ) as response:
+                async with self.client.stream("POST", "chat/completions", json=payload) as response:
                     if self.provider == "zhipu" and await self._stream_thinking_rejection(response):
                         # Always-thinking model: drop the key, retry once and
                         # remember so later calls skip the doomed round trip.

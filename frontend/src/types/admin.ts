@@ -572,6 +572,53 @@ export interface SupportMetrics {
   tokens: { llm_prompt: number; llm_completion: number; llm_total: number };
 }
 
+export interface AssistantSourceStat {
+  source: string;
+  turns: number;
+  failed: number;
+  error_rate: number;
+  conversations: number;
+  users: number;
+  latency: MetricsLatencySummary;
+}
+
+export interface AssistantUserStat {
+  user_id: string;
+  turns: number;
+  failed: number;
+  last_seen: string;
+}
+
+export interface AssistantErrorCodeStat {
+  code: string;
+  count: number;
+}
+
+export interface AssistantHttpErrorStat {
+  status_code: number;
+  error_code: string;
+  count: number;
+}
+
+export interface AssistantMetrics {
+  days: number;
+  sources: AssistantSourceStat[];
+  top_users: AssistantUserStat[];
+  turn_error_codes: AssistantErrorCodeStat[];
+  http_errors: AssistantHttpErrorStat[];
+  idempotency: {
+    assistant_protected: number;
+    assistant_replays: number;
+    ingestion_operations: Record<string, number>;
+  };
+  retention: {
+    retention_days: number;
+    total: number;
+    active: number;
+    expired: number;
+  };
+}
+
 export interface RequestErrorLog {
   id: string;
   request_id: string;

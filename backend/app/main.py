@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.health import router as health_router
-from app.api.router import assistant_api_router, router as api_router
+from app.api.router import assistant_api_router
+from app.api.router import router as api_router
 from app.common.errors import SERVER_BUSY_MESSAGE, ApiError, user_safe_chat_message
 from app.common.middleware import RequestContextMiddleware
 from app.core.config import Settings, get_settings
@@ -69,7 +70,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[
-            "Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key",
+            "Authorization",
+            "Content-Type",
+            "X-Request-ID",
+            "Idempotency-Key",
             "X-External-User-ID",
         ],
         expose_headers=["X-Request-ID"],
@@ -93,7 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             detail=exc.details or None,
         )
         message = exc.message
-        details = exc.details
+        details: dict[str, Any] | None = exc.details
         if _is_user_chat_path(request) and exc.status_code >= 500:
             message = user_safe_chat_message(exc)
             details = None
@@ -149,11 +153,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled_error", error_type=type(exc).__name__)
         await record_unhandled_exception(request, exc)
-        message = (
-            SERVER_BUSY_MESSAGE
-            if _is_user_chat_path(request)
-            else "服务发生内部错误"
-        )
+        message = SERVER_BUSY_MESSAGE if _is_user_chat_path(request) else "服务发生内部错误"
         return JSONResponse(
             status_code=500,
             content=_error_body(request, "INTERNAL_ERROR", message),

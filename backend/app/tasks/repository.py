@@ -134,9 +134,10 @@ class TaskRecordRepository:
     async def status(self, task_id: UUID) -> str | None:
         """Cheap cooperative-cancellation probe used inside worker loops."""
         async with self.engine.connect() as connection:
-            return await connection.scalar(
+            status = await connection.scalar(
                 text("SELECT status FROM task_record WHERE id = :id"), {"id": task_id}
             )
+        return str(status) if status is not None else None
 
     async def request_cancel(self, task_id: UUID) -> bool:
         """Terminal-cancel an active task; returns False when already terminal.

@@ -42,15 +42,11 @@ _CAPABILITIES: dict[str, dict[str, ProviderCapability]] = {
         "siliconflow": ProviderCapability("siliconflow_api_key", "siliconflow_base_url"),
     },
     "OCR": {
-        "zhipu": ProviderCapability(
-            "zhipu_api_key", "zhipu_base_url", supports_thinking=True
-        ),
+        "zhipu": ProviderCapability("zhipu_api_key", "zhipu_base_url", supports_thinking=True),
         "siliconflow": ProviderCapability("siliconflow_api_key", "siliconflow_base_url"),
     },
     "VISION": {
-        "zhipu": ProviderCapability(
-            "zhipu_api_key", "zhipu_base_url", supports_thinking=True
-        ),
+        "zhipu": ProviderCapability("zhipu_api_key", "zhipu_base_url", supports_thinking=True),
         "siliconflow": ProviderCapability("siliconflow_api_key", "siliconflow_base_url"),
     },
 }
@@ -72,9 +68,7 @@ def is_supported_provider(model_type: str, provider: str) -> bool:
     return get_provider_capability(model_type, provider) is not None
 
 
-def environment_api_key(
-    settings: Settings, model_type: str, provider: str
-) -> SecretStr | None:
+def environment_api_key(settings: Settings, model_type: str, provider: str) -> SecretStr | None:
     capability = get_provider_capability(model_type, provider)
     if capability is None:
         return None

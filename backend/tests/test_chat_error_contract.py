@@ -96,9 +96,7 @@ def test_chat_error_message_contract(
     gateway = _RaisingGateway(error)
     overrides = _install(client, gateway, _StubRepository())
     try:
-        response = client.post(
-            "/api/v1/chat", json=_chat_payload(), headers=_AUTH
-        )
+        response = client.post("/api/v1/chat", json=_chat_payload(), headers=_AUTH)
 
         assert response.status_code == error.status_code
         body = response.json()["error"]
@@ -135,9 +133,7 @@ def test_admin_routes_keep_technical_messages(client: TestClient) -> None:
 def test_chat_stream_error_event_is_user_safe(client: TestClient) -> None:
     # Mid-stream failures surface as SSE error events: the message collapses
     # to the busy copy while code + request_id stay machine-readable.
-    gateway = _RaisingGateway(
-        ApiError("UPSTREAM_UNAVAILABLE", "查询向量生成失败", 503)
-    )
+    gateway = _RaisingGateway(ApiError("UPSTREAM_UNAVAILABLE", "查询向量生成失败", 503))
     overrides = _install(client, gateway, _StubRepository())
     try:
         with client.stream(

@@ -1,16 +1,20 @@
 <script setup lang="ts">
 import type { Component } from "vue";
 
-defineProps<{
-  label: string;
-  value: string | number;
-  context?: string;
-  icon?: Component;
-}>();
+withDefaults(
+  defineProps<{
+    label: string;
+    value: string | number;
+    context?: string;
+    icon?: Component;
+    tone?: "default" | "warning" | "danger";
+  }>(),
+  { context: undefined, icon: undefined, tone: "default" },
+);
 </script>
 
 <template>
-  <article class="metric-card">
+  <article class="metric-card" :class="`tone-${tone}`">
     <div class="metric-head">
       <span class="label">{{ label }}</span>
       <span v-if="icon" class="metric-icon">
@@ -55,6 +59,14 @@ defineProps<{
   font-weight: 600;
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
+}
+
+.tone-warning .value {
+  color: var(--warning);
+}
+
+.tone-danger .value {
+  color: var(--error);
 }
 
 .context {

@@ -57,9 +57,11 @@ class _ProfileScore:
     @property
     def direct_evidence(self) -> bool:
         # Alias alone cannot direct-route unless it is a specific identifier.
-        return self.canonical >= 0.86 or (
-            self.canonical >= 0.70 and self.summary >= 0.62
-        ) or (self.alias_specific and self.alias >= 0.96)
+        return (
+            self.canonical >= 0.86
+            or (self.canonical >= 0.70 and self.summary >= 0.62)
+            or (self.alias_specific and self.alias >= 0.96)
+        )
 
 
 def _character_bigrams(value: str) -> set[str]:
@@ -92,9 +94,7 @@ def _is_specific_alias(alias: str) -> bool:
     # a model, error code, or other ASCII identifier is safe as a direct alias
     # anchor; every other Alias remains a RAG candidate signal.
     display_alias = unicodedata.normalize("NFKC", alias)
-    return bool(
-        _CODE_PATTERN.search(normalized) or _UPPER_ACRONYM_PATTERN.search(display_alias)
-    )
+    return bool(_CODE_PATTERN.search(normalized) or _UPPER_ACRONYM_PATTERN.search(display_alias))
 
 
 def _score_profile(
@@ -113,9 +113,7 @@ def _score_profile(
         # still strong evidence, not a generic substring match.
         alias = max(alias, 0.96)
     summary = _similarity(question, profile.routing_summary)
-    canonical_weight = (
-        settings.profile_canonical_weight if settings else 0.60
-    )
+    canonical_weight = settings.profile_canonical_weight if settings else 0.60
     summary_weight = settings.profile_summary_weight if settings else 0.25
     alias_weight = settings.profile_alias_weight if settings else 0.15
     if alias_text and not alias_specific:
@@ -239,8 +237,7 @@ class ProblemResolver:
         close_candidates = [
             item
             for item in ranked
-            if item.total >= self._candidate_threshold
-            and top.total - item.total < self._direct_gap
+            if item.total >= self._candidate_threshold and top.total - item.total < self._direct_gap
         ]
         method = (
             "PROFILE_MULTI_CANDIDATE"

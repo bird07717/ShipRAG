@@ -319,9 +319,7 @@ def decide_doc_routing(
             # A lone weak-best candidate must not hijack the templated
             # clarify (see m3_doc_single_clarify_best_floor): the
             # catalog-aware routing answer serves that turn instead.
-            if ordered and not (
-                len(ordered) == 1 and ordered[0].best < single_clarify_best_floor
-            ):
+            if ordered and not (len(ordered) == 1 and ordered[0].best < single_clarify_best_floor):
                 # Ask once with the candidates recorded as pending options so
                 # the loop converges: the user's next reply (affirmative,
                 # ordinal, or the document title itself) resolves to DELIVER

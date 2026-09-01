@@ -80,6 +80,22 @@ def _gateway_repository(results: list[Any]) -> tuple[GatewayRepository, _FakeCon
     return repo, engine.connection
 
 
+async def test_assistant_conversation_filter_uses_typed_direct_uuid_comparison() -> None:
+    repo, connection = _gateway_repository([[]])
+    conversation_id, knowledge_id = uuid4(), uuid4()
+
+    await repo.get_assistant_conversation(
+        conversation_id=conversation_id,
+        external_user_id="business-user-1",
+        knowledge_id=knowledge_id,
+    )
+
+    sql, params = connection.executed[0]
+    assert "c.knowledge_id = :knowledge_id" in sql
+    assert ":knowledge_id IS NULL" not in sql
+    assert params is not None and params["knowledge_id"] == knowledge_id
+
+
 async def test_set_conversation_focus_resets_chat_context() -> None:
     repo, connection = _repository([[0]])
     conversation_id, document_id, index_id = uuid4(), uuid4(), uuid4()

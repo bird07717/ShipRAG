@@ -112,9 +112,7 @@ class _FakeRagConfigRepository:
         )
 
 
-def policy(
-    value: ExecutionPolicy, mode: ConversationMode | None = None
-) -> ResolvedPolicy:
+def policy(value: ExecutionPolicy, mode: ConversationMode | None = None) -> ResolvedPolicy:
     return ResolvedPolicy(
         knowledge_id=uuid4(),
         policy=value,
@@ -332,9 +330,7 @@ async def test_fallback_stream_idempotency_replays_done_without_second_rag_call(
 
 class _RaisingRag(FakeRag):
     async def chat_stream(self, **kwargs: Any):  # type: ignore[no-untyped-def]
-        raise ApiError(
-            "UPSTREAM_UNAVAILABLE", "查询向量生成失败", 503, {"inner": "detail"}
-        )
+        raise ApiError("UPSTREAM_UNAVAILABLE", "查询向量生成失败", 503, {"inner": "detail"})
         yield b""  # pragma: no cover
 
 
@@ -348,8 +344,7 @@ async def test_stream_server_fault_collapses_to_busy_message() -> None:
     service = ChatGatewayService(repository, support, _RaisingRag())  # type: ignore[arg-type]
 
     frames = [
-        frame
-        async for frame in service.stream(policy=resolved, **kwargs(resolved.knowledge_id))
+        frame async for frame in service.stream(policy=resolved, **kwargs(resolved.knowledge_id))
     ]
 
     error_frames = [frame for frame in frames if b"event: error" in frame]

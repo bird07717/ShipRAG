@@ -30,9 +30,7 @@ def upgrade() -> None:
     )
     # A rebuild-orchestrated candidate build stays auditable on the index
     # itself, not only in task_record.metadata.
-    op.execute(
-        "ALTER TABLE knowledge_index DROP CONSTRAINT knowledge_index_build_reason_check"
-    )
+    op.execute("ALTER TABLE knowledge_index DROP CONSTRAINT knowledge_index_build_reason_check")
     op.execute(
         "ALTER TABLE knowledge_index ADD CONSTRAINT knowledge_index_build_reason_check "
         "CHECK (build_reason IN "
@@ -42,9 +40,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(f"DROP INDEX IF EXISTS {_INDEX}")
-    op.execute(
-        "ALTER TABLE knowledge_index DROP CONSTRAINT knowledge_index_build_reason_check"
-    )
+    op.execute("ALTER TABLE knowledge_index DROP CONSTRAINT knowledge_index_build_reason_check")
     op.execute(
         "ALTER TABLE knowledge_index ADD CONSTRAINT knowledge_index_build_reason_check "
         "CHECK (build_reason IN "

@@ -536,18 +536,11 @@ async def test_stream_retries_without_thinking_on_always_thinking_model() -> Non
                 400,
                 json={"error": {"code": "1210", "message": "该模型始终思考，不支持关闭思考"}},
             )
-        body = (
-            'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'
-            "data: [DONE]\n\n"
-        )
+        body = 'data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n'
         return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
 
-    settings = Settings(
-        _env_file=None, app_env="test", zhipu_api_key=SecretStr("not-a-real-key")
-    )
-    snapshot = ModelSnapshot(
-        "zhipu", "glm-always-thinking", {"thinking": {"type": "disabled"}}
-    )
+    settings = Settings(_env_file=None, app_env="test", zhipu_api_key=SecretStr("not-a-real-key"))
+    snapshot = ModelSnapshot("zhipu", "glm-always-thinking", {"thinking": {"type": "disabled"}})
     async with httpx.AsyncClient(
         base_url=settings.zhipu_base_url, transport=httpx.MockTransport(handler)
     ) as client:
@@ -594,9 +587,7 @@ async def test_complete_strips_thinking_on_always_thinking_model() -> None:
             )
         return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
 
-    settings = Settings(
-        _env_file=None, app_env="test", zhipu_api_key=SecretStr("not-a-real-key")
-    )
+    settings = Settings(_env_file=None, app_env="test", zhipu_api_key=SecretStr("not-a-real-key"))
     snapshot = ModelSnapshot("zhipu", "glm-always-thinking", {})
     async with httpx.AsyncClient(
         base_url=settings.zhipu_base_url, transport=httpx.MockTransport(handler)
@@ -632,9 +623,7 @@ async def test_complete_grows_token_budget_when_reasoning_exhausts_it() -> None:
             )
         return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
 
-    settings = Settings(
-        _env_file=None, app_env="test", zhipu_api_key=SecretStr("not-a-real-key")
-    )
+    settings = Settings(_env_file=None, app_env="test", zhipu_api_key=SecretStr("not-a-real-key"))
     snapshot = ModelSnapshot("zhipu", "glm-always-thinking", {})
     async with httpx.AsyncClient(
         base_url=settings.zhipu_base_url, transport=httpx.MockTransport(handler)

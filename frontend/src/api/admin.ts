@@ -33,6 +33,7 @@ import type {
   RequestErrorLogList,
   FailureSummary,
   SupportMetrics,
+  AssistantMetrics,
   ConversationMessageListResponse,
   SupportReleaseRollbackResult,
   SystemInfo,
@@ -227,6 +228,13 @@ export const adminApi = {
     apiRequest<MetricsLatency>(`/metrics/latency${buildMetricsQuery(params)}`),
   getSupportMetrics: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
     apiRequest<SupportMetrics>(`/metrics/support${buildMetricsQuery(params)}`),
+  getAssistantMetrics: (params: { knowledgeId?: string; days?: number } = {}) => {
+    const search = new URLSearchParams();
+    if (params.knowledgeId) search.set("knowledge_id", params.knowledgeId);
+    if (params.days) search.set("days", String(params.days));
+    const query = search.toString();
+    return apiRequest<AssistantMetrics>(`/metrics/assistant${query ? `?${query}` : ""}`);
+  },
   getTrace: (traceId: string, init: RequestInit = {}) =>
     apiRequest<RagTrace>(`/traces/${traceId}`, init),
   listRequestErrors: (

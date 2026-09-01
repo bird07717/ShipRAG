@@ -35,8 +35,7 @@ def upgrade() -> None:
         """
     )
     op.execute(
-        "CREATE INDEX ix_knowledge_release_kb_created "
-        "ON knowledge_release (kb_id, created_at DESC)"
+        "CREATE INDEX ix_knowledge_release_kb_created ON knowledge_release (kb_id, created_at DESC)"
     )
     op.execute(
         """

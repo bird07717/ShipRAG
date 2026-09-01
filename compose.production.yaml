@@ -178,7 +178,9 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${APP_HTTP_PORT:-18080}:8080"
+      # Production administrators access this Nginx entry from the intranet.
+      # Override APP_HTTP_BIND_ADDRESS with the server's private IP when desired.
+      - "${APP_HTTP_BIND_ADDRESS:-0.0.0.0}:${APP_HTTP_PORT:-18080}:8080"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health/live"]
       interval: 10s

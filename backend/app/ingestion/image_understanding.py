@@ -225,8 +225,7 @@ def create_ocr_provider(
     if not settings.has_secret(api_key):
         return UnavailableImageUnderstandingProvider(
             "OCR",
-            (snapshot.model_name if snapshot else None)
-            or settings.siliconflow_ocr_model,
+            (snapshot.model_name if snapshot else None) or settings.siliconflow_ocr_model,
         )
     assert api_key is not None
     return OpenAiCompatibleImageProvider(

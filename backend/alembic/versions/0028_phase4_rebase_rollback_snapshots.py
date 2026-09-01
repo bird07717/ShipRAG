@@ -72,12 +72,10 @@ def upgrade() -> None:
         """
     )
     op.execute(
-        "CREATE INDEX ix_support_release_profile_release "
-        "ON support_release_profile (release_id)"
+        "CREATE INDEX ix_support_release_profile_release ON support_release_profile (release_id)"
     )
     op.execute(
-        "CREATE INDEX ix_support_release_profile_document "
-        "ON support_release_profile (document_id)"
+        "CREATE INDEX ix_support_release_profile_document ON support_release_profile (document_id)"
     )
 
 

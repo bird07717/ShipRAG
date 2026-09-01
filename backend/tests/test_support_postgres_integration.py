@@ -147,6 +147,52 @@ async def test_postgres_failed_idempotency_can_retry() -> None:
         await repository.fail_turn(retried, code="TEST_CLEANUP", message="测试清理")
 
 
+async def test_postgres_completed_replay_increments_replay_count() -> None:
+    async with _repository() as (repository, knowledge_id):
+        kwargs = {
+            "knowledge_id": knowledge_id,
+            "conversation_id": None,
+            "question": "测试重放计数",
+            "request_id": "integration-replay",
+            "user_id": None,
+            "idempotency_key": f"idem-{uuid4()}",
+            "request_hash": "c" * 64,
+        }
+        first = await repository.begin_turn(**kwargs)
+        await repository.finish_turn(
+            first,
+            response={
+                "trace_id": str(first.trace_id),
+                "conversation_id": str(first.conversation_id),
+                "index_id": str(first.index_id),
+                "answer": "测试完成",
+                "references": [],
+                "content": [],
+                "response_type": "ANSWERED",
+                "latency_ms": 5,
+            },
+            context={},
+            focus_document_id=None,
+            trace={},
+        )
+
+        for expected in (1, 2):
+            replayed = await repository.begin_turn(**kwargs)
+            assert replayed.replay is not None
+            assert replayed.trace_id == first.trace_id
+            async with repository.engine.connect() as connection:
+                count = (
+                    await connection.execute(
+                        text(
+                            "SELECT replay_count FROM support_idempotency "
+                            "WHERE kb_id = :kb AND idempotency_key = :key"
+                        ),
+                        {"kb": knowledge_id, "key": kwargs["idempotency_key"]},
+                    )
+                ).scalar_one()
+            assert count == expected
+
+
 async def test_profile_generation_lists_all_documents_without_a_document_id() -> None:
     """A NULL optional UUID must be explicitly typed for asyncpg."""
     async with _repository() as (repository, knowledge_id):

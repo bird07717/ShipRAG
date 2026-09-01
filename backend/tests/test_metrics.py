@@ -80,20 +80,20 @@ class _StubMetricsRepository:
             "range": {"from": "2026-08-14T00:00:00", "to": "2026-08-21T00:00:00", "mode": "CHAT"},
             "support_turns": 12,
             "first_turns": 8,
-            "followup_turns": 4,
+            "followup_turns": 16,
             "document_delivered": 7,
             "clarification_required": 3,
             "clarification_resolved": 2,
             "no_match": 1,
             "escalation_required": 1,
-            "canonical_or_alias_matches": 5,
-            "llm_catalog_matches": 1,
+            "canonical_or_alias_matches": 10,
+            "llm_catalog_matches": 2,
             "general_guidance_turns": 2,
             "evidence_missing": 0,
             "high_risk_intercepts": 1,
-            "structured_output_retries": 1,
+            "structured_output_retries": 0,
             "workflow_conflicts": 0,
-            "model_calls": 4,
+            "model_calls": 30,
             "document_delivery_rate": 0.5833,
             "clarification_rate": 0.25,
             "clarification_resolution_rate": 0.6667,
@@ -103,6 +103,43 @@ class _StubMetricsRepository:
             "first_turn_latency": {"p50_ms": 100, "p95_ms": 200, "p99_ms": 300, "avg_ms": 120},
             "followup_latency": {"p50_ms": 400, "p95_ms": 500, "p99_ms": 600, "avg_ms": 450},
             "tokens": {"llm_prompt": 1000, "llm_completion": 200, "llm_total": 1200},
+        }
+
+    async def assistant(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls["assistant"] = kwargs
+        return {
+            "days": 7,
+            "sources": [
+                {
+                    "source": "ASSISTANT_API",
+                    "turns": 40,
+                    "failed": 1,
+                    "error_rate": 0.025,
+                    "conversations": 6,
+                    "users": 3,
+                    "latency": {"p50_ms": 2100, "p95_ms": 8200, "p99_ms": 9100, "avg_ms": 3200},
+                },
+                {
+                    "source": "INTERNAL_CHAT",
+                    "turns": 100,
+                    "failed": 2,
+                    "error_rate": 0.02,
+                    "conversations": 20,
+                    "users": 1,
+                    "latency": {"p50_ms": 1800, "p95_ms": 7000, "p99_ms": 8800, "avg_ms": 3000},
+                },
+            ],
+            "top_users": [
+                {"user_id": "crew-01", "turns": 18, "failed": 0, "last_seen": "2026-08-21T09:00:00"}
+            ],
+            "turn_error_codes": [{"code": "UPSTREAM_UNAVAILABLE", "count": 1}],
+            "http_errors": [{"status_code": 503, "error_code": "UPSTREAM_UNAVAILABLE", "count": 1}],
+            "idempotency": {
+                "assistant_protected": 35,
+                "assistant_replays": 2,
+                "ingestion_operations": {"upload_document:test-kb": 3},
+            },
+            "retention": {"retention_days": 7, "total": 6, "active": 5, "expired": 1},
         }
 
 
@@ -186,6 +223,36 @@ class TestMetricsApi:
 
     def test_overview_requires_token(self, client: TestClient) -> None:
         response = client.get("/api/v1/metrics/overview")
+        assert response.status_code == 401
+
+    def test_assistant_endpoint_wires_filters(self, client: TestClient) -> None:
+        stub = _StubMetricsRepository()
+        client.app.dependency_overrides[get_metrics_repository] = lambda: stub
+        try:
+            response = client.get(
+                "/api/v1/metrics/assistant"
+                "?days=14&knowledge_id=00000000-0000-0000-0000-000000000002",
+                headers=AUTH,
+            )
+            assert response.status_code == 200
+            body = response.json()
+            api_source = next(s for s in body["sources"] if s["source"] == "ASSISTANT_API")
+            assert api_source["latency"]["p95_ms"] == 8200
+            assert body["idempotency"]["assistant_replays"] == 2
+            assert body["retention"]["expired"] == 1
+            call = stub.calls["assistant"]
+            assert call["days"] == 14
+            assert str(call["knowledge_id"]) == "00000000-0000-0000-0000-000000000002"
+            assert call["retention_days"] > 0
+        finally:
+            client.app.dependency_overrides.clear()
+
+    def test_assistant_rejects_out_of_range_days_with_422(self, client: TestClient) -> None:
+        response = client.get("/api/v1/metrics/assistant?days=0", headers=AUTH)
+        assert response.status_code == 422
+
+    def test_assistant_requires_token(self, client: TestClient) -> None:
+        response = client.get("/api/v1/metrics/assistant")
         assert response.status_code == 401
 
     def test_overview_rejects_invalid_iso_with_422(self, client: TestClient) -> None:

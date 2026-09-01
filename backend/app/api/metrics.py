@@ -8,12 +8,14 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.dependencies import get_resources
 from app.api.schemas import (
+    AssistantMetricsResponse,
     MetricsLatencyResponse,
     MetricsOverviewResponse,
     MetricsTimeseriesPoint,
     SupportMetricsResponse,
 )
 from app.common.errors import ApiError
+from app.core.config import Settings, get_settings
 from app.core.resources import AppResources
 from app.rag.metrics import MetricsRepository
 
@@ -102,4 +104,25 @@ async def support_metrics(
         knowledge_id=knowledge_id,
         created_from=_parse_datetime(created_from),
         created_to=_parse_datetime(created_to),
+    )
+
+
+@router.get("/metrics/assistant", response_model=AssistantMetricsResponse)
+async def assistant_metrics(
+    repository: Annotated[MetricsRepository, Depends(get_metrics_repository)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    days: Annotated[int, Query(ge=1, le=92)] = 7,
+    knowledge_id: Annotated[UUID | None, Query()] = None,
+) -> dict[str, Any]:
+    """Operational panel for the online Assistant surface.
+
+    Aggregates call-source mix, external user activity, turn/HTTP error
+    rates, idempotency protection with replay hits, and conversation
+    retention state — all from existing ledgers, scoped to the optional
+    knowledge base.
+    """
+    return await repository.assistant(
+        days=days,
+        retention_days=settings.conversation_retention_days,
+        knowledge_id=knowledge_id,
     )

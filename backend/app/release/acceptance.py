@@ -390,7 +390,7 @@ async def run(
                     for line in chat_response.text.splitlines()
                     if line.startswith("event: ")
                 ]
-                if event_names[:2] != ["trace", "source"] or event_names[-1:] != ["done"]:
+                if event_names[:3] != ["status", "trace", "source"] or event_names[-1:] != ["done"]:
                     raise ReleaseAcceptanceError(f"Unexpected SSE event order: {event_names}")
 
                 async def live_operation(_: int) -> None:

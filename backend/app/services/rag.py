@@ -66,9 +66,7 @@ _CITATION_PATTERN = re.compile(r"\[S([1-9][0-9]*)\]")
 # only to produce a canned refusal that misreads the intent. The anchors and
 # the length guard keep longer sentences containing these phrases (e.g.
 # "帮我换一个问题：LRU怎么换") on the normal path.
-_META_ACK_PATTERN = re.compile(
-    r"^(?:换一?个(?:问题|话题)|算了|先?不问了)[呀啊吧。！!，,\s]*$"
-)
+_META_ACK_PATTERN = re.compile(r"^(?:换一?个(?:问题|话题)|算了|先?不问了)[呀啊吧。！!，,\s]*$")
 _META_ACK_MESSAGE = "好的，请问您想了解什么？我将基于产品文档为您解答。"
 
 
@@ -199,17 +197,13 @@ class RagService:
                 message="本轮处理超过总时限",
                 partial_answer="",
                 timings={
-                    "turn_deadline_seconds": int(
-                        self.settings.m3_turn_deadline_seconds * 1000
-                    ),
+                    "turn_deadline_seconds": int(self.settings.m3_turn_deadline_seconds * 1000),
                     **timings,
                 },
                 stage="turn_deadline",
                 retryable=True,
             )
-            raise ApiError(
-                "TURN_DEADLINE_EXCEEDED", "本次请求处理超时，请稍后重试", 504
-            ) from exc
+            raise ApiError("TURN_DEADLINE_EXCEEDED", "本次请求处理超时，请稍后重试", 504) from exc
 
     async def _prepare_retrieval(
         self,
@@ -278,17 +272,14 @@ class RagService:
                         async with asyncio.timeout(
                             self.settings.m3_query_embedding_timeout_seconds
                         ):
-                            result = await provider.embed(
-                                [EmbeddingInput(retrieval_query)]
-                            )
+                            result = await provider.embed([EmbeddingInput(retrieval_query)])
                     except TimeoutError as exc:
                         timings["query_embedding_ms"] = _elapsed_ms(stage_started)
                         if attempt >= attempts:
                             timings["query_embedding_timeout"] = True
                             limit = self.settings.m3_query_embedding_timeout_seconds
                             raise EmbeddingError(
-                                f"查询向量生成超时"
-                                f"（单次上限 {limit:.0f}s，共尝试 {attempts} 次）"
+                                f"查询向量生成超时（单次上限 {limit:.0f}s，共尝试 {attempts} 次）"
                             ) from exc
                         continue
                     timings["query_embedding_ms"] = _elapsed_ms(stage_started)
@@ -391,13 +382,21 @@ class RagService:
                         "model": outcome.model_name,
                         "usage": outcome.usage,
                     }
-                except (TimeoutError, RerankError) as exc:
+                except TimeoutError:
                     # A hung rerank (TimeoutError) must not eat the turn
                     # budget into a 504 — it degrades to rank-fallback routing
                     # exactly like a degradable provider error does
                     # (thresholds operate on normalized rank scores).
-                    timeout_hit = isinstance(exc, TimeoutError)
-                    if not timeout_hit and not exc.degradable:
+                    reranked_candidates = fusion_candidates[: retrieval.rerank_top_n]
+                    rerank_result = {
+                        "status": "DEGRADED",
+                        "degraded": True,
+                        "provider": rerank_provider.provider,
+                        "model": rerank_provider.model_name,
+                        "error_code": "RERANK_UPSTREAM_TIMEOUT",
+                    }
+                except RerankError as exc:
+                    if not exc.degradable:
                         raise
                     reranked_candidates = fusion_candidates[: retrieval.rerank_top_n]
                     rerank_result = {
@@ -405,9 +404,7 @@ class RagService:
                         "degraded": True,
                         "provider": rerank_provider.provider,
                         "model": rerank_provider.model_name,
-                        "error_code": (
-                            "RERANK_UPSTREAM_TIMEOUT" if timeout_hit else exc.code
-                        ),
+                        "error_code": exc.code,
                     }
             else:
                 reranked_candidates = []
@@ -1292,7 +1289,7 @@ class RagService:
             stay_score=self.settings.m3_doc_stay_score,
             switch_gap=self.settings.m3_doc_switch_gap,
             lock_best_floor=self.settings.m3_doc_lock_best_floor,
-                single_clarify_best_floor=self.settings.m3_doc_single_clarify_best_floor,
+            single_clarify_best_floor=self.settings.m3_doc_single_clarify_best_floor,
         )
         had_pending = bool(turn.chat_context.get("pending_options"))
 

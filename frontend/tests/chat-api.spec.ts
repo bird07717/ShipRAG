@@ -146,7 +146,7 @@ describe("chat API", () => {
     });
 
     expect(onError).toHaveBeenCalledWith(
-      "上游超时（UPSTREAM_TIMEOUT）",
+      "上游超时",
       { code: "UPSTREAM_TIMEOUT", message: "上游超时" },
     );
   });

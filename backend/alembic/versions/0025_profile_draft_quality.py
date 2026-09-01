@@ -41,9 +41,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE problem_profile_draft DROP CONSTRAINT IF EXISTS ck_problem_profile_draft_quality_evidence_array")
-    op.execute("ALTER TABLE problem_profile_draft DROP CONSTRAINT IF EXISTS ck_problem_profile_draft_quality_notes_array")
-    op.execute("ALTER TABLE problem_profile_draft DROP CONSTRAINT IF EXISTS ck_problem_profile_draft_quality_status")
+    op.execute(
+        "ALTER TABLE problem_profile_draft DROP CONSTRAINT IF EXISTS ck_problem_profile_draft_quality_evidence_array"
+    )
+    op.execute(
+        "ALTER TABLE problem_profile_draft DROP CONSTRAINT IF EXISTS ck_problem_profile_draft_quality_notes_array"
+    )
+    op.execute(
+        "ALTER TABLE problem_profile_draft DROP CONSTRAINT IF EXISTS ck_problem_profile_draft_quality_status"
+    )
     op.execute("ALTER TABLE problem_profile_draft DROP COLUMN IF EXISTS quality_evidence")
     op.execute("ALTER TABLE problem_profile_draft DROP COLUMN IF EXISTS quality_notes")
     op.execute("ALTER TABLE problem_profile_draft DROP COLUMN IF EXISTS quality_status")

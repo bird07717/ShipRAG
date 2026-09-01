@@ -439,6 +439,238 @@ class MetricsRepository:
             },
         }
 
+    async def assistant(
+        self,
+        *,
+        days: int = 7,
+        retention_days: int = 7,
+        knowledge_id: Any = None,
+    ) -> dict[str, Any]:
+        """Operational aggregation for the online Assistant surface.
+
+        Covers the five dimensions the admin dashboard panel needs: call
+        source mix, external user activity, turn-level and HTTP-level error
+        rates, idempotency protection/replay, and conversation retention
+        state. Everything is derived from existing ledgers — no extra
+        write-path instrumentation beyond ``replay_count``.
+        """
+        if not 1 <= days <= _MAX_RANGE_DAYS:
+            raise ApiError("VALIDATION_ERROR", "days 必须在 1 到 92 之间", 422)
+        if retention_days < 1:
+            raise ApiError("VALIDATION_ERROR", "会话留存天数必须为正整数", 422)
+
+        end = datetime.now(UTC)
+        start = end - timedelta(days=days)
+        parameters: dict[str, Any] = {"start": start, "end": end}
+        kb_clause = ""
+        conv_kb_clause = ""
+        if knowledge_id is not None:
+            kb_clause = " AND kb_id = :kb_id"
+            conv_kb_clause = " AND c.knowledge_id = :kb_id"
+            parameters["kb_id"] = knowledge_id
+
+        async with self.engine.connect() as connection:
+            source_rows = (
+                (
+                    await connection.execute(
+                        text(f"""
+                            SELECT source,
+                                   count(*) AS turns,
+                                   count(*) FILTER (WHERE status = 'FAILED') AS failed,
+                                   count(DISTINCT conversation_id) AS conversations,
+                                   count(DISTINCT user_id) AS users,
+                                   COALESCE(percentile_cont(0.5) WITHIN GROUP (
+                                       ORDER BY (latency ->> 'total_ms')::bigint
+                                   ), 0)::bigint AS p50_ms,
+                                   COALESCE(percentile_cont(0.95) WITHIN GROUP (
+                                       ORDER BY (latency ->> 'total_ms')::bigint
+                                   ), 0)::bigint AS p95_ms,
+                                   COALESCE(percentile_cont(0.99) WITHIN GROUP (
+                                       ORDER BY (latency ->> 'total_ms')::bigint
+                                   ), 0)::bigint AS p99_ms,
+                                   COALESCE(avg((latency ->> 'total_ms')::bigint), 0)::bigint
+                                       AS avg_ms
+                            FROM rag_trace
+                            WHERE created_at >= :start AND created_at < :end
+                              AND source IS NOT NULL{kb_clause}
+                            GROUP BY source
+                        """),
+                        parameters,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            user_rows = (
+                (
+                    await connection.execute(
+                        text(f"""
+                            SELECT user_id,
+                                   count(*) AS turns,
+                                   count(*) FILTER (WHERE status = 'FAILED') AS failed,
+                                   max(created_at) AS last_seen
+                            FROM rag_trace
+                            WHERE source = 'ASSISTANT_API' AND user_id IS NOT NULL
+                              AND created_at >= :start AND created_at < :end{kb_clause}
+                            GROUP BY user_id
+                            ORDER BY turns DESC, last_seen DESC
+                            LIMIT 10
+                        """),
+                        parameters,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            turn_error_rows = (
+                (
+                    await connection.execute(
+                        text(f"""
+                            SELECT COALESCE(error ->> 'code', 'UNKNOWN') AS code, count(*) AS count
+                            FROM rag_trace
+                            WHERE error ->> 'code' IS NOT NULL
+                              AND created_at >= :start AND created_at < :end{kb_clause}
+                            GROUP BY 1
+                            ORDER BY count DESC
+                            LIMIT 5
+                        """),
+                        parameters,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            http_error_rows = (
+                (
+                    await connection.execute(
+                        text("""
+                            SELECT status_code, COALESCE(error_code, 'UNKNOWN') AS error_code,
+                                   count(*) AS count
+                            FROM request_error_log
+                            WHERE created_at >= :start AND created_at < :end
+                              AND (path LIKE '/api/v1/chat%' OR path LIKE '/api/v1/assistant%')
+                            GROUP BY 1, 2
+                            ORDER BY count DESC
+                            LIMIT 8
+                        """),
+                        parameters,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            idempotency_row = (
+                (
+                    await connection.execute(
+                        text(f"""
+                            SELECT count(*) AS protected,
+                                   COALESCE(sum(replay_count), 0)::bigint AS replays
+                            FROM support_idempotency
+                            WHERE created_at >= :start AND created_at < :end{kb_clause}
+                        """),
+                        parameters,
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            ingestion_rows = (
+                (
+                    await connection.execute(
+                        text(f"""
+                            SELECT operation, count(*) AS count
+                            FROM idempotency_record
+                            WHERE created_at >= :start AND created_at < :end{kb_clause}
+                            GROUP BY operation
+                            ORDER BY count DESC
+                        """),
+                        parameters,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            retention_row = (
+                (
+                    await connection.execute(
+                        text(f"""
+                            SELECT count(*) AS total,
+                                   count(*) FILTER (
+                                       WHERE last_activity_at
+                                           >= now() - make_interval(days => :retention_days)
+                                   ) AS active,
+                                   count(*) FILTER (
+                                       WHERE last_activity_at
+                                           < now() - make_interval(days => :retention_days)
+                                   ) AS expired
+                            FROM conversation c
+                            WHERE EXISTS (
+                                SELECT 1 FROM rag_trace t
+                                WHERE t.conversation_id = c.id AND t.source = 'ASSISTANT_API'
+                            ){conv_kb_clause}
+                        """),
+                        {**parameters, "retention_days": retention_days},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+        sources = [
+            {
+                "source": str(row["source"]),
+                "turns": int(row["turns"]),
+                "failed": int(row["failed"]),
+                "error_rate": _rate(int(row["failed"]), int(row["turns"])),
+                "conversations": int(row["conversations"]),
+                "users": int(row["users"]),
+                "latency": {
+                    "p50_ms": int(row["p50_ms"]),
+                    "p95_ms": int(row["p95_ms"]),
+                    "p99_ms": int(row["p99_ms"]),
+                    "avg_ms": int(row["avg_ms"]),
+                },
+            }
+            for row in source_rows
+        ]
+        return {
+            "days": days,
+            "sources": sources,
+            "top_users": [
+                {
+                    "user_id": str(row["user_id"]),
+                    "turns": int(row["turns"]),
+                    "failed": int(row["failed"]),
+                    "last_seen": row["last_seen"].isoformat(),
+                }
+                for row in user_rows
+            ],
+            "turn_error_codes": [
+                {"code": str(row["code"]), "count": int(row["count"])} for row in turn_error_rows
+            ],
+            "http_errors": [
+                {
+                    "status_code": int(row["status_code"]),
+                    "error_code": str(row["error_code"]),
+                    "count": int(row["count"]),
+                }
+                for row in http_error_rows
+            ],
+            "idempotency": {
+                "assistant_protected": int(idempotency_row["protected"]),
+                "assistant_replays": int(idempotency_row["replays"]),
+                "ingestion_operations": {
+                    str(row["operation"]): int(row["count"]) for row in ingestion_rows
+                },
+            },
+            "retention": {
+                "retention_days": retention_days,
+                "total": int(retention_row["total"]),
+                "active": int(retention_row["active"]),
+                "expired": int(retention_row["expired"]),
+            },
+        }
+
 
 def _as_aware(value: datetime | None) -> datetime | None:
     if value is None:

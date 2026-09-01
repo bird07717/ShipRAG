@@ -25,9 +25,7 @@ def upgrade() -> None:
         "UPDATE conversation SET execution_policy = 'SUPPORT_WITH_RAG_FALLBACK' "
         "WHERE execution_policy = 'SUPPORT_ONLY'"
     )
-    op.execute(
-        "DELETE FROM engine_retrieval_config WHERE execution_policy = 'SUPPORT_ONLY'"
-    )
+    op.execute("DELETE FROM engine_retrieval_config WHERE execution_policy = 'SUPPORT_ONLY'")
 
     op.execute(
         "ALTER TABLE engine_runtime_policy DROP CONSTRAINT IF EXISTS "
@@ -53,7 +51,9 @@ def upgrade() -> None:
         "ck_conversation_execution_policy, DROP CONSTRAINT IF EXISTS "
         "ck_conversation_execution_engine"
     )
-    op.execute("ALTER TABLE conversation RENAME COLUMN execution_policy TO execution_policy_snapshot")
+    op.execute(
+        "ALTER TABLE conversation RENAME COLUMN execution_policy TO execution_policy_snapshot"
+    )
     op.execute("ALTER TABLE conversation RENAME COLUMN execution_engine TO last_execution_engine")
     op.execute(
         "ALTER TABLE conversation "
@@ -67,9 +67,7 @@ def upgrade() -> None:
         "WHEN focus_document_id IS NOT NULL THEN 'FOCUSED_SUPPORT' "
         "ELSE 'SUPPORT_DISCOVERY' END"
     )
-    op.execute(
-        "UPDATE conversation SET focus_epoch = 1 WHERE focus_document_id IS NOT NULL"
-    )
+    op.execute("UPDATE conversation SET focus_epoch = 1 WHERE focus_document_id IS NOT NULL")
     op.execute(
         "UPDATE conversation SET pending_switch_options = "
         "COALESCE(chat_context -> 'pending_options', '[]'::jsonb)"

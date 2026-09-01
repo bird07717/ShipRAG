@@ -622,6 +622,57 @@ class SupportMetricsResponse(BaseModel):
     tokens: dict[str, int]
 
 
+class AssistantSourceStat(BaseModel):
+    source: str
+    turns: int
+    failed: int
+    error_rate: float
+    conversations: int
+    users: int
+    latency: MetricsLatencySummary
+
+
+class AssistantUserStat(BaseModel):
+    user_id: str
+    turns: int
+    failed: int
+    last_seen: str
+
+
+class AssistantErrorCodeStat(BaseModel):
+    code: str
+    count: int
+
+
+class AssistantHttpErrorStat(BaseModel):
+    status_code: int
+    error_code: str
+    count: int
+
+
+class AssistantIdempotencyStat(BaseModel):
+    assistant_protected: int
+    assistant_replays: int
+    ingestion_operations: dict[str, int]
+
+
+class AssistantRetentionStat(BaseModel):
+    retention_days: int
+    total: int
+    active: int
+    expired: int
+
+
+class AssistantMetricsResponse(BaseModel):
+    days: int
+    sources: list[AssistantSourceStat]
+    top_users: list[AssistantUserStat]
+    turn_error_codes: list[AssistantErrorCodeStat]
+    http_errors: list[AssistantHttpErrorStat]
+    idempotency: AssistantIdempotencyStat
+    retention: AssistantRetentionStat
+
+
 class RequestErrorLogSummary(BaseModel):
     id: UUID
     request_id: str
@@ -739,9 +790,13 @@ def _validate_model_parameters(parameters: dict[str, Any]) -> None:
 # Typographic dash codepoints (U+2010..U+2015, U+2212, U+FF0D).  Model ids
 # pasted from docs/slides often carry these; upstreams reject them outright
 # ("modelCode: 不存在"), so they are normalized to the ASCII hyphen.
-_MODEL_NAME_DASHES = str.maketrans({chr(codepoint): "-" for codepoint in range(0x2010, 0x2016)})
-_MODEL_NAME_DASHES[chr(0x2212)] = "-"
-_MODEL_NAME_DASHES[chr(0xFF0D)] = "-"
+_MODEL_NAME_DASHES = str.maketrans(
+    {
+        **{chr(codepoint): "-" for codepoint in range(0x2010, 0x2016)},
+        chr(0x2212): "-",
+        chr(0xFF0D): "-",
+    }
+)
 
 
 class ModelConfigUpdate(BaseModel):

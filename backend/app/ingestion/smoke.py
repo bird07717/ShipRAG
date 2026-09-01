@@ -107,7 +107,10 @@ async def run(
 
         repository = IngestionRepository(resources.database, settings)
         document_id = UUID(uploaded["document"]["id"])
-        build = await repository.request_build(knowledge_id, "MANUAL")
+        # This fixture validates the Active-index read path, so use the
+        # internal auto-activation route explicitly rather than the public
+        # API's staged-build default.
+        build = await repository.request_build(knowledge_id, "MANUAL", activate_on_success=True)
         assert build.index_id is not None and build.task_id is not None
         smoke_index_id = build.index_id
         await asyncio.to_thread(enqueue_index_build, settings, build.index_id, build.task_id)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 from uuid import UUID
 
@@ -142,7 +142,7 @@ class ChatGatewayService:
             )
         return rag_response
 
-    async def stream(self, **kwargs: Any) -> AsyncIterator[bytes]:
+    async def stream(self, **kwargs: Any) -> AsyncGenerator[bytes, None]:
         policy: ResolvedPolicy = kwargs.pop("policy")
         yield _sse(
             "status",

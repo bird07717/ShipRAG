@@ -871,9 +871,11 @@ async def test_purge_expired_conversations_releases_frozen_references() -> None:
                     text(
                         """
                         INSERT INTO conversation (
-                            id, knowledge_id, rag_index_id, updated_at
+                            id, knowledge_id, rag_index_id, updated_at, last_activity_at
                         ) VALUES (
-                            :id, :kb_id, :index_id, now() - INTERVAL '30 days'
+                            :id, :kb_id, :index_id,
+                            now() - INTERVAL '30 days',
+                            now() - INTERVAL '30 days'
                         )
                         """
                     ),

@@ -60,3 +60,13 @@ honcho start worker-index frontend   # 任意子集
 生产部署还必须在项目根目录的部署 `.env`（或 CI/CD Secret 注入）中设置
 `ASSISTANT_SERVICE_TOKEN`；不能使用 `.env.example` 的示例值。生成方式及业务后台对接要求见
 [Assistant 接口对接文档](integration/assistant-api-integration-guide.md)。
+
+管理页面的生产监听地址由部署 `.env` 控制：
+
+```env
+APP_HTTP_BIND_ADDRESS=0.0.0.0
+APP_HTTP_PORT=18080
+```
+
+部署完成后，同一内网的管理员访问 `http://<服务器内网IP>:18080`。如果服务器有多个网卡，
+可将 `APP_HTTP_BIND_ADDRESS` 设置为服务器的指定内网 IP，缩小监听范围。

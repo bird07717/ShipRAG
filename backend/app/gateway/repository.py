@@ -530,6 +530,14 @@ class GatewayRepository:
             if self.settings.conversation_retention_days > 0
             else ""
         )
+        knowledge_clause = "AND c.knowledge_id = :knowledge_id" if knowledge_id else ""
+        params: dict[str, Any] = {
+            "conversation_id": conversation_id,
+            "external_user_id": external_user_id,
+            "retention_days": self.settings.conversation_retention_days,
+        }
+        if knowledge_id is not None:
+            params["knowledge_id"] = knowledge_id
         async with self.engine.connect() as connection:
             result = await connection.execute(
                 text(
@@ -543,16 +551,11 @@ class GatewayRepository:
                     JOIN knowledge_base kb ON kb.id = c.knowledge_id
                     WHERE c.id = :conversation_id
                       AND c.user_id = :external_user_id
-                      AND (:knowledge_id IS NULL OR c.knowledge_id = :knowledge_id)
+                      {knowledge_clause}
                       {retention_clause}
                     """
                 ),
-                {
-                    "conversation_id": conversation_id,
-                    "external_user_id": external_user_id,
-                    "knowledge_id": knowledge_id,
-                    "retention_days": self.settings.conversation_retention_days,
-                },
+                params,
             )
             row = result.mappings().one_or_none()
             return dict(row) if row is not None else None

@@ -24,6 +24,7 @@ logger = structlog.get_logger(__name__)
 
 BUILD_MODEL_TYPES = ("EMBEDDING", "OCR", "VISION")
 
+
 @dataclass(frozen=True, slots=True)
 class BuildModelConfig:
     snapshot: ModelSnapshot | None

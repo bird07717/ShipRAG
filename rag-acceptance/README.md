@@ -1,15 +1,33 @@
 # RAG 链路黄金集（Golden Set）
 
-对上线链路（`RAG_ONLY` → `RagService`）的黑盒回归评测：42 个用例 / 47 轮真实请求，
+对上线链路（`RAG_ONLY` → `RagService`）的黑盒回归评测：48 个用例 / 57 轮真实请求，
 经 HTTP 调用真实后端与真实模型（SiliconFlow embedding/rerank/LLM），按文档命中判定。
 
 ## 运行
 
 ```bash
+# 原管理接口模式（保留历史基线兼容）
 .venv/bin/python rag-acceptance/run_golden.py
-# 可选: --base-url http://127.0.0.1:18000 --kb-id <uuid>
-# 凭据: 环境变量 GOLDEN_TOKEN，或回退读取根目录 .env 的 SERVICE_TOKEN
+
+# Assistant 对外接口模式
+.venv/bin/python rag-acceptance/run_golden.py --api-mode assistant
+
+# 通用可选参数
+#   --base-url http://127.0.0.1:18000
+#   --kb-id <uuid>
+#   --external-user-id <稳定测试用户ID>  # 仅 Assistant 模式
 ```
+
+凭据：
+
+- 管理模式读取 `GOLDEN_TOKEN`，或回退读取根目录 `.env` 的 `SERVICE_TOKEN`。
+- Assistant 模式读取 `GOLDEN_ASSISTANT_TOKEN`，或回退读取根目录 `.env` 的
+  `ASSISTANT_SERVICE_TOKEN`。
+
+Assistant 模式调用 `/api/v1/assistant/chat/stream`，为每轮请求提供
+`X-External-User-ID`、`X-Request-ID` 和 `Idempotency-Key`，解析 SSE 的
+`complete/error` 终态，并仅使用公开的 `references` 与回答中《文档标题》进行命中判定。
+目标知识库的管理策略必须为 `RAG_ONLY`；测试请求本身不能选择模型或回答模式。
 
 约 10~15 分钟。报告写入 `reports/baseline-<时间戳>.json`，含每轮的 response_type、
 命中文档、延迟、答案摘录与失败原因。

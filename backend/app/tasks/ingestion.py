@@ -65,9 +65,7 @@ async def _submit_post_build_profile(
     try:
         submission = await DocumentProfileService(
             DocumentProfileRepository(resources.database), settings
-        ).request_generation(
-            knowledge_id
-        )
+        ).request_generation(knowledge_id)
         # The index task is already terminal when this follow-up is queued.
         # Preserve the relation so clients that were tracking the RAG build
         # can continue polling the independent Profile task and refresh the
