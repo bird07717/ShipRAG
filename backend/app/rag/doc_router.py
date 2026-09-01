@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from itertools import zip_longest
 from typing import Any
 from uuid import UUID
 
@@ -294,15 +295,32 @@ def decide_doc_routing(
                     phase_before=phase,
                     thresholds=thresholds,
                 )
-            eligible = [item for item in doc_scores if item.hits >= 1 and item.score >= t_low][:3]
-            # A single-option clarify must be confident: a lone weak-best
-            # candidate (e.g. generic hardware steps that merely share the
-            # product identifier) would hijack the templated clarify and
-            # mislead, while the catalog-aware routing answer can still
-            # surface the dedicated document semantically. Multiple options
-            # keep the clarify: the user sees the comparison either way.
-            if eligible and not (
-                len(eligible) == 1 and eligible[0].best < single_clarify_best_floor
+            eligible = [item for item in doc_scores if item.hits >= 1 and item.score >= t_low]
+            # Presentation order interleaves two relevance signals: the
+            # strongest single chunk (best) leads the list, while the
+            # multi-chunk corroboration winner (aggregate) stays in the top
+            # slots. When the two disagree, both hypotheses stay visible to
+            # the user; when they agree this degenerates to that winner.
+            # Machine decisions above (lock / stay / ratio) keep using the
+            # aggregate ordering, so only the displayed order changes.
+            by_best = sorted(
+                eligible,
+                key=lambda item: (-item.best, -item.score, str(item.document_id)),
+            )[:3]
+            by_aggregate = eligible[:3]
+            ordered: list[DocScore] = []
+            for pair in zip_longest(by_best, by_aggregate):
+                for item in pair:
+                    if item is not None and all(
+                        item.document_id != seen.document_id for seen in ordered
+                    ):
+                        ordered.append(item)
+            ordered = ordered[:3]
+            # A lone weak-best candidate must not hijack the templated
+            # clarify (see m3_doc_single_clarify_best_floor): the
+            # catalog-aware routing answer serves that turn instead.
+            if ordered and not (
+                len(ordered) == 1 and ordered[0].best < single_clarify_best_floor
             ):
                 # Ask once with the candidates recorded as pending options so
                 # the loop converges: the user's next reply (affirmative,
@@ -312,7 +330,7 @@ def decide_doc_routing(
                     action=ACTION_CLARIFY,
                     pending_options=[
                         {"document_id": str(item.document_id), "title": item.title}
-                        for item in eligible
+                        for item in ordered
                     ],
                     doc_scores=doc_scores,
                     phase_before=phase,

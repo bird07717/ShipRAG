@@ -129,6 +129,14 @@ class Settings(BaseSettings):
     m3_query_rewrite_max_chars: int = 40
     m3_query_rewrite_max_tokens: int = 192
     m3_query_rewrite_timeout_seconds: float = 3.0
+    # Fast-fail ceilings below the turn deadline: a hung upstream request
+    # retries once (embedding, idempotent and cheap) or degrades to
+    # rank-fallback routing (rerank) instead of burning the whole turn
+    # budget into a 504 (observed once on 2026-09-01: a transient SiliconFlow
+    # stall held the embedding call for the full 45s).
+    m3_query_embedding_timeout_seconds: float = 10.0
+    m3_query_embedding_retries: int = 1
+    m3_rerank_timeout_seconds: float = 15.0
 
     m4_ocr_provider: Literal["auto", "siliconflow", "fake", "disabled"] = "auto"
     m4_vision_provider: Literal["auto", "zhipu", "fake", "disabled"] = "auto"
@@ -433,6 +441,20 @@ class Settings(BaseSettings):
     def validate_query_rewrite_tokens(cls, value: int) -> int:
         if not 16 <= value <= 1_024:
             raise ValueError("M3 query rewrite token limit must be between 16 and 1024")
+        return value
+
+    @field_validator("m3_query_embedding_timeout_seconds", "m3_rerank_timeout_seconds")
+    @classmethod
+    def validate_upstream_call_timeouts(cls, value: float) -> float:
+        if not 0.1 <= value <= 60.0:
+            raise ValueError("M3 upstream call timeouts must be between 0.1 and 60 seconds")
+        return value
+
+    @field_validator("m3_query_embedding_retries")
+    @classmethod
+    def validate_query_embedding_retries(cls, value: int) -> int:
+        if not 0 <= value <= 3:
+            raise ValueError("M3 query embedding retries must be between 0 and 3")
         return value
 
     @field_validator("m3_query_rewrite_timeout_seconds")

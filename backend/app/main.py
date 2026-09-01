@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.health import router as health_router
 from app.api.router import router as api_router
-from app.common.errors import ApiError
+from app.common.errors import SERVER_BUSY_MESSAGE, ApiError, user_safe_chat_message
 from app.common.middleware import RequestContextMiddleware
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
@@ -74,6 +74,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(api_router, prefix=resolved_settings.api_prefix)
 
+    def _is_user_chat_path(request: Request) -> bool:
+        # Chat answer endpoints are end-user facing (the integrator forwards
+        # the message verbatim); admin/playground routes keep full detail.
+        return request.url.path.startswith(f"{resolved_settings.api_prefix}/chat")
+
     @app.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
         await record_request_error(
@@ -83,9 +88,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             message=exc.message,
             detail=exc.details or None,
         )
+        message = exc.message
+        details = exc.details
+        if _is_user_chat_path(request) and exc.status_code >= 500:
+            message = user_safe_chat_message(exc)
+            details = None
         return JSONResponse(
             status_code=exc.status_code,
-            content=_error_body(request, exc.code, exc.message, exc.details),
+            content=_error_body(request, exc.code, message, details),
             headers={"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else None,
         )
 
@@ -135,9 +145,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled_error", error_type=type(exc).__name__)
         await record_unhandled_exception(request, exc)
+        message = (
+            SERVER_BUSY_MESSAGE
+            if _is_user_chat_path(request)
+            else "服务发生内部错误"
+        )
         return JSONResponse(
             status_code=500,
-            content=_error_body(request, "INTERNAL_ERROR", "服务发生内部错误"),
+            content=_error_body(request, "INTERNAL_ERROR", message),
         )
 
     return app

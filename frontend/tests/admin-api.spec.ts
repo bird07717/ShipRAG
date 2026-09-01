@@ -179,17 +179,18 @@ describe("logs & review API", () => {
   });
 
   it("lists failed tasks and conversation messages", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ items: [] }) });
     vi.stubGlobal("fetch", fetchMock);
 
     await adminApi.listTasks({ status: "FAILED", knowledgeId: "kb-1", limit: 100 });
-    await adminApi.listConversationMessages("conv-1");
+    const messages = await adminApi.listConversationMessages("conv-1");
 
     const tasksUrl = String(fetchMock.mock.calls[0]?.[0]);
     expect(tasksUrl).toContain("/api/v1/tasks?");
     expect(tasksUrl).toContain("status=FAILED");
     expect(tasksUrl).toContain("knowledge_id=kb-1");
     expect(String(fetchMock.mock.calls[1]?.[0])).toBe("/api/v1/conversations/conv-1/messages");
+    expect(messages).toEqual({ items: [] });
   });
 
   it("passes error_code and conversation_id trace filters", async () => {

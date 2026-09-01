@@ -1702,24 +1702,3 @@ class RagRepository:
                 )
             )
             return [dict(row) for row in result.mappings()]
-
-    async def list_messages(self, conversation_id: UUID) -> list[dict[str, Any]]:
-        async with self.engine.connect() as connection:
-            exists = await connection.execute(
-                text("SELECT 1 FROM conversation WHERE id = :id"), {"id": conversation_id}
-            )
-            if exists.scalar_one_or_none() is None:
-                raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
-            result = await connection.execute(
-                text(
-                    """
-                    SELECT id, conversation_id, role, content, sources, status,
-                           content_blocks, response_type, support_mode,
-                           created_at, updated_at
-                    FROM message WHERE conversation_id = :id
-                    ORDER BY sequence_no
-                    """
-                ),
-                {"id": conversation_id},
-            )
-            return [dict(row) for row in result.mappings()]

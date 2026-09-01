@@ -530,7 +530,7 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("如何升级 PDC？");
     expect(wrapper.text()).toContain("待上线");
     expect(wrapper.text()).toContain("RAG 始终可用");
-    expect(wrapper.findAll("button").some((button) => button.text().includes("编辑属性"))).toBe(true);
+    expect(wrapper.findAll("button").some((button) => button.attributes("aria-label") === "编辑属性")).toBe(true);
   });
 
   it("support review: checks then publishes pending attributes", async () => {
@@ -656,7 +656,7 @@ describe("view interactions", () => {
     vi.spyOn(adminApi, "listTasks").mockResolvedValue([]);
     const listTraces = vi.spyOn(adminApi, "listTraces").mockResolvedValue([failedTraceSummary]);
     vi.spyOn(adminApi, "getTrace").mockResolvedValue(failedTraceDetail);
-    vi.spyOn(adminApi, "listConversationMessages").mockResolvedValue(conversationMessages);
+    vi.spyOn(adminApi, "listConversationMessages").mockResolvedValue({ items: conversationMessages });
 
     const wrapper = await mountView("logs");
     // overview: failure distribution from the summary endpoint

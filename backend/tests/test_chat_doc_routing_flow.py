@@ -1097,3 +1097,220 @@ async def test_meta_ack_length_guard_keeps_real_questions_on_doc_qa():
     assert llm.prompts, "real question must reach the LLM"
     assert result["response_type"] == "ANSWERED"
     assert result["answer_mode"] == "PRODUCT_KNOWLEDGE"
+
+
+class _FlakyEmbeddingProvider:
+    """Hangs past the per-call timeout on the first attempt, then succeeds."""
+
+    provider = "fake"
+    model_name = "flaky-embedding"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def embed(self, inputs: Any) -> list[list[float]]:
+        self.calls += 1
+        if self.calls == 1:
+            await asyncio.sleep(30.0)
+        return [[0.1] * 1024]
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _HungRerankProvider:
+    """Simulates a hung rerank upstream: never returns within the timeout."""
+
+    provider = "fake"
+    model_name = "hung-rerank"
+
+    async def rerank(self, query: str, documents: Any, top_n: int) -> Any:
+        await asyncio.sleep(30.0)
+        raise AssertionError("unreachable")
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _resilience_settings(**overrides: Any) -> Settings:
+    base = dict(
+        _env_file=None,
+        app_env="test",
+        m2_embedding_provider="fake",
+        m3_llm_provider="fake",
+        m3_turn_deadline_seconds=10.0,
+        m3_query_embedding_timeout_seconds=0.2,
+        m3_query_embedding_retries=1,
+        m3_rerank_timeout_seconds=0.2,
+    )
+    base.update(overrides)
+    return Settings(**base)
+
+
+@pytest.mark.asyncio
+async def test_turn_deadline_failure_keeps_accumulated_timings():
+    # The deadline record must carry the stage timings accumulated before
+    # the hang so post-mortems can tell WHICH upstream stalled (the
+    # hardcoded record previously discarded that evidence).
+    repo = _RoutingRepository(turn=_turn(), candidates=[])
+    service = RagService(
+        cast(RagRepository, repo),
+        _resilience_settings(
+            m3_turn_deadline_seconds=1.0,
+            # Per-call fast-fail must NOT preempt the deadline in this test:
+            # the hung embedding should burn into the turn deadline so the
+            # merged-timings failure record can be asserted.
+            m3_query_embedding_timeout_seconds=10.0,
+            m3_query_embedding_retries=0,
+        ),
+        embedding_factory=lambda _: cast(Any, _SlowEmbeddingProvider()),
+        llm_factory=lambda s, snap: cast(LlmProvider, _RecordingLlmProvider([])),
+        rerank_factory=lambda s, snap: FakeRerankProvider(),
+    )
+
+    with pytest.raises(ApiError) as exc_info:
+        await service.generate(
+            knowledge_id=repo.turn.knowledge_id,
+            conversation_id=None,
+            question="如何升级",
+            request_id="req-deadline-timings",
+        )
+
+    assert exc_info.value.code == "TURN_DEADLINE_EXCEEDED"
+    timings = repo.failed["timings"]
+    assert timings["turn_deadline_seconds"] == 1000
+    assert "prepare_turn_ms" in timings
+
+
+@pytest.mark.asyncio
+async def test_query_embedding_timeout_retries_and_recovers():
+    # A transient embedding stall is masked by one retry: the turn still
+    # prepares and the retry count lands in the timings.
+    repo = _RoutingRepository(turn=_turn(), candidates=[_candidate(DOC_A, 1)])
+    provider = _FlakyEmbeddingProvider()
+    service = RagService(
+        cast(RagRepository, repo),
+        _resilience_settings(),
+        embedding_factory=lambda _: cast(Any, provider),
+        llm_factory=lambda s, snap: cast(LlmProvider, _RecordingLlmProvider([])),
+        rerank_factory=lambda s, snap: FakeRerankProvider(),
+    )
+
+    prepared = await service.prepare(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=None,
+        question="如何升级",
+        request_id="req-embed-retry",
+    )
+
+    assert provider.calls == 2
+    assert prepared.timings["query_embedding_retries"] == 1
+    assert "query_embedding_timeout" not in prepared.timings
+
+
+@pytest.mark.asyncio
+async def test_query_embedding_timeout_fails_fast_after_retries():
+    # When every attempt stalls the turn fails as UPSTREAM_UNAVAILABLE within
+    # the per-call budget (not the 45s turn deadline), with the timeout
+    # flagged in the trace timings.
+    repo = _RoutingRepository(turn=_turn(), candidates=[])
+    service = RagService(
+        cast(RagRepository, repo),
+        _resilience_settings(),
+        embedding_factory=lambda _: cast(Any, _SlowEmbeddingProvider()),
+        llm_factory=lambda s, snap: cast(LlmProvider, _RecordingLlmProvider([])),
+        rerank_factory=lambda s, snap: FakeRerankProvider(),
+    )
+
+    with pytest.raises(ApiError) as exc_info:
+        await service.prepare(
+            knowledge_id=repo.turn.knowledge_id,
+            conversation_id=None,
+            question="如何升级",
+            request_id="req-embed-timeout",
+        )
+
+    assert exc_info.value.code == "UPSTREAM_UNAVAILABLE"
+    assert repo.failed["stage"] == "query_embedding"
+    assert repo.failed["timings"]["query_embedding_timeout"] is True
+    assert "超时" in str(repo.failed["detail"])
+
+
+@pytest.mark.asyncio
+async def test_rerank_timeout_degrades_to_rank_fallback():
+    # A hung rerank degrades to rank-fallback routing instead of failing
+    # the turn: the prepared record marks the degradation and its reason.
+    repo = _RoutingRepository(turn=_turn(), candidates=[_candidate(DOC_A, 1)])
+    service = RagService(
+        cast(RagRepository, repo),
+        _resilience_settings(),
+        embedding_factory=lambda _: FakeEmbeddingProvider(1024),
+        llm_factory=lambda s, snap: cast(LlmProvider, _RecordingLlmProvider([])),
+        rerank_factory=lambda s, snap: cast(Any, _HungRerankProvider()),
+    )
+
+    prepared = await service.prepare(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=None,
+        question="如何升级",
+        request_id="req-rerank-timeout",
+    )
+
+    rerank_result = repo.saved["rerank_result"]
+    assert rerank_result["status"] == "DEGRADED"
+    assert rerank_result["error_code"] == "RERANK_UPSTREAM_TIMEOUT"
+    assert prepared.rerank_candidates  # rank-fallback candidates still flow
+
+
+class _FailingLlmProvider:
+    """Simulates an LLM upstream failure during answer streaming."""
+
+    usage: ClassVar[dict[str, Any]] = {}
+
+    async def stream(self, prompt: str) -> Any:
+        raise LlmError("LLM_UPSTREAM_ERROR", "LLM 上游连接异常", retryable=True)
+        yield ""  # pragma: no cover
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_llm_failure_emits_user_safe_error():
+    # LLM answer failures are end-user facing: the SSE error event carries
+    # the busy message while code/trace_id/retryable stay machine-readable
+    # (full detail is persisted on the trace via fail_turn).
+    repo = _RoutingRepository(turn=_turn(focus_document_id=DOC_A), candidates=[])
+    service = RagService(
+        cast(RagRepository, repo),
+        Settings(
+            _env_file=None,
+            app_env="test",
+            m2_embedding_provider="fake",
+            m3_llm_provider="fake",
+        ),
+        embedding_factory=lambda _: FakeEmbeddingProvider(1024),
+        llm_factory=lambda s, snap: cast(LlmProvider, _FailingLlmProvider()),
+        rerank_factory=lambda s, snap: FakeRerankProvider(),
+    )
+
+    frames = [
+        frame
+        async for frame in service.chat_stream(
+            knowledge_id=repo.turn.knowledge_id,
+            conversation_id=None,
+            question="如何升级",
+            request_id="req-llm-user-safe",
+        )
+    ]
+
+    error_frames = [frame for frame in frames if b"event: error" in frame]
+    assert error_frames, frames
+    import json as _json
+
+    payload = _json.loads(error_frames[0].split(b"data: ", 1)[1].split(b"\n", 1)[0])
+    assert payload["code"] == "LLM_UPSTREAM_ERROR"
+    assert payload["message"] == "服务繁忙，请稍后重试"
+    assert payload["retryable"] is True
+    assert repo.failed is not None
+    assert repo.failed["message"] == "LLM 上游连接异常"  # trace keeps the detail

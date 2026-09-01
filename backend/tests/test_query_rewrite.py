@@ -230,8 +230,9 @@ async def test_prepare_uses_rewritten_query_for_retrieval_only() -> None:
         mode="CHAT",
     )
 
-    # BM25 searched with the rewritten query
-    assert repo.bm25_queries == ["VDR主机U盘升级的密码是什么"]
+    # BM25 searched with the rewritten query (plus the synonym expansion
+    # pass for "升级" -> "update")
+    assert repo.bm25_queries == ["VDR主机U盘升级的密码是什么", "update"]
     # the answer prompt keeps the ORIGINAL question, not the rewrite
     assert "问题：那它的密码呢" in prepared.prompt
     assert "VDR主机U盘升级的密码是什么" not in prepared.prompt
@@ -282,7 +283,7 @@ async def test_prepare_skips_rewrite_without_history() -> None:
         mode="CHAT",
     )
 
-    assert repo.bm25_queries == ["VDR主机如何升级"]
+    assert repo.bm25_queries == ["VDR主机如何升级", "update"]
     assert "query_rewrite" not in repo.saved["rerank_result"]
     assert llm.completions == ["不应被使用"]  # untouched
 

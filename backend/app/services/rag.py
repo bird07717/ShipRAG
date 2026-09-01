@@ -11,7 +11,7 @@ from uuid import UUID
 
 from minio import Minio
 
-from app.common.errors import ApiError
+from app.common.errors import SERVER_BUSY_MESSAGE, ApiError, user_safe_chat_message
 from app.common.text import estimate_tokens
 from app.core.config import Settings
 from app.ingestion.embedding import EmbeddingError, EmbeddingProvider, create_embedding_provider
@@ -45,7 +45,7 @@ from app.rag.prompt import (
 from app.rag.query_rewrite import rewrite_query, should_rewrite
 from app.rag.repository import RagRepository
 from app.rag.rerank import RerankError, RerankProvider, create_rerank_provider
-from app.rag.retrieval import apply_rerank, reciprocal_rank_fusion
+from app.rag.retrieval import apply_rerank, merge_expanded_candidates, reciprocal_rank_fusion
 from app.rag.routing import (
     UNCONFIRMED_MESSAGE,
     ChatResult,
@@ -54,6 +54,7 @@ from app.rag.routing import (
     post_validate,
 )
 from app.rag.routing import ContentBlock as RoutingContentBlock
+from app.rag.synonyms import bm25_expansion_terms
 from app.rag.welcome import build_suggestions
 
 EmbeddingFactory = Callable[[Settings], EmbeddingProvider]
@@ -171,6 +172,11 @@ class RagService:
             parent_trace_id=parent_trace_id,
             fallback_reason=fallback_reason,
         )
+        # The timings dict is created here — not inside _prepare_retrieval —
+        # so the turn-deadline handler below can merge the stage timings
+        # accumulated before the hang into the failure record (which stage
+        # stalled is the key post-mortem fact).
+        timings: dict[str, Any] = {"prepare_turn_ms": _elapsed_ms(started_at)}
         # One overall interactive deadline per turn: a hung upstream
         # (embedding / rerank / LLM) must never hold a chat request for the
         # provider-level 90-120s timeouts. Bounded failure is better UX
@@ -183,6 +189,7 @@ class RagService:
                     normalized_question=normalized_question,
                     mode=mode,
                     retrieval_overrides=retrieval_overrides,
+                    timings=timings,
                 )
         except TimeoutError as exc:
             await self.repository.fail_turn(
@@ -194,7 +201,8 @@ class RagService:
                 timings={
                     "turn_deadline_seconds": int(
                         self.settings.m3_turn_deadline_seconds * 1000
-                    )
+                    ),
+                    **timings,
                 },
                 stage="turn_deadline",
                 retryable=True,
@@ -211,6 +219,7 @@ class RagService:
         normalized_question: str,
         mode: str,
         retrieval_overrides: dict[str, int] | None,
+        timings: dict[str, Any],
     ) -> PreparedRag:
         # Effective retrieval knobs: DB rag_config snapshot from begin_turn,
         # optionally overridden per-call (playground overrides win so the
@@ -220,7 +229,6 @@ class RagService:
             if retrieval_overrides
             else turn.retrieval
         )
-        timings = {"prepare_turn_ms": _elapsed_ms(started_at)}
         provider: EmbeddingProvider | None = None
         rerank_provider: RerankProvider | None = None
         try:
@@ -259,10 +267,35 @@ class RagService:
                 timings["query_rewrite_ms"] = _elapsed_ms(rewrite_started)
 
             async def embed_query() -> list[list[float]]:
-                stage_started = time.perf_counter()
-                result = await provider.embed([EmbeddingInput(retrieval_query)])
-                timings["query_embedding_ms"] = _elapsed_ms(stage_started)
-                return result
+                # Fast-fail below the turn deadline, with one retry:
+                # embedding is idempotent and cheap, so a transient upstream
+                # stall (observed 2026-09-01) is masked by the retry instead
+                # of eating the whole turn budget.
+                attempts = 1 + max(0, self.settings.m3_query_embedding_retries)
+                for attempt in range(1, attempts + 1):
+                    stage_started = time.perf_counter()
+                    try:
+                        async with asyncio.timeout(
+                            self.settings.m3_query_embedding_timeout_seconds
+                        ):
+                            result = await provider.embed(
+                                [EmbeddingInput(retrieval_query)]
+                            )
+                    except TimeoutError as exc:
+                        timings["query_embedding_ms"] = _elapsed_ms(stage_started)
+                        if attempt >= attempts:
+                            timings["query_embedding_timeout"] = True
+                            limit = self.settings.m3_query_embedding_timeout_seconds
+                            raise EmbeddingError(
+                                f"查询向量生成超时"
+                                f"（单次上限 {limit:.0f}s，共尝试 {attempts} 次）"
+                            ) from exc
+                        continue
+                    timings["query_embedding_ms"] = _elapsed_ms(stage_started)
+                    if attempt > 1:
+                        timings["query_embedding_retries"] = attempt - 1
+                    return result
+                raise AssertionError("unreachable")
 
             async def retrieve_bm25() -> list[RetrievalCandidate]:
                 stage_started = time.perf_counter()
@@ -275,9 +308,38 @@ class RagService:
                 timings["bm25_retrieval_ms"] = _elapsed_ms(stage_started)
                 return result
 
-            embeddings, bm25_candidates = await asyncio.gather(
+            async def retrieve_expansions() -> list[RetrievalCandidate]:
+                # Domain synonyms widen recall for paraphrases ("如何检查"
+                # never sees 《如何手动自检VDR》 through exact tokens, and the
+                # vector channel ranks it too low). Expansion candidates do
+                # NOT compete in RRF fusion (a single-channel BM25 rank can
+                # never beat dual-channel originals); they ride directly to
+                # the reranker, which scores them against the original
+                # question and restores precision.
+                stage_started = time.perf_counter()
+                terms = bm25_expansion_terms(retrieval_query)
+                batches: list[list[RetrievalCandidate]] = []
+                if terms:
+                    batches = list(
+                        await asyncio.gather(
+                            *(
+                                self.repository.bm25_search(
+                                    knowledge_id=turn.knowledge_id,
+                                    index_id=turn.index_id,
+                                    query=term,
+                                    limit=3,
+                                )
+                                for term in terms
+                            )
+                        )
+                    )
+                timings["bm25_expansion_ms"] = _elapsed_ms(stage_started)
+                return merge_expanded_candidates([], [c for b in batches for c in b])
+
+            embeddings, bm25_candidates, expansion_candidates = await asyncio.gather(
                 embed_query(),
                 retrieve_bm25(),
+                retrieve_expansions(),
             )
             if len(embeddings) != 1 or len(embeddings[0]) != self.settings.embedding_dimension:
                 raise EmbeddingError("查询 Embedding 维度异常")
@@ -296,6 +358,17 @@ class RagService:
                 rrf_k=self.settings.m5_rrf_k,
                 limit=retrieval.fusion_top_k,
             )
+            # Expansion survivors ride along to the reranker (deduped against
+            # the fused set, capped to bound rerank noise): fusion stays a
+            # pure original-channel competition.
+            fused_ids = {candidate.chunk_id for candidate in fusion_candidates}
+            expansion_survivors = [
+                candidate
+                for candidate in expansion_candidates
+                if candidate.chunk_id not in fused_ids
+            ][:3]
+            if expansion_survivors:
+                fusion_candidates = [*fusion_candidates, *expansion_survivors]
             timings["fusion_ms"] = _elapsed_ms(fusion_started)
 
             rerank_started = time.perf_counter()
@@ -306,9 +379,10 @@ class RagService:
                 rerank_provider = self.rerank_factory(self.settings, turn.rerank)
                 documents = await self._build_rerank_documents(turn.index_id, fusion_candidates)
                 try:
-                    outcome = await rerank_provider.rerank(
-                        retrieval_query, documents, retrieval.rerank_top_n
-                    )
+                    async with asyncio.timeout(self.settings.m3_rerank_timeout_seconds):
+                        outcome = await rerank_provider.rerank(
+                            retrieval_query, documents, retrieval.rerank_top_n
+                        )
                     reranked_candidates = apply_rerank(fusion_candidates, outcome.items)
                     rerank_result = {
                         "status": "PASSED",
@@ -317,8 +391,13 @@ class RagService:
                         "model": outcome.model_name,
                         "usage": outcome.usage,
                     }
-                except RerankError as exc:
-                    if not exc.degradable:
+                except (TimeoutError, RerankError) as exc:
+                    # A hung rerank (TimeoutError) must not eat the turn
+                    # budget into a 504 — it degrades to rank-fallback routing
+                    # exactly like a degradable provider error does
+                    # (thresholds operate on normalized rank scores).
+                    timeout_hit = isinstance(exc, TimeoutError)
+                    if not timeout_hit and not exc.degradable:
                         raise
                     reranked_candidates = fusion_candidates[: retrieval.rerank_top_n]
                     rerank_result = {
@@ -326,7 +405,9 @@ class RagService:
                         "degraded": True,
                         "provider": rerank_provider.provider,
                         "model": rerank_provider.model_name,
-                        "error_code": exc.code,
+                        "error_code": (
+                            "RERANK_UPSTREAM_TIMEOUT" if timeout_hit else exc.code
+                        ),
                     }
             else:
                 reranked_candidates = []
@@ -827,7 +908,7 @@ class RagService:
                 "error",
                 {
                     "code": plan_error.code,
-                    "message": plan_error.message,
+                    "message": user_safe_chat_message(plan_error),
                     "trace_id": str(turn.trace_id),
                     "retryable": False,
                 },
@@ -966,7 +1047,9 @@ class RagService:
                 "error",
                 {
                     "code": exc.code,
-                    "message": exc.public_message,
+                    # LLM answer failures are end-user facing: the busy
+                    # message replaces upstream detail (kept in the trace).
+                    "message": SERVER_BUSY_MESSAGE,
                     "trace_id": str(turn.trace_id),
                     "retryable": exc.retryable,
                 },
@@ -987,7 +1070,7 @@ class RagService:
                 "error",
                 {
                     "code": "INTERNAL_ERROR",
-                    "message": "回答生成失败",
+                    "message": SERVER_BUSY_MESSAGE,
                     "trace_id": str(turn.trace_id),
                     "retryable": False,
                 },

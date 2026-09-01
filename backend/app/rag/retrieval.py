@@ -70,3 +70,23 @@ def apply_rerank(
         )
         for rank, item in enumerate(items, start=1)
     ]
+
+
+def merge_expanded_candidates(
+    base: list[RetrievalCandidate],
+    extras: list[RetrievalCandidate],
+) -> list[RetrievalCandidate]:
+    """Merge synonym-pass BM25 candidates into the original result list.
+
+    Original hits keep their relative order and strictly better ranks; new
+    chunks are appended (in the order their expansion query surfaced them)
+    and the merged list gets sequential ranks so RRF scoring stays sound —
+    per-query BM25 ranks collide across queries and would corrupt RRF.
+    """
+    seen: set[object] = {candidate.chunk_id for candidate in base}
+    merged = list(base)
+    for candidate in extras:
+        if candidate.chunk_id not in seen:
+            seen.add(candidate.chunk_id)
+            merged.append(candidate)
+    return [replace(candidate, rank=index) for index, candidate in enumerate(merged, start=1)]

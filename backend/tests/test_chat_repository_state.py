@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.common.errors import ApiError
 from app.core.config import Settings
+from app.gateway.repository import GatewayRepository
 from app.rag.models import ModelSnapshot, Turn
 from app.rag.repository import RagRepository
 
@@ -70,6 +71,12 @@ class _FakeEngine:
 def _repository(results: list[Any]) -> tuple[RagRepository, _FakeConnection]:
     engine = _FakeEngine(results)
     repo = RagRepository(cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test"))
+    return repo, engine.connection
+
+
+def _gateway_repository(results: list[Any]) -> tuple[GatewayRepository, _FakeConnection]:
+    engine = _FakeEngine(results)
+    repo = GatewayRepository(cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test"))
     return repo, engine.connection
 
 
@@ -286,7 +293,7 @@ async def test_list_traces_filters_by_error_code_and_conversation() -> None:
     assert params["conversation_id"] == conversation_id
 
 
-async def test_list_messages_exposes_support_columns() -> None:
+async def test_gateway_message_replay_exposes_support_columns() -> None:
     """Conversation replay needs response_type / support_mode / content_blocks;
     the columns exist since 0015 but were never selected."""
     conversation_id = uuid4()
@@ -303,11 +310,11 @@ async def test_list_messages_exposes_support_columns() -> None:
         "created_at": "2026-08-20T10:00:00",
         "updated_at": "2026-08-20T10:00:01",
     }
-    repo, connection = _repository([[{"id": conversation_id}], [row]])
+    repo, connection = _gateway_repository([[row]])
 
-    messages = await repo.list_messages(conversation_id)
+    messages = await repo.list_conversation_messages(conversation_id, 100)
 
-    sql, _ = connection.executed[1]
+    sql, _ = connection.executed[0]
     for column in ("content_blocks", "response_type", "support_mode"):
         assert column in sql
     assert messages[0]["response_type"] == "DOCUMENT_DELIVERED"

@@ -291,3 +291,44 @@ def test_citation_result_records_missing_and_invalid_ids() -> None:
     assert result["citation_missing"] is False
     assert missing == []
     assert missing_result["citation_missing"] is True
+
+
+def test_bm25_expansion_terms_from_synonym_groups() -> None:
+    from app.rag.synonyms import bm25_expansion_terms
+
+    # Only the used group contributes; the used member itself is excluded.
+    assert bm25_expansion_terms("如何检查VDR") == ["排查", "检测", "自检"]
+    assert bm25_expansion_terms("主板坏了怎么更换") == ["替换", "核心板"]
+    # Case-insensitive for latin members.
+    assert bm25_expansion_terms("MIC有杂音") == ["麦克风"]
+    assert bm25_expansion_terms("怎么update") == ["升级"]
+    # No group member present -> no expansion.
+    assert bm25_expansion_terms("船名在哪里修改") == []
+
+
+def test_merge_expanded_candidates_reassigns_sequential_ranks() -> None:
+    from app.rag.retrieval import merge_expanded_candidates
+
+    def candidate(chunk_id, rank):
+        return RetrievalCandidate(
+            chunk_id=chunk_id,
+            document_id=uuid4(),
+            document="doc",
+            chunk_type="TEXT",
+            content="content",
+            token_count=1,
+            section_path=[],
+            element_ids=[],
+            distance=None,
+            similarity=None,
+            rank=rank,
+        )
+
+    a, b, c, d = uuid4(), uuid4(), uuid4(), uuid4()
+    base = [candidate(a, 1), candidate(b, 2)]
+    extras = [candidate(c, 1), candidate(a, 1), candidate(d, 3)]
+    merged = merge_expanded_candidates(base, extras)
+    # Originals keep their order and strictly better ranks; duplicates are
+    # dropped; appended chunks get fresh sequential ranks so RRF stays sound.
+    assert [item.chunk_id for item in merged] == [a, b, c, d]
+    assert [item.rank for item in merged] == [1, 2, 3, 4]

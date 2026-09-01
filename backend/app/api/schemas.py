@@ -364,19 +364,6 @@ class ConversationDetailResponse(ConversationListItem):
     focus_index_id: UUID | None = None
 
 
-class ConversationMessageItem(BaseModel):
-    id: UUID
-    role: str
-    content: str
-    status: str
-    sources: list[dict[str, Any]] = []
-    created_at: datetime
-
-
-class ConversationMessageListResponse(BaseModel):
-    items: list[ConversationMessageItem]
-
-
 class ConversationDeleteResponse(BaseModel):
     conversation_id: UUID
     deleted: bool
@@ -420,6 +407,12 @@ class MessageResponse(BaseModel):
     support_mode: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ConversationMessageListResponse(BaseModel):
+    """Complete, ordered messages used by the administrative replay view."""
+
+    items: list[MessageResponse]
 
 
 class RagTraceResponse(BaseModel):

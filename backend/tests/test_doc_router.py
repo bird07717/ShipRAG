@@ -586,3 +586,47 @@ def test_aligning_two_weak_candidates_still_clarify():
     )
     assert decision.action == ACTION_CLARIFY
     assert len(decision.pending_options) == 2
+
+
+def test_aligning_clarify_interleaves_best_and_aggregate_signals():
+    # DOC_A aggregates highest from two mediocre chunks; DOC_B holds the
+    # strongest single chunk. The clarify presents B (best evidence) first
+    # and keeps A (multi-chunk corroboration) second — both hypotheses stay
+    # in the top slots while machine decisions still use aggregate order.
+    candidates = [
+        _candidate(DOC_A, 1, 0.4),
+        _candidate(DOC_A, 2, 0.4),
+        _candidate(DOC_B, 3, 0.6),
+        _candidate(DOC_C, 4, 0.5),
+    ]
+    decision = decide_doc_routing(
+        question="如何检查VDR",
+        candidates=candidates,
+        focus_document_id=None,
+        chat_context={},
+        **_settings_kwargs(),
+    )
+    assert decision.action == ACTION_CLARIFY
+    assert [option["document_id"] for option in decision.pending_options] == [
+        str(DOC_B),
+        str(DOC_A),
+        str(DOC_C),
+    ]
+
+
+def test_aligning_clarify_same_winner_keeps_single_order():
+    # When one document wins both signals the interleave degenerates to
+    # that winner with no surprise reordering.
+    candidates = [
+        _candidate(DOC_A, 1, 0.8),
+        _candidate(DOC_A, 2, 0.7),
+        _candidate(DOC_B, 3, 0.4),
+    ]
+    decision = decide_doc_routing(
+        question="如何升级",
+        candidates=candidates,
+        focus_document_id=None,
+        chat_context={},
+        **_settings_kwargs(),
+    )
+    assert decision.action == ACTION_DELIVER

@@ -212,17 +212,13 @@ export async function streamChat(
       } else if (evt.event === "error") {
         terminalReceived = true;
         const error = payload as ChatErrorEvent;
-        const suffix = [error.code, error.request_id ? `Request ID: ${error.request_id}` : ""]
-          .filter(Boolean)
-          .join(" · ");
-        callbacks.onError(
-          `${error.message ?? "未知错误"}${suffix ? `（${suffix}）` : ""}`,
-          error,
-        );
+        // 展示层只呈现消息本体（后端对 5xx 已统一为"服务繁忙，请稍后重试"）；
+        // code / request_id 仍随错误对象携带，供控制台与工单排查使用。
+        callbacks.onError(error.message ?? "服务繁忙，请稍后重试", error);
       }
     } catch {
       protocolErrorReported = true;
-      callbacks.onError("服务返回了无法解析的流事件");
+      callbacks.onError("服务繁忙，请稍后重试");
     }
   };
 

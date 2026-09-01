@@ -45,3 +45,4 @@
 {"id": "rag_focus_003", "category": "focus_coverage", "turns": [{"question": "FFC 如何更换外壳", "expected": {"document_keys": ["FFC 更换外壳"], "tolerance": "EXACT"}}, {"question": "定位销不稳定怎么办", "expected": {"document_keys": [], "answer_must_any": ["定位销"], "tolerance": "EXACT"}}]}
 {"id": "rag_meta_001", "category": "meta", "turns": [{"question": "FFC 如何更换外壳", "expected": {"document_keys": ["FFC 更换外壳"], "tolerance": "EXACT"}}, {"question": "换一个问题", "expected": {"document_keys": [], "answer_must_any": ["请问您想了解"], "answer_forbidden_any": ["我只能回答"], "max_latency_ms": 15000, "tolerance": "EXACT"}}]}
 {"id": "rag_retrieval_001", "category": "retrieval", "question": "压力释放器出现问题怎么办", "expected": {"document_keys": [], "forbidden_keys": ["FFC"], "answer_must_any": ["未找到", "未涉及", "无法确认", "没有足够"], "tolerance": "EXACT"}}
+{"id": "rag_syn_001", "category": "colloquial", "question": "如何检查VDR", "expected": {"document_keys": ["自检"], "tolerance": "EXACT"}}

@@ -112,11 +112,16 @@ def test_messages_and_delete_enforce_same_ownership(client: TestClient) -> None:
     repository.messages[conversation_id] = [
         {
             "id": uuid4(),
+            "conversation_id": conversation_id,
             "role": "USER",
             "content": "第一问",
             "status": "COMPLETED",
             "sources": [],
+            "content_blocks": [],
+            "response_type": None,
+            "support_mode": None,
             "created_at": _NOW,
+            "updated_at": _NOW,
         }
     ]
     _install(client, repository)
@@ -140,7 +145,12 @@ def test_messages_and_delete_enforce_same_ownership(client: TestClient) -> None:
 
     assert foreign_messages.status_code == 404
     assert own_messages.status_code == 200
-    assert own_messages.json()["items"][0]["content"] == "第一问"
+    message = own_messages.json()["items"][0]
+    assert message["conversation_id"] == str(conversation_id)
+    assert message["content"] == "第一问"
+    assert message["content_blocks"] == []
+    assert message["response_type"] is None
+    assert message["support_mode"] is None
     assert foreign_delete.status_code == 404
     assert own_delete.status_code == 200
     assert own_delete.json() == {
@@ -148,6 +158,17 @@ def test_messages_and_delete_enforce_same_ownership(client: TestClient) -> None:
         "deleted": True,
     }
     assert repository.deleted == [conversation_id]
+
+
+def test_conversation_message_route_is_registered_once(client: TestClient) -> None:
+    matches = [
+        route
+        for route in client.app.routes
+        if getattr(route, "path", None) == "/api/v1/conversations/{conversation_id}/messages"
+        and "GET" in (getattr(route, "methods", set()) or set())
+    ]
+
+    assert len(matches) == 1
 
 
 def test_anonymous_conversation_remains_service_accessible(client: TestClient) -> None:

@@ -33,7 +33,7 @@ import type {
   RequestErrorLogList,
   FailureSummary,
   SupportMetrics,
-  SupportMessage,
+  ConversationMessageListResponse,
   SupportReleaseRollbackResult,
   SystemInfo,
   TaskRecord,
@@ -189,6 +189,7 @@ export const adminApi = {
       to?: string;
       limit?: number;
     } = {},
+    init: RequestInit = {},
   ) => {
     const search = new URLSearchParams();
     if (knowledgeId) search.set("knowledge_id", knowledgeId);
@@ -202,7 +203,7 @@ export const adminApi = {
     if (filters.to) search.set("to", filters.to);
     if (filters.limit) search.set("limit", String(filters.limit));
     const query = search.toString();
-    return apiRequest<TraceSummary[]>(`/traces${query ? `?${query}` : ""}`);
+    return apiRequest<TraceSummary[]>(`/traces${query ? `?${query}` : ""}`, init);
   },
   listNoAnswerTraces: (knowledgeId?: string, limit = 20) => {
     const search = new URLSearchParams({
@@ -222,7 +223,8 @@ export const adminApi = {
     apiRequest<MetricsLatency>(`/metrics/latency${buildMetricsQuery(params)}`),
   getSupportMetrics: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
     apiRequest<SupportMetrics>(`/metrics/support${buildMetricsQuery(params)}`),
-  getTrace: (traceId: string) => apiRequest<RagTrace>(`/traces/${traceId}`),
+  getTrace: (traceId: string, init: RequestInit = {}) =>
+    apiRequest<RagTrace>(`/traces/${traceId}`, init),
   listRequestErrors: (
     filters: {
       requestId?: string;
@@ -261,8 +263,8 @@ export const adminApi = {
     const query = search.toString();
     return apiRequest<IndexTask[]>(`/tasks${query ? `?${query}` : ""}`);
   },
-  listConversationMessages: (conversationId: string) =>
-    apiRequest<SupportMessage[]>(`/conversations/${conversationId}/messages`),
+  listConversationMessages: (conversationId: string, init: RequestInit = {}) =>
+    apiRequest<ConversationMessageListResponse>(`/conversations/${conversationId}/messages`, init),
   runPlayground: (knowledgeId: string, question: string, options: Record<string, number>) =>
     apiRequest<RagTrace>("/rag/playground", {
       method: "POST",

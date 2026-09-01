@@ -19,7 +19,6 @@ from app.api.schemas import (
     ChatStreamRequest,
     EngineRetrievalConfigResponse,
     EngineRetrievalConfigUpdate,
-    MessageResponse,
     ModelConfigResponse,
     ModelConfigUpdate,
     ModelProbeResponse,
@@ -428,15 +427,3 @@ async def get_trace(
     repository: Annotated[RagRepository, Depends(get_rag_repository)],
 ) -> dict[str, Any]:
     return await repository.get_trace(trace_id)
-
-
-@router.get(
-    "/conversations/{conversation_id}/messages",
-    response_model=list[MessageResponse],
-    tags=["conversations"],
-)
-async def list_messages(
-    conversation_id: UUID,
-    repository: Annotated[RagRepository, Depends(get_rag_repository)],
-) -> list[dict[str, Any]]:
-    return await repository.list_messages(conversation_id)

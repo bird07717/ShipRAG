@@ -468,10 +468,13 @@ class GatewayRepository:
             result = await connection.execute(
                 text(
                     """
-                    SELECT id, role, content, status, sources, created_at
+                    SELECT id, conversation_id, role, content, sources, status,
+                           content_blocks, response_type, support_mode,
+                           created_at, updated_at
                     FROM (
-                        SELECT id, role, content, status, sources, created_at,
-                               sequence_no
+                        SELECT id, conversation_id, role, content, sources, status,
+                               content_blocks, response_type, support_mode,
+                               created_at, updated_at, sequence_no
                         FROM message
                         WHERE conversation_id = :conversation_id
                           AND status IN ('COMPLETED', 'FAILED')

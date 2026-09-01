@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 
 import { adminApi } from "@/api/admin";
 import { useAdminStore } from "@/composables/adminStore";
 import { renderMarkdown } from "@/utils/markdown";
-import type { RagTrace, SupportMessage } from "@/types/admin";
+import type { RagTrace, SupportMessage, TraceSummary } from "@/types/admin";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
@@ -22,30 +22,107 @@ const messages = ref<SupportMessage[]>([]);
 const traces = ref<RagTrace[]>([]);
 const loading = ref(false);
 const loadError = ref("");
+const traceDetailWarning = ref("");
 
 // Traces carry the heavy workflow JSON; cap detail fetches so a runaway
 // conversation cannot turn the replay drawer into a request storm.
 const MAX_TRACE_DETAILS = 20;
+const TRACE_DETAILS_CONCURRENCY = 4;
+const REPLAY_TIMEOUT_MS = 20_000;
+
+let activeController: AbortController | null = null;
+let activeLoad = 0;
+
+function abortError(): Error {
+  const error = new Error("会话回放请求已取消");
+  error.name = "AbortError";
+  return error;
+}
+
+async function loadTraceDetails(
+  summaries: TraceSummary[],
+  signal: AbortSignal,
+): Promise<PromiseSettledResult<RagTrace>[]> {
+  const targets = summaries.slice(0, MAX_TRACE_DETAILS);
+  const results: PromiseSettledResult<RagTrace>[] = [];
+  let nextIndex = 0;
+
+  const worker = async (): Promise<void> => {
+    while (nextIndex < targets.length) {
+      if (signal.aborted) throw abortError();
+      const index = nextIndex;
+      nextIndex += 1;
+      const target = targets[index];
+      if (!target) continue;
+      try {
+        results[index] = {
+          status: "fulfilled",
+          value: await adminApi.getTrace(target.trace_id, { signal }),
+        };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(TRACE_DETAILS_CONCURRENCY, targets.length) }, () => worker()),
+  );
+  if (signal.aborted) throw abortError();
+  return results;
+}
 
 async function load(conversationId: string): Promise<void> {
   if (!conversationId) return;
+  const loadId = ++activeLoad;
+  activeController?.abort();
+  const controller = new AbortController();
+  activeController = controller;
+  let timedOut = false;
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REPLAY_TIMEOUT_MS);
+
   loading.value = true;
   loadError.value = "";
+  traceDetailWarning.value = "";
   messages.value = [];
   traces.value = [];
   try {
     const [messageList, traceSummaries] = await Promise.all([
-      adminApi.listConversationMessages(conversationId),
-      adminApi.listTraces(undefined, { conversationId, limit: 50 }),
+      adminApi.listConversationMessages(conversationId, { signal: controller.signal }),
+      adminApi.listTraces(undefined, { conversationId, limit: 50 }, { signal: controller.signal }),
     ]);
-    messages.value = messageList;
-    traces.value = await Promise.all(
-      traceSummaries.slice(0, MAX_TRACE_DETAILS).map((summary) => adminApi.getTrace(summary.trace_id)),
-    );
+    if (!Array.isArray(messageList.items) || !Array.isArray(traceSummaries)) {
+      throw new Error("会话回放接口返回的数据格式不正确");
+    }
+    if (loadId !== activeLoad || controller.signal.aborted) return;
+
+    messages.value = messageList.items;
+    const detailResults = await loadTraceDetails(traceSummaries, controller.signal);
+    if (loadId !== activeLoad || controller.signal.aborted) return;
+
+    traces.value = detailResults
+      .filter((result): result is PromiseFulfilledResult<RagTrace> => result.status === "fulfilled")
+      .map((result) => result.value);
+    const failedCount = detailResults.filter((result) => result.status === "rejected").length;
+    if (failedCount) {
+      traceDetailWarning.value = `${failedCount} 条 Trace 详情加载失败，已展示其余会话内容。`;
+    }
   } catch (cause) {
-    loadError.value = cause instanceof Error ? cause.message : "会话加载失败";
+    if (loadId !== activeLoad || (controller.signal.aborted && !timedOut)) return;
+    loadError.value = timedOut
+      ? "会话回放请求超时，请重试。"
+      : cause instanceof Error
+        ? cause.message
+        : "会话加载失败";
   } finally {
-    loading.value = false;
+    window.clearTimeout(timeoutId);
+    if (loadId === activeLoad) {
+      loading.value = false;
+      activeController = null;
+    }
   }
 }
 
@@ -54,6 +131,12 @@ watch(
   (value) => void load(value),
   { immediate: true },
 );
+
+onBeforeUnmount(() => {
+  activeLoad += 1;
+  activeController?.abort();
+  activeController = null;
+});
 
 interface Turn {
   user: SupportMessage | null;
@@ -152,6 +235,13 @@ function traceError(trace: RagTrace | null): { code?: string; message?: string }
       description="该会话没有任何消息记录。"
     />
     <template v-else>
+      <el-alert
+        v-if="traceDetailWarning"
+        :title="traceDetailWarning"
+        type="warning"
+        :closable="false"
+        show-icon
+      />
       <header class="timeline-head">
         <span class="mono muted">{{ conversationId }}</span>
         <span class="muted">{{ turns.length }} 轮对话</span>

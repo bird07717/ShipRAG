@@ -4,6 +4,7 @@ import json
 from typing import Any
 from uuid import UUID, uuid4
 
+from app.common.errors import ApiError
 from app.gateway.models import ChatEngine, ConversationMode, ExecutionPolicy, ResolvedPolicy
 from app.gateway.repository import GatewayRepository
 from app.gateway.service import ChatGatewayService
@@ -327,3 +328,32 @@ async def test_fallback_stream_idempotency_replays_done_without_second_rag_call(
 
     assert json.loads(second_done.splitlines()[1][6:]) == json.loads(first_done.splitlines()[1][6:])
     assert rag.calls == 1
+
+
+class _RaisingRag(FakeRag):
+    async def chat_stream(self, **kwargs: Any):  # type: ignore[no-untyped-def]
+        raise ApiError(
+            "UPSTREAM_UNAVAILABLE", "查询向量生成失败", 503, {"inner": "detail"}
+        )
+        yield b""  # pragma: no cover
+
+
+async def test_stream_server_fault_collapses_to_busy_message() -> None:
+    # The chat stream's SSE error event is end-user facing: a server fault
+    # keeps its machine code but hides the technical message behind the
+    # uniform busy copy (full detail stays in the trace).
+    repository = FakeGatewayRepository()
+    support = FakeSupport("ANSWERED")
+    resolved = policy(ExecutionPolicy.RAG_ONLY)
+    service = ChatGatewayService(repository, support, _RaisingRag())  # type: ignore[arg-type]
+
+    frames = [
+        frame
+        async for frame in service.stream(policy=resolved, **kwargs(resolved.knowledge_id))
+    ]
+
+    error_frames = [frame for frame in frames if b"event: error" in frame]
+    assert error_frames, frames
+    payload = json.loads(error_frames[0].split(b"data: ", 1)[1].split(b"\n", 1)[0])
+    assert payload["code"] == "UPSTREAM_UNAVAILABLE"
+    assert payload["message"] == "服务繁忙，请稍后重试"

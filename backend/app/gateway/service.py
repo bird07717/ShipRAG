@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID
 
-from app.common.errors import ApiError
+from app.common.errors import ApiError, user_safe_chat_message
 from app.gateway.models import ChatEngine, ResolvedPolicy
 from app.gateway.repository import GatewayRepository
 from app.rag.models import RetrievalConfig
@@ -232,7 +232,13 @@ class ChatGatewayService:
         except ApiError as exc:
             yield _sse(
                 "error",
-                {"code": exc.code, "message": exc.message, "status_code": exc.status_code},
+                {
+                    "code": exc.code,
+                    # End-user facing: server faults collapse to the busy
+                    # message; full detail stays in the trace.
+                    "message": user_safe_chat_message(exc),
+                    "status_code": exc.status_code,
+                },
             )
 
     async def _rag_stream(

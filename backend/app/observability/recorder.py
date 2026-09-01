@@ -16,7 +16,7 @@ from typing import Any
 import structlog
 from fastapi import Request
 
-from app.common.errors import ApiError
+from app.common.errors import SERVER_BUSY_MESSAGE, ApiError, user_safe_chat_message
 from app.observability.repository import ObservabilityRepository
 
 logger = structlog.get_logger(__name__)
@@ -103,9 +103,18 @@ def _sse(event: str, payload: dict[str, Any]) -> bytes:
 
 
 async def observe_stream_errors(
-    request: Request, source: AsyncIterator[bytes]
+    request: Request,
+    source: AsyncIterator[bytes],
+    *,
+    user_facing: bool = False,
 ) -> AsyncIterator[bytes]:
-    """Persist SSE failures that can no longer reach FastAPI exception handlers."""
+    """Persist SSE failures that can no longer reach FastAPI exception handlers.
+
+    `user_facing=True` (chat answer stream) rewrites server-fault messages in
+    the SSE error event to the uniform busy message; the request error log
+    above still records the original message for diagnostics. Admin streams
+    (playground) keep the full detail.
+    """
 
     request_id = getattr(request.state, "request_id", "unknown")
     try:
@@ -135,9 +144,12 @@ async def observe_stream_errors(
             message=exc.message,
             detail=exc.details or {"stream": True},
         )
+        message = (
+            user_safe_chat_message(exc) if user_facing else exc.message
+        )
         yield _sse(
             "error",
-            {"code": exc.code, "message": exc.message, "request_id": request_id},
+            {"code": exc.code, "message": message, "request_id": request_id},
         )
     except Exception as exc:
         await record_unhandled_exception(request, exc)
@@ -145,7 +157,9 @@ async def observe_stream_errors(
             "error",
             {
                 "code": "INTERNAL_ERROR",
-                "message": "流式请求处理失败",
+                "message": (
+                    SERVER_BUSY_MESSAGE if user_facing else "流式请求处理失败"
+                ),
                 "request_id": request_id,
             },
         )

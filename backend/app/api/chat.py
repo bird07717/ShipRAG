@@ -90,6 +90,7 @@ async def chat_stream(
                 include_images=payload.include_images,
                 idempotency_key=idempotency_key,
             ),
+            user_facing=True,
         ),
         media_type="text/event-stream",
         headers={
