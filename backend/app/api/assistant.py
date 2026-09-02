@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.api.dependencies import get_resources
 from app.api.engine_dependencies import (
@@ -21,7 +23,13 @@ from app.api.schemas import (
     AssistantMessageListResponse,
     AssistantWelcomeResponse,
 )
-from app.assistant.service import AssistantFacadeService, decode_cursor, encode_cursor
+from app.assistant.service import (
+    AssistantFacadeService,
+    decode_cursor,
+    encode_cursor,
+    public_payload,
+)
+from app.common.assets import attachment_content_disposition
 from app.common.errors import ApiError
 from app.core.resources import AppResources
 from app.gateway.repository import GatewayRepository
@@ -57,7 +65,10 @@ def _conversation(row: dict[str, Any], retention_days: int) -> dict[str, Any]:
 
 
 def _message(row: dict[str, Any]) -> dict[str, Any]:
-    payload, trace_error = dict(row.get("response_payload") or {}), row.get("trace_error") or {}
+    payload, trace_error = (
+        public_payload(dict(row.get("response_payload") or {})),
+        row.get("trace_error") or {},
+    )
     status = "GENERATING" if str(row["status"]) == "STREAMING" else str(row["status"])
     error = None
     if status in {"FAILED", "CANCELLED"} and isinstance(trace_error, dict):
@@ -98,10 +109,15 @@ async def list_knowledge_bases(
 async def welcome(
     knowledge_id: UUID, repository: Annotated[RagRepository, Depends(get_rag_repository)]
 ) -> dict[str, Any]:
-    return build_welcome(
-        await repository.get_knowledge_base_summary(knowledge_id),
+    payload = build_welcome(
+        await repository.get_knowledge_base_summary(knowledge_id, enabled_only=True),
         await repository.list_kb_documents(knowledge_id),
     )
+    return {
+        "knowledge_id": knowledge_id,
+        "message": payload["message"],
+        "suggestions": payload["suggestions"],
+    }
 
 
 @router.get("/conversations", response_model=AssistantConversationListResponse)
@@ -205,21 +221,32 @@ async def chat_stream(
     )
 
 
-def _asset_response(
+async def _asset_response(
     resources: AppResources, asset: dict[str, Any], *, filename: str | None = None
-) -> Response:
+) -> StreamingResponse:
     try:
-        upstream = resources.minio.get_object(asset["minio_bucket"], asset["minio_object_key"])
-        try:
-            body = bytes(upstream.read())
-        finally:
-            upstream.close()
-            upstream.release_conn()
+        upstream = await run_in_threadpool(
+            resources.minio.get_object, asset["minio_bucket"], asset["minio_object_key"]
+        )
     except Exception as exc:
         raise ApiError("ASSET_UNAVAILABLE", "资源暂时不可用", 503) from exc
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'} if filename else {}
-    return Response(
-        content=body,
+
+    async def body() -> AsyncIterator[bytes]:
+        try:
+            while chunk := await run_in_threadpool(upstream.read, 64 * 1024):
+                yield bytes(chunk)
+        finally:
+            await run_in_threadpool(upstream.close)
+            await run_in_threadpool(upstream.release_conn)
+
+    headers = {
+        "Cache-Control": "private, max-age=300",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if filename:
+        headers["Content-Disposition"] = attachment_content_disposition(filename)
+    return StreamingResponse(
+        body(),
         media_type=asset.get("mime_type") or "application/octet-stream",
         headers=headers,
     )
@@ -231,9 +258,9 @@ async def document_content(
     document_id: UUID,
     repository: Annotated[GatewayRepository, Depends(get_gateway_repository)],
     resources: Annotated[AppResources, Depends(get_resources)],
-) -> Response:
+) -> StreamingResponse:
     asset = await repository.assistant_document(knowledge_id=knowledge_id, document_id=document_id)
-    return _asset_response(
+    return await _asset_response(
         resources, asset, filename=str(asset.get("filename") or asset["display_name"])
     )
 
@@ -244,8 +271,8 @@ async def image_content(
     image_asset_id: UUID,
     repository: Annotated[GatewayRepository, Depends(get_gateway_repository)],
     resources: Annotated[AppResources, Depends(get_resources)],
-) -> Response:
-    return _asset_response(
+) -> StreamingResponse:
+    return await _asset_response(
         resources,
         await repository.assistant_image_asset(
             knowledge_id=knowledge_id, image_asset_id=image_asset_id

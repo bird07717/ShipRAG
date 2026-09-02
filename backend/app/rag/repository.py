@@ -1164,17 +1164,21 @@ class RagRepository:
             if expected_context_version is not None and result.rowcount != 1:
                 raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
 
-    async def get_knowledge_base_summary(self, knowledge_id: UUID) -> dict[str, Any]:
+    async def get_knowledge_base_summary(
+        self, knowledge_id: UUID, *, enabled_only: bool = False
+    ) -> dict[str, Any]:
         async with self.engine.connect() as connection:
             result = await connection.execute(
                 text(
                     """
                     SELECT id, name, description, status,
                            COALESCE(rag_active_index_id, active_index_id) AS active_index_id
-                    FROM knowledge_base WHERE id = :kb_id
+                    FROM knowledge_base
+                    WHERE id = :kb_id
+                      AND (:enabled_only = FALSE OR status = 'ENABLED')
                     """
                 ),
-                {"kb_id": knowledge_id},
+                {"kb_id": knowledge_id, "enabled_only": enabled_only},
             )
             row = result.mappings().one_or_none()
         if row is None:

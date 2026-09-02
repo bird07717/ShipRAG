@@ -237,6 +237,7 @@ def decide_doc_routing(
     switch_gap: float = 0.25,
     lock_best_floor: float = 0.75,
     single_clarify_best_floor: float = 0.65,
+    rerank_degraded: bool = False,
 ) -> DocRoutingDecision:
     thresholds: dict[str, Any] = {
         "t_high": t_high,
@@ -273,6 +274,34 @@ def decide_doc_routing(
 
     doc_scores, score_meta = aggregate_documents(candidates, max_hits=max_hits)
     thresholds.update(score_meta)
+
+    # Reciprocal rank is useful for preserving a deterministic candidate
+    # order when the reranker is unavailable, but 1/rank is not a calibrated
+    # relevance score.  Never compare it with thresholds tuned for real
+    # rerank scores: doing so turns the first unrelated candidate into a
+    # perfect 1.0 match.  Explicit pending-option confirmations were handled
+    # above; the chat planner can still resolve an explicitly named catalog
+    # title after this conservative decision.
+    if doc_scores and (
+        rerank_degraded or score_meta["score_source"] == "RANK_FALLBACK"
+    ):
+        thresholds["rerank_degraded"] = rerank_degraded
+        if focus_document_id is not None:
+            thresholds["fallback_guard"] = "FOCUS_STAY"
+            return DocRoutingDecision(
+                action=ACTION_STAY,
+                document_id=focus_document_id,
+                doc_scores=doc_scores,
+                phase_before=phase,
+                thresholds=thresholds,
+            )
+        thresholds["fallback_guard"] = "NO_MATCH"
+        return DocRoutingDecision(
+            action=ACTION_NO_MATCH,
+            doc_scores=doc_scores,
+            phase_before=phase,
+            thresholds=thresholds,
+        )
 
     if focus_document_id is None:
         if doc_scores:

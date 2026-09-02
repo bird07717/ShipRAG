@@ -216,7 +216,7 @@ export const adminStore = reactive({
     return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
   },
   formatJson(value: unknown): string {
-    return JSON.stringify(value, null, 2);
+    return JSON.stringify(value, null, 2) ?? "(empty)";
   },
   taskMetadata(task: IndexTask | undefined, key: string): string | number | undefined {
     const value = task?.metadata[key];

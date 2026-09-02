@@ -480,6 +480,12 @@ class RagService:
                 timings=timings,
                 started_at=started_at,
                 rerank_candidates=reranked_candidates,
+                rerank_status=str(rerank_result["status"]),
+                rerank_error_code=(
+                    str(rerank_result["error_code"])
+                    if rerank_result.get("error_code")
+                    else None
+                ),
             )
         except ApiError as exc:
             await self.repository.fail_turn(
@@ -1290,6 +1296,7 @@ class RagService:
             switch_gap=self.settings.m3_doc_switch_gap,
             lock_best_floor=self.settings.m3_doc_lock_best_floor,
             single_clarify_best_floor=self.settings.m3_doc_single_clarify_best_floor,
+            rerank_degraded=prepared.rerank_status == "DEGRADED",
         )
         had_pending = bool(turn.chat_context.get("pending_options"))
 
@@ -1325,6 +1332,7 @@ class RagService:
 
         clear_pending_after = had_pending
         catalog: list[dict[str, Any]] | None = None
+        rank_fallback = bool(decision.thresholds.get("fallback_guard"))
 
         meta_ack = self._match_meta_ack(question)
         if meta_ack is not None:
@@ -1340,9 +1348,15 @@ class RagService:
         # Catalog-title resolution: the user explicitly names a document
         # (typically confirming a previous routing suggestion verbatim).
         # Delivering it directly closes the clarify loop instead of asking
-        # the same question again. Never overrides STAY: a title-shaped
-        # follow-up inside the focus document should be answered by DOC_QA.
-        if decision.action in (ACTION_NO_MATCH, ACTION_CLARIFY, ACTION_OFFER_SWITCH):
+        # the same question again.  A normal STAY remains authoritative, but
+        # a conservative rank-fallback STAY may be overridden by an explicit
+        # catalog title because title matching does not depend on reranking.
+        title_resolution_allowed = decision.action in (
+            ACTION_NO_MATCH,
+            ACTION_CLARIFY,
+            ACTION_OFFER_SWITCH,
+        ) or (decision.action == ACTION_STAY and rank_fallback)
+        if title_resolution_allowed:
             catalog = await self.repository.list_kb_documents(turn.knowledge_id)
             matched = self._match_catalog_title(question, catalog)
             if matched is not None:
@@ -1378,6 +1392,20 @@ class RagService:
                     references=delivery["references"],
                     clear_pending_after=clear_pending_after,
                 )
+
+        # With no established focus, uncalibrated rank-only candidates must
+        # not reach the catalog-routing LLM or become public references.  The
+        # user gets a deterministic, non-error answer and can retry when the
+        # reranker recovers or provide an explicit document title.
+        if rank_fallback and turn.focus_document_id is None:
+            routing = decision.to_dict()
+            routing["resolved_from"] = "RANK_FALLBACK_GUARD"
+            return _ChatPlan(
+                kind="ROUTING",
+                routing=routing,
+                fixed_answer=UNCONFIRMED_MESSAGE,
+                clear_pending_after=clear_pending_after,
+            )
 
         if decision.action == ACTION_STAY and turn.focus_document_id is not None:
             document = await self.repository.get_document_blocks(

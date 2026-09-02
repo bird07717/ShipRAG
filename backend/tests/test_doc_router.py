@@ -89,6 +89,63 @@ def test_aggregate_falls_back_to_rank_score_without_rerank():
     assert meta == {"score_normalization": "NONE", "score_source": "RANK_FALLBACK"}
 
 
+def test_rank_fallback_without_focus_cannot_deliver_or_clarify() -> None:
+    candidates = [
+        _candidate(DOC_A, 1, None, "A"),
+        _candidate(DOC_A, 2, None, "A"),
+        _candidate(DOC_B, 3, None, "B"),
+    ]
+
+    decision = decide_doc_routing(
+        question="今天天气怎么样",
+        candidates=candidates,
+        focus_document_id=None,
+        chat_context={},
+        **_settings_kwargs(),
+    )
+
+    assert decision.action == ACTION_NO_MATCH
+    assert decision.pending_options == []
+    assert decision.thresholds["score_source"] == "RANK_FALLBACK"
+    assert decision.thresholds["fallback_guard"] == "NO_MATCH"
+
+
+def test_rank_fallback_with_focus_cannot_switch_documents() -> None:
+    candidates = [
+        _candidate(DOC_B, 1, None, "B"),
+        _candidate(DOC_B, 2, None, "B"),
+    ]
+
+    decision = decide_doc_routing(
+        question="怎么判断它是不是坏了",
+        candidates=candidates,
+        focus_document_id=DOC_A,
+        chat_context={},
+        **_settings_kwargs(),
+    )
+
+    assert decision.action == ACTION_STAY
+    assert decision.document_id == DOC_A
+    assert decision.pending_options == []
+    assert decision.thresholds["fallback_guard"] == "FOCUS_STAY"
+
+
+def test_pending_confirmation_still_delivers_during_rank_fallback() -> None:
+    decision = decide_doc_routing(
+        question="确认",
+        candidates=[_candidate(DOC_B, 1, None, "B")],
+        focus_document_id=DOC_A,
+        chat_context={
+            "pending_options": [{"document_id": str(DOC_B), "title": "B"}],
+        },
+        **_settings_kwargs(),
+    )
+
+    assert decision.action == ACTION_DELIVER
+    assert decision.document_id == DOC_B
+    assert decision.resolved_from == "CLARIFICATION_REPLY"
+
+
 def test_aggregate_rescales_logits_above_unit_range():
     # a rerank provider emitting raw (non-[0,1]) scores must not break the
     # threshold semantics: the batch is divided by its max

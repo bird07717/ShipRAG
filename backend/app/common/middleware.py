@@ -1,40 +1,56 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Awaitable, Callable
 from uuid import uuid4
 
 import structlog
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = structlog.get_logger(__name__)
 
 
-class RequestContextMiddleware(BaseHTTPMiddleware):
-    async def dispatch(
+class RequestContextMiddleware:
+    """Pure ASGI middleware so handled dependency errors cannot stall a response."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(
         self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        request_id = request.headers.get("X-Request-ID", "").strip()[:128] or str(uuid4())
-        request.state.request_id = request_id
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request_id = Headers(scope=scope).get("X-Request-ID", "").strip()[:128] or str(uuid4())
+        scope.setdefault("state", {})["request_id"] = request_id
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(request_id=request_id)
         started = time.perf_counter()
+        status_code: int | None = None
+
+        async def send_with_context(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = int(message["status"])
+                MutableHeaders(scope=message)["X-Request-ID"] = request_id
+            await send(message)
+
         try:
-            response = await call_next(request)
+            await self.app(scope, receive, send_with_context)
         except Exception:
-            logger.exception("request_failed", method=request.method, path=request.url.path)
+            logger.exception("request_failed", method=scope["method"], path=scope["path"])
             raise
         finally:
             structlog.contextvars.clear_contextvars()
-        response.headers["X-Request-ID"] = request_id
-        await logger.ainfo(
-            "request_completed",
-            method=request.method,
-            path=request.url.path,
-            status_code=response.status_code,
-            latency_ms=round((time.perf_counter() - started) * 1000, 2),
-        )
-        return response
+        if status_code is not None:
+            logger.info(
+                "request_completed",
+                method=scope["method"],
+                path=scope["path"],
+                status_code=status_code,
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+            )

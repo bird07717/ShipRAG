@@ -11,6 +11,7 @@ from pydantic import SecretStr, ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.api.schemas import IndexBuildRequest
+from app.common.assets import reject_control_characters
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.ingestion.chunker import build_chunks, build_parent_chunks
@@ -42,6 +43,14 @@ def test_index_build_contract_rejects_auto_activation() -> None:
     assert IndexBuildRequest().activate_on_success is False
     with pytest.raises(ValidationError):
         IndexBuildRequest(activate_on_success=True)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", ["evil\r\nX-Injected: yes.docx", "bad\x00name.docx"])
+def test_stored_asset_names_reject_response_header_control_characters(value: str) -> None:
+    with pytest.raises(ApiError) as raised:
+        reject_control_characters(value, field_name="文件名")
+
+    assert raised.value.code == "VALIDATION_ERROR"
 
 
 def test_index_delete_blocker_error_names_live_references() -> None:

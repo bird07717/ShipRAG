@@ -18,6 +18,8 @@ from app.assistant.service import (
     encode_cursor,
     parse_sse,
     ping,
+    public_complete,
+    public_payload,
 )
 from app.common.errors import ApiError
 from app.core.config import Settings
@@ -224,6 +226,38 @@ async def test_facade_heartbeat_does_not_cancel_slow_gateway(
 
     assert ping() in frames
     assert _event(frames[-1])[0] == "complete"
+
+
+def test_public_payload_removes_internal_resource_urls_recursively() -> None:
+    payload = public_complete(
+        {
+            "conversation_id": CONVERSATION_ID,
+            "message_id": ASSISTANT_MESSAGE_ID,
+            "content": [
+                {
+                    "type": "image",
+                    "image_asset_id": uuid4(),
+                    "url": "/api/v1/image-assets/secret/content",
+                }
+            ],
+            "references": [
+                {
+                    "document_id": uuid4(),
+                    "title": "手册",
+                    "download_url": "/api/v1/documents/secret/content",
+                }
+            ],
+            "document": {"id": uuid4(), "download_url": "/api/v1/documents/secret/content"},
+        },
+        "request-1",
+    )
+
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "/api/v1/" not in serialized
+    assert payload["content"][0]["image_asset_id"]
+    assert payload["references"][0]["document_id"]
+    assert "download_url" not in payload["document"]
+    assert public_payload({"url": "https://example.invalid"}) == {}
 
 
 def test_external_request_rejects_internal_engine_selection() -> None:

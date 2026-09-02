@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from fastapi import UploadFile
 from minio import Minio
 
+from app.common.assets import reject_control_characters
 from app.common.errors import ApiError
 from app.common.text import repair_utf8_mojibake
 from app.core.config import Settings
@@ -43,6 +44,7 @@ class IngestionService:
         filename = repair_utf8_mojibake(PurePath(raw_filename).name)
         if not filename:
             raise ApiError("VALIDATION_ERROR", "必须提供 Word 文件名", 422)
+        reject_control_characters(filename, field_name="文件名")
 
         hasher = hashlib.sha256()
         size = 0
@@ -71,6 +73,7 @@ class IngestionService:
             )
             if not normalized_display_name:
                 raise ApiError("VALIDATION_ERROR", "文档显示名称不能为空", 422)
+            reject_control_characters(normalized_display_name, field_name="文档显示名称")
             request_hash = hashlib.sha256(
                 json.dumps(
                     {

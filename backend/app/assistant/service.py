@@ -33,6 +33,26 @@ def public_context(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: str(value) if isinstance(value, UUID) else value for key, value in payload.items()}
 
 
+def public_payload(value: Any) -> Any:
+    """Remove internal resource URLs from values crossing the Assistant boundary.
+
+    The documented external contract identifies documents and images by ID; it
+    never grants callers a management-plane URL. Applying this recursively
+    protects both newly streamed responses and historical response payloads.
+    """
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, list):
+        return [public_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: public_payload(item)
+            for key, item in value.items()
+            if key not in {"download_url", "url"}
+        }
+    return value
+
+
 def parse_sse(frame: bytes) -> tuple[str | None, dict[str, Any] | None]:
     event: str | None = None
     data: list[str] = []
@@ -96,7 +116,9 @@ def public_complete(response: dict[str, Any], request_id: str) -> dict[str, Any]
         "disclaimer",
         "next_suggestions",
     )
-    result = {key: response.get(key) for key in fields if response.get(key) is not None}
+    result = {
+        key: public_payload(response.get(key)) for key in fields if response.get(key) is not None
+    }
     result.setdefault("content", [])
     result.setdefault("sections", [])
     result.setdefault("references", [])

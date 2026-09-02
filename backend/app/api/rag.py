@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated, Any, Literal
-from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -29,6 +28,7 @@ from app.api.schemas import (
     RagTraceResponse,
     TraceSummaryResponse,
 )
+from app.common.assets import attachment_content_disposition
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.core.resources import AppResources
@@ -108,11 +108,7 @@ async def download_document(
 
     content = await asyncio.to_thread(download)
     filename = doc["display_name"] or doc["filename"]
-    safe = filename.replace(chr(34), "").replace(chr(13), "").replace(chr(10), "")
-    fallback = safe if safe.isascii() else "download.docx"
-    disposition = (
-        "attachment; filename=" + chr(34) + fallback + chr(34) + "; filename*=UTF-8''" + quote(safe)
-    )
+    disposition = attachment_content_disposition(filename)
     return Response(
         content,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",

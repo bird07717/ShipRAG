@@ -1258,6 +1258,91 @@ async def test_rerank_timeout_degrades_to_rank_fallback():
     assert prepared.rerank_candidates  # rank-fallback candidates still flow
 
 
+@pytest.mark.asyncio
+async def test_rerank_timeout_without_focus_returns_unconfirmed_without_references():
+    repo = _RoutingRepository(
+        turn=_turn(),
+        candidates=[_candidate(DOC_A, 1), _candidate(DOC_B, 2, title=TITLE_B)],
+    )
+    llm = _RecordingLlmProvider(["不应调用路由模型"])
+    service = RagService(
+        cast(RagRepository, repo),
+        _resilience_settings(),
+        embedding_factory=lambda _: FakeEmbeddingProvider(1024),
+        llm_factory=lambda s, snap: cast(LlmProvider, llm),
+        rerank_factory=lambda s, snap: cast(Any, _HungRerankProvider()),
+    )
+
+    result = await service.generate(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=None,
+        question="今天天气怎么样",
+        request_id="req-rerank-timeout-no-focus",
+    )
+
+    assert result["response_type"] == "ANSWERED"
+    assert result["references"] == []
+    assert TITLE_A not in result["answer"]
+    assert TITLE_B not in result["answer"]
+    assert llm.prompts == []
+    assert repo.completed["doc_routing"]["resolved_from"] == "RANK_FALLBACK_GUARD"
+
+
+@pytest.mark.asyncio
+async def test_rerank_timeout_keeps_existing_focus_for_follow_up():
+    repo = _RoutingRepository(
+        turn=_turn(focus_document_id=DOC_A),
+        candidates=[_candidate(DOC_B, 1, title=TITLE_B)],
+    )
+    llm = _RecordingLlmProvider(["[MODE:PRODUCT_KNOWLEDGE]\n继续检查麦克风。"])
+    service = RagService(
+        cast(RagRepository, repo),
+        _resilience_settings(),
+        embedding_factory=lambda _: FakeEmbeddingProvider(1024),
+        llm_factory=lambda s, snap: cast(LlmProvider, llm),
+        rerank_factory=lambda s, snap: cast(Any, _HungRerankProvider()),
+    )
+
+    result = await service.generate(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=repo.turn.conversation_id,
+        question="怎么判断它是不是坏了",
+        request_id="req-rerank-timeout-focus",
+    )
+
+    assert [item["title"] for item in result["references"]] == [TITLE_A]
+    assert repo.completed["doc_routing"]["thresholds"]["fallback_guard"] == "FOCUS_STAY"
+    assert repo.focus_updates == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_catalog_title_can_switch_focus_during_rank_fallback():
+    repo = _RoutingRepository(
+        turn=_turn(focus_document_id=DOC_A),
+        candidates=[_candidate(DOC_A, 1)],
+    )
+    llm = _RecordingLlmProvider(["不应调用模型"])
+    service = RagService(
+        cast(RagRepository, repo),
+        _resilience_settings(),
+        embedding_factory=lambda _: FakeEmbeddingProvider(1024),
+        llm_factory=lambda s, snap: cast(LlmProvider, llm),
+        rerank_factory=lambda s, snap: cast(Any, _HungRerankProvider()),
+    )
+
+    result = await service.generate(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=repo.turn.conversation_id,
+        question=TITLE_B,
+        request_id="req-rerank-timeout-explicit-title",
+    )
+
+    assert result["response_type"] == "DOC_DELIVERED"
+    assert [item["title"] for item in result["references"]] == [TITLE_B]
+    assert repo.focus_updates == [DOC_B]
+    assert llm.prompts == []
+
+
 class _FailingLlmProvider:
     """Simulates an LLM upstream failure during answer streaming."""
 

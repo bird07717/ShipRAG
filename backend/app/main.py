@@ -19,7 +19,10 @@ from app.common.middleware import RequestContextMiddleware
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.resources import AppResources
-from app.observability.recorder import record_request_error, record_unhandled_exception
+from app.observability.recorder import (
+    record_unhandled_exception,
+    schedule_request_error,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -89,7 +92,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
-        await record_request_error(
+        schedule_request_error(
             request,
             status_code=exc.status_code,
             error_code=exc.code,
@@ -115,7 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             {"location": list(error["loc"]), "message": error["msg"], "type": error["type"]}
             for error in exc.errors()
         ]
-        await record_request_error(
+        schedule_request_error(
             request,
             status_code=422,
             error_code="VALIDATION_ERROR",
@@ -140,7 +143,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # running API process predates the route (e.g. after a deploy);
             # say so instead of surfacing FastAPI's default text.
             message = "接口不存在：后端服务可能是旧版本，请重启后端进程后重试"
-        await record_request_error(
+        schedule_request_error(
             request, status_code=exc.status_code, error_code=code, message=message
         )
         return JSONResponse(

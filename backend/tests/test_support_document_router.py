@@ -55,7 +55,7 @@ class _ConfiguredSupportRepository:
 
 
 @pytest.mark.asyncio
-async def test_document_router_degraded_rerank_requires_clarification() -> None:
+async def test_document_router_degraded_rerank_without_focus_returns_no_match() -> None:
     document_id = uuid4()
     candidates = [_candidate(document_id, uuid4(), 1), _candidate(document_id, uuid4(), 2)]
 
@@ -84,12 +84,12 @@ async def test_document_router_degraded_rerank_requires_clarification() -> None:
         question="PDC 更新中断后怎么恢复？",
     )
 
-    assert route.action == "CLARIFY"
+    assert route.action == "NO_MATCH"
     assert route.document_id is None
     assert route.trace["source"] == "RAG_FALLBACK"
     assert route.trace["rerank"]["status"] == "DEGRADED"
-    assert route.trace["document_routing"]["decision"] == "CLARIFY"
-    assert route.trace["document_routing"]["resolved_from"] == "RERANK_DEGRADED_GUARD"
+    assert route.trace["document_routing"]["decision"] == "NO_MATCH"
+    assert route.trace["document_routing"]["thresholds"]["fallback_guard"] == "NO_MATCH"
 
 
 @pytest.mark.asyncio

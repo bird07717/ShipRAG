@@ -158,3 +158,5 @@ class PreparedRag:
     started_at: float
     answer_parts: list[str] = field(default_factory=list)
     rerank_candidates: list[RetrievalCandidate] = field(default_factory=list)
+    rerank_status: str = "SKIPPED"
+    rerank_error_code: str | None = None

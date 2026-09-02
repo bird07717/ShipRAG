@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
+from fastapi import FastAPI
 from pydantic import SecretStr
 
 from app.core.config import Settings
@@ -20,6 +24,63 @@ from app.main import create_app
 # there). Explicit environment variables always win, and unreachable
 # infrastructure keeps the previous skip behaviour.
 _REDIS_TEST_DB = 15  # dedicated test DB — the GC suite flushes it on setup
+
+
+class ASGIClient:
+    """Synchronous facade over httpx ASGITransport for synchronous API tests.
+
+    Starlette's TestClient starts an AnyIO blocking portal, which deadlocks in
+    this sandbox before application startup. Keeping an explicit Runner and
+    lifespan gives the existing synchronous tests the same request API without
+    the portal thread.
+    """
+
+    def __init__(self, app: FastAPI) -> None:
+        self.app = app
+        self._runner = asyncio.Runner()
+        self._lifespan = app.router.lifespan_context(app)
+        self._client: httpx.AsyncClient | None = None
+
+    def __enter__(self) -> ASGIClient:
+        self._runner.run(self._lifespan.__aenter__())
+        self._client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app), base_url="http://testserver"
+        )
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        try:
+            if self._client is not None:
+                self._runner.run(self._client.aclose())
+        finally:
+            try:
+                self._runner.run(self._lifespan.__aexit__(exc_type, exc, traceback))
+            finally:
+                self._runner.close()
+
+    def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        if self._client is None:
+            raise RuntimeError("ASGIClient must be used as a context manager")
+        return self._runner.run(self._client.request(method, url, **kwargs))
+
+    def get(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self.request("POST", url, **kwargs)
+
+    def put(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self.request("PUT", url, **kwargs)
+
+    def patch(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self.request("PATCH", url, **kwargs)
+
+    def delete(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self.request("DELETE", url, **kwargs)
+
+    @contextmanager
+    def stream(self, method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        yield self.request(method, url, **kwargs)
 
 
 def _project_env() -> dict[str, str]:
@@ -91,6 +152,6 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def client(settings: Settings) -> Iterator[TestClient]:
-    with TestClient(create_app(settings)) as test_client:
+def client(settings: Settings) -> Iterator[ASGIClient]:
+    with ASGIClient(create_app(settings)) as test_client:
         yield test_client

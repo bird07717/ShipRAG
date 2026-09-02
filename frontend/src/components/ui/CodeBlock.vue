@@ -2,18 +2,22 @@
 import { computed, ref } from "vue";
 import { CopyDocument } from "@element-plus/icons-vue";
 
-const props = defineProps<{
-  code: string;
+const props = withDefaults(defineProps<{
+  code?: string | null;
   maxHeight?: string;
-}>();
+}>(), {
+  code: "",
+  maxHeight: "",
+});
 
 const copied = ref(false);
 
 const style = computed(() => (props.maxHeight ? { maxHeight: props.maxHeight } : undefined));
+const displayCode = computed(() => props.code ?? "");
 
 async function copy(): Promise<void> {
   try {
-    await navigator.clipboard.writeText(props.code);
+    await navigator.clipboard.writeText(displayCode.value);
     copied.value = true;
     setTimeout(() => (copied.value = false), 1500);
   } catch {
@@ -24,7 +28,7 @@ async function copy(): Promise<void> {
 
 <template>
   <div class="code-block">
-    <pre :style="style">{{ code }}</pre>
+    <pre :style="style">{{ displayCode }}</pre>
     <el-button
       class="copy-button"
       size="small"
