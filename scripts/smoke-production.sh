@@ -16,13 +16,18 @@ cleanup() {
 trap cleanup EXIT
 
 export APP_HTTP_PORT="${http_port}"
+export APP_HTTP_BIND_ADDRESS="127.0.0.1"
 export SERVICE_TOKEN="m7-smoke-service-token"
+export ASSISTANT_SERVICE_TOKEN="m7-smoke-assistant-token-0123456789"
 export POSTGRES_PASSWORD="m7-smoke-postgres-password"
 export REDIS_PASSWORD="m7-smoke-redis-password"
 export MINIO_ROOT_USER="m7-smoke-minio"
 export MINIO_ROOT_PASSWORD="m7-smoke-minio-password"
 export M2_EMBEDDING_PROVIDER="fake"
-export M3_LLM_PROVIDER="fake"
+# Production settings reject the fake LLM provider.  This smoke check does not
+# issue a chat request, so auto avoids external model calls while preserving
+# the same production validation path.
+export M3_LLM_PROVIDER="auto"
 export M4_OCR_PROVIDER="fake"
 export M4_VISION_PROVIDER="fake"
 export M5_RERANK_PROVIDER="fake"
@@ -45,6 +50,7 @@ docker run --rm "${backend_image}" python -c \
 import json
 import sys
 import urllib.request
+from urllib.error import HTTPError
 
 port = int(sys.argv[1])
 with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/ready", timeout=10) as response:
@@ -52,9 +58,40 @@ with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/ready", timeout=10)
 with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=10) as response:
     html = response.read().decode("utf-8")
 
+assistant_request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/api/v1/assistant/knowledge-bases",
+    headers={
+        "Authorization": "Bearer m7-smoke-assistant-token-0123456789",
+        "X-External-User-ID": "m7-production-smoke",
+    },
+)
+with urllib.request.urlopen(assistant_request, timeout=10) as response:
+    assistant_payload = json.load(response)
+
+try:
+    urllib.request.urlopen(
+        f"http://127.0.0.1:{port}/api/v1/assistant/knowledge-bases", timeout=10
+    )
+except HTTPError as error:
+    if error.code != 401:
+        raise SystemExit(f"unauthenticated Assistant request returned {error.code}, expected 401")
+else:
+    raise SystemExit("unauthenticated Assistant request unexpectedly succeeded")
+
 if readiness.get("status") != "ready":
     raise SystemExit("production readiness failed")
 if '<div id="app"></div>' not in html:
     raise SystemExit("production frontend entry did not load")
-print(json.dumps({"status": "passed", "readiness": "ready", "frontend": "served"}))
+if not isinstance(assistant_payload.get("items"), list):
+    raise SystemExit("production Assistant knowledge-base endpoint failed")
+print(
+    json.dumps(
+        {
+            "status": "passed",
+            "readiness": "ready",
+            "frontend": "served",
+            "assistant": "reachable",
+        }
+    )
+)
 PY
