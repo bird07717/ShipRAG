@@ -10,7 +10,8 @@ from uuid import uuid4
 import pytest
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import SecretStr, ValidationError
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
+from starlette.types import Message, Scope
 
 import app.assistant.service as assistant_service_module
 from app.api.assistant import chat_stream
@@ -40,6 +41,7 @@ class _Repository:
         self.completed: dict | None = None
         self.context: dict | None = None
         self.failed: dict | None = None
+        self.cancelled: dict | None = None
         self.runtime_marks: list[dict] = []
 
     async def ensure_assistant_knowledge_base_ready(self, **_: object) -> None:
@@ -87,6 +89,9 @@ class _Repository:
 
     async def fail_assistant_request(self, **kwargs: object) -> None:
         self.failed = dict(kwargs)
+
+    async def cancel_assistant_request(self, **kwargs: object) -> None:
+        self.cancelled = dict(kwargs)
 
     async def mark_assistant_trace_runtime(self, **kwargs: object) -> None:
         self.runtime_marks.append(dict(kwargs))
@@ -181,6 +186,116 @@ async def test_chat_route_surfaces_preflight_error_before_streaming_response() -
 
     assert raised.value.status_code == 409
     assert raised.value.code == "CONVERSATION_BUSY"
+
+
+@pytest.mark.asyncio
+async def test_chat_route_cancels_reservation_when_client_disconnects_after_accepted() -> None:
+    repository, gateway = _Repository(), _Gateway()
+    service = AssistantFacadeService(repository, gateway)  # type: ignore[arg-type]
+    request = cast(Request, SimpleNamespace(state=SimpleNamespace(request_id="request-1")))
+    response = await chat_stream(
+        AssistantChatStreamRequest(knowledge_id=KNOWLEDGE_ID, question="如何处理？"),
+        request,
+        service,
+        "business-user-1",
+        "request-key-1",
+    )
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+        if message["type"] == "http.response.body":
+            raise OSError("client disconnected")
+
+    scope = cast(
+        Scope,
+        {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}},
+    )
+    with pytest.raises(ClientDisconnect):
+        await response(scope, receive, send)
+
+    body = next(message["body"] for message in sent if message["type"] == "http.response.body")
+    assert _event(body)[0] == "accepted"
+    assert repository.cancelled is not None
+    assert repository.cancelled["external_request_id"] == "request-1"
+    assert repository.cancelled["payload"]["code"] == "CLIENT_DISCONNECTED"
+    assert gateway.called is False
+
+
+@pytest.mark.asyncio
+async def test_chat_route_cancels_reservation_on_legacy_asgi_disconnect() -> None:
+    repository = _Repository()
+    service = AssistantFacadeService(repository, _Gateway())  # type: ignore[arg-type]
+    request = cast(Request, SimpleNamespace(state=SimpleNamespace(request_id="request-1")))
+    response = await chat_stream(
+        AssistantChatStreamRequest(knowledge_id=KNOWLEDGE_ID, question="如何处理？"),
+        request,
+        service,
+        "business-user-1",
+        "request-key-1",
+    )
+    accepted_sent = asyncio.Event()
+
+    async def receive() -> Message:
+        await accepted_sent.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body" and message.get("body"):
+            accepted_sent.set()
+
+    scope = cast(
+        Scope,
+        {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}},
+    )
+    await response(scope, receive, send)
+
+    assert accepted_sent.is_set()
+    assert repository.cancelled is not None
+
+
+@pytest.mark.asyncio
+async def test_chat_route_keeps_contract_and_does_not_cancel_completed_request() -> None:
+    repository = _Repository()
+    service = AssistantFacadeService(repository, _Gateway())  # type: ignore[arg-type]
+    request = cast(Request, SimpleNamespace(state=SimpleNamespace(request_id="request-1")))
+    response = await chat_stream(
+        AssistantChatStreamRequest(knowledge_id=KNOWLEDGE_ID, question="如何处理？"),
+        request,
+        service,
+        "business-user-1",
+        "request-key-1",
+    )
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope = cast(
+        Scope,
+        {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}},
+    )
+    await response(scope, receive, send)
+
+    events = [
+        event
+        for message in sent
+        if message["type"] == "http.response.body" and message.get("body")
+        for event, _ in [_event(message["body"])]
+    ]
+    assert events == ["accepted", "progress", "context", "delta", "complete"]
+    assert response.media_type == "text/event-stream"
+    assert response.headers["cache-control"] == "no-cache, no-transform"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert repository.completed is not None
+    assert repository.failed is None
+    assert repository.cancelled is None
 
 
 @pytest.mark.asyncio

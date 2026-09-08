@@ -143,6 +143,65 @@ def public_complete(response: dict[str, Any], request_id: str) -> dict[str, Any]
     return result
 
 
+class PreparedAssistantStream:
+    """Own a reserved Assistant request until its public stream reaches a terminal event."""
+
+    def __init__(
+        self,
+        source: AsyncIterator[bytes],
+        *,
+        repository: GatewayRepository,
+        durable_id: UUID,
+        request_id: str,
+        reserved: bool,
+    ) -> None:
+        self._source = source
+        self._repository = repository
+        self._durable_id = durable_id
+        self._request_id = request_id
+        self._reserved = reserved
+        self._terminal = False
+        self._closed = False
+        self._answer_parts: list[str] = []
+
+    def __aiter__(self) -> PreparedAssistantStream:
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._closed:
+            raise StopAsyncIteration
+        frame = await self._source.__anext__()
+        event, payload = parse_sse(frame)
+        if event == "delta" and payload:
+            self._answer_parts.append(str(payload.get("text", "")))
+        elif event in {"complete", "error"}:
+            self._terminal = True
+        return frame
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self._source, "aclose", None)
+        try:
+            if close is not None:
+                await close()
+        finally:
+            if self._reserved and not self._terminal:
+                await self._repository.cancel_assistant_request(
+                    request_id=self._durable_id,
+                    external_request_id=self._request_id,
+                    payload={
+                        "request_id": self._request_id,
+                        "code": "CLIENT_DISCONNECTED",
+                        "message": "客户端已断开",
+                        "retryable": True,
+                        "partial_content": "".join(self._answer_parts),
+                    },
+                    partial_content="".join(self._answer_parts),
+                )
+
+
 class AssistantFacadeService:
     """Translate existing gateway frames to the stable external contract."""
 
@@ -161,7 +220,7 @@ class AssistantFacadeService:
         include_images: bool,
         idempotency_key: str,
         request_id: str,
-    ) -> AsyncIterator[bytes]:
+    ) -> PreparedAssistantStream:
         """Run request validation/reservation before the HTTP SSE response starts."""
         if conversation_id is not None:
             visible = await self.repository.get_assistant_conversation(
@@ -187,17 +246,24 @@ class AssistantFacadeService:
             ),
             conversation_id=conversation_id,
         )
-        return self._stream_prepared(
-            external_user_id=external_user_id,
-            knowledge_id=knowledge_id,
-            conversation_id=conversation_id,
-            question=question,
-            choice_id=choice_id,
-            include_images=include_images,
+        durable_id = UUID(str(stored["id"]))
+        return PreparedAssistantStream(
+            self._stream_prepared(
+                external_user_id=external_user_id,
+                knowledge_id=knowledge_id,
+                conversation_id=conversation_id,
+                question=question,
+                choice_id=choice_id,
+                include_images=include_images,
+                request_id=request_id,
+                policy=policy,
+                state=state,
+                stored=stored,
+            ),
+            repository=self.repository,
+            durable_id=durable_id,
             request_id=request_id,
-            policy=policy,
-            state=state,
-            stored=stored,
+            reserved=state == "NEW",
         )
 
     async def stream(
@@ -223,8 +289,11 @@ class AssistantFacadeService:
             idempotency_key=idempotency_key,
             request_id=request_id,
         )
-        async for frame in source:
-            yield frame
+        try:
+            async for frame in source:
+                yield frame
+        finally:
+            await source.aclose()
 
     async def _stream_prepared(
         self,

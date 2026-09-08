@@ -96,6 +96,54 @@ async def test_assistant_conversation_filter_uses_typed_direct_uuid_comparison()
     assert params is not None and params["knowledge_id"] == knowledge_id
 
 
+async def test_assistant_image_asset_requires_stored_document() -> None:
+    image_asset_id, knowledge_id = uuid4(), uuid4()
+    repo, connection = _gateway_repository(
+        [
+            [
+                {
+                    "id": image_asset_id,
+                    "mime_type": "image/png",
+                    "minio_bucket": "documents",
+                    "minio_object_key": "images/example.png",
+                }
+            ]
+        ]
+    )
+
+    asset = await repo.assistant_image_asset(
+        knowledge_id=knowledge_id, image_asset_id=image_asset_id
+    )
+
+    sql, params = connection.executed[0]
+    assert "d.status = 'STORED'" in sql
+    assert params == {"image_asset_id": image_asset_id, "knowledge_id": knowledge_id}
+    assert asset["id"] == image_asset_id
+
+
+async def test_cancel_assistant_request_closes_linked_runtime_in_one_statement() -> None:
+    request_id = uuid4()
+    repo, connection = _gateway_repository([[]])
+
+    await repo.cancel_assistant_request(
+        request_id=request_id,
+        external_request_id="external-request-1",
+        payload={"code": "CLIENT_DISCONNECTED", "message": "客户端已断开"},
+        partial_content="部分回答",
+    )
+
+    sql, params = connection.executed[0]
+    assert "UPDATE assistant_request" in sql
+    assert "UPDATE rag_trace" in sql
+    assert "UPDATE message" in sql
+    assert "status = 'CANCELLED'" in sql
+    assert "t.request_id = :external_request_id" in sql
+    assert params is not None
+    assert params["id"] == request_id
+    assert params["external_request_id"] == "external-request-1"
+    assert params["partial_content"] == "部分回答"
+
+
 async def test_set_conversation_focus_resets_chat_context() -> None:
     repo, connection = _repository([[0]])
     conversation_id, document_id, index_id = uuid4(), uuid4(), uuid4()

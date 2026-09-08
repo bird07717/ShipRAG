@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
 from typing import Annotated, Any
 from uuid import UUID
@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.types import Receive, Scope, Send
 
 from app.api.dependencies import get_resources
 from app.api.engine_dependencies import (
@@ -47,6 +48,27 @@ def external_user_id(
 router = APIRouter(
     prefix="/assistant", tags=["assistant"], dependencies=[Depends(external_user_id)]
 )
+
+
+class _AssistantStreamingResponse(StreamingResponse):
+    """Finalize the reserved request even when ASGI body delivery fails."""
+
+    def __init__(
+        self,
+        content: AsyncIterator[bytes],
+        *,
+        finalizer: Callable[[], Awaitable[None]],
+        media_type: str,
+        headers: dict[str, str],
+    ) -> None:
+        super().__init__(content, media_type=media_type, headers=headers)
+        self._finalizer = finalizer
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._finalizer()
 
 
 def _conversation(row: dict[str, Any], retention_days: int) -> dict[str, Any]:
@@ -213,8 +235,9 @@ async def chat_stream(
         idempotency_key=idempotency_key,
         request_id=str(request.state.request_id),
     )
-    return StreamingResponse(
+    return _AssistantStreamingResponse(
         observe_stream_errors(request, source, user_facing=True),
+        finalizer=source.aclose,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

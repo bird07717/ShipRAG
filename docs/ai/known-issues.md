@@ -13,7 +13,7 @@
 | 后端全量 Pytest 无法完成 | 已确认阻塞 | 2026-09-02 以详细进度运行并设置 180 秒上限时，前 14 项测试通过后停在 `tests/test_api.py::test_service_api_requires_bearer_token`，未产生终态并以超时退出。根因待确认；应先在隔离环境复现并检查该测试的应用生命周期、认证依赖和本地服务/网络等待。 |
 | 前端覆盖率门槛 | 已确认门禁失败 | 2026-09-02 中 18 个测试文件、108 项测试均通过，但 `test:coverage` 未达到 `vite.config.ts` 的目录阈值：`src/api/**` 函数 56.79%（要求 80%）、分支 79.50%（要求 80%）；`src/composables/**` 语句/行 75.92%（要求 80%）、函数 72.04%（要求 75%）、分支 71.65%（要求 80%）。 |
 | 前端生产包体积 | 已确认警告 | 生产构建通过，但 Vite 警告入口 JavaScript 压缩后为 1,291.66 kB（gzip 427.76 kB），超过 500 kB 警告阈值；可评估动态导入或手动分包。 |
-| Assistant 请求记录保留 | 已确认容量风险 | `assistant_request` 当前没有独立的终态记录清理任务；已关联 Conversation 的记录可随会话级联删除，但关联前失败且 `conversation_id` 为空的记录可能持续保留。遗留 `RUNNING` 状态已提供 `app.assistant.recovery` 预览/事务恢复命令，但容量仍需通过保留策略和表增长监控处理。 |
+| Assistant 请求记录保留 | 已确认容量风险 | `assistant_request` 当前没有独立的终态记录清理任务；已关联 Conversation 的记录可随会话级联删除，但关联前失败且 `conversation_id` 为空的记录可能持续保留。正常 ASGI 发送失败和客户端断连会幂等取消仍为 `RUNNING` 的请求及其关联运行态；进程强制终止等无法执行响应收口的遗留状态已提供 `app.assistant.recovery` 预览/事务恢复命令。容量仍需通过保留策略和表增长监控处理。 |
 | Assistant 幂等指标口径 | 已确认观测缺口 | `/api/v1/metrics/assistant` 的 `idempotency` 区块当前查询 `support_idempotency`，没有统计 Assistant 门面的 `assistant_request`，因此不能表示外部 Assistant 请求保护数或重放率；应由业务后台指标或受控数据分析补充，后续再修正平台指标。 |
 
 ## 已核实的测试基线

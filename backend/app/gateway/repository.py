@@ -908,6 +908,68 @@ class GatewayRepository:
                 },
             )
 
+    async def cancel_assistant_request(
+        self,
+        *,
+        request_id: UUID,
+        external_request_id: str,
+        payload: dict[str, Any],
+        partial_content: str,
+    ) -> None:
+        """Atomically cancel a reserved request and any running turn it created."""
+        serialized_payload = json.dumps(payload, ensure_ascii=False)
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    WITH cancelled_request AS MATERIALIZED (
+                        UPDATE assistant_request
+                        SET status = 'CANCELLED',
+                            terminal_error = CAST(:payload AS jsonb),
+                            updated_at = now()
+                        WHERE id = :id AND status = 'RUNNING'
+                        RETURNING assistant_message_id, trace_id
+                    ),
+                    cancelled_traces AS MATERIALIZED (
+                        UPDATE rag_trace AS t
+                        SET status = 'CANCELLED',
+                            source = 'ASSISTANT_API',
+                            answer = :partial_content,
+                            error = CAST(:payload AS jsonb),
+                            finished_at = COALESCE(t.finished_at, now())
+                        FROM cancelled_request AS r
+                        WHERE t.status = 'RUNNING'
+                          AND (
+                              t.request_id = :external_request_id
+                              OR t.trace_id = r.trace_id
+                          )
+                        RETURNING t.message_id
+                    )
+                    UPDATE message AS m
+                    SET status = 'CANCELLED',
+                        content = :partial_content,
+                        updated_at = now()
+                    WHERE m.status = 'STREAMING'
+                      AND (
+                          EXISTS (
+                              SELECT 1 FROM cancelled_request AS r
+                              WHERE r.assistant_message_id = m.id
+                          )
+                          OR EXISTS (
+                              SELECT 1 FROM cancelled_traces AS t
+                              WHERE t.message_id = m.id
+                          )
+                      )
+                    """
+                ),
+                {
+                    "id": request_id,
+                    "external_request_id": external_request_id,
+                    "payload": serialized_payload,
+                    "partial_content": partial_content,
+                },
+            )
+
     async def assistant_document(self, *, knowledge_id: UUID, document_id: UUID) -> dict[str, Any]:
         async with self.engine.connect() as connection:
             result = await connection.execute(
@@ -937,7 +999,9 @@ class GatewayRepository:
                     FROM image_asset a
                     JOIN document_element e ON e.id = a.element_id
                     JOIN document_source d ON d.id = e.document_id
-                    WHERE a.id = :image_asset_id AND d.kb_id = :knowledge_id
+                    WHERE a.id = :image_asset_id
+                      AND d.kb_id = :knowledge_id
+                      AND d.status = 'STORED'
                     """
                 ),
                 {"image_asset_id": image_asset_id, "knowledge_id": knowledge_id},
