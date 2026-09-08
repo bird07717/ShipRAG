@@ -14,6 +14,17 @@ from app.gateway.repository import GatewayRepository
 from app.gateway.service import ChatGatewayService
 
 HEARTBEAT_SECONDS = 15.0
+_PUBLIC_CONTEXT_FIELDS = frozenset(
+    {"conversation_id", "user_message_id", "assistant_message_id", "trace_id"}
+)
+_RETRYABLE_ERROR_CODES = frozenset(
+    {
+        "LLM_UPSTREAM_ERROR",
+        "TURN_DEADLINE_EXCEEDED",
+        "UPSTREAM_TIMEOUT",
+        "UPSTREAM_UNAVAILABLE",
+    }
+)
 
 
 def sse(event: str, payload: dict[str, Any]) -> bytes:
@@ -29,8 +40,12 @@ def ping() -> bytes:
 
 
 def public_context(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalize database-native identifiers before they reach the public stream."""
-    return {key: str(value) if isinstance(value, UUID) else value for key, value in payload.items()}
+    """Whitelist public turn identifiers and normalize database UUID values."""
+    return {
+        key: str(value) if isinstance(value, UUID) else value
+        for key, value in payload.items()
+        if key in _PUBLIC_CONTEXT_FIELDS
+    }
 
 
 def public_payload(value: Any) -> Any:
@@ -156,6 +171,7 @@ class AssistantFacadeService:
             )
             if visible is None:
                 raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
+        await self.repository.ensure_assistant_knowledge_base_ready(knowledge_id=knowledge_id)
         policy = await self.repository.resolve_policy(
             knowledge_id=knowledge_id, conversation_id=conversation_id
         )
@@ -302,9 +318,7 @@ class AssistantFacadeService:
                     await self.repository.mark_assistant_trace_runtime(
                         request_id=request_id, policy=policy
                     )
-                    known_context.update(
-                        {key: value for key, value in payload.items() if value is not None}
-                    )
+                    known_context.update(public_context(payload))
                     context = await self.repository.assistant_turn_context(
                         conversation_id=UUID(str(payload["conversation_id"])),
                         trace_id=UUID(str(payload["trace_id"])),
@@ -371,7 +385,12 @@ class AssistantFacadeService:
                         "trace_id": payload.get("trace_id") or known_context.get("trace_id"),
                         "code": payload.get("code", "INTERNAL_ERROR"),
                         "message": payload.get("message", "回答生成失败"),
-                        "retryable": bool(payload.get("retryable", False)),
+                        "retryable": bool(
+                            payload.get(
+                                "retryable",
+                                payload.get("code") in _RETRYABLE_ERROR_CODES,
+                            )
+                        ),
                         "partial_content": "".join(answer_parts),
                     }
                     await self.repository.fail_assistant_request(

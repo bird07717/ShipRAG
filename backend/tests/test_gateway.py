@@ -4,6 +4,8 @@ import json
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
+
 from app.common.errors import ApiError
 from app.gateway.models import ChatEngine, ConversationMode, ExecutionPolicy, ResolvedPolicy
 from app.gateway.repository import GatewayRepository
@@ -26,6 +28,34 @@ class FakeGatewayRepository:
         self, *, support_trace_id: UUID, rag_trace_id: UUID, reason: str
     ) -> None:
         self.links.append((support_trace_id, rag_trace_id, reason))
+
+
+class _AssistantReadinessResult:
+    def __init__(self, row: dict[str, Any] | None) -> None:
+        self.row = row
+
+    def mappings(self) -> _AssistantReadinessResult:
+        return self
+
+    def one_or_none(self) -> dict[str, Any] | None:
+        return self.row
+
+
+class _AssistantReadinessEngine:
+    def __init__(self, row: dict[str, Any] | None) -> None:
+        self.row = row
+
+    def connect(self) -> _AssistantReadinessEngine:
+        return self
+
+    async def __aenter__(self) -> _AssistantReadinessEngine:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    async def execute(self, *_: object) -> _AssistantReadinessResult:
+        return _AssistantReadinessResult(self.row)
 
 
 class FakeSupport:
@@ -134,6 +164,44 @@ def test_policy_readiness_requires_only_the_engines_selected_by_policy() -> None
     assert GatewayRepository._policy_blockers(
         ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK, readiness
     ) == ["support blocked", "rag blocked"]
+
+
+async def test_assistant_readiness_accepts_enabled_knowledge_base_with_active_index() -> None:
+    repository = GatewayRepository(
+        _AssistantReadinessEngine(
+            {"status": "ENABLED", "active_index_id": uuid4(), "index_status": "ACTIVE"}
+        ),  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+    )
+
+    await repository.ensure_assistant_knowledge_base_ready(knowledge_id=uuid4())
+
+
+async def test_assistant_readiness_returns_stable_public_errors() -> None:
+    cases = [
+        (None, "KNOWLEDGE_BASE_NOT_FOUND"),
+        (
+            {"status": "DISABLED", "active_index_id": uuid4(), "index_status": "ACTIVE"},
+            "FORBIDDEN",
+        ),
+        (
+            {"status": "ENABLED", "active_index_id": None, "index_status": None},
+            "KNOWLEDGE_BASE_NOT_READY",
+        ),
+        (
+            {"status": "ENABLED", "active_index_id": uuid4(), "index_status": "BUILDING"},
+            "INDEX_NOT_READY",
+        ),
+    ]
+
+    for row, expected_code in cases:
+        repository = GatewayRepository(
+            _AssistantReadinessEngine(row),  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]
+        )
+        with pytest.raises(ApiError) as raised:
+            await repository.ensure_assistant_knowledge_base_ready(knowledge_id=uuid4())
+        assert raised.value.code == expected_code
 
 
 def kwargs(knowledge_id: UUID) -> dict[str, Any]:

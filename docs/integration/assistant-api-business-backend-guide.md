@@ -1,288 +1,956 @@
-# Assistant API 业务后台对接指南
+# Assistant API 业务后台对接契约
 
-## 1. 生产入口与配置
+## 目录
 
-| 项目 | 值 |
-| --- | --- |
-| Shipdemo 内网 IP | `172.17.2.12` |
-| Base URL | `http://172.17.2.12:18080` |
-| Assistant API | `http://172.17.2.12:18080/api/v1/assistant` |
-| 就绪检查 | `http://172.17.2.12:18080/health/ready` |
+- [1. 服务信息](#1-服务信息)
+- [2. 环境与鉴权](#2-环境与鉴权)
+- [3. 公共调用契约](#3-公共调用契约)
+- [4. 整体接入流程](#4-整体接入流程)
+- [5. 接口调用关系](#5-接口调用关系)
+- [6. 接口清单](#6-接口清单)
+- [7. 核心对接规则](#7-核心对接规则)
+- [8. 性能压力与容量规则](#8-性能压力与容量规则)
+- [9. 错误处理规则](#9-错误处理规则)
+- [10. 对接验收清单](#10-对接验收清单)
 
-以上是迁移完成后的目标地址；`/health/ready` 验收通过前不能视为已上线。Token 不由接口自动生成，必须由运维在 Shipdemo 与业务后台的服务端 Secret 中配置同一个值。
+## 1. 服务信息
 
-Shipdemo 生产环境：
+### 1.1 服务名称
 
-```env
-APP_HTTP_BIND_ADDRESS=0.0.0.0
-APP_HTTP_PORT=18080
-ASSISTANT_SERVICE_TOKEN=<由部署 Secret 注入的生产值>
-ASSISTANT_SERVICE_TOKEN_PREVIOUS=
+Shipdemo Assistant API
+
+### 1.2 服务说明
+
+向业务后台提供知识库查询、欢迎语、会话管理、流式问答、历史消息查询，以及回答所引用图片和文档的受控下载能力。
+
+业务 App、Web 页面不得直接调用本服务；所有请求应由业务后台发起或代理。
+
+## 2. 环境与鉴权
+
+### 2.1 基础地址
+
+- 目标生产地址：`http://172.17.2.12:18080`
+- Assistant API 前缀：`/api/v1/assistant`
+- 完整示例：`http://172.17.2.12:18080/api/v1/assistant/knowledge-bases`
+- 当前项目尚未迁移至目标服务器；完成部署并确认 `/health/ready` 返回 HTTP 200 后，以上地址才可用于正式联调。
+
+### 2.2 鉴权方式
+
+除健康检查外，所有接口均使用 Bearer Token：
+
+该凭据对应 Shipdemo 的 `ASSISTANT_SERVICE_TOKEN`，仅用于业务后台调用 Assistant API，不得与管理接口使用的 `SERVICE_TOKEN` 混用。
+
+当前处于测试联调阶段，已配置临时 Assistant Token，并通过安全渠道提供给对接方。该 Token 仅允许保存在双方服务端的 Secret 或环境变量中；正式上线前必须重新生成生产 Token、完成双方配置切换，并撤销测试 Token。文档不记录任何真实 Token 值。
+
+```http
+Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}
+X-External-User-ID: user-12345
+X-Request-ID: 550e8400-e29b-41d4-a716-446655440000
 ```
 
-业务后台：
+| Header | 必填 | 规则 |
+| --- | --- | --- |
+| `Authorization` | 是 | 格式固定为 `Bearer <token>`；Token 只保存在业务后台服务端密钥配置中，不得下发到浏览器、App 或日志。 |
+| `X-External-User-ID` | 是 | 业务系统内稳定且唯一的用户标识，长度 1～100；不得使用昵称等可变化字段。 |
+| `X-Request-ID` | 否 | 单次 HTTP 请求追踪标识，最长 128 字符；建议由业务后台生成 UUID。 |
+
+业务后台建议配置：
 
 ```env
 SHIPDEMO_BASE_URL=http://172.17.2.12:18080
-SHIPDEMO_ASSISTANT_TOKEN=<通过安全渠道取得的生产值>
+SHIPDEMO_ASSISTANT_TOKEN=<7sD9kF2pR5bN8vQ3gX1jZ4cM6hT0wY7uA2eS9dG>
 SHIPDEMO_CONNECT_TIMEOUT_SECONDS=5
-SHIPDEMO_SSE_IDLE_TIMEOUT_SECONDS=25
+SHIPDEMO_READ_TIMEOUT_SECONDS=25
 ```
 
-- 生产 Token 只存放在双方服务端的 Secret/环境变量中，不写入代码、文档、URL 或日志，不下发给 App/Web。
-- 业务后台不使用 Shipdemo 管理端的 `SERVICE_TOKEN`。
-- 防火墙仅允许业务后台服务器访问 `172.17.2.12:18080`；具备内网 TLS 网关时改用 HTTPS 地址。
-- Token 轮换时，Shipdemo 临时将旧值配置到 `ASSISTANT_SERVICE_TOKEN_PREVIOUS`，业务后台切换完成后清空旧值并重新部署。
+流式问答不能使用普通 25 秒整体读取超时，应分别配置连接超时、首事件超时和业务总时限。
 
-连通性检查：
+## 3. 公共调用契约
 
-```bash
-curl --fail http://172.17.2.12:18080/health/ready
-
-curl --fail \
-  -H "Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}" \
-  -H "X-External-User-ID: integration-check" \
-  http://172.17.2.12:18080/api/v1/assistant/knowledge-bases
-```
-
-## 2. 调用契约
-
-除健康检查外，所有 Assistant 接口都必须携带：
-
-```http
-Authorization: Bearer <SHIPDEMO_ASSISTANT_TOKEN>
-X-External-User-ID: <业务后台生成的稳定用户 ID>
-X-Request-ID: <业务调用链 ID，可选但建议提供>
-```
-
-`X-External-User-ID` 长度为 1～100 字符，必须由业务后台从已登录用户生成；客户端不得提交或覆盖。聊天接口额外要求：
-
-```http
-Idempotency-Key: <本次业务请求的稳定唯一键，1～200 字符>
-Content-Type: application/json
-Accept: text/event-stream
-```
-
-### 2.1 接口清单
-
-| 用途 | 方法与路径 |
-| --- | --- |
-| 知识库列表 | `GET /api/v1/assistant/knowledge-bases` |
-| 欢迎语 | `GET /api/v1/assistant/knowledge-bases/{knowledge_id}/welcome` |
-| 会话列表 | `GET /api/v1/assistant/conversations?knowledge_id=...&limit=20&cursor=...` |
-| 会话详情 | `GET /api/v1/assistant/conversations/{conversation_id}` |
-| 历史消息 | `GET /api/v1/assistant/conversations/{conversation_id}/messages?limit=50&before=...` |
-| 流式问答 | `POST /api/v1/assistant/chat/stream` |
-| 下载文档 | `GET /api/v1/assistant/knowledge-bases/{knowledge_id}/documents/{document_id}/content` |
-| 加载图片 | `GET /api/v1/assistant/knowledge-bases/{knowledge_id}/image-assets/{image_asset_id}/content` |
-
-完整字段结构见[《Assistant API 完整接口契约》](assistant-api-integration-guide.md)。
-
-### 2.2 首次提问
-
-无需预创建会话，`conversation_id` 传 `null`：
-
-```bash
-curl --no-buffer \
-  -X POST "${SHIPDEMO_BASE_URL}/api/v1/assistant/chat/stream" \
-  -H "Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}" \
-  -H "X-External-User-ID: business-user-123" \
-  -H "X-Request-ID: req-7f2c" \
-  -H "Idempotency-Key: 914f6886-8070-45fe-a9c3-bdc28f430beb" \
-  -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
-  --data '{
-    "knowledge_id": "4a4c40f1-04f9-4ae6-af4c-52392f302dfa",
-    "conversation_id": null,
-    "question": "如何更换保险丝？",
-    "choice_id": null,
-    "include_images": true
-  }'
-```
-
-请求约束：
-
-- `knowledge_id` 必须来自知识库列表，且 `ready=true`；不要硬编码 UUID。
-- `question` 必须为非空字符串，最长 4,000 字符。
-- `choice_id` 仅在回答澄清选项时传入，最长 100 字符。
-- 请求体禁止额外字段，业务后台不能选择内部执行引擎。
-
-### 2.3 继续会话
-
-只传本次新问题，不拼接历史消息：
+- JSON 请求和响应统一使用 UTF-8，时间统一为 ISO 8601 UTC 字符串，资源 ID 使用 UUID 字符串。
+- 请求字段按文档发送；未声明的额外字段可能返回 HTTP 422。
+- 响应中的可选字段可能缺失或为 `null`；调用方必须兼容新增字段和未知 SSE 事件。
+- 除 `/health/ready` 外，HTTP 非 2xx 错误统一按下列结构解析：
 
 ```json
 {
-  "knowledge_id": "4a4c40f1-04f9-4ae6-af4c-52392f302dfa",
-  "conversation_id": "be55b152-2cfb-43a1-91f6-bd227bc9289b",
-  "question": "下一步应该做什么？",
-  "choice_id": null,
-  "include_images": true
+  "error": {
+    "code": "CONVERSATION_NOT_FOUND",
+    "message": "会话不存在",
+    "details": {},
+    "request_id": "550e8400-e29b-41d4-a716-446655440000"
+  }
 }
 ```
 
-Shipdemo 会加载该会话的历史和冻结版本。会话必须同时属于当前 `X-External-User-ID` 和 `knowledge_id`，否则返回 `CONVERSATION_NOT_FOUND`。
+HTTP 错误字段：
 
-### 2.4 SSE 处理
+| 字段 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| `error` | object | 是 | 错误对象。 | 所有 HTTP 失败统一从该对象读取。 |
+| `error.code` | string | 是 | 稳定的机器可读错误码。 | 业务逻辑以该字段分支，不依赖 `message` 文案。 |
+| `error.message` | string | 是 | 用户可读错误说明。 | 可展示或映射为业务侧文案。 |
+| `error.details` | object | 是 | 补充信息；没有详情时为空对象。 | 仅辅助排查，调用方必须兼容新增字段。 |
+| `error.request_id` | string | 是 | 服务端请求追踪 ID。 | 记录到日志，联调或报障时提供。 |
 
-常规顺序：
+常见 `response_type`：
+
+| 值 | 含义 | 调用方处理 |
+| --- | --- | --- |
+| `ANSWERED` | 已生成正常回答。 | 展示 `answer` 及相关内容。 |
+| `UNCONFIRMED` | 当前资料不足以确认。 | 展示回答并提示用户补充信息。 |
+| `OUT_OF_SCOPE` | 问题不在服务范围内。 | 展示范围提示。 |
+| `DOC_DELIVERED` / `DOCUMENT_DELIVERED` | 已匹配并交付文档。 | 展示 `document`、`content` 和下载入口。 |
+| `CLARIFICATION_REQUIRED` | 需要用户进一步选择或补充。 | 根据 `clarification` 构建交互。 |
+| `ESCALATION_REQUIRED` | 建议转人工或升级处理。 | 根据 `escalation` 进入业务侧流程。 |
+| 其他值 | 后续扩展类型。 | 按普通文本回答兼容，不直接报错。 |
+
+- 流式问答在服务接受请求前发生的鉴权、参数、会话归属、知识库/索引可用性、幂等或并发错误，以 HTTP 4xx/5xx JSON 返回；接受请求后的生成错误，以 SSE `error` 事件返回。
+- `cursor`、`before` 均为不透明游标，只能原样回传，不得拆解、拼接或自行生成。
+
+## 4. 整体接入流程
+
+### 4.1 标准流程
 
 ```text
-accepted → progress* → context → delta* → complete
-                                  └──────────→ error
+1. 服务启动或定时探测：调用就绪检查
+2. 用户进入问答功能：查询可用知识库
+3. 用户选择知识库：查询欢迎语（可选）
+4. 业务后台创建 client_chat_id，并为首次提问生成 Idempotency-Key
+5. 首次流式问答：conversation_id 省略或传 null
+6. 收到 context/complete：保存 client_chat_id → conversation_id 映射
+7. 后续追问：携带同一 conversation_id，并为每次新提问生成新的 Idempotency-Key
+8. 页面恢复或历史查询：调用会话列表、会话详情和历史消息接口
+9. 展示引用资源：根据 document_id/image_asset_id，由业务后台代理下载
 ```
 
-| 事件 | 业务后台动作 |
+### 4.2 流式问答状态处理
+
+```text
+提交请求
+  ├─ HTTP 4xx/5xx：请求未被接受，按 error.code 处理
+  └─ HTTP 200：开始解析 SSE
+       ├─ accepted：前置检查通过
+       ├─ progress/context/delta：更新进度、会话映射和临时回答
+       ├─ complete：本轮成功，保存最终回答和资源 ID
+       ├─ error：本轮失败，按 retryable 决定是否允许重试
+       └─ 网络中断且无终态：结果未知，使用原 Key 和原请求体重试
+```
+
+### 4.3 页面恢复流程
+
+1. 使用接口 4 查询当前用户在目标知识库下的会话列表。
+2. 用户选择会话后，使用接口 5 确认会话仍然存在。
+3. 使用接口 6 加载最近一页消息；存在 `next_before` 时按需加载更早消息。
+4. 历史回答包含资源 ID 时，通过接口 8 或接口 9 重新获取资源。
+5. 会话返回 404 时，删除业务后台中的旧映射，并按首次问答流程创建新会话。
+
+## 5. 接口调用关系
+
+| 顺序 | 当前接口 | 关键输入来源 | 关键输出 | 后续用途 | 是否必调 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 接口 1：就绪检查 | 固定基础地址 | `status` | 判断是否允许发起业务请求 | 上线验收必调，运行期建议定时调用 |
+| 2 | 接口 2：知识库列表 | 当前用户身份 | `knowledge_id`、`ready` | 欢迎语、问答、资源下载 | 必调 |
+| 3 | 接口 3：欢迎语 | 接口 2 的 `knowledge_id` | `message`、`suggestions` | 页面展示或快捷提问 | 可选 |
+| 4 | 接口 7：首次问答 | `knowledge_id`、新 `Idempotency-Key` | `conversation_id`、最终回答 | 建立会话映射并继续追问 | 必调 |
+| 5 | 接口 7：继续问答 | 已保存的 `conversation_id`、新 `Idempotency-Key` | 新消息、引用和资源 ID | 更新当前对话 | 按需重复调用 |
+| 6 | 接口 4：会话列表 | `knowledge_id` | `conversation_id`、`next_cursor` | 选择历史会话、继续分页 | 有历史页面时调用 |
+| 7 | 接口 5：会话详情 | 接口 4 或接口 7 的 `conversation_id` | 会话元数据 | 校验和展示会话 | 可选 |
+| 8 | 接口 6：历史消息 | `conversation_id` | 消息、`next_before`、资源 ID | 恢复对话、继续分页或下载资源 | 有历史页面时调用 |
+| 9 | 接口 8/9：资源下载 | 回答或历史消息中的资源 ID | 文档/图片二进制 | 由业务后台代理给前端 | 有资源时调用 |
+
+关键传递关系：
+
+- `knowledge_id` 只能来自接口 2，后续传给接口 3、7、8、9。
+- `conversation_id` 来自接口 7 的 `context`/`complete` 或接口 4，后续传给接口 5、6、7。
+- `document_id` 来自 `complete.references[].document_id`、`complete.document.id` 或历史消息中的对应字段，传给接口 8。
+- `image_asset_id` 来自 `complete.content` 或历史消息的 `content_blocks`，传给接口 9。
+- `next_cursor` 只回传给接口 4；`next_before` 只回传给接口 6。
+- `Idempotency-Key` 由业务后台生成，不来自其他接口；一次用户主动发送对应一个 Key。
+
+## 6. 接口清单
+
+### 6.1 接口 1：服务就绪检查
+
+接口名称：服务就绪检查
+
+接口用途：判断 Assistant 服务及其关键依赖是否可接收请求。
+
+method：`GET`
+
+url：`{BASE_URL}/health/ready`
+
+请求参数：无；不需要鉴权 Header。
+
+请求示例：
+
+```bash
+curl -i "${SHIPDEMO_BASE_URL}/health/ready"
+```
+
+成功响应示例：
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"status":"ready","checks":{"postgres":{"status":"ok","latency_ms":3.2},"redis":{"status":"ok","latency_ms":1.1},"minio":{"status":"ok","latency_ms":2.4}}}
+```
+
+响应字段说明：
+
+| 字段 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| `status` | string | 是 | `ready` 表示服务可用，`not_ready` 表示至少一项依赖异常。 | 只有 `ready` 才允许继续调用业务接口。 |
+| `checks` | object | 是 | 各项就绪检查结果，键名可能扩展。 | 遍历展示或记录，不依赖固定数量。 |
+| `checks.<name>.status` | string | 是 | 单项状态：`ok` 或 `error`。 | `error` 时记录对应检查项。 |
+| `checks.<name>.latency_ms` | number | 是 | 单项检查耗时，单位毫秒。 | 用于监控，不作为业务成功条件。 |
+| `checks.<name>.version` | string | 否 | 依赖版本；并非所有检查项都会返回。 | 可记录，不能设为必填。 |
+| `checks.<name>.detail` | string | 否 | 不可用时的简要原因。 | 用于排查，不直接展示给终端用户。 |
+
+失败响应示例：
+
+```http
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+
+{"status":"not_ready","checks":{"postgres":{"status":"error","detail":"dependency unavailable","latency_ms":5.1},"redis":{"status":"ok","latency_ms":1.1},"minio":{"status":"ok","latency_ms":2.4}}}
+```
+
+特殊规则：只有 HTTP 200 才表示服务可用；响应字段可扩展，调用方不得依赖 `checks` 中固定的检查项数量。
+
+---
+
+### 6.2 接口 2：查询可用知识库
+
+接口名称：查询可用知识库
+
+接口用途：取得当前 Token 允许业务用户使用的知识库。
+
+method：`GET`
+
+url：`{BASE_URL}/api/v1/assistant/knowledge-bases`
+
+请求参数：无 Query 参数；必须携带公共鉴权 Header。
+
+请求示例：
+
+```bash
+curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/knowledge-bases" \
+  -H "Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}" \
+  -H "X-External-User-ID: user-12345"
+```
+
+成功响应示例：
+
+```json
+{
+  "items": [
+    {
+      "knowledge_id": "5ae9881a-a568-436b-9330-2da5e9a2a9c9",
+      "name": "船舶业务知识库",
+      "description": "船舶业务问答",
+      "ready": true
+    }
+  ]
+}
+```
+
+响应字段说明：
+
+| 字段 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| `items` | array | 是 | 当前 Assistant 接口可见的知识库列表；无可用项时为空数组。 | 遍历展示，不得假定至少存在一项。 |
+| `items[].knowledge_id` | UUID string | 是 | 知识库唯一标识。 | 保存为字符串，供欢迎语、问答和资源接口使用。 |
+| `items[].name` | string | 是 | 知识库名称。 | 用于页面展示。 |
+| `items[].description` | string/null | 否 | 知识库说明。 | 为空时隐藏说明区域。 |
+| `items[].ready` | boolean | 是 | 是否具备基本问答条件。 | 仅允许选择 `true` 的知识库。 |
+
+失败响应示例：
+
+```http
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+
+{"error":{"code":"AUTHENTICATION_REQUIRED","message":"服务访问凭据无效","details":{},"request_id":"..."}}
+```
+
+特殊规则：业务后台只能展示或使用响应中返回且 `ready=true` 的知识库；不得在代码中长期硬编码知识库 ID。
+
+---
+
+### 6.3 接口 3：查询知识库欢迎语
+
+接口名称：查询知识库欢迎语
+
+接口用途：在用户进入问答页面时展示知识库欢迎信息。
+
+method：`GET`
+
+url：`{BASE_URL}/api/v1/assistant/knowledge-bases/{knowledge_id}/welcome`
+
+请求参数：
+
+| 位置 | 参数 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| Path | `knowledge_id` | 是 | 接口 2 返回的知识库 UUID。 |
+
+请求示例：
+
+```bash
+curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/knowledge-bases/5ae9881a-a568-436b-9330-2da5e9a2a9c9/welcome" \
+  -H "Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}" \
+  -H "X-External-User-ID: user-12345"
+```
+
+成功响应示例：
+
+```json
+{
+  "knowledge_id": "5ae9881a-a568-436b-9330-2da5e9a2a9c9",
+  "message": "您好，请问需要查询什么内容？",
+  "suggestions": ["查询操作流程", "查看常见问题"]
+}
+```
+
+响应字段说明：
+
+| 字段 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| `knowledge_id` | UUID string | 是 | 当前欢迎语所属知识库。 | 可用于校验响应是否对应当前选择。 |
+| `message` | string | 是 | 欢迎文案。 | 作为页面初始提示展示，不写入会话历史。 |
+| `suggestions` | string[] | 是 | 推荐问题列表，可能为空。 | 可渲染为快捷提问；点击后仍按一次新问答处理。 |
+
+失败响应示例：
+
+```http
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{"error":{"code":"KNOWLEDGE_BASE_NOT_FOUND","message":"知识库不存在","details":{},"request_id":"..."}}
+```
+
+特殊规则：欢迎语只用于展示，不产生会话或历史消息；失败时业务页面可使用本地默认文案，不应阻断问答功能。
+
+---
+
+### 6.4 接口 4：查询会话列表
+
+接口名称：查询会话列表
+
+接口用途：分页查询指定用户在指定知识库下的历史会话。
+
+method：`GET`
+
+url：`{BASE_URL}/api/v1/assistant/conversations`
+
+请求参数：
+
+| 位置 | 参数 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| Query | `knowledge_id` | 是 | 知识库 UUID。 |
+| Query | `limit` | 否 | 1～100，默认 20。 |
+| Query | `cursor` | 否 | 上一页响应的 `next_cursor`，最长 500 字符。 |
+
+请求示例：
+
+```bash
+curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/conversations?knowledge_id=5ae9881a-a568-436b-9330-2da5e9a2a9c9&limit=20" \
+  -H "Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}" \
+  -H "X-External-User-ID: user-12345"
+```
+
+成功响应示例：
+
+```json
+{
+  "items": [
+    {
+      "conversation_id": "b23a568e-5d20-42f3-87e6-d7019b992c70",
+      "knowledge": {
+        "knowledge_id": "5ae9881a-a568-436b-9330-2da5e9a2a9c9",
+        "name": "船舶业务知识库"
+      },
+      "title": "船舶证书如何办理",
+      "message_count": 2,
+      "created_at": "2026-09-08T02:00:00Z",
+      "last_activity_at": "2026-09-08T02:01:00Z",
+      "expires_at": "2026-09-15T02:01:00Z",
+      "status": "ACTIVE"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+响应字段说明：
+
+| 字段 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| `items` | array | 是 | 当前页会话，按最近活动时间倒序排列。 | 依次展示；空数组表示没有历史会话。 |
+| `items[].conversation_id` | UUID string | 是 | 会话唯一标识。 | 用于会话详情、历史消息和继续问答。 |
+| `items[].knowledge` | object | 是 | 会话所属知识库摘要。 | 展示知识库名称并校验当前页面上下文。 |
+| `items[].knowledge.knowledge_id` | UUID string | 是 | 所属知识库 ID。 | 继续问答时作为 `knowledge_id`。 |
+| `items[].knowledge.name` | string | 是 | 所属知识库名称。 | 用于展示。 |
+| `items[].title` | string/null | 否 | 会话标题。 | 为空时使用本地默认标题。 |
+| `items[].message_count` | integer | 是 | 会话内消息总数。 | 用于展示，不用于分页计算。 |
+| `items[].created_at` | datetime string | 是 | 会话创建时间。 | 按业务时区格式化展示。 |
+| `items[].last_activity_at` | datetime string | 是 | 最近活动时间。 | 用于排序展示。 |
+| `items[].expires_at` | datetime string/null | 否 | 会话预计过期时间；未启用保留期时可为 `null`。 | 可用于过期提示，不作为本地删除指令。 |
+| `items[].status` | string | 是 | 当前固定为 `ACTIVE`。 | 兼容未来新增状态。 |
+| `next_cursor` | string/null | 是 | 下一页游标；`null` 表示没有下一页。 | 非空时原样传给下一次接口 4 请求。 |
+
+失败响应示例：
+
+```http
+HTTP/1.1 422 Unprocessable Entity
+Content-Type: application/json
+
+{"error":{"code":"INVALID_CURSOR","message":"分页游标无效","details":{},"request_id":"..."}}
+```
+
+特殊规则：会话按 Token 权限、`X-External-User-ID` 和 `knowledge_id` 隔离；只使用服务端返回的游标翻页。会话存在保留周期，调用方不得将此接口作为永久业务档案存储。
+
+---
+
+### 6.5 接口 5：查询会话详情
+
+接口名称：查询会话详情
+
+接口用途：根据会话 ID 查询会话基本信息。
+
+method：`GET`
+
+url：`{BASE_URL}/api/v1/assistant/conversations/{conversation_id}`
+
+请求参数：
+
+| 位置 | 参数 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| Path | `conversation_id` | 是 | 流式问答返回或会话列表返回的 UUID。 |
+
+请求示例：
+
+```bash
+curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/conversations/b23a568e-5d20-42f3-87e6-d7019b992c70" \
+  -H "Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}" \
+  -H "X-External-User-ID: user-12345"
+```
+
+成功响应示例：
+
+```json
+{
+  "conversation_id": "b23a568e-5d20-42f3-87e6-d7019b992c70",
+  "knowledge": {
+    "knowledge_id": "5ae9881a-a568-436b-9330-2da5e9a2a9c9",
+    "name": "船舶业务知识库"
+  },
+  "title": "船舶证书如何办理",
+  "message_count": 2,
+  "created_at": "2026-09-08T02:00:00Z",
+  "last_activity_at": "2026-09-08T02:01:00Z",
+  "expires_at": "2026-09-15T02:01:00Z",
+  "status": "ACTIVE"
+}
+```
+
+响应字段说明：
+
+| 字段 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| `conversation_id` | UUID string | 是 | 会话唯一标识。 | 与请求 ID 对比，并用于历史消息或继续问答。 |
+| `knowledge` | object | 是 | 所属知识库摘要。 | 展示并校验知识库上下文。 |
+| `knowledge.knowledge_id` | UUID string | 是 | 所属知识库 ID。 | 继续问答时作为 `knowledge_id`。 |
+| `knowledge.name` | string | 是 | 所属知识库名称。 | 用于展示。 |
+| `title` | string/null | 否 | 会话标题。 | 为空时使用本地默认标题。 |
+| `message_count` | integer | 是 | 会话消息总数。 | 仅用于展示。 |
+| `created_at` | datetime string | 是 | 会话创建时间。 | 按业务时区格式化。 |
+| `last_activity_at` | datetime string | 是 | 最近活动时间。 | 用于展示或判断新旧。 |
+| `expires_at` | datetime string/null | 否 | 预计过期时间。 | 可用于提醒；实际是否存在仍以接口返回为准。 |
+| `status` | string | 是 | 当前固定为 `ACTIVE`。 | 兼容未来新增状态。 |
+
+失败响应示例：
+
+```http
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{"error":{"code":"CONVERSATION_NOT_FOUND","message":"会话不存在","details":{},"request_id":"..."}}
+```
+
+特殊规则：同一 `conversation_id` 只能由创建它的外部用户访问；404 时不得自动改用其他用户身份重试。
+
+---
+
+### 6.6 接口 6：查询会话历史消息
+
+接口名称：查询会话历史消息
+
+接口用途：加载指定会话的用户提问、Assistant 回答及关联资源。
+
+method：`GET`
+
+url：`{BASE_URL}/api/v1/assistant/conversations/{conversation_id}/messages`
+
+请求参数：
+
+| 位置 | 参数 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| Path | `conversation_id` | 是 | 会话 UUID。 |
+| Query | `limit` | 否 | 1～100，默认 50。 |
+| Query | `before` | 否 | 上一页响应的 `next_before`，最长 32 字符。 |
+
+请求示例：
+
+```bash
+curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/conversations/b23a568e-5d20-42f3-87e6-d7019b992c70/messages?limit=50" \
+  -H "Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}" \
+  -H "X-External-User-ID: user-12345"
+```
+
+成功响应示例：
+
+```json
+{
+  "items": [
+    {
+      "message_id": "1ea8f37d-3c89-4730-a933-0c6b3979cf65",
+      "conversation_id": "b23a568e-5d20-42f3-87e6-d7019b992c70",
+      "role": "USER",
+      "status": "COMPLETED",
+      "content": "船舶证书如何办理？",
+      "trace_id": null,
+      "response_type": null,
+      "content_blocks": [],
+      "sections": [],
+      "document": null,
+      "references": [],
+      "clarification": null,
+      "escalation": null,
+      "disclaimer": null,
+      "error": null,
+      "created_at": "2026-09-08T02:00:00Z",
+      "updated_at": "2026-09-08T02:00:00Z"
+    },
+    {
+      "message_id": "f115de3b-30dd-462b-b07f-e88ae102a289",
+      "conversation_id": "b23a568e-5d20-42f3-87e6-d7019b992c70",
+      "role": "ASSISTANT",
+      "content": "办理流程如下……",
+      "status": "COMPLETED",
+      "trace_id": "0a377fb1-a80f-43a6-85ee-189de51d15f9",
+      "response_type": "ANSWERED",
+      "content_blocks": [],
+      "sections": [],
+      "document": null,
+      "references": [
+        {
+          "document_id": "79271b06-cf5e-4c6c-aea9-c8b48f803543",
+          "title": "船舶证书办理指南"
+        }
+      ],
+      "clarification": null,
+      "escalation": null,
+      "disclaimer": null,
+      "error": null,
+      "created_at": "2026-09-08T02:00:10Z",
+      "updated_at": "2026-09-08T02:00:10Z"
+    }
+  ],
+  "next_before": null
+}
+```
+
+响应字段说明：
+
+| 字段 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| `items` | array | 是 | 当前页消息，按会话内时间正序排列。 | 按数组顺序渲染。 |
+| `items[].message_id` | UUID string | 是 | 消息唯一标识。 | 用于前端列表 Key 和本地幂等更新。 |
+| `items[].conversation_id` | UUID string | 是 | 消息所属会话。 | 校验是否属于当前会话。 |
+| `items[].role` | string | 是 | `USER` 或 `ASSISTANT`。 | 决定消息展示方向。 |
+| `items[].status` | string | 是 | `GENERATING`、`COMPLETED`、`FAILED` 或 `CANCELLED`。 | 只有 `COMPLETED` 表示回答完整成功。 |
+| `items[].content` | string | 是 | 用户问题或 Assistant 最终文本。 | 作为历史正文展示。 |
+| `items[].trace_id` | UUID string/null | 否 | Assistant 回答的追踪标识。 | 故障反馈时随 `request_id` 一并提供。 |
+| `items[].response_type` | string/null | 否 | 回答类型。 | 用于选择展示组件；未知值按普通文本兼容。 |
+| `items[].content_blocks` | object[] | 是 | 结构化内容块，常见类型为 `text`、`table`、`image`。 | 按 `type` 渲染；未知类型忽略。 |
+| `items[].content_blocks[].type` | string | 条件必有 | 内容块类型。 | `text/table` 展示文本，`image` 使用资源 ID 加载图片。 |
+| `items[].content_blocks[].text` | string/null | 否 | 文本或表格内容。 | 存在时按原顺序展示。 |
+| `items[].content_blocks[].image_asset_id` | UUID string/null | 否 | 图片资源 ID。 | 存在时调用接口 9。 |
+| `items[].sections` | object[] | 是 | 可选的分段结构。 | 支持时分段展示，否则使用 `content`。 |
+| `items[].document` | object/null | 否 | 单文档交付信息，常用字段为 `id`、`title`。 | 使用 `id` 调用接口 8，不拼接内部地址。 |
+| `items[].references` | object[] | 是 | 回答引用列表，常用字段为 `document_id`、`title`。 | 显示标题；存在 `document_id` 时可调用接口 8。 |
+| `items[].clarification` | object/null | 否 | 需要用户补充信息时的结构化内容。 | 根据内容生成补充提问交互。 |
+| `items[].escalation` | object/null | 否 | 建议转人工或升级处理的信息。 | 交给业务侧人工流程。 |
+| `items[].disclaimer` | string/null | 否 | 回答附加提示。 | 在回答附近展示。 |
+| `items[].error` | object/null | 否 | 失败或取消消息的错误信息。 | 非空时显示失败状态，不把不完整内容当作成功答案。 |
+| `items[].error.code` | string | 条件必有 | 机器可读错误码。 | 用于业务分支和日志。 |
+| `items[].error.message` | string | 条件必有 | 用户可读错误说明。 | 可展示给用户。 |
+| `items[].error.retryable` | boolean/null | 否 | 是否建议重试。 | `true` 时提供重试入口。 |
+| `items[].created_at` | datetime string | 是 | 消息创建时间。 | 按业务时区展示。 |
+| `items[].updated_at` | datetime string | 是 | 消息最后更新时间。 | 用于本地记录更新判断。 |
+| `next_before` | string/null | 是 | 更早一页游标；`null` 表示没有更早消息。 | 非空时原样传给接口 6。 |
+
+失败响应示例：
+
+```http
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{"error":{"code":"CONVERSATION_NOT_FOUND","message":"会话不存在","details":{},"request_id":"..."}}
+```
+
+特殊规则：单页 `items` 按时间正序返回；首次请求返回最近一页，更早消息使用 `next_before` 查询。调用方应兼容回答状态不是 `COMPLETED` 的历史记录。
+
+---
+
+### 6.7 接口 7：流式问答
+
+接口名称：流式问答
+
+接口用途：提交用户问题，并通过 SSE 持续返回回答、引用和资源信息。
+
+method：`POST`
+
+url：`{BASE_URL}/api/v1/assistant/chat/stream`
+
+请求参数：
+
+Header：
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `Authorization` | 是 | Bearer Token。 |
+| `X-External-User-ID` | 是 | 当前业务用户稳定 ID。 |
+| `Idempotency-Key` | 是 | 1～200 字符；每次用户主动发送生成一个新值，建议 UUID。 |
+| `X-Request-ID` | 否 | HTTP 请求追踪 ID。 |
+| `Content-Type` | 是 | `application/json`。 |
+| `Accept` | 建议 | `text/event-stream`。 |
+
+Body：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `knowledge_id` | UUID string | 是 | 知识库 ID。 |
+| `conversation_id` | UUID string / null | 否 | 首次问答省略或传 `null`，追问传服务返回的会话 ID。 |
+| `question` | string | 是 | 本次新增问题，长度 1～4000；不要拼接完整历史。 |
+| `choice_id` | string / null | 否 | 用户选择建议选项时回传，长度 1～100。 |
+| `include_images` | boolean | 否 | 是否返回图片资源，默认 `true`。 |
+
+请求示例：
+
+```bash
+curl -N "${SHIPDEMO_BASE_URL}/api/v1/assistant/chat/stream" \
+  -H "Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}" \
+  -H "X-External-User-ID: user-12345" \
+  -H "X-Request-ID: 916752f2-5256-46d3-a186-e62417e3f23a" \
+  -H "Idempotency-Key: 2f965322-c441-4ce3-8371-9ae612c46e71" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  --data '{
+    "knowledge_id":"5ae9881a-a568-436b-9330-2da5e9a2a9c9",
+    "conversation_id":null,
+    "question":"船舶证书如何办理？",
+    "choice_id":null,
+    "include_images":true
+  }'
+```
+
+成功响应示例：
+
+```text
+event: accepted
+data: {"request_id":"916752f2-5256-46d3-a186-e62417e3f23a","knowledge_id":"5ae9881a-a568-436b-9330-2da5e9a2a9c9","conversation_id":null}
+
+event: progress
+data: {"stage":"PREPARING"}
+
+event: context
+data: {"conversation_id":"b23a568e-5d20-42f3-87e6-d7019b992c70","user_message_id":"1ea8f37d-3c89-4730-a933-0c6b3979cf65","assistant_message_id":"f115de3b-30dd-462b-b07f-e88ae102a289","trace_id":"0a377fb1-a80f-43a6-85ee-189de51d15f9"}
+
+event: delta
+data: {"message_id":"f115de3b-30dd-462b-b07f-e88ae102a289","text":"办理流程"}
+
+event: delta
+data: {"message_id":"f115de3b-30dd-462b-b07f-e88ae102a289","text":"如下……"}
+
+event: complete
+data: {"request_id":"916752f2-5256-46d3-a186-e62417e3f23a","conversation_id":"b23a568e-5d20-42f3-87e6-d7019b992c70","message_id":"f115de3b-30dd-462b-b07f-e88ae102a289","trace_id":"0a377fb1-a80f-43a6-85ee-189de51d15f9","response_type":"ANSWERED","answer":"办理流程如下……","content":[{"type":"text","text":"办理流程如下……"},{"type":"image","image_asset_id":"5b594127-f6b8-41b0-8bd8-5df90f47ff26"}],"sections":[],"references":[{"document_id":"79271b06-cf5e-4c6c-aea9-c8b48f803543","title":"船舶证书办理指南"}],"next_suggestions":[],"created_at":"2026-09-08T02:00:10Z"}
+
+```
+
+响应 Header：
+
+| Header | 说明 | 调用方处理 |
+| --- | --- | --- |
+| `Content-Type` | `text/event-stream`。 | 使用 SSE 流解析，不按普通 JSON 读取。 |
+| `X-Request-ID` | 本次请求追踪 ID。 | 保存到日志，故障反馈时提供。 |
+| `Cache-Control` | 禁止缓存和转换。 | 代理层保持原值。 |
+| `X-Accel-Buffering` | 值为 `no`。 | Nginx 等代理不得缓冲流。 |
+
+SSE 事件关系：
+
+| 事件 | 是否终态 | 主要字段 | 含义 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| `accepted` | 否 | `request_id`、`knowledge_id`、`conversation_id` | 请求已通过前置检查。 | 标记本轮已接受，开始等待后续事件。 |
+| `progress` | 否 | `stage` | 当前处理阶段。 | 更新进度提示；同一请求可能出现多次。 |
+| `context` | 否 | 会话和消息 ID | 返回本轮持久化标识。 | 立即保存 `conversation_id` 和消息映射。 |
+| `delta` | 否 | `message_id`、`text` | 回答文本增量。 | 按收到顺序追加到临时显示内容。 |
+| `complete` | 是 | 最终回答、引用和资源 | 本轮成功结束。 | 使用该事件覆盖临时内容并保存终态。 |
+| `error` | 是 | 错误码、消息、重试信息 | 本轮失败结束。 | 停止读取，按 `retryable` 决定交互。 |
+
+公共及过程事件字段：
+
+| 事件.字段 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| `accepted.request_id` | string | 是 | 请求追踪 ID。 | 与请求日志关联。 |
+| `accepted.knowledge_id` | UUID string | 是 | 本轮知识库 ID。 | 校验当前页面上下文。 |
+| `accepted.conversation_id` | UUID string/null | 是 | 续聊时为已有会话；首次问答通常为 `null`。 | 首次问答等待 `context` 获取新 ID。 |
+| `progress.stage` | string | 是 | `PREPARING`、`RETRIEVING` 或 `GENERATING`。 | 映射为业务侧进度文案；未知值使用通用文案。 |
+| `context.conversation_id` | UUID string | 是 | 本轮所属会话。 | 建立或更新 `client_chat_id → conversation_id` 映射。 |
+| `context.user_message_id` | UUID string/null | 否 | 本轮用户消息 ID。 | 保存为本地消息映射。 |
+| `context.assistant_message_id` | UUID string/null | 否 | 本轮 Assistant 消息 ID。 | 后续 `delta` 和终态按此 ID 更新。 |
+| `context.trace_id` | UUID string/null | 否 | 本轮追踪 ID。 | 故障反馈时提供。 |
+| `delta.message_id` | UUID string/null | 否 | 当前 Assistant 消息 ID。 | 存在时按 ID 合并；为空时归入当前请求。 |
+| `delta.text` | string | 是 | 本次新增文本片段，可能很短。 | 原样按顺序追加，不自行插入分隔符。 |
+
+`complete` 字段：
+
+| 字段 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| `request_id` | string | 是 | 请求追踪 ID。 | 与当前请求核对并记录。 |
+| `conversation_id` | UUID string | 是 | 会话 ID。 | 保存，后续追问必须回传。 |
+| `message_id` | UUID string | 是 | 最终 Assistant 消息 ID。 | 按 ID 幂等保存最终回答。 |
+| `trace_id` | UUID string/null | 否 | 本轮追踪 ID。 | 故障反馈时提供。 |
+| `response_type` | string/null | 否 | 回答类型。 | 选择展示组件；未知值按普通文本处理。 |
+| `answer` | string | 是 | 完整最终回答。 | 覆盖由 `delta` 拼接的临时文本。 |
+| `content` | object[] | 是 | 结构化内容块，常见类型为 `text`、`table`、`image`。 | 按数组顺序和 `type` 渲染。 |
+| `content[].type` | string | 条件必有 | 内容块类型。 | `text/table` 展示文本，`image` 加载图片；未知类型忽略。 |
+| `content[].text` | string/null | 否 | 文本或表格内容。 | 存在时原样展示。 |
+| `content[].image_asset_id` | UUID string/null | 否 | 图片资源 ID。 | 存在时调用接口 9。 |
+| `content[].source_id` | string/null | 否 | 内容块对应的引用标识。 | 可用于关联引用，不用于拼接下载地址。 |
+| `sections` | object[] | 是 | 分段回答结构，可能为空。 | 支持时分段展示，否则使用 `answer`。 |
+| `document` | object/null | 否 | 单文档交付信息，常用字段为 `id`、`title`。 | 使用 `document.id` 调用接口 8。 |
+| `references` | object[] | 是 | 回答引用列表。 | 展示引用；包含 `document_id` 时可下载。 |
+| `references[].document_id` | UUID string | 条件必有 | 被引用文档 ID。 | 与当前 `knowledge_id` 一起传给接口 8。 |
+| `references[].title` | string | 否 | 被引用文档标题。 | 用于展示下载入口名称。 |
+| `clarification` | object/null | 否 | 需要用户补充信息时的内容。 | 转换为补充提问交互。 |
+| `escalation` | object/null | 否 | 转人工或升级处理信息。 | 对接业务侧人工流程。 |
+| `disclaimer` | string/null | 否 | 附加提示。 | 在回答附近展示。 |
+| `next_suggestions` | string[] | 是 | 下一步建议问题，可能为空。 | 可渲染为快捷提问。 |
+| `created_at` | datetime string | 是 | 服务端生成终态的时间。 | 记录并按业务时区展示。 |
+
+`error` 字段：
+
+| 字段 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| `request_id` | string | 是 | 请求追踪 ID。 | 记录到错误日志。 |
+| `conversation_id` | UUID string/null | 否 | 已创建或已有的会话 ID。 | 非空时保存会话映射。 |
+| `message_id` | UUID string/null | 否 | 失败的 Assistant 消息 ID。 | 按 ID 标记失败。 |
+| `trace_id` | UUID string/null | 否 | 追踪 ID。 | 故障反馈时提供。 |
+| `code` | string | 是 | 机器可读错误码。 | 按错误码执行稳定业务分支。 |
+| `message` | string | 是 | 用户可读错误说明。 | 可直接展示或映射为业务文案。 |
+| `retryable` | boolean | 是 | 是否属于可重试错误。 | `true` 时提供重试入口；自动重试仍须遵守幂等规则。 |
+| `partial_content` | string | 否 | 失败前已经生成的文本，可能缺失或为空。 | 只能作为失败现场展示，不能当作完整答案保存。 |
+
+失败响应示例：
+
+请求接受前返回 HTTP JSON：
+
+```http
+HTTP/1.1 409 Conflict
+Content-Type: application/json
+
+{"error":{"code":"CONVERSATION_BUSY","message":"会话正在生成回答","details":{},"request_id":"..."}}
+```
+
+请求接受后返回 SSE `error`：
+
+```text
+event: error
+data: {"code":"TURN_DEADLINE_EXCEEDED","message":"服务繁忙，请稍后重试","request_id":"...","retryable":true,"partial_content":""}
+
+```
+
+特殊规则：
+
+- SSE 按空行分帧；同一事件可能包含多行 `data:`，不能按单个网络数据块解析。
+- 正常事件顺序为 `accepted → progress/context/delta → complete`；`progress` 和 `delta` 可出现多次，`complete` 与 `error` 均为终止事件。
+- HTTP 200 仅表示流已建立；只有收到 `complete` 才算业务成功，最终回答以 `complete.answer` 为准。
+- 服务可能发送以冒号开头的心跳注释，调用方应忽略但用于刷新空闲计时。
+- 网络中断且结果未知时，使用原 `Idempotency-Key` 和完全相同的请求体重试；用户主动再次发送时必须生成新 Key。
+- 同一个 `Idempotency-Key` 不得对应不同请求体；冲突时按失败处理，不可自动换 Key 掩盖问题。
+- 同一会话同一时刻只允许一个问答请求。首次问答尚未取得 `conversation_id` 时，业务后台应按自己的稳定聊天窗口标识串行化请求。
+- 幂等重放可能直接返回 `accepted → complete` 或 `accepted → error`，调用方不得假定一定会收到 `delta`。
+- 客户端断开后，业务后台应取消对上游 SSE 的读取，避免无效连接继续占用资源。
+
+---
+
+### 6.8 接口 8：下载引用文档
+
+接口名称：下载引用文档
+
+接口用途：根据回答或历史消息中的 `document_id` 获取原始文档内容。
+
+method：`GET`
+
+url：`{BASE_URL}/api/v1/assistant/knowledge-bases/{knowledge_id}/documents/{document_id}/content`
+
+请求参数：
+
+| 位置 | 参数 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| Path | `knowledge_id` | 是 | 当前会话所属知识库 UUID。 |
+| Path | `document_id` | 是 | `complete.references[].document_id`、`complete.document.id` 或历史消息返回的文档 UUID。 |
+
+请求示例：
+
+```bash
+curl -fS "${SHIPDEMO_BASE_URL}/api/v1/assistant/knowledge-bases/5ae9881a-a568-436b-9330-2da5e9a2a9c9/documents/79271b06-cf5e-4c6c-aea9-c8b48f803543/content" \
+  -H "Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}" \
+  -H "X-External-User-ID: user-12345" \
+  --output document.bin
+```
+
+成功响应示例：
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/pdf
+Content-Length: 245760
+Content-Disposition: attachment; filename="document.pdf"; filename*=UTF-8''document.pdf
+
+[binary body]
+```
+
+响应字段说明：
+
+| 响应项 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| Body | binary stream | 是 | 原始文档二进制内容。 | 边读边转发，不完整加载到内存。 |
+| `Content-Type` | Header | 是 | 文档 MIME 类型；无法识别时为 `application/octet-stream`。 | 原样转发给前端。 |
+| `Content-Length` | Header | 否 | 文档字节数；无法取得时可能缺失。 | 有值时原样转发并用于进度展示。 |
+| `Content-Disposition` | Header | 是 | `attachment` 及安全编码后的文件名。 | 原样转发，使浏览器按附件下载。 |
+| `Cache-Control` | Header | 是 | 私有短时缓存策略。 | 不得改成公共缓存。 |
+| `X-Content-Type-Options` | Header | 是 | 固定为 `nosniff`。 | 原样转发。 |
+
+失败响应示例：
+
+```http
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{"error":{"code":"DOCUMENT_NOT_FOUND","message":"文档不存在","details":{},"request_id":"..."}}
+```
+
+特殊规则：业务后台必须校验当前登录用户有权访问该知识库后再代理下载；应流式转发二进制响应及 `Content-Type`、`Content-Disposition`，并在存在时转发 `Content-Length`，不得把 Assistant Token 暴露给终端。
+
+---
+
+### 6.9 接口 9：下载回答图片
+
+接口名称：下载回答图片
+
+接口用途：根据回答内容中的 `image_asset_id` 获取图片二进制内容。
+
+method：`GET`
+
+url：`{BASE_URL}/api/v1/assistant/knowledge-bases/{knowledge_id}/image-assets/{image_asset_id}/content`
+
+请求参数：
+
+| 位置 | 参数 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| Path | `knowledge_id` | 是 | 当前会话所属知识库 UUID。 |
+| Path | `image_asset_id` | 是 | `complete.content` 中返回的图片资源 UUID。 |
+
+请求示例：
+
+```bash
+curl -fS "${SHIPDEMO_BASE_URL}/api/v1/assistant/knowledge-bases/5ae9881a-a568-436b-9330-2da5e9a2a9c9/image-assets/5b594127-f6b8-41b0-8bd8-5df90f47ff26/content" \
+  -H "Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}" \
+  -H "X-External-User-ID: user-12345" \
+  --output image.bin
+```
+
+成功响应示例：
+
+```http
+HTTP/1.1 200 OK
+Content-Type: image/png
+Content-Length: 48321
+
+[binary body]
+```
+
+响应字段说明：
+
+| 响应项 | 类型 | 是否必有 | 说明 | 调用方处理 |
+| --- | --- | --- | --- | --- |
+| Body | binary stream | 是 | 图片二进制内容。 | 边读边转发，不完整加载到内存。 |
+| `Content-Type` | Header | 是 | 图片 MIME 类型；无法识别时为 `application/octet-stream`。 | 原样转发并用于图片展示。 |
+| `Content-Length` | Header | 否 | 图片字节数；上游未提供时可能缺失。 | 存在时原样转发，不得设为业务必填。 |
+| `Cache-Control` | Header | 是 | 私有短时缓存策略。 | 不得改成公共缓存。 |
+| `X-Content-Type-Options` | Header | 是 | 固定为 `nosniff`。 | 原样转发。 |
+
+失败响应示例：
+
+```http
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{"error":{"code":"IMAGE_ASSET_NOT_FOUND","message":"图片不存在","details":{},"request_id":"..."}}
+```
+
+特殊规则：图片 URL 应由业务后台生成并代理访问；前端不得自行拼接 Assistant 地址或携带 Token。`Content-Length` 在上游未提供时可能缺失。下载失败时保留回答文本并显示资源不可用，不应判定整次问答失败。
+
+## 7. 核心对接规则
+
+1. 用户身份：`X-External-User-ID` 必须来自业务后台当前登录态，禁止接受前端任意传值后直接透传。
+2. 权限控制：业务后台应先校验用户是否可以使用目标知识库；Assistant 返回的可见列表仍是最终可调用范围。
+3. 幂等控制：业务后台应保存“业务发送记录 ID、`Idempotency-Key`、请求体摘要、`conversation_id`、终态”。结果未知时复用原 Key；明确失败后由用户重新发起时使用新 Key。
+4. 并发控制：同一会话严格串行。首次请求使用业务后台生成的稳定 `client_chat_id` 串行化，取得 `conversation_id` 后保存 `client_chat_id → conversation_id` 映射。
+5. SSE 转发：必须使用支持流式读取和即时刷新的 HTTP 客户端及网关配置；不得缓存完整答案后一次性返回。
+6. 资源访问：文档和图片只能通过接口 8、接口 9 受控访问；禁止将对象存储地址或 Assistant Token 返回给前端。
+7. 日志脱敏：可以记录 `X-Request-ID`、`Idempotency-Key`、状态码和耗时；不得记录 Token、完整问题、完整回答或文档二进制内容。
+8. 兼容性：未知 JSON 字段和未知非终止 SSE 事件应忽略；已声明字段类型变化、终止事件缺失或响应无法解析时应告警。
+
+## 8. 性能压力与容量规则
+
+| 压力来源 | 对接要求 |
 | --- | --- |
-| `accepted` | 标记上游已接收；不是成功终态 |
-| `progress` | 可转发进度提示，不参与成功判断 |
-| `context` | 保存 `conversation_id`、用户/助手消息 ID、`trace_id` |
-| `delta` | 按到达顺序追加 `text`，立即 flush 给客户端 |
-| `complete` | 唯一成功终态；用完整 `answer` 校正增量文本并幂等落库 |
-| `error` | 失败终态；保存 `code`、关联 ID 和 `partial_content` |
-| `: ping` | 15 秒无上游帧时的 SSE 注释心跳，不是业务事件 |
+| Chat SSE 长连接 | Chat 使用独立连接池；连接池容量至少覆盖允许的最大并发，并预留突发余量。 |
+| 元数据请求 | 知识库、会话和历史查询使用独立小连接池，避免被 Chat 长连接占满。 |
+| 图片和文档下载 | 使用独立并发及带宽限制，全程流式转发，禁止先完整读入内存。 |
+| 重试流量 | 仅对短暂故障有限重试；问答结果未知时复用原 Key，避免重复生成放大压力。 |
 
-必须满足：
+活跃 Chat 流可按“峰值发起速率 × 平均完整回答时间”估算。例如峰值 2 次/秒、平均 20 秒，平均约有 40 条活跃流；还需为突发流量预留连接、文件描述符和内存余量。该估算不是容量承诺。
 
-- `accepted` 表示认证、参数、会话权限、知识库状态、幂等和并发前置检查均已通过；在它之前失败时，接口返回对应 HTTP `4xx/5xx` JSON 错误，不建立 SSE。
-- 使用标准 SSE 解析器，兼容 TCP 拆包/粘包、`LF`/`CRLF`、多行 `data` 和注释帧。
-- HTTP `200` 只表示流已建立；必须等到 `complete` 或 `error`。
-- 幂等重放可能只有 `accepted → complete` 或 `accepted → error`，不能依赖一定出现 `context`/`delta`。
-- 忽略未知事件并记录事件名，不能因此中断当前流。
-- App 断开或用户停止生成时，立即取消业务后台到 Shipdemo 的上游请求。
-- 无终态断流时标记 `UNKNOWN`，使用原请求参数和原 `Idempotency-Key` 对账。
 
-### 2.5 历史与资源
+## 9. 错误处理规则
 
-- 会话列表默认 20、最大 100；`next_cursor` 原样作为下一页 `cursor`。
-- 消息列表默认 50、最大 100；`next_before` 原样作为下一页 `before`，单页消息按时间正序返回。
-- 会话默认保留 7 天，以 `last_activity_at` 计算；生产环境可通过 `CONVERSATION_RETENTION_DAYS` 覆盖。
-- 文档和图片由业务后台完成用户权限校验后流式代理；保留上游 `Content-Type`、可用的 `Content-Length` 和文档文件名，不得把 Shipdemo 地址或 Token 返回客户端，不得整文件读入内存。
-
-## 3. 业务后台内部实现约束
-
-### 3.1 权限边界
-
-Shipdemo 只按 `X-External-User-ID` 隔离会话，不掌握业务租户、角色或产品权限。业务后台必须校验用户能否：使用问答、访问知识库、查看会话、读取引用文档/图片。资源接口按知识库与资源 ID 校验，不替代业务权限校验。
-
-### 3.2 幂等与状态
-
-建议保存最小请求台账：
-
-```text
-client_request_id (unique) | client_chat_id | idempotency_key (unique) | business_user_id
-knowledge_id | conversation_id | request_id | user_message_id
-assistant_message_id | trace_id | request_payload_hash
-status: REQUESTED/ACCEPTED/STREAMING/COMPLETED/FAILED/CANCELLED/UNKNOWN
-error_code | started_at | first_delta_at | completed_at
-```
-
-- App 每次点击发送生成稳定 `client_request_id`；业务后台首次受理时生成一个 `Idempotency-Key`。
-- `client_chat_id` 是业务后台为一个聊天窗口/草稿会话生成的稳定 ID；首次取得 Shipdemo `conversation_id` 前，同一聊天窗口的所有发送操作必须复用它。它不是每次发送都变化的 `client_request_id`。
-- 相同 `client_request_id` 的重复提交必须复用原 Key 和原参数。
-- 相同 Key 修改问题、会话、`choice_id` 或 `include_images` 会返回 `IDEMPOTENCY_KEY_REUSED`。
-- 收到部分增量或结果未知后，不得换新 Key 静默重试；用原 Key 对账。
-- 只有明确失败后由用户主动重试，才创建新的业务请求和新 Key。
-- Shipdemo 是会话和消息正文的事实源；业务后台保存副本时，按 `conversation_id`、`assistant_message_id` 幂等 upsert。
-
-### 3.3 并发锁
-
-同一 Conversation 同时只能有一个生成请求：
-
-- 已有会话锁：`assistant:conversation:{conversation_id}`。
-- 新会话在取得 `context` 前的锁：`assistant:new:{user_id}:{knowledge_id}:{client_chat_id}`。
-- 收到 `context` 后保存 `client_chat_id → conversation_id` 映射，后续改用已有会话锁；同一 `client_chat_id` 不得同时创建多个 Shipdemo Conversation。
-- 多实例业务后台使用 Redis 锁或数据库唯一约束，不使用进程内锁。
-- 锁 TTL 覆盖请求总超时；收到终态或取消后主动释放。
-
-Shipdemo 数据库会以 `CONVERSATION_BUSY` 最终拒绝同会话并发，但业务后台应提前拦截，避免占用连接和模型资源。
-
-### 3.4 超时、取消和重试
-
-- 连接超时建议 3～5 秒；SSE 空闲超时不得低于 25 秒。
-- 端到端总超时按真实链路 p99 设置，并小于 Nginx 当前 180 秒读写超时。
-- HTTP 客户端不得自动使用新 Key 重试 POST。
-- 进程异常后将本地 `ACCEPTED/STREAMING` 改为 `UNKNOWN`，使用原 Key 与原参数对账。
-- 下游断开必须传播取消；Shipdemo 会将请求记为 `CANCELLED`。
-- 非流式 `4xx/5xx` 按 JSON 错误体处理；流建立后的失败按 SSE `error` 处理。
-
-### 3.5 核心处理流程
-
-```text
-认证用户 → 校验知识库/会话权限 → 获取或创建请求台账 → 获取会话锁
-  → 打开 Shipdemo SSE → accepted/context/delta 实时更新并转发
-  → complete 幂等落库，或 error/断流记录失败状态
-  → 关闭上游连接 → 释放锁
-```
-
-主要错误处理；“HTTP”表示在 `accepted` 前返回 JSON，“SSE”表示流建立后的 `error` 事件：
-
-| 错误码 | 载体 | 处理 |
+| 场景 | 典型状态/错误码 | 调用方处理 |
 | --- | --- | --- |
-| `AUTHENTICATION_REQUIRED` | HTTP 401 | 配置告警，不自动重试 |
-| `VALIDATION_ERROR` | HTTP 422 | 接入参数错误，记录告警 |
-| `CONVERSATION_NOT_FOUND` | HTTP 404 | 会话过期、越权或知识库不匹配；引导新建会话 |
-| `REQUEST_IN_PROGRESS` | HTTP 409 | 原 Key 仍在执行，不创建新请求 |
-| `ABANDONED_ASSISTANT_REQUEST` | SSE | 原请求已被运维恢复为失败终态；用户主动重试时使用新 Key |
-| `CONVERSATION_BUSY` | HTTP 409 | 阻止同会话重复发送 |
-| `IDEMPOTENCY_KEY_REUSED` | HTTP 409 | 幂等实现错误，立即告警 |
-| `KNOWLEDGE_BASE_NOT_READY` | HTTP 409/503 | 停止发送并刷新知识库状态 |
-| `TURN_DEADLINE_EXCEEDED` | SSE | 本轮失败；用户主动重试时使用新 Key |
+| Token 缺失或无效 | HTTP 401 `AUTHENTICATION_REQUIRED` | 不重试；检查业务后台密钥配置。 |
+| 知识库不存在、停用或未就绪 | HTTP 404 `KNOWLEDGE_BASE_NOT_FOUND`、HTTP 403 `FORBIDDEN`、HTTP 409 `KNOWLEDGE_BASE_NOT_READY`/`INDEX_NOT_READY` | 刷新知识库列表；未就绪时稍后重试。 |
+| 参数或游标错误 | HTTP 422 | 修正请求；游标错误时从第一页重新加载。 |
+| 会话不存在 | HTTP 404 `CONVERSATION_NOT_FOUND` | 清理本地会话映射，回到新会话流程。 |
+| 会话正在处理 | HTTP 409 `CONVERSATION_BUSY` | 禁止并发发送；等待当前请求结束后再处理。 |
+| 幂等请求仍在处理 | HTTP 409 `REQUEST_IN_PROGRESS` | 使用原 Key 延迟重试，不生成新 Key。 |
+| 幂等 Key 与请求体冲突 | HTTP 409 `IDEMPOTENCY_KEY_REUSED` | 终止请求并告警，检查调用方幂等实现。 |
+| SSE `TURN_DEADLINE_EXCEEDED` | `error` 终止事件 | 标记本次失败；由用户重新发送时生成新 Key。 |
+| 资源暂时不可用 | HTTP 503 `ASSET_UNAVAILABLE` | 文本回答继续可用，资源入口提供稍后重试。 |
 
-## 4. 性能压力与容量边界
+自动重试仅适用于网络连接失败、HTTP 502/503/504 等短暂故障，建议最多 2 次并使用指数退避；流式问答在结果未知时必须复用原 `Idempotency-Key` 和相同请求体。
 
-### 4.1 当前实现事实
+## 10. 对接验收清单
 
-- Production Compose 默认启动 2 个 Uvicorn worker。
-- Assistant 当前没有独立 QPS、单用户或全局并发限制。
-- 每条 Chat 占用一条“客户端→业务后台”和一条“业务后台→Shipdemo”长连接。
-- Assistant 空闲心跳为 15 秒；RAG 单轮默认时限为 45 秒；Nginx `/api/` 读写超时为 180 秒且关闭响应缓冲。
-- 数据库引擎未显式配置连接池容量；增加 Uvicorn worker 会同步放大数据库连接数和模型调用并发。
-- 文档/图片以 64 KiB 分块从 MinIO 输出；高并发资源下载主要消耗 MinIO 连接与内网带宽。
-- `assistant_request` 当前没有独立清理任务，需要监控表增长。
-
-### 4.2 业务后台资源设计
-
-业务后台必须使用非阻塞流式 IO，并拆分连接池：
-
-| 连接池 | 用途 | 约束 |
-| --- | --- | --- |
-| Chat SSE | 长时间问答 | 容量不低于允许的最大 Chat 并发并保留突发余量 |
-| Metadata | 知识库、会话、历史 | 独立小池，不能被长流占满 |
-| Asset | 文档、图片 | 独立并发和带宽限制，全程流式转发 |
-
-并发限制至少覆盖：同会话 1、单用户、单租户、全局四级。超过已验证容量时快速返回业务侧 `429/503`，不要无限排队。
-
-### 4.3 压力估算与瓶颈
-
-```text
-平均活跃 Chat SSE ≈ 峰值发起速率（次/秒）× 平均完整回答时间（秒）
-```
-
-例如峰值 2 次/秒、平均 20 秒，平均约 40 条活跃 Chat 流；连接池、文件描述符、内存和网关连接上限还需预留突发余量。该公式不是容量承诺。
-
-压力优先级：
-
-1. 模型 Provider 的并发额度、429、首字延迟和生成速度。
-2. PostgreSQL 连接池等待、混合检索慢查询和锁等待。
-3. Shipdemo Uvicorn worker 的活跃 SSE、CPU、内存和事件循环延迟。
-4. 业务后台上下游连接池、文件描述符和断连回收。
-5. 文档/图片下载对 MinIO 和网络带宽的挤占。
-
-### 4.4 当前结论与压测门槛
-
-当前仓库只有 fake provider 负载验收，未覆盖“业务后台代理 + Assistant SSE + 真实模型”完整链路，因此不能承诺生产 QPS 或最大并发。
-
-上线前使用真实模型、代表性知识库和生产同规格环境验证：持续 Chat、2 倍短时突发、同 Key 重放、同会话并发、随机取消、Chat/历史/资源混合流量、Provider 429/超时及单实例退出。记录成功率、活跃 SSE、首字/完整耗时 p50/p95/p99、错误码、Provider 限流、CPU、内存、文件描述符、数据库连接池等待和慢查询；据此确定单用户、单租户和全局并发阈值。
-
-## 5. 上线检查
-
-- [ ] 业务后台可访问 `http://172.17.2.12:18080/health/ready`。
-- [ ] TCP 18080 仅对白名单业务后台开放。
-- [ ] 两端通过 Secret 配置相同 Assistant Token，客户端无 Token。
-- [ ] `X-External-User-ID` 由服务端生成并完成业务权限校验。
-- [ ] 首次提问、续聊、历史分页、资源代理和 Token 轮换联调通过。
-- [ ] SSE 实时转发，且只以 `complete/error` 判断终态。
-- [ ] 断连/停止会取消上游；原 Key 对账、同会话锁已实现。
-- [ ] Chat、Metadata、Asset 使用独立连接池和并发额度。
-- [ ] 完成真实链路压测后再设置和承诺容量指标。
+- `/health/ready` 返回 HTTP 200。
+- 能使用服务端安全保存的 Token 和稳定用户 ID 查询知识库。
+- 首次问答传 `conversation_id=null`，能保存返回的会话 ID 并完成追问。
+- 能正确处理 HTTP JSON 错误、SSE `complete`、SSE `error`、心跳、断流和幂等重放。
+- 同一会话不会并发发送，重复点击不会产生重复问答。
+- 会话列表、详情和历史消息均按当前用户隔离。
+- 图片和文档经业务后台代理可下载，响应类型和长度正确，前端不可见 Assistant Token。
+- 日志中无 Token、完整问答正文和资源内容。

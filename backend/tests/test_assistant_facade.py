@@ -24,6 +24,7 @@ from app.assistant.service import (
     ping,
     public_complete,
     public_payload,
+    sse,
 )
 from app.common.errors import ApiError
 from app.core.config import Settings
@@ -40,6 +41,9 @@ class _Repository:
         self.context: dict | None = None
         self.failed: dict | None = None
         self.runtime_marks: list[dict] = []
+
+    async def ensure_assistant_knowledge_base_ready(self, **_: object) -> None:
+        return None
 
     async def get_assistant_conversation(self, **_: object) -> dict | None:
         return {"conversation_id": uuid4()}
@@ -95,7 +99,11 @@ class _Gateway:
     async def stream(self, **_: object):  # type: ignore[no-untyped-def]
         self.called = True
         yield b'event: status\ndata: {"stage":"rag_processing","engine":"RAG"}\n\n'
-        trace = {"conversation_id": str(CONVERSATION_ID), "trace_id": str(TRACE_ID)}
+        trace = {
+            "conversation_id": str(CONVERSATION_ID),
+            "trace_id": str(TRACE_ID),
+            "index_id": str(uuid4()),
+        }
         yield f"event: trace\ndata: {json.dumps(trace)}\n\n".encode()
         yield 'event: message\ndata: {"delta":"你好"}\n\n'.encode()
         done = {
@@ -127,6 +135,30 @@ class _RejectingFacade:
         raise ApiError("CONVERSATION_BUSY", "会话正在生成回答", 409)
 
 
+class _NotReadyRepository(_Repository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reserved = False
+
+    async def ensure_assistant_knowledge_base_ready(self, **_: object) -> None:
+        raise ApiError("KNOWLEDGE_BASE_NOT_READY", "知识库尚无 Active Index", 409)
+
+    async def reserve_assistant_request(self, **_: object) -> tuple[str, dict]:
+        self.reserved = True
+        return "NEW", {"id": uuid4(), "status": "RUNNING"}
+
+
+class _DeadlineGateway:
+    async def stream(self, **_: object):  # type: ignore[no-untyped-def]
+        yield sse(
+            "error",
+            {
+                "code": "TURN_DEADLINE_EXCEEDED",
+                "message": "服务繁忙，请稍后重试",
+            },
+        )
+
+
 CONVERSATION_ID = uuid4()
 USER_MESSAGE_ID = uuid4()
 ASSISTANT_MESSAGE_ID = uuid4()
@@ -149,6 +181,27 @@ async def test_chat_route_surfaces_preflight_error_before_streaming_response() -
 
     assert raised.value.status_code == 409
     assert raised.value.code == "CONVERSATION_BUSY"
+
+
+@pytest.mark.asyncio
+async def test_facade_rejects_unready_knowledge_base_before_reserving_request() -> None:
+    repository = _NotReadyRepository()
+    service = AssistantFacadeService(repository, _Gateway())  # type: ignore[arg-type]
+
+    with pytest.raises(ApiError) as raised:
+        await service.prepare_stream(
+            external_user_id="business-user-1",
+            knowledge_id=KNOWLEDGE_ID,
+            conversation_id=None,
+            question="怎么做",
+            choice_id=None,
+            include_images=True,
+            idempotency_key="key-not-ready",
+            request_id="request-not-ready",
+        )
+
+    assert raised.value.code == "KNOWLEDGE_BASE_NOT_READY"
+    assert repository.reserved is False
 
 
 @pytest.mark.asyncio
@@ -179,10 +232,35 @@ async def test_facade_hides_engine_and_normalizes_existing_stream() -> None:
     assert events[1][1] == {"stage": "RETRIEVING"}
     assert events[3][1] == {"message_id": str(ASSISTANT_MESSAGE_ID), "text": "你好"}
     assert events[-1][1]["request_id"] == "request-1"
+    assert "index_id" not in events[2][1]
     assert "execution_engine" not in events[-1][1]
     assert repository.completed is not None
     assert len(repository.runtime_marks) == 2
     assert all(mark["request_id"] == "request-1" for mark in repository.runtime_marks)
+
+
+@pytest.mark.asyncio
+async def test_facade_preserves_retryable_semantics_for_deadline_error() -> None:
+    service = AssistantFacadeService(_Repository(), _DeadlineGateway())  # type: ignore[arg-type]
+
+    frames = [
+        frame
+        async for frame in service.stream(
+            external_user_id="business-user-1",
+            knowledge_id=KNOWLEDGE_ID,
+            conversation_id=None,
+            question="怎么做",
+            choice_id=None,
+            include_images=True,
+            idempotency_key="deadline-key",
+            request_id="deadline-request",
+        )
+    ]
+
+    event, payload = _event(frames[-1])
+    assert event == "error"
+    assert payload and payload["code"] == "TURN_DEADLINE_EXCEEDED"
+    assert payload["retryable"] is True
 
 
 @pytest.mark.asyncio

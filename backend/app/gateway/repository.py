@@ -503,6 +503,39 @@ class GatewayRepository:
 
     # External Assistant API -------------------------------------------------
 
+    async def ensure_assistant_knowledge_base_ready(self, *, knowledge_id: UUID) -> None:
+        """Validate the public knowledge-base/index boundary before SSE starts."""
+        async with self.engine.connect() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT kb.status,
+                                   COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                                       AS active_index_id,
+                                   i.status AS index_status
+                            FROM knowledge_base kb
+                            LEFT JOIN knowledge_index i
+                              ON i.id = COALESCE(kb.rag_active_index_id, kb.active_index_id)
+                            WHERE kb.id = :knowledge_id
+                            """
+                        ),
+                        {"knowledge_id": knowledge_id},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
+        if row["status"] != "ENABLED":
+            raise ApiError("FORBIDDEN", "知识库已停用", 403)
+        if row["active_index_id"] is None:
+            raise ApiError("KNOWLEDGE_BASE_NOT_READY", "知识库尚无 Active Index", 409)
+        if row["index_status"] != "ACTIVE":
+            raise ApiError("INDEX_NOT_READY", "知识库 Active Index 状态异常", 409)
+
     async def list_assistant_knowledge_bases(self) -> list[dict[str, Any]]:
         """Return only enabled knowledge bases with a usable RAG index."""
         async with self.engine.connect() as connection:
