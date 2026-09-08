@@ -200,7 +200,10 @@ async def chat_stream(
     user_id: Annotated[str, Depends(external_user_id)],
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=200)],
 ) -> StreamingResponse:
-    source = facade.stream(
+    # Complete visibility, policy, idempotency and concurrency checks before
+    # StreamingResponse commits HTTP 200. Contractual 4xx errors therefore
+    # remain normal JSON responses instead of becoming in-stream SSE errors.
+    source = await facade.prepare_stream(
         external_user_id=user_id,
         knowledge_id=payload.knowledge_id,
         conversation_id=payload.conversation_id,
@@ -239,15 +242,32 @@ async def _asset_response(
             await run_in_threadpool(upstream.close)
             await run_in_threadpool(upstream.release_conn)
 
+    upstream_headers = getattr(upstream, "headers", None)
+    upstream_content_type = (
+        upstream_headers.get("Content-Type") if upstream_headers is not None else None
+    )
     headers = {
         "Cache-Control": "private, max-age=300",
         "X-Content-Type-Options": "nosniff",
     }
+    for candidate in (
+        upstream_headers.get("Content-Length") if upstream_headers is not None else None,
+        asset.get("file_size"),
+    ):
+        if candidate is None:
+            continue
+        try:
+            content_length = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if content_length >= 0:
+            headers["Content-Length"] = str(content_length)
+            break
     if filename:
         headers["Content-Disposition"] = attachment_content_disposition(filename)
     return StreamingResponse(
         body(),
-        media_type=asset.get("mime_type") or "application/octet-stream",
+        media_type=asset.get("mime_type") or upstream_content_type or "application/octet-stream",
         headers=headers,
     )
 

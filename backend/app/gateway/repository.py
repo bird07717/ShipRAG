@@ -880,7 +880,8 @@ class GatewayRepository:
             result = await connection.execute(
                 text(
                     """
-                    SELECT id, kb_id, display_name, filename, minio_bucket, minio_object_key
+                    SELECT id, kb_id, display_name, filename, minio_bucket, minio_object_key,
+                           mime_type, file_size
                     FROM document_source
                     WHERE id = :document_id AND kb_id = :knowledge_id AND status = 'STORED'
                     """

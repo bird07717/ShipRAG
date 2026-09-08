@@ -52,7 +52,7 @@ bash scripts/dev-up.sh
 - 管理 API 使用 `SERVICE_TOKEN`，面向管理台和运维操作。
 - Assistant API 位于 `/api/v1/assistant/*`，使用独立的 `ASSISTANT_SERVICE_TOKEN`，并要求每个请求携带稳定的 `X-External-User-ID`。
 - 内部管理聊天 SSE 使用 `status`、`trace`、`message`、可选 `fallback`、`done`/`error` 事件。
-- Assistant SSE 会转换为公开的 `accepted`、`progress`、`context`、`delta`、`complete`/`error` 事件，并含心跳；完整请求与响应契约见 [Assistant API 对接文档](docs/integration/assistant-api-integration-guide.md)。
+- Assistant SSE 会转换为公开的 `accepted`、`progress`、`context`、`delta`、`complete`/`error` 事件，并含心跳；完整字段契约见 [Assistant API 对接文档](docs/integration/assistant-api-integration-guide.md)，实际调用和后台实现见 [Assistant API 业务后台对接指南](docs/integration/assistant-api-business-backend-guide.md)。
 
 ## 验证
 
@@ -76,9 +76,10 @@ bash scripts/check-m7.sh
 | Agent 工作入口、文档路由和维护规则 | [AGENTS.md](AGENTS.md) |
 | 系统架构与数据流 | [docs/ai/architecture.md](docs/ai/architecture.md) |
 | 前端、后端、数据库 | [frontend.md](docs/ai/frontend.md)、[backend.md](docs/ai/backend.md)、[database.md](docs/ai/database.md) |
-| 环境、命令和生产部署 | [environment.md](docs/ai/environment.md) |
+| 环境、命令和生产部署 | [environment.md](docs/ai/environment.md)、[生产服务器迁移手册](docs/production-migration-guide.md) |
 | 当前状态、已知问题、技术决策 | [current-state.md](docs/ai/current-state.md)、[known-issues.md](docs/ai/known-issues.md)、[decisions.md](docs/ai/decisions.md) |
-| 对外 Assistant API | [assistant-api-integration-guide.md](docs/integration/assistant-api-integration-guide.md) |
+| 对外 Assistant API 完整契约 | [assistant-api-integration-guide.md](docs/integration/assistant-api-integration-guide.md) |
+| 业务后台对接实施指南 | [assistant-api-business-backend-guide.md](docs/integration/assistant-api-business-backend-guide.md) |
 | 运维与 RAG 回归 | [ops-runbook.md](docs/ops-runbook.md)、[rag-acceptance/README.md](rag-acceptance/README.md) |
 
 ## 协作约定

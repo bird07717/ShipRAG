@@ -28,7 +28,7 @@
 | `support/` | 技术支持 Profile 解析、聚焦工作流、文档交付、风险校验、幂等。 |
 | `ingestion/` 与 `services/ingestion.py` | DOCX 安全校验、解析、图像理解、分块、嵌入、索引构建。 |
 | `document_profiles/`、`releases/` | Profile 生成、审核、发布与回滚。 |
-| `assistant/` | 对外 Assistant API 的门面、公开响应过滤、游标。 |
+| `assistant/` | 对外 Assistant API 的门面、公开响应过滤、游标及遗留运行请求恢复。 |
 | `tasks/` | RQ 任务、任务记录、GC、保留期清理、恢复和密钥轮换。 |
 | `observability/` | Trace 与未处理请求错误记录。 |
 
@@ -43,6 +43,9 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - 嵌入维度在 Settings 与数据库契约中固定为 1024，变更需要迁移与重建计划。
 - 运行策略有 `RAG_ONLY` 和 `SUPPORT_WITH_RAG_FALLBACK`；会话模式可覆盖引擎选择。
 - 对外 Assistant 请求使用幂等记录与外部用户隔离；其响应通过 `public_payload` 过滤内部字段。
+- Assistant Chat 会在创建 `StreamingResponse` 前完成会话权限、知识库策略、幂等和同会话并发检查；这些前置失败保持 HTTP JSON 错误，`accepted` 后的生成期失败才使用 SSE `error`。
+- Assistant 文档/图片接口按 64 KiB 分块代理 MinIO，并转发可信的内容类型、可用的对象长度和文档文件名；调用方无需为取得长度缓冲完整对象。
+- 超过指定时间仍为 `RUNNING` 的 Assistant 请求可通过 `app.assistant.recovery` 预览并事务恢复；恢复会保留请求行，并同步将关联的流式消息和 Trace 标为失败。
 - API 密钥可存储为加密密文，密钥轮换由 `app.tasks.key_rotation` 支持；文档只可记录变量名，不能记录值。
 
 ## 测试

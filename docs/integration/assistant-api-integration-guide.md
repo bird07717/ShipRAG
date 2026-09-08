@@ -513,7 +513,7 @@ Conversation ID 会通过 SSE `context` 和 `complete` 事件返回。业务后�
 
 | 事件 | 说明 |
 |---|---|
-| accepted | 请求通过认证和基础校验 |
+| accepted | 认证、参数、会话权限、知识库状态、幂等和并发前置检查均已通过 |
 | progress | 处理阶段变化 |
 | context | Conversation、Message 和 Trace 标识已经确定 |
 | delta | Markdown 文本增量 |
@@ -522,6 +522,8 @@ Conversation ID 会通过 SSE `context` 和 `complete` 事件返回。业务后�
 | `: ping` | 心跳注释 |
 
 每个流只能出现一个终态事件：`complete` 或 `error`。
+
+在 `accepted` 之前发现的认证、参数、会话权限、知识库状态、幂等或同会话并发错误，以 HTTP `4xx/5xx` 和 JSON 错误体返回，不建立 SSE。只有 `accepted` 之后的生成期失败才使用 SSE `error`。
 
 对于新的正常回答，当前外部事件顺序为：
 
@@ -807,6 +809,7 @@ GET {AI_BASE_URL}/api/v1/assistant/knowledge-bases/{knowledge_id}/documents/{doc
 - 不把 Assistant Token 放入下载 URL。
 - 不把 AI 平台内网地址返回给移动端。
 - 保留 Content-Type、文件名和长度。
+- 上游在完整对象响应中返回 `Content-Length`；业务后台应直接转发，不得为计算长度而把整文件读入内存。
 - 下载前验证业务用户仍然登录。
 
 ## 22. 图片加载
@@ -857,6 +860,7 @@ Android/iOS 必须：
 | 401 | AUTHENTICATION_REQUIRED | 检查服务凭证并告警，不向移动端暴露凭证信息 |
 | 404 | CONVERSATION_NOT_FOUND | 提示会话失效，引导返回历史或新建聊天 |
 | 409 | REQUEST_IN_PROGRESS | 保持原请求状态，不创建重复消息 |
+| SSE error | ABANDONED_ASSISTANT_REQUEST | 原请求已由恢复任务标记失败；用户主动重试时使用新幂等键 |
 | 409 | CONVERSATION_BUSY | 阻止重复发送，提示回答仍在生成 |
 | 409 | IDEMPOTENCY_KEY_REUSED | 记录接入错误，检查 Key 使用逻辑 |
 | 409 | WORKFLOW_CONFLICT | 提示用户重试，不静默并发重发 |
@@ -866,6 +870,8 @@ Android/iOS 必须：
 | SSE error | 事件中的 code | 展示 message，记录 request_id 和 trace_id |
 
 流在没有 `complete/error` 的情况下断开时，业务后台使用原 Idempotency-Key 对账，不直接创建新请求。
+
+HTTP 404/409 等前置错误发生在 `accepted` 之前；收到 `accepted` 后，调用方只按 SSE 终态处理本轮结果。
 
 ## 26. 日志和排障
 
@@ -956,6 +962,7 @@ error code
 | SSE 转换、心跳、幂等重放和错误终态 | `backend/app/assistant/service.py` |
 | 用户会话隔离、分页、请求持久化和资源查询 | `backend/app/gateway/repository.py` |
 | 模型和回答策略不对外暴露 | `backend/app/assistant/service.py`、`backend/app/gateway/service.py` |
+| Assistant 遗留请求、消息和 Trace 恢复 | `backend/app/assistant/recovery.py` |
 | Token 强度与生产环境校验 | `backend/app/core/config.py`、`compose.production.yaml` |
 | Nginx SSE 代理和缓冲设置 | `infra/nginx/default.conf` |
 | 7 天会话及 Trace 生命周期 | `backend/app/core/config.py`、`backend/app/tasks/gc.py` |

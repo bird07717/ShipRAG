@@ -15,6 +15,7 @@ from app.core.resources import AppResources
 class _Object:
     def __init__(self) -> None:
         self.parts = [b"first", b"second", b""]
+        self.headers = {"Content-Type": "application/vnd.test", "Content-Length": "11"}
         self.closed = False
         self.released = False
 
@@ -93,6 +94,8 @@ async def test_assistant_asset_response_streams_chunks_and_releases_connection(
     assert upstream.closed is True
     assert upstream.released is True
     assert response.headers["content-disposition"] == attachment_content_disposition("manual.docx")
+    assert response.headers["content-type"] == "application/vnd.test"
+    assert response.headers["content-length"] == "11"
 
 
 @pytest.mark.asyncio

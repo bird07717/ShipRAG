@@ -135,7 +135,7 @@ class AssistantFacadeService:
         self.repository = repository
         self.gateway = gateway
 
-    async def stream(
+    async def prepare_stream(
         self,
         *,
         external_user_id: str,
@@ -147,6 +147,7 @@ class AssistantFacadeService:
         idempotency_key: str,
         request_id: str,
     ) -> AsyncIterator[bytes]:
+        """Run request validation/reservation before the HTTP SSE response starts."""
         if conversation_id is not None:
             visible = await self.repository.get_assistant_conversation(
                 conversation_id=conversation_id,
@@ -170,6 +171,59 @@ class AssistantFacadeService:
             ),
             conversation_id=conversation_id,
         )
+        return self._stream_prepared(
+            external_user_id=external_user_id,
+            knowledge_id=knowledge_id,
+            conversation_id=conversation_id,
+            question=question,
+            choice_id=choice_id,
+            include_images=include_images,
+            request_id=request_id,
+            policy=policy,
+            state=state,
+            stored=stored,
+        )
+
+    async def stream(
+        self,
+        *,
+        external_user_id: str,
+        knowledge_id: UUID,
+        conversation_id: UUID | None,
+        question: str,
+        choice_id: str | None,
+        include_images: bool,
+        idempotency_key: str,
+        request_id: str,
+    ) -> AsyncIterator[bytes]:
+        """Compatibility iterator for non-HTTP callers and focused tests."""
+        source = await self.prepare_stream(
+            external_user_id=external_user_id,
+            knowledge_id=knowledge_id,
+            conversation_id=conversation_id,
+            question=question,
+            choice_id=choice_id,
+            include_images=include_images,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+        )
+        async for frame in source:
+            yield frame
+
+    async def _stream_prepared(
+        self,
+        *,
+        external_user_id: str,
+        knowledge_id: UUID,
+        conversation_id: UUID | None,
+        question: str,
+        choice_id: str | None,
+        include_images: bool,
+        request_id: str,
+        policy: Any,
+        state: str,
+        stored: dict[str, Any],
+    ) -> AsyncIterator[bytes]:
         durable_id = UUID(str(stored["id"]))
         yield sse(
             "accepted",

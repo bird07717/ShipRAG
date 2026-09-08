@@ -24,7 +24,8 @@
 - `document_source` 的活跃文件哈希在同一知识库内唯一；其原始对象键、图像对象键也唯一。内容索引可随 `knowledge_index` 版本重建。
 - `document_chunk.embedding` 固定为 `vector(1024)`，使用 HNSW cosine 索引；BM25 通过 `pg_search` 索引支持混合检索。
 - `conversation` 关联知识库，并可冻结 RAG/Support 索引或发布版本；`message` 有会话内顺序约束，`rag_trace` 关联会话/消息并支持回退父子链路。
-- `assistant_request` 的 `(external_user_id, knowledge_id, idempotency_key)` 唯一；`support_idempotency` 记录重放计数。不要绕过这些约束手工重复执行对外写操作。
+- `assistant_request` 的 `(external_user_id, knowledge_id, idempotency_key)` 唯一，同一非空 Conversation 只允许一条 `RUNNING` 记录；`support_idempotency` 记录 Support 重放计数。不要绕过这些约束手工重复执行对外写操作。
+- `assistant_request.conversation_id` 使用 `ON DELETE CASCADE`，但当前没有该表的独立保留期清理任务；在关联 Conversation 前失败且保持空外键的记录可能持续保留，需监控并制定清理策略。详见 [`known-issues.md`](known-issues.md)。
 
 ## 数据流
 

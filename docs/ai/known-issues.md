@@ -13,6 +13,8 @@
 | 后端全量 Pytest 无法完成 | 已确认阻塞 | 2026-09-02 以详细进度运行并设置 180 秒上限时，前 14 项测试通过后停在 `tests/test_api.py::test_service_api_requires_bearer_token`，未产生终态并以超时退出。根因待确认；应先在隔离环境复现并检查该测试的应用生命周期、认证依赖和本地服务/网络等待。 |
 | 前端覆盖率门槛 | 已确认门禁失败 | 2026-09-02 中 18 个测试文件、108 项测试均通过，但 `test:coverage` 未达到 `vite.config.ts` 的目录阈值：`src/api/**` 函数 56.79%（要求 80%）、分支 79.50%（要求 80%）；`src/composables/**` 语句/行 75.92%（要求 80%）、函数 72.04%（要求 75%）、分支 71.65%（要求 80%）。 |
 | 前端生产包体积 | 已确认警告 | 生产构建通过，但 Vite 警告入口 JavaScript 压缩后为 1,291.66 kB（gzip 427.76 kB），超过 500 kB 警告阈值；可评估动态导入或手动分包。 |
+| Assistant 请求记录保留 | 已确认容量风险 | `assistant_request` 当前没有独立的终态记录清理任务；已关联 Conversation 的记录可随会话级联删除，但关联前失败且 `conversation_id` 为空的记录可能持续保留。遗留 `RUNNING` 状态已提供 `app.assistant.recovery` 预览/事务恢复命令，但容量仍需通过保留策略和表增长监控处理。 |
+| Assistant 幂等指标口径 | 已确认观测缺口 | `/api/v1/metrics/assistant` 的 `idempotency` 区块当前查询 `support_idempotency`，没有统计 Assistant 门面的 `assistant_request`，因此不能表示外部 Assistant 请求保护数或重放率；应由业务后台指标或受控数据分析补充，后续再修正平台指标。 |
 
 ## 已核实的测试基线
 
@@ -22,6 +24,8 @@
 - 后端 Mypy 对 111 个源文件通过，Ruff lint 通过；但 `scripts/check.sh` 在 Ruff 格式门禁停止，后端完整 Pytest/Smoke/覆盖率未完成，具体阻塞见上表。
 - 前端 ESLint、Vue Type Check 与生产构建通过；18 个测试文件、108 项测试通过，但覆盖率门禁失败，具体缺口见上表。
 - `scripts/check.sh` 仍会在后端测试完成后额外执行三个 smoke 任务累计覆盖率；本次未能到达这些步骤。
+- 2026-09-07 对 Assistant 恢复功能执行 Ruff、Mypy 及相关定向 Pytest，后续扩展到 Assistant/config 共 37 项定向测试通过；当前数据库 25 条遗留请求、25 条 Assistant 消息和 25 条 Assistant Trace 已事务恢复。另精确删除 2 条无业务价值的内部 Support Trace 和对应 4 条消息；最终 `assistant_request RUNNING=0`、`rag_trace RUNNING=0`、`message STREAMING=0`、活跃 `task_record=0`。隔离 Production Compose Smoke 同日通过。
+- 2026-09-08 统一 Assistant 前置 HTTP 错误、资源长度响应和业务后台 `client_chat_id` 约束；Ruff、格式、Mypy 及 13 项 Assistant 定向测试通过，隔离 Production Smoke 确认无效会话返回 HTTP 404 JSON、未建立 SSE。`test_api.py` 定向执行仍复现上述 ASGI 测试夹具超时，未计为通过。
 
 确认方式：在已 bootstrap 的环境运行 `bash scripts/check.sh`，或针对每项运行相应 Pytest/Ruff 命令；将真实输出与当前工作树对应后更新本文件。
 

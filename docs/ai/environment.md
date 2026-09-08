@@ -15,7 +15,7 @@ bash scripts/bootstrap.sh
 
 该脚本创建虚拟环境、依据 `backend/requirements.lock` 安装后端依赖、以 editable 模式安装后端、执行前端 `npm ci`，并在缺少 `.env` 时由 `.env.example` 复制。开始前审阅 `.env.example` 的变量名称和说明；敏感值仅写入本地安全配置或部署 Secret。
 
-关键配置类别：应用与 CORS、PostgreSQL、Redis/RQ、MinIO、模型提供者、嵌入/检索阈值、保留期、模型密钥加密，以及生产的 `SERVICE_TOKEN` 和 `ASSISTANT_SERVICE_TOKEN`。生产示例为 `.env.production.example`；Production Compose 对必要密码和服务凭据使用必填变量。
+关键配置类别：应用与 CORS、PostgreSQL、Redis/RQ、MinIO、模型提供者、嵌入/检索阈值、保留期、模型密钥加密，以及生产的 `SERVICE_TOKEN` 和 `ASSISTANT_SERVICE_TOKEN`。生产示例为 `.env.production.example`；Production Compose 对必要密码、服务凭据和 `MODEL_SECRET_KEY` 使用必填变量。恢复已有数据库时必须沿用能解密其中模型凭据的密钥及版本，不能生成新值替代。
 
 ## 本地启动
 
@@ -39,16 +39,19 @@ bash scripts/dev-up.sh
 | RAG 回归 | `.venv/bin/python rag-acceptance/run_golden.py` | 真实 HTTP/模型回归；需要可用服务、知识库及安全配置。 |
 | Support 回归 | `cd backend && ../.venv/bin/pytest -q -o addopts='' tests/test_support_evaluation.py` | `support-acceptance` 说明中定义的开发回归。 |
 | 生产门禁 | `bash scripts/check-m7.sh` | 常规检查、依赖审计、production compose 校验、生产 smoke 与发布验收。 |
+| Assistant 遗留请求恢复 | `cd backend && ../.venv/bin/python -m app.assistant.recovery --stale-hours 24` | 默认只预览；停写并完成数据库备份后追加 `--apply`，事务同步修复请求、消息和 Trace。 |
 
 以上命令是从仓库脚本/配置读取的“可执行入口”，不代表本次已运行或必然成功；任务报告必须单独说明实际运行的命令和结果。
 
 ## 生产部署
 
-使用 `compose.production.yaml` 和部署环境变量。编排顺序为 PostgreSQL/Redis/MinIO → 一次性 `migrate` → 后端与两个 Worker → Nginx 前端。生产后端和 Worker 使用只读根文件系统及 `/tmp` tmpfs；Nginx 代理 `/api/` 与 `/health/` 并托管 SPA。管理页面默认通过 `APP_HTTP_BIND_ADDRESS`、`APP_HTTP_PORT` 绑定；Assistant API 需要强独立的 `ASSISTANT_SERVICE_TOKEN`。
+使用 `compose.production.yaml` 和部署环境变量。编排顺序为 PostgreSQL/Redis/MinIO → 一次性 `migrate` → 后端与两个 Worker → Nginx 前端。生产后端和 Worker 使用只读根文件系统及 `/tmp` tmpfs；Nginx 代理 `/api/` 与 `/health/` 并托管 SPA。生产示例将 `APP_HTTP_BIND_ADDRESS=0.0.0.0`、`APP_HTTP_PORT=18080`，供同内网其他服务器访问；部署防火墙必须把该端口限制为获准的内网来源。Assistant API 需要强独立的 `ASSISTANT_SERVICE_TOKEN`。从当前工作机完整迁移至生产服务器的停写、备份、恢复、验收和回滚步骤见[《生产服务器完整迁移手册》](../production-migration-guide.md)。
 
 生产 smoke 脚本是 `scripts/smoke-production.sh`，会创建临时 compose 项目并清理卷。仅在已理解 Docker 影响、可执行相关容器操作的环境运行。
 
+Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文件（保留可提交的示例）、虚拟环境、Node 依赖、Python 测试/静态检查缓存、Coverage 分片、前端构建/覆盖率产物、`VDR600/` 本地资料和 RAG 验收报告均不进入镜像构建上下文。修改 Dockerfile 的 `COPY` 范围或新增构建输入时，应同步检查该文件。
+
 ## 待确认
 
-- 当前工作机是否已执行 bootstrap、Docker 是否可用、基础设施是否已启动：待确认。可通过 `docker compose ps`、对应进程和健康端点确认。
-- 当前数据库迁移版本：待确认。可通过 `cd backend && ../.venv/bin/alembic current` 确认。
+- 当前工作机已确认 PostgreSQL、Redis、MinIO Compose 容器健康；API、Worker 与前端进程的端到端状态仍待确认。
+- 当前本地数据库已确认位于迁移 `0040`；目标生产数据库版本仍须在恢复后通过 Alembic 或数据库检查确认。

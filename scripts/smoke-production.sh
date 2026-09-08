@@ -23,6 +23,9 @@ export POSTGRES_PASSWORD="m7-smoke-postgres-password"
 export REDIS_PASSWORD="m7-smoke-redis-password"
 export MINIO_ROOT_USER="m7-smoke-minio"
 export MINIO_ROOT_PASSWORD="m7-smoke-minio-password"
+# Fixed test-only AES-256 key; production receives its key from a Secret.
+export MODEL_SECRET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+export MODEL_SECRET_KEY_VERSION="1"
 export M2_EMBEDDING_PROVIDER="fake"
 # Production settings reject the fake LLM provider.  This smoke check does not
 # issue a chat request, so auto avoids external model calls while preserving
@@ -68,6 +71,39 @@ assistant_request = urllib.request.Request(
 with urllib.request.urlopen(assistant_request, timeout=10) as response:
     assistant_payload = json.load(response)
 
+preflight_request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/api/v1/assistant/chat/stream",
+    data=json.dumps(
+        {
+            "knowledge_id": "00000000-0000-0000-0000-000000000001",
+            "conversation_id": "00000000-0000-0000-0000-000000000002",
+            "question": "preflight contract check",
+        }
+    ).encode(),
+    headers={
+        "Authorization": "Bearer m7-smoke-assistant-token-0123456789",
+        "X-External-User-ID": "m7-production-smoke",
+        "Idempotency-Key": "m7-preflight-contract-check",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    },
+    method="POST",
+)
+try:
+    urllib.request.urlopen(preflight_request, timeout=10)
+except HTTPError as error:
+    preflight_payload = json.load(error)
+    if error.code != 404 or preflight_payload.get("error", {}).get("code") != (
+        "CONVERSATION_NOT_FOUND"
+    ):
+        raise SystemExit(
+            f"Assistant preflight returned unexpected error: {error.code} {preflight_payload}"
+        )
+    if not error.headers.get_content_type() == "application/json":
+        raise SystemExit("Assistant preflight error did not use JSON")
+else:
+    raise SystemExit("Assistant preflight error unexpectedly established SSE")
+
 try:
     urllib.request.urlopen(
         f"http://127.0.0.1:{port}/api/v1/assistant/knowledge-bases", timeout=10
@@ -91,6 +127,7 @@ print(
             "readiness": "ready",
             "frontend": "served",
             "assistant": "reachable",
+            "assistant_preflight": "http-json",
         }
     )
 )

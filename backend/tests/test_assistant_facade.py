@@ -3,13 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import SecretStr, ValidationError
+from starlette.requests import Request
 
 import app.assistant.service as assistant_service_module
+from app.api.assistant import chat_stream
 from app.api.dependencies import require_assistant_service_token
 from app.api.schemas import AssistantChatStreamRequest
 from app.assistant.service import (
@@ -118,11 +122,33 @@ class _SlowGateway(_Gateway):
             yield frame
 
 
+class _RejectingFacade:
+    async def prepare_stream(self, **_: Any) -> Any:
+        raise ApiError("CONVERSATION_BUSY", "会话正在生成回答", 409)
+
+
 CONVERSATION_ID = uuid4()
 USER_MESSAGE_ID = uuid4()
 ASSISTANT_MESSAGE_ID = uuid4()
 TRACE_ID = uuid4()
 KNOWLEDGE_ID = uuid4()
+
+
+@pytest.mark.asyncio
+async def test_chat_route_surfaces_preflight_error_before_streaming_response() -> None:
+    request = cast(Request, SimpleNamespace(state=SimpleNamespace(request_id="request-1")))
+
+    with pytest.raises(ApiError) as raised:
+        await chat_stream(
+            AssistantChatStreamRequest(knowledge_id=KNOWLEDGE_ID, question="如何处理？"),
+            request,
+            cast(AssistantFacadeService, _RejectingFacade()),
+            "business-user-1",
+            "request-key-1",
+        )
+
+    assert raised.value.status_code == 409
+    assert raised.value.code == "CONVERSATION_BUSY"
 
 
 @pytest.mark.asyncio
