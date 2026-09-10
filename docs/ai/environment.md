@@ -58,4 +58,4 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 ## 待确认
 
 - 2026-09-10 已确认目标生产服务器的 PostgreSQL、Redis、MinIO、后端和前端健康，两个 Worker 正常运行，数据库位于 Alembic `0040`，迁移备份校验通过；Assistant 鉴权、知识库、会话、真实 SSE、幂等、用户隔离以及文档/图片资源代理均已完成生产验收。
-- 正式上线前仍需由具备 sudo 权限的管理员确认 UFW 与 `DOCKER-USER` 的实际规则，并轮换曾用于联调的临时凭据。服务器 `cm` 账号直接拉取 GitHub 还需为其 SSH 公钥配置仓库读取权限。
+- 正式上线前仍需由具备 sudo 权限的管理员确认 UFW 与 `DOCKER-USER` 的实际规则，并轮换曾用于联调的临时凭据。服务器仓库通过 GitHub SSH 拉取，`cm` 账号需在交互式终端输入 SSH 私钥口令，因此服务器 `git pull` 由用户手动执行。

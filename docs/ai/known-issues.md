@@ -15,7 +15,7 @@
 | 前端生产包体积 | 已确认警告 | 生产构建通过，但 Vite 警告入口 JavaScript 压缩后为 1,291.66 kB（gzip 427.76 kB），超过 500 kB 警告阈值；可评估动态导入或手动分包。 |
 | Assistant 请求记录保留 | 已确认容量风险 | `assistant_request` 当前没有独立的终态记录清理任务；已关联 Conversation 的记录可随会话级联删除，但关联前失败且 `conversation_id` 为空的记录可能持续保留。正常 ASGI 发送失败和客户端断连会幂等取消仍为 `RUNNING` 的请求及其关联运行态；进程强制终止等无法执行响应收口的遗留状态已提供 `app.assistant.recovery` 预览/事务恢复命令。容量仍需通过保留策略和表增长监控处理。 |
 | Assistant 幂等指标口径 | 已确认观测缺口 | `/api/v1/metrics/assistant` 的 `idempotency` 区块当前查询 `support_idempotency`，没有统计 Assistant 门面的 `assistant_request`，因此不能表示外部 Assistant 请求保护数或重放率；应由业务后台指标或受控数据分析补充，后续再修正平台指标。 |
-| 服务器 GitHub 拉取权限 | 已确认部署阻塞 | 生产服务器 `cm` 账号的 SSH 公钥尚未获得仓库读取权限，直接 `git pull` 返回 `Permission denied (publickey)`；2026-09-10 使用一次性 Git bundle 完成快进同步。应配置只读 Deploy Key 后恢复标准拉取流程。 |
+| 服务器 GitHub 非交互拉取 | 已确认操作约束 | 生产服务器仓库的 `origin` 使用 GitHub SSH 地址；`cm` 账号可在交互式输入 SSH 私钥口令后正常拉取。非交互自动化无法提供该口令，后续服务器 `git pull` 由用户手动执行。 |
 
 ## 已核实的测试基线
 
