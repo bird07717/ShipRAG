@@ -101,7 +101,7 @@ services:
     restart: "no"
 
   migrate:
-    image: ${BACKEND_IMAGE:-enterprise-rag-backend:1.0.0}
+    image: ${BACKEND_IMAGE:-enterprise-rag-backend:1.0.1}
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -113,7 +113,7 @@ services:
     restart: "no"
 
   backend:
-    image: ${BACKEND_IMAGE:-enterprise-rag-backend:1.0.0}
+    image: ${BACKEND_IMAGE:-enterprise-rag-backend:1.0.1}
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -137,7 +137,7 @@ services:
     restart: unless-stopped
 
   worker-index:
-    image: ${BACKEND_IMAGE:-enterprise-rag-backend:1.0.0}
+    image: ${BACKEND_IMAGE:-enterprise-rag-backend:1.0.1}
     environment:
       <<: *app-environment
       RQ_QUEUES: index_build
@@ -155,7 +155,7 @@ services:
     restart: unless-stopped
 
   worker-maintenance:
-    image: ${BACKEND_IMAGE:-enterprise-rag-backend:1.0.0}
+    image: ${BACKEND_IMAGE:-enterprise-rag-backend:1.0.1}
     environment:
       <<: *app-environment
       RQ_QUEUES: ingestion,maintenance
@@ -173,7 +173,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: ${FRONTEND_IMAGE:-enterprise-rag-frontend:1.0.0}
+    image: ${FRONTEND_IMAGE:-enterprise-rag-frontend:1.0.1}
     build:
       context: .
       dockerfile: frontend/Dockerfile

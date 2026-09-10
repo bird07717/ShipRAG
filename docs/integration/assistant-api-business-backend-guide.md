@@ -29,10 +29,10 @@ Shipdemo Assistant API
 
 ### 2.1 基础地址
 
-- 目标生产地址：`http://172.17.2.12:18080`
+- 当前内网联调地址：`http://172.17.2.12:18080`
 - Assistant API 前缀：`/api/v1/assistant`
 - 完整示例：`http://172.17.2.12:18080/api/v1/assistant/knowledge-bases`
-- 当前项目尚未迁移至目标服务器；完成部署并确认 `/health/ready` 返回 HTTP 200 后，以上地址才可用于正式联调。
+- 项目已迁移至目标服务器；2026-09-10 已确认 `/health/ready`、Assistant 鉴权和知识库列表接口可用，可进行内网联调。正式上线前仍须完成凭据轮换、防火墙来源限制和真实流式问答验收。
 
 ### 2.2 鉴权方式
 
@@ -58,7 +58,7 @@ X-Request-ID: 550e8400-e29b-41d4-a716-446655440000
 
 ```env
 SHIPDEMO_BASE_URL=http://172.17.2.12:18080
-SHIPDEMO_ASSISTANT_TOKEN=<7sD9kF2pR5bN8vQ3gX1jZ4cM6hT0wY7uA2eS9dG>
+SHIPDEMO_ASSISTANT_TOKEN=replace-with-secret-from-secure-channel
 SHIPDEMO_CONNECT_TIMEOUT_SECONDS=5
 SHIPDEMO_READ_TIMEOUT_SECONDS=25
 ```

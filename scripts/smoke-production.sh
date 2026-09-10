@@ -5,7 +5,7 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project_name="enterprise-rag-m7-smoke"
 http_port="${M7_PRODUCTION_SMOKE_PORT:-18008}"
 compose_file="${project_root}/compose.production.yaml"
-backend_image="${BACKEND_IMAGE:-enterprise-rag-backend:1.0.0}"
+backend_image="${BACKEND_IMAGE:-enterprise-rag-backend:1.0.1}"
 
 cleanup() {
   docker compose \

@@ -45,7 +45,11 @@ bash scripts/dev-up.sh
 
 ## 生产部署
 
-使用 `compose.production.yaml` 和部署环境变量。编排顺序为 PostgreSQL/Redis/MinIO → 一次性 `migrate` → 后端与两个 Worker → Nginx 前端。生产后端和 Worker 使用只读根文件系统及 `/tmp` tmpfs；Nginx 代理 `/api/` 与 `/health/` 并托管 SPA。生产示例将 `APP_HTTP_BIND_ADDRESS=0.0.0.0`、`APP_HTTP_PORT=18080`，供同内网其他服务器访问；部署防火墙必须把该端口限制为获准的内网来源。Assistant API 需要强独立的 `ASSISTANT_SERVICE_TOKEN`。从当前工作机完整迁移至生产服务器的停写、备份、恢复、验收和回滚步骤见[《生产服务器完整迁移手册》](../production-migration-guide.md)。
+使用 `compose.production.yaml` 和部署环境变量。默认应用镜像为 `enterprise-rag-backend:1.0.1` 和 `enterprise-rag-frontend:1.0.1`；正式部署应在 `.env` 中显式固定镜像名，避免默认值变化导致不可预期升级。编排顺序为 PostgreSQL/Redis/MinIO → 一次性 `migrate` → 后端与两个 Worker → Nginx 前端。生产后端和 Worker 使用只读根文件系统及 `/tmp` tmpfs；Nginx 代理 `/api/` 与 `/health/` 并托管 SPA。Assistant API 需要强独立的 `ASSISTANT_SERVICE_TOKEN`。
+
+生产示例将 `APP_HTTP_BIND_ADDRESS=0.0.0.0`、`APP_HTTP_PORT=18080`，供同内网其他服务器访问；多网卡服务器可把绑定地址缩小到指定内网 IP。先用 `sudo ufw status verbose`、`sudo ufw status numbered` 和 `sudo ufw show added` 审核主机规则，在保持当前 SSH 会话的同时，先允许管理员来源访问实际 SSH 端口，再收紧默认入站策略。不要运行 `ufw reset`。
+
+Docker 发布端口的流量会在到达 UFW 使用的常规 `INPUT` 链之前被转发，因此只添加 `ufw allow/deny 18080` 不能可靠限制 Compose 发布的 `18080`。该端口必须使用上游网络防火墙，或在 Docker 的 `DOCKER-USER` 链按业务后台来源地址限制；不要通过关闭 Docker 的 `iptables` 功能规避该问题，这会破坏容器网络。变更前后分别检查 `sudo iptables -S DOCKER-USER`、`docker compose ... ps`，并从允许和不允许的来源各测试一次。
 
 生产 smoke 脚本是 `scripts/smoke-production.sh`，会创建临时 compose 项目并清理卷。仅在已理解 Docker 影响、可执行相关容器操作的环境运行。
 
@@ -53,5 +57,5 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 
 ## 待确认
 
-- 当前工作机已确认 PostgreSQL、Redis、MinIO Compose 容器健康；API、Worker 与前端进程的端到端状态仍待确认。
-- 当前本地数据库已确认位于迁移 `0040`；目标生产数据库版本仍须在恢复后通过 Alembic 或数据库检查确认。
+- 2026-09-10 已确认目标生产服务器的 PostgreSQL、Redis、MinIO、后端和前端健康，两个 Worker 正常运行，数据库位于 Alembic `0040`，迁移备份校验通过，Assistant 鉴权与知识库列表接口可用。
+- 正式上线前仍需由具备 sudo 权限的管理员确认 UFW 与 `DOCKER-USER` 的实际规则、执行真实 Assistant SSE/资源代理验收，并轮换曾用于联调的临时凭据。

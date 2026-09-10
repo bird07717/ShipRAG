@@ -76,7 +76,7 @@ bash scripts/check-m7.sh
 | Agent 工作入口、文档路由和维护规则 | [AGENTS.md](AGENTS.md) |
 | 系统架构与数据流 | [docs/ai/architecture.md](docs/ai/architecture.md) |
 | 前端、后端、数据库 | [frontend.md](docs/ai/frontend.md)、[backend.md](docs/ai/backend.md)、[database.md](docs/ai/database.md) |
-| 环境、命令和生产部署 | [environment.md](docs/ai/environment.md)、[生产服务器迁移手册](docs/production-migration-guide.md) |
+| 环境、命令和生产部署 | [environment.md](docs/ai/environment.md) |
 | 当前状态、已知问题、技术决策 | [current-state.md](docs/ai/current-state.md)、[known-issues.md](docs/ai/known-issues.md)、[decisions.md](docs/ai/decisions.md) |
 | 对外 Assistant API 完整契约 | [assistant-api-integration-guide.md](docs/integration/assistant-api-integration-guide.md) |
 | 业务后台对接实施指南 | [assistant-api-business-backend-guide.md](docs/integration/assistant-api-business-backend-guide.md) |
