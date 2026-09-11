@@ -36,7 +36,7 @@ from app.core.resources import AppResources
 from app.gateway.repository import GatewayRepository
 from app.observability.recorder import observe_stream_errors
 from app.rag.repository import RagRepository
-from app.rag.welcome import build_welcome
+from app.rag.welcome import build_assistant_welcome
 
 
 def external_user_id(
@@ -131,7 +131,7 @@ async def list_knowledge_bases(
 async def welcome(
     knowledge_id: UUID, repository: Annotated[RagRepository, Depends(get_rag_repository)]
 ) -> dict[str, Any]:
-    payload = build_welcome(
+    payload = build_assistant_welcome(
         await repository.get_knowledge_base_summary(knowledge_id, enabled_only=True),
         await repository.list_kb_documents(knowledge_id),
     )

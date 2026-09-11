@@ -43,6 +43,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - 嵌入维度在 Settings 与数据库契约中固定为 1024，变更需要迁移与重建计划。
 - 运行策略有 `RAG_ONLY` 和 `SUPPORT_WITH_RAG_FALLBACK`；会话模式可覆盖引擎选择。
 - 对外 Assistant 请求使用幂等记录与外部用户隔离；其响应通过 `public_payload` 过滤内部字段。
+- 对外 Assistant 就绪态欢迎语使用简洁的用户侧文案，不暴露知识库名称、描述或文档数量；三条快捷问题固定取自已通过的 Assistant Golden Set `standard + EXACT` 用例。管理端 Chat 欢迎语仍使用知识库目录生成，不受此规则影响。
 - Assistant Chat 会在创建 `StreamingResponse` 前完成会话权限、知识库及 Active Index 可用性、策略、幂等和同会话并发检查；这些前置失败保持 HTTP JSON 错误，`accepted` 后的生成期失败才使用 SSE `error`。
 - Assistant Chat 的已预留请求由专用流响应持有；ASGI 发送失败或客户端断连时会在响应收口阶段幂等地将仍为 `RUNNING` 的请求及其关联消息/Trace 标记为取消，正常终态与幂等重放不会被改写。进程强制终止等无法执行收口的情况仍由遗留请求恢复命令处理。
 - Assistant SSE `context` 只允许输出会话、用户消息、Assistant 消息和 Trace 标识，不透传 Index 等内部 Trace 字段；已知短暂上游/超时错误保留可重试语义。

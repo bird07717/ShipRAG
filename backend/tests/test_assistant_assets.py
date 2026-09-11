@@ -106,6 +106,15 @@ async def test_assistant_welcome_only_queries_enabled_knowledge_bases() -> None:
     response = await welcome(knowledge_id, repository)  # type: ignore[arg-type]
 
     assert response["knowledge_id"] == knowledge_id
+    assert response["message"] == (
+        "您好，我是您的智能技术助手。请描述您遇到的问题或想完成的操作，"
+        "我会为您提供清晰、可执行的建议。"
+    )
+    assert response["suggestions"] == [
+        "如何使用U盘升级PDC",
+        "如何更换PSU电源板",
+        "如何手动自检VDR",
+    ]
     assert repository.requested_enabled_only is True
 
 

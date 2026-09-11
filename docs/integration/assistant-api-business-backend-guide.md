@@ -308,8 +308,12 @@ curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/knowledge-bases/5ae9881a-a568-43
 ```json
 {
   "knowledge_id": "5ae9881a-a568-436b-9330-2da5e9a2a9c9",
-  "message": "您好，请问需要查询什么内容？",
-  "suggestions": ["查询操作流程", "查看常见问题"]
+  "message": "您好，我是您的智能技术助手。请描述您遇到的问题或想完成的操作，我会为您提供清晰、可执行的建议。",
+  "suggestions": [
+    "如何使用U盘升级PDC",
+    "如何更换PSU电源板",
+    "如何手动自检VDR"
+  ]
 }
 ```
 
@@ -319,7 +323,7 @@ curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/knowledge-bases/5ae9881a-a568-43
 | --- | --- | --- | --- | --- |
 | `knowledge_id` | UUID string | 是 | 当前欢迎语所属知识库。 | 可用于校验响应是否对应当前选择。 |
 | `message` | string | 是 | 欢迎文案。 | 作为页面初始提示展示，不写入会话历史。 |
-| `suggestions` | string[] | 是 | 推荐问题列表，可能为空。 | 可渲染为快捷提问；点击后仍按一次新问答处理。 |
+| `suggestions` | string[] | 是 | 服务就绪时返回 3 条经过回归验证的标准问题；服务未就绪时可能为空。 | 可渲染为快捷提问；点击后仍按一次新问答处理。 |
 
 失败响应示例：
 

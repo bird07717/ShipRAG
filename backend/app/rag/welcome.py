@@ -17,6 +17,17 @@ _TITLE_PREFIX_PATTERN = re.compile(r"^[^\u2014\u2013\-]{2,20}[\u2014\u2013\-]\s*
 _SUGGESTION_LIMIT = 3
 _SUGGESTION_MIN_CHARS = 4
 
+_ASSISTANT_WELCOME_MESSAGE = (
+    "您好，我是您的智能技术助手。请描述您遇到的问题或想完成的操作，我会为您提供清晰、可执行的建议。"
+)
+# Keep these prompts identical to the standard EXACT cases that passed the
+# Assistant Golden Set, so every starter question has a verified answer path.
+_ASSISTANT_GOLDEN_SUGGESTIONS = (
+    "如何使用U盘升级PDC",
+    "如何更换PSU电源板",
+    "如何手动自检VDR",
+)
+
 
 def build_suggestions(catalog: list[dict[str, Any]]) -> list[str]:
     """Turn document titles into clickable starter questions."""
@@ -78,3 +89,12 @@ def build_welcome(kb: dict[str, Any], catalog: list[dict[str, Any]]) -> dict[str
         "message": message,
         "suggestions": build_suggestions(catalog),
     }
+
+
+def build_assistant_welcome(kb: dict[str, Any], catalog: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the public Assistant welcome without exposing catalog metadata."""
+    payload = build_welcome(kb, catalog)
+    if payload["knowledge_base"]["ready"]:
+        payload["message"] = _ASSISTANT_WELCOME_MESSAGE
+        payload["suggestions"] = list(_ASSISTANT_GOLDEN_SUGGESTIONS)
+    return payload
