@@ -54,7 +54,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - Assistant SSE `context` 只允许输出会话、用户消息、Assistant 消息和 Trace 标识，不透传 Index 等内部 Trace 字段；已知短暂上游/超时错误保留可重试语义。
 - Assistant 不提供原文下载接口；公开回答中的文档 ID 和标题只用于来源展示。图片接口只允许读取状态为 `STORED` 的所属文档图片，按 64 KiB 分块代理 MinIO，并转发可信的内容类型和可用的对象长度。
 - 管理 API 允许修改 `document_source.display_name`，但不修改原始文件名、对象存储键、文档 ID 或索引内容，也不触发索引重建；同一知识库内新增或重命名后的有效显示名称不得重复。后续 RAG/Support 回答从文档源读取最新显示名称，既有 Message、Assistant 幂等终态和 Trace 保持原快照。
-- 回答正文中出现文档标题时使用 Markdown `**《文档标题》**`；结构化 `document.title` 和 `references[].title` 保持无 Markdown 的纯文本契约。
+- 回答正文中出现文档标题时使用 Markdown `**《文档标题》**`；文档直达回答的 `answer` 只包含该标题，不添加“已找到”或“以下是文档内容”等引导语。交付内容会移除与当前显示名称相同、或带既有“故障解决文档N—”前缀的重复首行标题，后续步骤及章节标题保持原样。结构化 `document.title` 和 `references[].title` 保持无 Markdown 的纯文本契约。
 - 超过指定时间仍为 `RUNNING` 的 Assistant 请求可通过 `app.assistant.recovery` 预览并事务恢复；恢复会保留请求行，并同步将关联的流式消息和 Trace 标为失败。
 - 维护 Worker 启动时及之后每天清理超过 `ASSISTANT_REQUEST_RETENTION_DAYS`、未关联 Conversation 且处于终态的 Assistant 请求；关联会话的请求随 Conversation 级联清理，`RUNNING` 请求只能经正常收口或遗留恢复处理。
 - API 密钥可存储为加密密文，密钥轮换由 `app.tasks.key_rotation` 支持；文档只可记录变量名，不能记录值。

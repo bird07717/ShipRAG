@@ -100,13 +100,14 @@ HTTP 错误字段：
 | `ANSWERED` | 已生成正常回答。 | 展示 `answer` 及相关内容。 |
 | `UNCONFIRMED` | 当前资料不足以确认。 | 展示回答并提示用户补充信息。 |
 | `OUT_OF_SCOPE` | 问题不在服务范围内。 | 展示范围提示。 |
-| `DOC_DELIVERED` / `DOCUMENT_DELIVERED` | 已匹配并交付文档内容。 | 展示 `document` 和 `content`；不提供原文下载入口。 |
+| `DOC_DELIVERED` / `DOCUMENT_DELIVERED` | 已匹配并交付文档内容。 | `answer` 展示加粗文档标题，随后按顺序展示 `content`；不提供原文下载入口。 |
 | `CLARIFICATION_REQUIRED` | 需要用户进一步选择或补充。 | 根据 `clarification` 构建交互。 |
 | `ESCALATION_REQUIRED` | 建议转人工或升级处理。 | 根据 `escalation` 进入业务侧流程。 |
 | 其他值 | 后续扩展类型。 | 按普通文本回答兼容，不直接报错。 |
 
 - `document` 和 `references` 中的文档 ID、标题仅用于内容归属与来源展示，不得据此拼接原文下载地址；Assistant API 不提供原文下载能力。
 - `answer` 和文本内容块使用 Markdown；其中 `**《文档标题》**` 表示需要加粗展示的文档标题。
+- 文档直达时，`answer` 仅为 `**《文档标题》**`，不包含“已找到”或“以下是文档内容”等引导语；`content` 从有效正文或操作步骤开始，平台会过滤与显示名称重复的原文首行标题。
 - 流式问答在服务接受请求前发生的鉴权、参数、会话归属、知识库/索引可用性、幂等或并发错误，以 HTTP 4xx/5xx JSON 返回；接受请求后的生成错误，以 SSE `error` 事件返回。
 - `cursor`、`before` 均为不透明游标，只能原样回传，不得拆解、拼接或自行生成。
 
@@ -730,7 +731,7 @@ SSE 事件关系：
 | `message_id` | UUID string | 是 | 最终 Assistant 消息 ID。 | 按 ID 幂等保存最终回答。 |
 | `trace_id` | UUID string/null | 否 | 本轮追踪 ID。 | 故障反馈时提供。 |
 | `response_type` | string/null | 否 | 回答类型。 | 选择展示组件；未知值按普通文本处理。 |
-| `answer` | string | 是 | 完整最终回答。 | 覆盖由 `delta` 拼接的临时文本。 |
+| `answer` | string | 是 | 完整最终回答；文档直达时仅为 Markdown 加粗的文档标题。 | 覆盖由 `delta` 拼接的临时文本；文档直达后继续按顺序渲染 `content`。 |
 | `content` | object[] | 是 | 结构化内容块，常见类型为 `text`、`table`、`image`。 | 按数组顺序和 `type` 渲染。 |
 | `content[].type` | string | 条件必有 | 内容块类型。 | `text/table` 展示文本，`image` 加载图片；未知类型忽略。 |
 | `content[].text` | string/null | 否 | 文本或表格内容。 | 存在时原样展示。 |

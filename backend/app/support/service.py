@@ -178,7 +178,7 @@ class TechnicalSupportService:
         response.update(
             {
                 "response_type": "DOCUMENT_DELIVERED",
-                "answer": "【已提供文档】\n\n" + markdown_document_title(document.title),
+                "answer": markdown_document_title(document.title),
                 "document": {
                     "id": str(document.id),
                     "problem_code": profile.problem_code if profile else None,

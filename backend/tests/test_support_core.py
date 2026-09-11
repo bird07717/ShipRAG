@@ -204,6 +204,30 @@ def test_document_delivery_keeps_order_and_optionally_suppresses_images() -> Non
     assert hidden_images == []
 
 
+def test_document_delivery_removes_redundant_leading_document_heading() -> None:
+    document = FocusedDocument(
+        id=uuid4(),
+        title="如何配VAU图像",
+        problem_code="VAU_IMAGE_CONFIG",
+        index_id=uuid4(),
+        blocks=[
+            DocumentContentBlock(uuid4(), 1, "text", "故障解决文档5—如何配VAU图像"),
+            DocumentContentBlock(uuid4(), 2, "text", "第一步：打开VAU配置界面。"),
+        ],
+    )
+
+    content, _ = deliver_document(document, include_images=True)
+
+    assert content == [
+        {
+            "type": "text",
+            "sequence_no": 2,
+            "text": "第一步：打开VAU配置界面。",
+            "source_id": str(document.blocks[1].element_id),
+        }
+    ]
+
+
 def test_context_v1_migrates_legacy_workflow_and_keeps_candidates_outside_prompt_memory() -> None:
     document_id, index_id = uuid4(), uuid4()
     legacy = {
@@ -1050,7 +1074,7 @@ async def test_support_service_delivers_complete_document_without_llm() -> None:
     )
 
     assert response["response_type"] == "DOCUMENT_DELIVERED"
-    assert response["answer"] == f"【已提供文档】\n\n**《{document.title}》**"
+    assert response["answer"] == f"**《{document.title}》**"
     ChatResponse.model_validate(response)
     assert response["routing"] == {
         "method": "PROBLEM_CODE",

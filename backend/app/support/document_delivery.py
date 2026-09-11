@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.common.text import strip_redundant_document_heading
 from app.support.models import FocusedDocument
 
 
@@ -32,6 +33,7 @@ def deliver_document(
     """
     content: list[dict[str, Any]] = []
     images: list[dict[str, Any]] = []
+    leading_text = True
     for block in document.blocks:
         if block.type == "image":
             if not include_images or block.image_asset_id is None:
@@ -49,11 +51,17 @@ def deliver_document(
             content.append(image)
             images.append({key: value for key, value in image.items() if key != "type"})
         else:
+            text = block.text
+            if leading_text and block.type == "text":
+                text = strip_redundant_document_heading(text, document.title)
+                if not text.strip():
+                    continue
+            leading_text = False
             content.append(
                 {
                     "type": "table" if block.type == "table" else "text",
                     "sequence_no": block.sequence_no,
-                    "text": block.text,
+                    "text": text,
                     "source_id": str(block.element_id),
                 }
             )

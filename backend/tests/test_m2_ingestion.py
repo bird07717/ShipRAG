@@ -14,7 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.api.schemas import IndexBuildRequest
 from app.common.assets import reject_control_characters
 from app.common.errors import ApiError
-from app.common.text import emphasize_document_title_mentions, markdown_document_title
+from app.common.text import (
+    emphasize_document_title_mentions,
+    markdown_document_title,
+    strip_redundant_document_heading,
+)
 from app.core.config import Settings
 from app.ingestion.chunker import build_chunks, build_parent_chunks
 from app.ingestion.embedding import FakeEmbeddingProvider, SiliconFlowEmbeddingProvider
@@ -712,6 +716,19 @@ def test_markdown_document_title_is_bold_and_escapes_untrusted_markup() -> None:
         )
         == "请查看 **《升级手册》**，已有 **《升级手册》** 不重复处理。"
     )
+
+
+def test_strip_redundant_document_heading_only_removes_matching_first_line() -> None:
+    assert (
+        strip_redundant_document_heading(
+            "故障解决文档5—如何配VAU图像\n第一步：打开配置界面。",
+            "如何配VAU图像",
+        )
+        == "第一步：打开配置界面。"
+    )
+    assert strip_redundant_document_heading("如何配VAU图像", "如何配VAU图像") == ""
+    body = "操作说明\n第一步：打开配置界面。"
+    assert strip_redundant_document_heading(body, "如何配VAU图像") == body
 
 
 @pytest.mark.asyncio

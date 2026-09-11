@@ -16,6 +16,7 @@ from app.common.text import (
     emphasize_document_title_mentions,
     estimate_tokens,
     markdown_document_title,
+    strip_redundant_document_heading,
 )
 from app.core.config import Settings
 from app.ingestion.embedding import EmbeddingError, EmbeddingProvider, create_embedding_provider
@@ -1608,10 +1609,12 @@ class RagService:
 
     def _build_delivery_payload(self, document: dict[str, Any]) -> dict[str, Any]:
         max_tokens = self.settings.m3_doc_delivery_max_tokens
+        document_title = str(document["title"])
         blocks: list[RoutingContentBlock] = []
         image_asset_ids: list[str] = []
         used_tokens = 0
         truncated = False
+        leading_text = True
         for element in document.get("elements", []):
             if element.get("element_type") == "IMAGE":
                 asset_id = element.get("image_asset_id")
@@ -1638,11 +1641,17 @@ class RagService:
                 continue
             if not element.get("content"):
                 continue
-            tokens = estimate_tokens(str(element["content"]))
+            content = str(element["content"])
+            if leading_text and element.get("element_type") == "TEXT":
+                content = strip_redundant_document_heading(content, document_title)
+                if not content.strip():
+                    continue
+            leading_text = False
+            tokens = estimate_tokens(content)
             if used_tokens + tokens > max_tokens:
                 truncated = True
                 break
-            blocks.append(RoutingContentBlock(type="text", text=str(element["content"])))
+            blocks.append(RoutingContentBlock(type="text", text=content))
             used_tokens += tokens
         if truncated:
             blocks.append(
@@ -1651,13 +1660,11 @@ class RagService:
                     text="（文档较长，以上内容已截断。）",
                 )
             )
-        summary = (
-            "已为你找到 " + markdown_document_title(str(document["title"])) + "，以下是文档内容："
-        )
+        summary = markdown_document_title(document_title)
         document_source = {
             "source_id": "S1",
             "document_id": document["document_id"],
-            "document": document["title"],
+            "document": document_title,
             "section_path": [],
             "page": None,
             "element_ids": [],
@@ -1668,7 +1675,7 @@ class RagService:
         return {
             "result": result,
             "document_source": document_source,
-            "references": [self._document_reference(document["document_id"], document["title"])],
+            "references": [self._document_reference(document["document_id"], document_title)],
         }
 
     async def _emit_final_chat_turn(

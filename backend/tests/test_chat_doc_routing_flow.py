@@ -260,8 +260,9 @@ async def test_aligning_clear_winner_delivers_document_without_llm():
     )
 
     assert result["response_type"] == "DOC_DELIVERED"
-    assert TITLE_A in result["answer"]
-    assert f"**《{TITLE_A}》**" in result["answer"]
+    assert result["answer"] == f"**《{TITLE_A}》**"
+    assert "已为你找到" not in result["answer"]
+    assert "以下是文档内容" not in result["answer"]
     assert "下载原文档" not in json.dumps(result, ensure_ascii=False)
     assert llm.prompts == []  # zero-LLM delivery path
     assert result["usage"] == {}
@@ -282,6 +283,49 @@ async def test_aligning_clear_winner_delivers_document_without_llm():
     assert TITLE_A in repo.completed["answer"]
     assert repo.completed["usage"] == {}
     assert repo.failed is None
+
+
+@pytest.mark.asyncio
+async def test_document_delivery_removes_redundant_leading_document_heading() -> None:
+    title = "如何配VAU图像"
+    document = {
+        "document_id": str(DOC_A),
+        "title": title,
+        "elements": [
+            {
+                "element_id": uuid4(),
+                "element_type": "TEXT",
+                "content": "故障解决文档5—如何配VAU图像",
+                "section_path": [],
+                "image_asset_id": None,
+                "image_caption": "",
+            },
+            {
+                "element_id": uuid4(),
+                "element_type": "TEXT",
+                "content": "第一步：打开VAU配置界面。",
+                "section_path": [],
+                "image_asset_id": None,
+                "image_caption": "",
+            },
+        ],
+    }
+    repo = _RoutingRepository(
+        turn=_turn(),
+        candidates=[_candidate(DOC_A, 1), _candidate(DOC_A, 2)],
+        document_blocks={str(DOC_A): document},
+    )
+    service = _service(repo, _RecordingLlmProvider(["不应被调用"]))
+
+    result = await service.generate(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=None,
+        question="如何配VAU图像",
+        request_id="req-delivery-title",
+    )
+
+    assert result["answer"] == "**《如何配VAU图像》**"
+    assert result["content"] == [{"type": "text", "text": "第一步：打开VAU配置界面。"}]
 
 
 @pytest.mark.asyncio

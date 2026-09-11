@@ -818,6 +818,8 @@ GET {AI_BASE_URL}/api/v1/assistant/knowledge-bases/{knowledge_id}/image-assets/{
 
 `answer` 和文本 Content Block 使用 Markdown。
 
+文档直达时，`answer` 仅返回 `**《文档标题》**`，不附加“已找到”或“以下是文档内容”等引导语；`content` 从有效正文或操作步骤开始，平台会过滤与显示名称重复的原文首行标题。
+
 Android/iOS 必须：
 
 - 禁止执行 Markdown 中的原生 HTML。
