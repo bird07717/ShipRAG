@@ -585,8 +585,18 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "ASSISTANT_SERVICE_TOKEN_PREVIOUS must differ from ASSISTANT_SERVICE_TOKEN"
                 )
-        if self.app_env in {"staging", "production"} and self.m3_llm_provider == "fake":
-            raise ValueError("M3_LLM_PROVIDER=fake is forbidden in staging and production")
+        if self.app_env in {"staging", "production"}:
+            fake_modes = {
+                "M2_EMBEDDING_PROVIDER": self.m2_embedding_provider,
+                "M3_LLM_PROVIDER": self.m3_llm_provider,
+                "M5_RERANK_PROVIDER": self.m5_rerank_provider,
+            }
+            forbidden = [name for name, value in fake_modes.items() if value == "fake"]
+            if forbidden:
+                raise ValueError(
+                    ", ".join(f"{name}=fake" for name in forbidden)
+                    + " is forbidden in staging and production"
+                )
         return self
 
     @property

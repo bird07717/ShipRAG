@@ -34,11 +34,26 @@ function isRagActive(index: KnowledgeIndex): boolean {
   return Boolean(activeId && activeId === index.id);
 }
 
-function rollbackable(index: KnowledgeIndex): boolean {
-  return (
-    ["READY", "DEPRECATED"].includes(index.status) ||
-    (index.status === "ACTIVE" && !isRagActive(index))
-  );
+function canActivate(index: KnowledgeIndex): boolean {
+  return index.status === "READY";
+}
+
+function canRollback(index: KnowledgeIndex): boolean {
+  return index.status === "DEPRECATED" || (index.status === "ACTIVE" && !isRagActive(index));
+}
+
+async function activateRag(index: KnowledgeIndex): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `将 Index v${index.version} 设为当前 RAG 索引。` +
+        "新会话将使用该版本；既有会话继续使用各自冻结的版本。Support 发布状态不受影响。",
+      "设为当前 RAG 索引",
+      { type: "warning", confirmButtonText: "确认切换", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  await store.activateIndex(index.id);
 }
 
 async function rollbackRag(index: KnowledgeIndex): Promise<void> {
@@ -158,7 +173,16 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
         <el-table-column label="操作" width="180" align="right">
           <template #default="scope">
             <el-button
-              v-if="rollbackable(scope.row)"
+              v-if="canActivate(scope.row)"
+              link
+              type="warning"
+              :loading="store.isActionLoading(`activate-index:${scope.row.id}`)"
+              @click.stop="activateRag(scope.row)"
+            >
+              设为当前 RAG
+            </el-button>
+            <el-button
+              v-if="canRollback(scope.row)"
               link
               type="warning"
               :loading="store.isActionLoading(`rollback-rag-index:${scope.row.id}`)"
@@ -266,7 +290,7 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
             {{ detailIndex.build_reason }}
           </el-descriptions-item>
           <el-descriptions-item label="RAG 生效策略">
-            构建完成后自动切换
+            构建完成后保留为候选索引，由管理员明确切换
           </el-descriptions-item>
           <el-descriptions-item label="开始时间">
             {{ store.formatDate(detailIndex.created_at) }}
@@ -282,7 +306,7 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
         </template>
 
         <el-alert
-          title="此页面不处理 Support Profile。构建完成并通过技术校验后，RAG 会自动切换到该索引；请在 Profile 审核（Profile Review）中审核和发布技术支持（Support）配置。"
+          title="此页面不处理 Support Profile。候选索引构建完成后需明确设为当前 RAG 索引；技术支持（Support）配置仍在 Profile 审核（Profile Review）中独立审核和发布。"
           type="info"
           :closable="false"
           show-icon
@@ -291,7 +315,16 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
 
         <div class="detail-actions">
           <el-button
-            v-if="rollbackable(detailIndex)"
+            v-if="canActivate(detailIndex)"
+            type="warning"
+            plain
+            :loading="store.isActionLoading(`activate-index:${detailIndex.id}`)"
+            @click="activateRag(detailIndex)"
+          >
+            设为当前 RAG 索引
+          </el-button>
+          <el-button
+            v-if="canRollback(detailIndex)"
             type="warning"
             plain
             :loading="store.isActionLoading(`rollback-rag-index:${detailIndex.id}`)"

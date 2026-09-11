@@ -480,7 +480,7 @@ async def test_no_match_empty_catalog_returns_fixed_unconfirmed():
         request_id="req-no-match",
     )
 
-    assert result["response_type"] == "ANSWERED"
+    assert result["response_type"] == "UNCONFIRMED"
     assert "当前知识库没有足够的可靠信息" in result["answer"]
     assert llm.prompts == []
     assert repo.completed["doc_routing"]["decision"] == "NO_MATCH"
@@ -1280,7 +1280,7 @@ async def test_rerank_timeout_without_focus_returns_unconfirmed_without_referenc
         request_id="req-rerank-timeout-no-focus",
     )
 
-    assert result["response_type"] == "ANSWERED"
+    assert result["response_type"] == "UNCONFIRMED"
     assert result["references"] == []
     assert TITLE_A not in result["answer"]
     assert TITLE_B not in result["answer"]
@@ -1310,9 +1310,99 @@ async def test_rerank_timeout_keeps_existing_focus_for_follow_up():
         request_id="req-rerank-timeout-focus",
     )
 
-    assert [item["title"] for item in result["references"]] == [TITLE_A]
-    assert repo.completed["doc_routing"]["thresholds"]["fallback_guard"] == "FOCUS_STAY"
+    assert result["response_type"] == "UNCONFIRMED"
+    assert result["references"] == []
+    assert llm.prompts == []
+    assert repo.completed["doc_routing"]["thresholds"]["fallback_guard"] == "FOCUS_NO_MATCH"
     assert repo.focus_updates == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "reason"),
+    [
+        ("%%%%%%", "SYMBOL_ONLY"),
+        ("甲", "SINGLE_CHARACTER"),
+        ("啊啊啊啊", "REPEATED_CHARACTER"),
+        ("asdfghjkl", "KEYBOARD_SEQUENCE"),
+    ],
+)
+async def test_obvious_noise_short_circuits_retrieval_and_returns_unconfirmed(
+    question: str, reason: str
+):
+    repo = _RoutingRepository(
+        turn=_turn(focus_document_id=DOC_A),
+        candidates=[_candidate(DOC_A, 1)],
+    )
+    llm = _RecordingLlmProvider(["不应调用模型"])
+    service = _service(repo, llm)
+
+    result = await service.generate(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=repo.turn.conversation_id,
+        question=question,
+        request_id=f"req-input-guard-{reason.lower()}",
+    )
+
+    assert result["response_type"] == "UNCONFIRMED"
+    assert result["references"] == []
+    assert repo.completed["sources"] == []
+    assert repo.saved is None
+    assert llm.prompts == []
+    assert repo.completed["doc_routing"]["resolved_from"] == "INPUT_GUARD"
+    assert repo.completed["doc_routing"]["thresholds"]["input_guard"] == reason
+    assert repo.focus_updates == []
+
+
+@pytest.mark.asyncio
+async def test_pending_numeric_reply_bypasses_input_guard():
+    options = [{"document_id": str(DOC_A), "title": TITLE_A}]
+    repo = _RoutingRepository(
+        turn=_turn(chat_context={"pending_options": options, "pending_query": "PDC怎么处理"}),
+        candidates=[_candidate(DOC_A, 1)],
+    )
+    llm = _RecordingLlmProvider(["不应调用模型"])
+    service = _service(repo, llm)
+
+    result = await service.generate(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=repo.turn.conversation_id,
+        question="1",
+        request_id="req-input-guard-pending-reply",
+    )
+
+    assert result["response_type"] == "DOC_DELIVERED"
+    assert result["references"][0]["document_id"] == str(DOC_A)
+    assert repo.saved is not None
+    assert repo.completed["doc_routing"]["resolved_from"] == "CLARIFICATION_REPLY"
+
+
+@pytest.mark.asyncio
+async def test_obvious_noise_stream_returns_unconfirmed_without_public_documents():
+    repo = _RoutingRepository(
+        turn=_turn(focus_document_id=DOC_A),
+        candidates=[_candidate(DOC_A, 1)],
+    )
+    llm = _RecordingLlmProvider(["不应调用模型"])
+    service = _service(repo, llm)
+
+    frames = [
+        frame
+        async for frame in service.chat_stream(
+            knowledge_id=repo.turn.knowledge_id,
+            conversation_id=repo.turn.conversation_id,
+            question="%%%%%%",
+            request_id="req-input-guard-stream",
+        )
+    ]
+    events = await _collect(frames)
+    done_payload = events[-1][1]
+
+    assert done_payload["response_type"] == "UNCONFIRMED"
+    assert done_payload["sources"] == []
+    assert done_payload["references"] == []
+    assert repo.saved is None
+    assert llm.prompts == []
 
 
 @pytest.mark.asyncio

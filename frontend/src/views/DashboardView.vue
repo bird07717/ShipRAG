@@ -386,7 +386,7 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
             <button type="button" @click="store.navigate('indexes')">
               <span>RAG 在线</span>
               <strong class="state-text">{{ store.activeIndex ? `v${store.activeIndex.version}` : "未就绪" }}</strong>
-              <small>技术构建成功后自动切换</small>
+              <small>技术构建完成后由管理员明确切换</small>
             </button>
             <button type="button" @click="store.navigate('support-review')">
               <span>Profile 属性</span>

@@ -1,6 +1,6 @@
 import ElementPlus from "element-plus";
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminStore } from "@/composables/adminStore";
 import AdminStudio from "@/components/AdminStudio.vue";
@@ -12,6 +12,7 @@ const kb = {
   name: "产品库",
   description: "d",
   status: "ENABLED",
+  assistant_online: true,
   runtime_state: "READY",
   active_index_id: "idx-1",
   building_index_id: null,
@@ -88,9 +89,18 @@ const model = {
 const prompt = { id: "p-1", name: "default", version: 2, content: "SYS", active: true };
 
 describe("view smoke", () => {
+  beforeEach(() => {
+    sessionStorage.setItem("rag_service_token", "test-service-token");
+    adminStore.serviceToken = "test-service-token";
+    adminStore.credentialRejected = false;
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    sessionStorage.clear();
+    adminStore.serviceToken = "";
+    adminStore.credentialRejected = false;
   });
 
   it("mounts every admin view without errors", async () => {

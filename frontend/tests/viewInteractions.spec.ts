@@ -12,6 +12,7 @@ const kb = {
   name: "产品库",
   description: "desc",
   status: "ENABLED",
+  assistant_online: true,
   runtime_state: "READY",
   active_index_id: "idx-1",
   building_index_id: null,
@@ -432,12 +433,17 @@ async function mountView(view: string, navigationQuery = "") {
 
 describe("view interactions", () => {
   beforeEach(() => {
+    sessionStorage.setItem("rag_service_token", "test-service-token");
+    adminStore.serviceToken = "test-service-token";
+    adminStore.credentialRejected = false;
     stubApi();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     sessionStorage.clear();
+    adminStore.serviceToken = "";
+    adminStore.credentialRejected = false;
     // shared drawers live in the module-level store and would leak into the
     // next test's mount (triggering real fetches from the replay drawer)
     adminStore.conversationDrawerOpen = false;

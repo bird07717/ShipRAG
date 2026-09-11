@@ -49,14 +49,24 @@ def test_production_rejects_duplicate_assistant_rotation_token() -> None:
 
 
 @pytest.mark.parametrize("app_env", ["staging", "production"])
-def test_deployed_environments_reject_fake_llm(app_env: str) -> None:
-    with pytest.raises(ValidationError, match="fake is forbidden"):
+@pytest.mark.parametrize(
+    ("setting_name", "environment_name"),
+    [
+        ("m2_embedding_provider", "M2_EMBEDDING_PROVIDER"),
+        ("m3_llm_provider", "M3_LLM_PROVIDER"),
+        ("m5_rerank_provider", "M5_RERANK_PROVIDER"),
+    ],
+)
+def test_deployed_environments_reject_fake_model_providers(
+    app_env: str, setting_name: str, environment_name: str
+) -> None:
+    with pytest.raises(ValidationError, match=rf"{environment_name}=fake is forbidden"):
         Settings(
             _env_file=None,
             app_env=app_env,
             service_token="configured",
             assistant_service_token="a" * 32 if app_env == "production" else None,
-            m3_llm_provider="fake",
+            **{setting_name: "fake"},
         )
 
 

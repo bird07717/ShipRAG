@@ -105,6 +105,7 @@ HTTP 错误字段：
 | `ESCALATION_REQUIRED` | 建议转人工或升级处理。 | 根据 `escalation` 进入业务侧流程。 |
 | 其他值 | 后续扩展类型。 | 按普通文本回答兼容，不直接报错。 |
 
+- `UNCONFIRMED`、`OUT_OF_SCOPE` 及不引用产品资料的通用解释不会返回可下载文档引用；调用方仅在 `references` 或 `document` 实际包含文档 ID 时展示下载入口。
 - 流式问答在服务接受请求前发生的鉴权、参数、会话归属、知识库/索引可用性、幂等或并发错误，以 HTTP 4xx/5xx JSON 返回；接受请求后的生成错误，以 SSE `error` 事件返回。
 - `cursor`、`before` 均为不透明游标，只能原样回传，不得拆解、拼接或自行生成。
 
@@ -114,7 +115,7 @@ HTTP 错误字段：
 
 ```text
 1. 服务启动或定时探测：调用就绪检查
-2. 用户进入问答功能：查询可用知识库
+2. 用户进入问答功能：查询后台已上线知识库，并根据 `ready` 判断当前是否可用
 3. 用户选择知识库：查询欢迎语（可选）
 4. 业务后台创建 client_chat_id，并为首次提问生成 Idempotency-Key
 5. 首次流式问答：conversation_id 省略或传 null
@@ -150,7 +151,7 @@ HTTP 错误字段：
 | 顺序 | 当前接口 | 关键输入来源 | 关键输出 | 后续用途 | 是否必调 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 接口 1：就绪检查 | 固定基础地址 | `status` | 判断是否允许发起业务请求 | 上线验收必调，运行期建议定时调用 |
-| 2 | 接口 2：知识库列表 | 当前用户身份 | `knowledge_id`、`ready` | 欢迎语、问答、资源下载 | 必调 |
+| 2 | 接口 2：知识库列表 | 当前用户身份 | 已上线知识库的 `knowledge_id`、`ready` | 欢迎语、问答、资源下载 | 必调 |
 | 3 | 接口 3：欢迎语 | 接口 2 的 `knowledge_id` | `message`、`suggestions` | 页面展示或快捷提问 | 可选 |
 | 4 | 接口 7：首次问答 | `knowledge_id`、新 `Idempotency-Key` | `conversation_id`、最终回答 | 建立会话映射并继续追问 | 必调 |
 | 5 | 接口 7：继续问答 | 已保存的 `conversation_id`、新 `Idempotency-Key` | 新消息、引用和资源 ID | 更新当前对话 | 按需重复调用 |
@@ -225,7 +226,7 @@ Content-Type: application/json
 
 接口名称：查询可用知识库
 
-接口用途：取得当前 Token 允许业务用户使用的知识库。
+接口用途：取得后台已对 Assistant 上线、且当前 Token 允许业务用户使用的知识库。
 
 method：`GET`
 
@@ -260,11 +261,11 @@ curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/knowledge-bases" \
 
 | 字段 | 类型 | 是否必有 | 说明 | 调用方处理 |
 | --- | --- | --- | --- | --- |
-| `items` | array | 是 | 当前 Assistant 接口可见的知识库列表；无可用项时为空数组。 | 遍历展示，不得假定至少存在一项。 |
+| `items` | array | 是 | 当前已上线并对 Assistant 可见的知识库列表；无上线项时为空数组。 | 遍历展示，不得假定至少存在一项。 |
 | `items[].knowledge_id` | UUID string | 是 | 知识库唯一标识。 | 保存为字符串，供欢迎语、问答和资源接口使用。 |
 | `items[].name` | string | 是 | 知识库名称。 | 用于页面展示。 |
 | `items[].description` | string/null | 否 | 知识库说明。 | 为空时隐藏说明区域。 |
-| `items[].ready` | boolean | 是 | 是否具备基本问答条件。 | 仅允许选择 `true` 的知识库。 |
+| `items[].ready` | boolean | 是 | 当前运行策略所需索引、模型、Prompt 等依赖是否完整就绪。 | 仅允许选择 `true` 的知识库。 |
 
 失败响应示例：
 
@@ -275,7 +276,7 @@ Content-Type: application/json
 {"error":{"code":"AUTHENTICATION_REQUIRED","message":"服务访问凭据无效","details":{},"request_id":"..."}}
 ```
 
-特殊规则：业务后台只能展示或使用响应中返回且 `ready=true` 的知识库；不得在代码中长期硬编码知识库 ID。
+特殊规则：业务后台只能展示或使用响应中返回且 `ready=true` 的知识库；知识库上线状态可能变化，应在进入问答功能时刷新列表，不得在代码中长期硬编码或永久缓存知识库 ID。后台未上线或已下线的知识库不会出现在列表中。
 
 ---
 
@@ -334,7 +335,7 @@ Content-Type: application/json
 {"error":{"code":"KNOWLEDGE_BASE_NOT_FOUND","message":"知识库不存在","details":{},"request_id":"..."}}
 ```
 
-特殊规则：欢迎语只用于展示，不产生会话或历史消息；失败时业务页面可使用本地默认文案，不应阻断问答功能。
+特殊规则：欢迎语只用于展示，不产生会话或历史消息；只能使用接口 2 当前返回的知识库 ID。知识库下线后可能返回 HTTP 404；失败时业务页面可使用本地默认文案，不应阻断其他知识库的问答功能。
 
 ---
 
@@ -937,7 +938,7 @@ Content-Type: application/json
 | 场景 | 典型状态/错误码 | 调用方处理 |
 | --- | --- | --- |
 | Token 缺失或无效 | HTTP 401 `AUTHENTICATION_REQUIRED` | 不重试；检查业务后台密钥配置。 |
-| 知识库不存在、停用或未就绪 | HTTP 404 `KNOWLEDGE_BASE_NOT_FOUND`、HTTP 403 `FORBIDDEN`、HTTP 409 `KNOWLEDGE_BASE_NOT_READY`/`INDEX_NOT_READY` | 刷新知识库列表；未就绪时稍后重试。 |
+| 知识库不存在、未上线、已下线、停用或未就绪 | HTTP 404 `KNOWLEDGE_BASE_NOT_FOUND`、HTTP 403 `FORBIDDEN`、HTTP 409 `KNOWLEDGE_BASE_NOT_READY`/`INDEX_NOT_READY` | 刷新知识库列表；未就绪时稍后重试。 |
 | 参数或游标错误 | HTTP 422 | 修正请求；游标错误时从第一页重新加载。 |
 | 会话不存在 | HTTP 404 `CONVERSATION_NOT_FOUND` | 清理本地会话映射，回到新会话流程。 |
 | 会话正在处理 | HTTP 409 `CONVERSATION_BUSY` | 禁止并发发送；等待当前请求结束后再处理。 |
@@ -952,6 +953,7 @@ Content-Type: application/json
 
 - `/health/ready` 返回 HTTP 200。
 - 能使用服务端安全保存的 Token 和稳定用户 ID 查询知识库。
+- 业务页面不会展示知识库列表中不存在或 `ready=false` 的知识库；列表变化后能够刷新。
 - 首次问答传 `conversation_id=null`，能保存返回的会话 ID 并完成追问。
 - 能正确处理 HTTP JSON 错误、SSE `complete`、SSE `error`、心跳、断流和幂等重放。
 - 同一会话不会并发发送，重复点击不会产生重复问答。

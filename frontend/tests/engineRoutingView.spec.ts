@@ -13,6 +13,7 @@ const knowledgeBase: KnowledgeBase = {
   name: "产品库",
   description: null,
   status: "ENABLED",
+  assistant_online: true,
   runtime_state: "READY",
   active_index_id: "index-1",
   building_index_id: null,

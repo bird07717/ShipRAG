@@ -36,6 +36,22 @@ describe("admin API", () => {
     );
   });
 
+  it("announces a rejected service credential so automatic requests can stop", async () => {
+    const rejected = vi.fn();
+    window.addEventListener("rag-service-auth-rejected", rejected, { once: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ error: { message: "未授权" } }),
+      }),
+    );
+
+    await expect(apiRequest("/knowledge-bases")).rejects.toMatchObject({ status: 401 });
+    expect(rejected).toHaveBeenCalledOnce();
+  });
+
   it("sends whitelisted playground options as JSON", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
     vi.stubGlobal("fetch", fetchMock);
@@ -84,6 +100,98 @@ describe("admin API", () => {
     expect((fetchMock.mock.calls[3]?.[1] as RequestInit).method).toBe("DELETE");
     expect(fetchMock.mock.calls[15]?.[0]).toBe("/api/v1/knowledge-bases/kb-1");
     expect((fetchMock.mock.calls[15]?.[1] as RequestInit).method).toBe("DELETE");
+  });
+
+  it("wires the complete management contract", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminApi.getSystemInfo();
+    await adminApi.createKnowledgeBase("产品 B", "");
+    await adminApi.getDocumentProfileContext("doc-1");
+    await adminApi.getKnowledgeProfiles("kb-1");
+    await adminApi.generateKnowledgeProfiles("kb-1");
+    await adminApi.generateDocumentProfile("kb-1", "doc-1");
+    await adminApi.updateDocumentProfile("kb-1", "doc-1", {} as never);
+    await adminApi.checkKnowledgeProfiles("kb-1");
+    await adminApi.publishKnowledgeProfiles("kb-1");
+    await adminApi.discardPendingKnowledgeProfiles("kb-1");
+    await adminApi.rebuildKnowledgeProfiles("kb-1", "idem-1");
+    await adminApi.listChunks("doc-1", "idx-1");
+    await adminApi.listIndexTasks("idx-1");
+    await adminApi.getTask("task-1");
+    await adminApi.cancelTask("task-1");
+    await adminApi.gcIndexes("kb-1");
+    await adminApi.deleteIndex("idx-1");
+    await adminApi.deleteIndex("idx-1", true);
+    await adminApi.listTraces(
+      "kb-1",
+      {
+        status: "SUCCESS",
+        responseType: "KNOWLEDGE",
+        userId: "user-1",
+        errorCode: "NONE",
+        conversationId: "conv-1",
+        engine: "RAG",
+        source: "ASSISTANT_API",
+        requestId: "req-1",
+        from: "2026-09-01",
+        to: "2026-09-02",
+        limit: 50,
+      },
+      { signal: new AbortController().signal },
+    );
+    await adminApi.listNoAnswerTraces();
+    await adminApi.getMetricsOverview();
+    await adminApi.getMetricsTimeseries({
+      knowledgeId: "kb-1",
+      from: "2026-09-01",
+      to: "2026-09-02",
+      granularity: "day",
+    });
+    await adminApi.getMetricsLatency();
+    await adminApi.getSupportMetrics({ knowledgeId: "kb-1", to: "2026-09-02" });
+    await adminApi.getAssistantMetrics({ knowledgeId: "kb-1", days: 7 });
+    await adminApi.getAssistantMetrics();
+    await adminApi.listRequestErrors({ to: "2026-09-02" });
+    await adminApi.listRequestErrors();
+    await adminApi.getFailureSummary();
+    await adminApi.listTasks({ from: "2026-09-01", to: "2026-09-02" });
+    await adminApi.updateModel("model-1", {} as never);
+    await adminApi.putApiKey("model-1", "test-api-key");
+    await adminApi.deleteApiKey("model-1");
+    await adminApi.probeModel("model-1");
+    await adminApi.getRagConfig();
+    await adminApi.updateRagConfig({} as never);
+    await adminApi.listEngineRetrievalConfigs();
+    await adminApi.updateEngineRetrievalConfig("RAG_ONLY", {} as never);
+    await adminApi.getRuntimePolicy("kb-1");
+    await adminApi.updateRuntimePolicy("kb-1", "RAG_ONLY");
+    await adminApi.listProblemProfiles("kb-1");
+    await adminApi.listKnowledgeReleases("kb-1");
+    await adminApi.getKnowledgeRelease("release-1");
+    await adminApi.generateProfileDrafts("idx-1");
+    await adminApi.backfillProfileDrafts("idx-1");
+    await adminApi.refreshProfileDrafts("idx-1");
+    await adminApi.regenerateProfileDraft("draft-1");
+    await adminApi.createProfileEditDraft("release-1", "profile-1");
+    await adminApi.updateProfileDraft("draft-1", {} as never);
+    await adminApi.validateKnowledgeRelease("release-1");
+    await adminApi.publishKnowledgeRelease("release-1");
+    await adminApi.rebaseKnowledgeRelease("release-1");
+    await adminApi.rollbackSupportRelease("kb-1", "release-1");
+    await adminApi.rollbackRagIndex("kb-1", "idx-1");
+    await adminApi.listProfileFeedback("kb-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(55);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(
+      expect.arrayContaining([
+        "/api/v1/system/info",
+        "/api/v1/indexes/idx-1?force=true",
+        "/api/v1/runtime-policies/kb-1",
+        "/api/v1/knowledge-bases/kb-1/profile-feedback",
+      ]),
+    );
   });
 });
 

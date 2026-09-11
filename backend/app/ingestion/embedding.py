@@ -161,6 +161,10 @@ def create_embedding_provider(
     api_key = (snapshot.api_key if snapshot else None) or environment_api_key(
         settings, "EMBEDDING", provider
     )
-    if mode == "fake" or (mode == "auto" and not settings.has_secret(api_key)):
+    if mode == "fake":
+        return FakeEmbeddingProvider(settings.embedding_dimension)
+    if mode == "auto" and not settings.has_secret(api_key):
+        if settings.app_env in {"staging", "production"}:
+            raise EmbeddingError(f"{provider} Embedding 未配置，部署环境禁止回退到 fake")
         return FakeEmbeddingProvider(settings.embedding_dimension)
     return SiliconFlowEmbeddingProvider(settings, snapshot=snapshot)

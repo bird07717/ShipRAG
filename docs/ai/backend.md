@@ -36,14 +36,19 @@
 
 RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生产均将索引 Worker 和维护 Worker 分开：索引 Worker 负责索引构建、启动时的索引恢复/GC；维护 Worker 负责 Profile/维护任务、过期错误日志和周期 GC 调度。不要因方便把它们合并，长索引任务会阻塞维护工作。
 
-外部服务包括 PostgreSQL、Redis、MinIO，以及可配置的模型服务。代码支持 SiliconFlow 嵌入/重排/OCR、智谱 LLM/视觉等提供者；`auto` 模式会按密钥可用性选择，开发测试可使用受控 fake provider。实际模型、超时和阈值来自 Settings/环境变量，不能仅根据本文推断部署值。
+外部服务包括 PostgreSQL、Redis、MinIO，以及可配置的模型服务。代码支持 SiliconFlow 嵌入/重排/OCR、智谱 LLM/视觉等提供者；`auto` 模式会按环境或数据库模型快照中的凭据选择。Embedding、LLM、Rerank 在 staging/production 中禁止显式或隐式回退到 fake，缺少凭据时失败关闭；fake 仅用于开发/测试的受控场景。实际模型、超时和阈值来自 Settings、模型快照及环境变量，不能仅根据本文推断部署值。
 
 ## 关键实现约束
 
 - 嵌入维度在 Settings 与数据库契约中固定为 1024，变更需要迁移与重建计划。
+- 查询嵌入优先使用与 Active Index 模型一致的数据库模型快照，无法使用时才尝试环境配置；Trace 的 `retrieval_result` 同时记录索引模型及实际查询 Embedding provider/model，便于识别索引与查询向量不一致。
+- 明显低信息输入（纯符号、单字符、同字符重复、连续键盘字符）在检索和模型调用前返回 `UNCONFIRMED`；待确认选项存在时，`1` 等合法选择回复不受该门禁影响。
+- Rerank 降级为无分数排名时不得据此选中或沿用文档；即使会话已有焦点也返回不带来源和下载引用的 `UNCONFIRMED`，但保留焦点供下一轮有效追问。任何 `UNCONFIRMED`、`OUT_OF_SCOPE` 或通用解释响应都不得公开文档引用。
 - 运行策略有 `RAG_ONLY` 和 `SUPPORT_WITH_RAG_FALLBACK`；会话模式可覆盖引擎选择。
 - 对外 Assistant 请求使用幂等记录与外部用户隔离；其响应通过 `public_payload` 过滤内部字段。
-- 对外 Assistant 就绪态欢迎语使用简洁的用户侧文案，不暴露知识库名称、描述或文档数量；三条快捷问题固定取自已通过的 Assistant Golden Set `standard + EXACT` 用例。管理端 Chat 欢迎语仍使用知识库目录生成，不受此规则影响。
+- 对外 Assistant 只列出 `assistant_online=true` 且知识库本身启用的项目；欢迎语、问答、会话、文档和图片入口都执行同一上线边界及知识库归属检查。新知识库默认不对外，迁移前已经启用的知识库保持原可见性。
+- Assistant 列表的 `ready` 按知识库当前执行策略使用完整 Gateway 就绪条件计算；Chat 在预留幂等请求前再次执行同一策略就绪检查。已上线但依赖异常的知识库可以保留在列表中，但必须返回 `ready=false`。
+- 对外 Assistant 就绪态欢迎语使用简洁的用户侧文案，不暴露知识库名称、描述或文档数量；三条快捷问题目前仍全局固定取自已通过的 Assistant Golden Set `standard + EXACT` 用例。未就绪时只返回通用准备中文案，不暴露上传或索引管理指令。按知识库配置三个标准问题及后台上线写操作尚未实现，见 `current-state.md`。管理端 Chat 欢迎语仍使用知识库目录生成，不受此规则影响。
 - Assistant Chat 会在创建 `StreamingResponse` 前完成会话权限、知识库及 Active Index 可用性、策略、幂等和同会话并发检查；这些前置失败保持 HTTP JSON 错误，`accepted` 后的生成期失败才使用 SSE `error`。
 - Assistant Chat 的已预留请求由专用流响应持有；ASGI 发送失败或客户端断连时会在响应收口阶段幂等地将仍为 `RUNNING` 的请求及其关联消息/Trace 标记为取消，正常终态与幂等重放不会被改写。进程强制终止等无法执行收口的情况仍由遗留请求恢复命令处理。
 - Assistant SSE `context` 只允许输出会话、用户消息、Assistant 消息和 Trace 标识，不透传 Index 等内部 Trace 字段；已知短暂上游/超时错误保留可重试语义。

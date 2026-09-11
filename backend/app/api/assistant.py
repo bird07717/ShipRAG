@@ -132,7 +132,9 @@ async def welcome(
     knowledge_id: UUID, repository: Annotated[RagRepository, Depends(get_rag_repository)]
 ) -> dict[str, Any]:
     payload = build_assistant_welcome(
-        await repository.get_knowledge_base_summary(knowledge_id, enabled_only=True),
+        await repository.get_knowledge_base_summary(
+            knowledge_id, enabled_only=True, assistant_online_only=True
+        ),
         await repository.list_kb_documents(knowledge_id),
     )
     return {

@@ -36,6 +36,10 @@
 
 `src/api/admin.ts` 通过 `VITE_API_BASE_URL`（缺省同源）请求管理 API，并从 `sessionStorage` 的 `rag_service_token` 读取 Bearer Token。`src/api/chat.ts` 手动解析 SSE，支持 `status`、`trace`、`message`、`fallback`、`done`、`error` 事件。不要将服务令牌或任何真实密钥写入源码、测试夹具或认知文档。
 
+除凭证配置页外，`AdminStudio` 在当前浏览器会话没有 Service Token 时不挂载管理视图，也不启动索引/任务轮询；`App.vue` 对独立的问答测试页执行相同门禁。管理 API 返回 401 时会标记凭证失效、卸载管理视图并停止后续自动请求。保存新凭证后解除该状态并恢复加载，避免无凭证或失效凭证持续请求造成认证错误刷屏。后端仍必须对每次实际到达的未授权请求记录和返回 401，前端门禁不是认证边界。
+
+知识库列表和详情只读展示 Assistant 的“已上线/未上线”状态；当前没有管理侧写接口，因此页面尚不提供上线开关或按知识库配置标准问题。索引构建产生 `READY` 候选，不自动生效；候选索引通过已有激活接口明确设为当前 RAG，`DEPRECATED` 历史索引才使用回滚操作。
+
 ## 开发约定
 
 - 使用 TypeScript 严格类型；对 API 契约改动应同步 `types/`、适配层、视图与测试。

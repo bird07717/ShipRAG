@@ -1,15 +1,26 @@
 import ElementPlus, { ElMessageBox } from "element-plus";
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminApi } from "@/api/admin";
 import AdminStudio from "@/components/AdminStudio.vue";
+import { adminStore } from "@/composables/adminStore";
 
 describe("AdminStudio settings", () => {
+  beforeEach(() => {
+    adminStore.serviceToken = "";
+    adminStore.credentialRejected = false;
+    adminStore.error = "";
+    adminStore.notice = "";
+  });
+
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     sessionStorage.clear();
+    adminStore.serviceToken = "";
+    adminStore.credentialRejected = false;
   });
 
   it("accepts and saves a service access credential", async () => {
@@ -38,12 +49,14 @@ describe("AdminStudio settings", () => {
   });
 
   it("confirms and deletes a parsed document", async () => {
+    adminStore.saveToken("session-token");
     vi.spyOn(adminApi, "listKnowledgeBases").mockResolvedValue([
       {
         id: "kb-1",
         name: "产品库",
         description: null,
         status: "ENABLED",
+        assistant_online: true,
         runtime_state: "READY",
         active_index_id: "index-1",
         building_index_id: null,
@@ -101,6 +114,46 @@ describe("AdminStudio settings", () => {
     );
     expect(deleteSpy).toHaveBeenCalledWith("doc-1");
     expect(wrapper.text()).toContain("文档已删除，索引更新已提交");
+    wrapper.unmount();
+  });
+
+  it("does not mount management views or poll without a service credential", async () => {
+    const listKnowledgeBases = vi.spyOn(adminApi, "listKnowledgeBases").mockResolvedValue([]);
+
+    const wrapper = mount(AdminStudio, {
+      props: { view: "dashboard" },
+      global: { plugins: [ElementPlus] },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("需要配置服务凭证");
+    expect(wrapper.text()).toContain("管理台已暂停自动加载和轮询");
+    expect(listKnowledgeBases).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("stops automatic requests after the backend rejects the credential", async () => {
+    vi.useFakeTimers();
+    adminStore.saveToken("invalid-session-token");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: () => Promise.resolve({ error: { message: "服务凭证无效" } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(AdminStudio, {
+      props: { view: "dashboard" },
+      global: { plugins: [ElementPlus] },
+    });
+    await flushPromises();
+
+    expect(adminStore.credentialRejected).toBe(true);
+    expect(wrapper.text()).toContain("需要配置服务凭证");
+    const callsAfterRejection = fetchMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterRejection);
     wrapper.unmount();
   });
 });

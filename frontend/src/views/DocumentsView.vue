@@ -189,7 +189,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         v-else
         :icon="Document"
         title="暂无文档"
-        description="上传 Word 文档后会自动完成解析、切片（Chunk）、向量化（Embedding），并在构建成功后切换 RAG；Support Profile 仍需单独审核发布。"
+        description="上传 Word 文档后会自动完成解析、切片（Chunk）和向量化（Embedding）；候选索引构建成功后需明确切换，Support Profile 仍需单独审核发布。"
       >
         <template #action>
           <el-button
@@ -214,7 +214,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         <h4>选择文件</h4>
         <p class="desc">
           当前知识库：{{ store.selectedKnowledge?.name ?? "未选择" }}。仅支持 .docx
-          文件。上传后系统会自动构建并切换 RAG 索引；Support Profile 草稿将在 Profile Review 中单独审核发布。
+          文件。上传后系统会自动构建 RAG 候选索引，构建完成后需明确切换；Support Profile 草稿将在 Profile Review 中单独审核发布。
         </p>
         <button type="button" class="upload-dropzone" @click="openPicker">
           <el-icon :size="22"><UploadFilled /></el-icon>

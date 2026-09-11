@@ -92,6 +92,7 @@ async def test_assistant_conversation_filter_uses_typed_direct_uuid_comparison()
 
     sql, params = connection.executed[0]
     assert "c.knowledge_id = :knowledge_id" in sql
+    assert "kb.assistant_online" in sql
     assert ":knowledge_id IS NULL" not in sql
     assert params is not None and params["knowledge_id"] == knowledge_id
 
@@ -117,8 +118,64 @@ async def test_assistant_image_asset_requires_stored_document() -> None:
 
     sql, params = connection.executed[0]
     assert "d.status = 'STORED'" in sql
+    assert "kb.assistant_online" in sql
     assert params == {"image_asset_id": image_asset_id, "knowledge_id": knowledge_id}
     assert asset["id"] == image_asset_id
+
+
+async def test_assistant_request_reservation_rechecks_publication_in_transaction() -> None:
+    knowledge_id = uuid4()
+    repo, connection = _gateway_repository([[{"status": "ENABLED", "assistant_online": True}], []])
+
+    state, request = await repo.reserve_assistant_request(
+        external_user_id="business-user-1",
+        knowledge_id=knowledge_id,
+        idempotency_key="request-key-1",
+        request_hash="request-hash-1",
+        conversation_id=None,
+    )
+
+    statements = "\n".join(statement for statement, _ in connection.executed)
+    assert state == "NEW"
+    assert request["status"] == "RUNNING"
+    assert "assistant_online" in connection.executed[0][0]
+    assert "FOR SHARE" in connection.executed[0][0]
+    assert "INSERT INTO assistant_request" in statements
+
+
+async def test_assistant_request_reservation_rejects_offline_knowledge_base() -> None:
+    repo, connection = _gateway_repository([[{"status": "ENABLED", "assistant_online": False}]])
+
+    with pytest.raises(ApiError) as raised:
+        await repo.reserve_assistant_request(
+            external_user_id="business-user-1",
+            knowledge_id=uuid4(),
+            idempotency_key="request-key-1",
+            request_hash="request-hash-1",
+            conversation_id=None,
+        )
+
+    assert raised.value.code == "KNOWLEDGE_BASE_NOT_FOUND"
+    assert all("INSERT INTO assistant_request" not in sql for sql, _ in connection.executed)
+
+
+async def test_assistant_request_reservation_rechecks_conversation_association() -> None:
+    repo, connection = _gateway_repository([[{"status": "ENABLED", "assistant_online": True}], []])
+
+    with pytest.raises(ApiError) as raised:
+        await repo.reserve_assistant_request(
+            external_user_id="business-user-1",
+            knowledge_id=uuid4(),
+            idempotency_key="request-key-1",
+            request_hash="request-hash-1",
+            conversation_id=uuid4(),
+        )
+
+    assert raised.value.code == "CONVERSATION_NOT_FOUND"
+    conversation_sql = connection.executed[1][0]
+    assert "knowledge_id = :knowledge_id" in conversation_sql
+    assert "user_id = :user_id" in conversation_sql
+    assert "FOR SHARE" in conversation_sql
 
 
 async def test_cancel_assistant_request_closes_linked_runtime_in_one_statement() -> None:

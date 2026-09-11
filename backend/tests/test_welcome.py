@@ -64,6 +64,13 @@ def test_assistant_welcome_uses_verified_golden_questions() -> None:
     ]
 
 
+def test_assistant_welcome_never_exposes_admin_setup_guidance() -> None:
+    payload = build_assistant_welcome(_kb(active_index_id=None), [{"title": "手册"}])
+
+    assert payload["message"] == "服务正在准备中，请稍后再试。"
+    assert payload["suggestions"] == []
+
+
 def test_welcome_without_documents_guides_upload() -> None:
     payload = build_welcome(_kb(), [])
     assert payload["knowledge_base"]["ready"] is False

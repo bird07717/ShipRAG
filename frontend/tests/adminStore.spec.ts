@@ -12,6 +12,7 @@ const kb = {
   name: "产品库",
   description: null,
   status: "ENABLED",
+  assistant_online: true,
   runtime_state: "READY",
   active_index_id: "idx-1",
   building_index_id: null,
@@ -97,6 +98,9 @@ async function mountStudio(view = "indexes") {
 
 describe("adminStore", () => {
   beforeEach(() => {
+    sessionStorage.setItem("rag_service_token", "test-service-token");
+    adminStore.serviceToken = "test-service-token";
+    adminStore.credentialRejected = false;
     adminStore.knowledgeBases = [];
     adminStore.indexes = [];
     adminStore.latestIndexTasks = {};
@@ -114,6 +118,8 @@ describe("adminStore", () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     sessionStorage.clear();
+    adminStore.serviceToken = "";
+    adminStore.credentialRejected = false;
     localStorage.clear();
   });
 
@@ -152,7 +158,7 @@ describe("adminStore", () => {
     expect(create).toHaveBeenCalledWith("新库", "");
     expect(adminStore.selectedKnowledgeId).toBe("kb-9");
     expect(adminStore.knowledgeDrawerOpen).toBe(false);
-    expect(adminStore.notice).toBe("知识库已创建");
+    expect(adminStore.notice).toBe("知识库已创建，默认不对 Assistant 上线");
   });
 
   it("requires the knowledge name and deletes the selected knowledge base", async () => {
@@ -301,7 +307,7 @@ describe("adminStore", () => {
     expect(upload).toHaveBeenCalledWith("kb-1", expect.any(File), expect.any(String));
     expect(adminStore.uploadDrawerOpen).toBe(false);
     expect(adminStore.notice).toBe(
-      "文档已上传，RAG 索引构建已提交；构建成功后自动生效，Profile 请在 Profile Review 审核",
+      "文档已上传，RAG 候选索引构建已提交；构建完成后需明确设为当前索引，Profile 请在 Profile Review 审核",
     );
   });
 
@@ -536,6 +542,194 @@ describe("adminStore", () => {
   it("reads task metadata defensively", () => {
     expect(adminStore.taskMetadata(task, "current_document")).toBe("a.docx");
     expect(adminStore.taskMetadata(undefined, "x")).toBeUndefined();
+  });
+
+  it("derives support publication state and formats defensive values", () => {
+    const supportIndex = { ...index, id: "idx-support" };
+    const draftRelease = {
+      id: "release-draft",
+      index_id: supportIndex.id,
+      status: "DRAFT",
+      draft_count: 3,
+      approved_count: 1,
+    } as never;
+    const publishedRelease = {
+      id: "release-live",
+      index_id: "idx-live",
+      status: "PUBLISHED",
+      draft_count: 2,
+      approved_count: 2,
+    } as never;
+    adminStore.knowledgeBases = [
+      {
+        ...kb,
+        support_active_index_id: supportIndex.id,
+        support_active_release_id: "release-live",
+      },
+    ];
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.indexes = [supportIndex];
+    adminStore.releases = [draftRelease, publishedRelease];
+
+    expect(adminStore.supportActiveIndex?.id).toBe(supportIndex.id);
+    expect(adminStore.supportActiveRelease?.id).toBe("release-live");
+    expect(adminStore.pendingSupportReviewCount).toBe(2);
+    expect(adminStore.releaseForIndex(supportIndex.id)?.id).toBe("release-draft");
+    expect(adminStore.isActionableReleaseIndex(supportIndex.id)).toBe(true);
+    expect(adminStore.isActionableReleaseIndex("missing")).toBe(false);
+
+    adminStore.documents = [
+      { display_name: "数据库手册", filename: "db.docx" },
+      { display_name: "部署说明", filename: "server.docx" },
+    ] as never;
+    adminStore.documentSearch = "server";
+    expect(adminStore.filteredDocuments).toHaveLength(1);
+    adminStore.documentSearch = "数据库";
+    expect(adminStore.filteredDocuments).toHaveLength(1);
+    adminStore.documentSearch = "";
+    expect(adminStore.filteredDocuments).toHaveLength(2);
+    expect(adminStore.formatDate(null)).toBe("—");
+    expect(adminStore.formatDate("2026-09-11T00:00:00Z")).not.toBe("—");
+    expect(adminStore.formatJson(undefined)).toBe("(empty)");
+    expect(adminStore.taskMetadata({ ...task, metadata: { count: 3 } }, "count")).toBe(3);
+    expect(adminStore.taskMetadata({ ...task, metadata: { nested: {} } }, "nested")).toBeUndefined();
+    adminStore.navigate("logs", "tab=traces");
+    expect(adminStore.requestedViewQuery).toBe("tab=traces");
+    adminStore.actionLoading.save = true;
+    expect(adminStore.isActionLoading("save")).toBe(true);
+    expect(adminStore.isActionLoading("missing")).toBe(false);
+  });
+
+  it("runs document Profile publication operations", async () => {
+    adminStore.selectedKnowledgeId = kb.id;
+    const hydrate = vi.spyOn(adminStore, "hydrateTrackedTask").mockResolvedValue(undefined);
+    const loadProfiles = vi.spyOn(adminStore, "loadKnowledgeProfiles").mockResolvedValue(undefined);
+    vi.spyOn(adminApi, "generateDocumentProfile").mockResolvedValue({
+      task_id: "task-doc-profile",
+      task_type: "DOCUMENT_PROFILE_GENERATE",
+      status: "QUEUED",
+      replayed: false,
+    });
+    vi.spyOn(adminApi, "cancelTask").mockResolvedValue({
+      ...task,
+      task_type: "DOCUMENT_PROFILE_GENERATE",
+      kb_id: kb.id,
+      status: "CANCELLED",
+    } as never);
+    vi.spyOn(adminApi, "updateDocumentProfile").mockResolvedValue({} as never);
+    vi.spyOn(adminApi, "checkKnowledgeProfiles").mockResolvedValue({ publishable: true } as never);
+    vi.spyOn(adminApi, "publishKnowledgeProfiles").mockResolvedValue({
+      published_count: 2,
+      summary: { published_count: 2 },
+    } as never);
+    vi.spyOn(adminApi, "discardPendingKnowledgeProfiles").mockResolvedValue({
+      discarded_count: 3,
+    });
+
+    await adminStore.generateDocumentProfile("doc-1");
+    await adminStore.cancelDocumentProfileTask("task-doc-profile");
+    await adminStore.updateDocumentProfile("doc-1", {} as never);
+    expect(await adminStore.checkKnowledgeProfiles()).toEqual({ publishable: true });
+    await adminStore.publishKnowledgeProfiles();
+    expect(adminStore.notice).toBe("已上线 2 项 Profile 属性");
+    await adminStore.discardPendingKnowledgeProfiles();
+    expect(adminStore.notice).toBe("已取消 3 项待上线变更");
+    expect(hydrate).toHaveBeenCalledWith("task-doc-profile");
+    expect(loadProfiles).toHaveBeenCalled();
+  });
+
+  it("runs release validation, publishing, rebase, and rollback operations", async () => {
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.releases = [{ id: "release-1", status: "DRAFT" }] as never;
+    const release = { id: "release-1", status: "DRAFT" };
+    vi.spyOn(adminApi, "updateProfileDraft").mockResolvedValue({
+      release_id: "release-1",
+    } as never);
+    vi.spyOn(adminApi, "getKnowledgeRelease").mockResolvedValue(release as never);
+    vi.spyOn(adminApi, "validateKnowledgeRelease")
+      .mockResolvedValueOnce({ publishable: true } as never)
+      .mockResolvedValueOnce({ publishable: false, review_required_count: 2 } as never)
+      .mockResolvedValueOnce({
+        publishable: false,
+        review_required_count: 0,
+        valid: true,
+      } as never);
+    vi.spyOn(adminApi, "publishKnowledgeRelease").mockResolvedValue({
+      ...release,
+      status: "PUBLISHED",
+    } as never);
+    vi.spyOn(adminApi, "rebaseKnowledgeRelease").mockResolvedValue({
+      release_id: "release-1",
+    } as never);
+    vi.spyOn(adminApi, "rollbackSupportRelease").mockResolvedValue({} as never);
+    const loadKnowledgeBases = vi
+      .spyOn(adminStore, "loadKnowledgeBases")
+      .mockResolvedValue(undefined);
+    vi.spyOn(adminStore, "loadKnowledgeDetails").mockResolvedValue(undefined);
+
+    await adminStore.updateProfileDraft("draft-1", { status: "APPROVED" } as never);
+    expect(adminStore.notice).toContain("草稿已批准");
+    await adminStore.validateKnowledgeRelease("release-1");
+    expect(adminStore.notice).toContain("可以发布");
+    await adminStore.validateKnowledgeRelease("release-1");
+    expect(adminStore.notice).toContain("2 篇草稿待审核");
+    await adminStore.validateKnowledgeRelease("release-1");
+    expect(adminStore.notice).toContain("暂不可发布");
+    await adminStore.publishKnowledgeRelease("release-1");
+    expect(adminStore.releaseDetails["release-1"]?.status).toBe("PUBLISHED");
+    expect(await adminStore.rebaseKnowledgeRelease("release-1")).toEqual({
+      release_id: "release-1",
+    });
+    await adminStore.rollbackSupportRelease("release-1");
+    expect(loadKnowledgeBases).toHaveBeenCalled();
+  });
+
+  it("loads and updates model and RAG configuration", async () => {
+    const ragConfig = { vector_top_k: 12 } as never;
+    vi.spyOn(adminApi, "getRagConfig").mockResolvedValue(ragConfig);
+    vi.spyOn(adminApi, "updateRagConfig").mockResolvedValue(ragConfig);
+    vi.spyOn(adminApi, "updateModel").mockResolvedValue({ rebuilds: ["kb-1"] } as never);
+    vi.spyOn(adminApi, "listModels").mockResolvedValue([]);
+    vi.spyOn(adminApi, "putApiKey").mockResolvedValue({} as never);
+    vi.spyOn(adminApi, "deleteApiKey").mockResolvedValue({} as never);
+    vi.spyOn(adminApi, "probeModel").mockResolvedValue({ success: true } as never);
+
+    await adminStore.loadRagConfig();
+    await adminStore.saveRagConfig({ vector_top_k: 12 });
+    await adminStore.saveModelConfig("model-1", { rebuild_all_confirmed: true });
+    expect(adminStore.notice).toContain("1 个知识库");
+    await adminStore.putModelApiKey("model-1", "test-key");
+    await adminStore.clearModelApiKey("model-1");
+    expect(await adminStore.probeModel("model-1")).toEqual({ success: true });
+  });
+
+  it("short-circuits selected-knowledge operations and normalizes non-Error failures", async () => {
+    adminStore.selectedKnowledgeId = "";
+    adminStore.knowledgeBases = [];
+    adminStore.indexes = [];
+    adminStore.releases = [];
+
+    expect(adminStore.supportActiveIndex).toBeNull();
+    expect(adminStore.supportActiveRelease).toBeNull();
+    expect(adminStore.documentInspectionIndexes).toEqual([]);
+    await adminStore.generateKnowledgeProfiles();
+    await adminStore.generateDocumentProfile("doc-1");
+    await adminStore.updateDocumentProfile("doc-1", {} as never);
+    expect(await adminStore.checkKnowledgeProfiles()).toBeNull();
+    await adminStore.publishKnowledgeProfiles();
+    await adminStore.discardPendingKnowledgeProfiles();
+    await adminStore.buildIndex();
+    await adminStore.gcIndexes();
+    await adminStore.refreshOperationalState();
+
+    await adminStore.run(async () => {
+      throw "offline";
+    });
+    expect(adminStore.error).toBe("操作失败");
+    await adminStore.runAction("save", async () => {
+      throw "offline";
+    });
+    expect(adminStore.error).toBe("操作失败");
   });
 
   it("surfaces api errors instead of throwing", async () => {

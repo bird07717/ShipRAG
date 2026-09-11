@@ -56,6 +56,14 @@ function writeSelectedKnowledgeId(knowledgeId: string): void {
   }
 }
 
+function readServiceToken(): string {
+  try {
+    return sessionStorage.getItem("rag_service_token")?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
 function readTrackedTasks(): TrackedTask[] {
   try {
     const raw = sessionStorage.getItem(TRACKED_TASKS_STORAGE_KEY);
@@ -131,11 +139,12 @@ export const adminStore = reactive({
   trackedTasks: [] as TrackedTask[],
   error: "",
   notice: "",
+  credentialRejected: false,
 
   /* forms */
   newKnowledgeName: "",
   newKnowledgeDescription: "",
-  serviceToken: "",
+  serviceToken: readServiceToken(),
 
   /* playground */
   question: "如何配置数据库？",
@@ -145,6 +154,9 @@ export const adminStore = reactive({
   /* ---------- derived ---------- */
   get totalDocuments(): number {
     return this.knowledgeBases.reduce((total, item) => total + item.document_count, 0);
+  },
+  get hasServiceCredential(): boolean {
+    return Boolean(this.serviceToken.trim()) && !this.credentialRejected;
   },
   get totalChunks(): number {
     return this.knowledgeBases.reduce((total, item) => total + item.active_chunk_count, 0);
@@ -275,6 +287,7 @@ export const adminStore = reactive({
   },
 
   async pollTrackedTasks(): Promise<void> {
+    if (!this.hasServiceCredential) return;
     const tracked = [...this.trackedTasks];
     if (!tracked.length) return;
     const results = await Promise.allSettled(
@@ -539,7 +552,7 @@ export const adminStore = reactive({
       this.selectedKnowledgeId = created.id;
       writeSelectedKnowledgeId(created.id);
       await this.loadKnowledgeDetails();
-    }, "知识库已创建");
+    }, "知识库已创建，默认不对 Assistant 上线");
     if (!this.error) this.knowledgeDrawerOpen = false;
   },
 
@@ -579,7 +592,7 @@ export const adminStore = reactive({
         this.loadKnowledgeBases(),
         this.loadKnowledgeDetails(),
       ]);
-    }, "文档已上传，RAG 索引构建已提交；构建成功后自动生效，Profile 请在 Profile Review 审核");
+    }, "文档已上传，RAG 候选索引构建已提交；构建完成后需明确设为当前索引，Profile 请在 Profile Review 审核");
     if (!this.error) this.uploadDrawerOpen = false;
   },
 
@@ -767,13 +780,13 @@ export const adminStore = reactive({
         this.trackTask(
           { task_id: build.task_id, task_type: "INDEX_BUILD", status: "QUEUED", replayed: build.coalesced },
           {
-            successMessage: "RAG 索引构建已完成并自动生效；Profile 将在后台单独生成",
+            successMessage: "RAG 候选索引构建已完成，请检查后设为当前索引；Profile 将在后台单独生成",
             knowledgeId: this.selectedKnowledgeId,
           },
         );
       }
       await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
-    }, "RAG 索引构建已提交；完成后自动生效，Profile 将在后台单独生成");
+    }, "RAG 候选索引构建已提交；完成后需明确设为当前索引，Profile 将在后台单独生成");
   },
 
   async refreshProfileDrafts(indexId: string): Promise<void> {
@@ -871,10 +884,11 @@ export const adminStore = reactive({
   },
 
   async activateIndex(indexId: string): Promise<void> {
-    await this.run(async () => {
+    await this.runAction(`activate-index:${indexId}`, async () => {
       await adminApi.activateIndex(indexId);
       await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
-    }, "索引已原子切换");
+    });
+    if (!this.error) this.notice = "当前 RAG 索引已切换";
   },
 
   async gcIndexes(): Promise<void> {
@@ -1016,6 +1030,7 @@ export const adminStore = reactive({
   saveToken(value: string): void {
     const token = value.trim();
     this.serviceToken = token;
+    this.credentialRejected = false;
     if (token) sessionStorage.setItem("rag_service_token", token);
     else sessionStorage.removeItem("rag_service_token");
     this.notice = "访问凭据仅保存在当前浏览器会话";
@@ -1024,6 +1039,7 @@ export const adminStore = reactive({
   clearToken(): void {
     sessionStorage.removeItem("rag_service_token");
     this.serviceToken = "";
+    this.credentialRejected = false;
     this.notice = "本地访问凭据已清除";
   },
 });

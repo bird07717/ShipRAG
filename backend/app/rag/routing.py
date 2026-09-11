@@ -236,7 +236,11 @@ def post_validate(
     elif mode == AnswerMode.UNCONFIRMED:
         if not has_evidence:
             answer = UNCONFIRMED_MESSAGE
-            valid_sources = []
+        # An unconfirmed answer must never expose a document as if it were
+        # evidence.  Trace candidates remain available to operators.
+        answer = _CITATION_PATTERN.sub("", answer).strip()
+        valid_sources = []
+        cited_ids = []
     elif mode == AnswerMode.PRODUCT_GENERAL:
         disclaimer = PRODUCT_GENERAL_DISCLAIMER
 

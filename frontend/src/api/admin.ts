@@ -80,6 +80,9 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     const body = (await response.json().catch(() => null)) as {
       error?: { message?: string; details?: Record<string, unknown> };
     } | null;
+    if (response.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("rag-service-auth-rejected"));
+    }
     throw new ApiRequestError(
       body?.error?.message ?? `请求失败：HTTP ${response.status}`,
       response.status,

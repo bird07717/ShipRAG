@@ -16,11 +16,12 @@ from pydantic import SecretStr
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
+from app.ingestion.embedding import EmbeddingError, create_embedding_provider
 from app.rag.llm import FakeLlmProvider, LlmError, ZhipuLlmProvider, create_llm_provider
 from app.rag.model_probe import probe_model
 from app.rag.model_providers import supported_providers
 from app.rag.models import ModelSnapshot
-from app.rag.rerank import SiliconFlowRerankProvider, create_rerank_provider
+from app.rag.rerank import RerankError, SiliconFlowRerankProvider, create_rerank_provider
 
 
 def _raw_key() -> bytes:
@@ -205,6 +206,41 @@ class TestProviderKeyPrecedence:
             assert provider.client.headers["Authorization"] == "Bearer sk-zhipu"
         finally:
             asyncio.run(provider.aclose())
+
+    def test_deployed_auto_embedding_without_secret_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "")
+        settings = Settings(
+            _env_file=None,
+            app_env="production",
+            service_token="admin-token",
+            assistant_service_token="a" * 32,
+            m2_embedding_provider="auto",
+        )
+
+        with pytest.raises(EmbeddingError, match="禁止回退到 fake"):
+            create_embedding_provider(settings)
+
+    def test_deployed_auto_rerank_without_secret_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "")
+        settings = Settings(
+            _env_file=None,
+            app_env="production",
+            service_token="admin-token",
+            assistant_service_token="a" * 32,
+            m5_rerank_provider="auto",
+        )
+
+        with pytest.raises(RerankError, match="禁止回退到 fake") as exc_info:
+            create_rerank_provider(
+                settings,
+                ModelSnapshot(provider="siliconflow", model_name="rerank", parameters={}),
+            )
+        assert exc_info.value.code == "MODEL_NOT_CONFIGURED"
+        assert exc_info.value.degradable is False
 
 
 class TestProbeModel:

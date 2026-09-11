@@ -68,6 +68,7 @@ _CITATION_PATTERN = re.compile(r"\[S([1-9][0-9]*)\]")
 # "帮我换一个问题：LRU怎么换") on the normal path.
 _META_ACK_PATTERN = re.compile(r"^(?:换一?个(?:问题|话题)|算了|先?不问了)[呀啊吧。！!，,\s]*$")
 _META_ACK_MESSAGE = "好的，请问您想了解什么？我将基于产品文档为您解答。"
+_KEYBOARD_ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
 
 
 def _elapsed_ms(started_at: float) -> int:
@@ -76,6 +77,23 @@ def _elapsed_ms(started_at: float) -> int:
 
 def _unexpected_detail(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:500]
+
+
+def _input_guard_reason(question: str) -> str | None:
+    """Reject only obvious low-information noise before model retrieval."""
+    normalized = "".join(question.split()).casefold()
+    if not normalized:
+        return "EMPTY"
+    if not any(character.isalnum() for character in normalized):
+        return "SYMBOL_ONLY"
+    if len(normalized) == 1:
+        return "SINGLE_CHARACTER"
+    alphanumeric = "".join(character for character in normalized if character.isalnum())
+    if len(alphanumeric) >= 3 and len(set(alphanumeric)) == 1:
+        return "REPEATED_CHARACTER"
+    if len(alphanumeric) >= 5 and any(alphanumeric in row for row in _KEYBOARD_ROWS):
+        return "KEYBOARD_SEQUENCE"
+    return None
 
 
 @dataclass(slots=True)
@@ -127,14 +145,19 @@ class RagService:
         factories only accept settings, so the snapshot path is limited to
         the production default factory.
         """
-        env_provider = self.embedding_factory(self.settings)
         if turn.embedding is not None and self.embedding_factory is create_embedding_provider:
-            db_provider = create_embedding_provider(self.settings, turn.embedding)
-            if db_provider.provider == "fake" or (
-                db_provider.model_name == turn.embedding_model_name
-            ):
-                return db_provider
-        return env_provider
+            try:
+                db_provider = create_embedding_provider(self.settings, turn.embedding)
+            except EmbeddingError:
+                # A snapshot without its own secret may still use the
+                # provider-specific environment secret below.
+                pass
+            else:
+                if db_provider.provider == "fake" or (
+                    db_provider.model_name == turn.embedding_model_name
+                ):
+                    return db_provider
+        return self.embedding_factory(self.settings)
 
     async def prepare(
         self,
@@ -170,6 +193,22 @@ class RagService:
             parent_trace_id=parent_trace_id,
             fallback_reason=fallback_reason,
         )
+        input_guard_reason = (
+            None
+            if turn.chat_context.get("pending_options")
+            else _input_guard_reason(normalized_question)
+        )
+        if input_guard_reason is not None:
+            return PreparedRag(
+                turn=turn,
+                prompt="",
+                candidates=[],
+                selected_candidates=[],
+                sources=[],
+                timings={"input_guard_ms": _elapsed_ms(started_at)},
+                started_at=started_at,
+                input_guard_reason=input_guard_reason,
+            )
         # The timings dict is created here — not inside _prepare_retrieval —
         # so the turn-deadline handler below can merge the stage timings
         # accumulated before the hang into the failure record (which stage
@@ -462,6 +501,8 @@ class RagService:
             timings["prompt_ms"] = _elapsed_ms(prompt_started)
             await self.repository.save_prepared(
                 turn,
+                embedding_provider=provider.provider,
+                embedding_model=provider.model_name,
                 vector_candidates=vector_candidates,
                 bm25_candidates=bm25_candidates,
                 fusion_candidates=fusion_candidates,
@@ -482,9 +523,7 @@ class RagService:
                 rerank_candidates=reranked_candidates,
                 rerank_status=str(rerank_result["status"]),
                 rerank_error_code=(
-                    str(rerank_result["error_code"])
-                    if rerank_result.get("error_code")
-                    else None
+                    str(rerank_result["error_code"]) if rerank_result.get("error_code") else None
                 ),
             )
         except ApiError as exc:
@@ -1013,7 +1052,7 @@ class RagService:
                     "answer_mode": result.answer_mode.value if result.answer_mode else None,
                     "disclaimer": result.disclaimer,
                     "content": [block.to_dict() for block in result.content],
-                    "references": plan.references,
+                    "references": self._references_for_result(plan, result),
                     "next_suggestions": self._next_suggestions(plan, result),
                 },
             )
@@ -1124,7 +1163,7 @@ class RagService:
             if plan.kind == "DELIVER" and plan.delivery is not None:
                 result = plan.delivery["result"]
             else:
-                result = build_assist_result(plan.fixed_answer or "")
+                result = self._result_for_fixed_plan(plan)
             await self._apply_post_state(plan, turn, question)
             await self.repository.complete_turn(
                 turn,
@@ -1141,7 +1180,7 @@ class RagService:
             return self._chat_payload(
                 turn,
                 result,
-                plan.references,
+                self._references_for_result(plan, result),
                 {},
                 prepared.timings["total_ms"],
                 self._next_suggestions(plan, result),
@@ -1191,7 +1230,7 @@ class RagService:
             return self._chat_payload(
                 turn,
                 result,
-                plan.references,
+                self._references_for_result(plan, result),
                 usage,
                 prepared.timings["total_ms"],
                 self._next_suggestions(plan, result),
@@ -1281,6 +1320,23 @@ class RagService:
         scope_description: str,
     ) -> _ChatPlan:
         turn = prepared.turn
+        if prepared.input_guard_reason is not None:
+            phase = "DOC_FOCUS" if turn.focus_document_id is not None else "ALIGNING"
+            return _ChatPlan(
+                kind="NO_MATCH",
+                routing={
+                    "decision": ACTION_NO_MATCH,
+                    "document_id": None,
+                    "document_title": None,
+                    "resolved_from": "INPUT_GUARD",
+                    "pending_options": [],
+                    "doc_scores": [],
+                    "phase_before": phase,
+                    "phase_after": phase,
+                    "thresholds": {"input_guard": prepared.input_guard_reason},
+                },
+                fixed_answer=UNCONFIRMED_MESSAGE,
+            )
         candidates = prepared.rerank_candidates or prepared.candidates
         decision = decide_doc_routing(
             question=question,
@@ -1393,15 +1449,16 @@ class RagService:
                     clear_pending_after=clear_pending_after,
                 )
 
-        # With no established focus, uncalibrated rank-only candidates must
-        # not reach the catalog-routing LLM or become public references.  The
+        # Uncalibrated rank-only candidates must not reach document QA or
+        # become public references, including when a focus already exists. The
         # user gets a deterministic, non-error answer and can retry when the
-        # reranker recovers or provide an explicit document title.
-        if rank_fallback and turn.focus_document_id is None:
+        # reranker recovers or provide an explicit document title. Existing
+        # focus state is retained for a later, well-formed follow-up.
+        if rank_fallback:
             routing = decision.to_dict()
             routing["resolved_from"] = "RANK_FALLBACK_GUARD"
             return _ChatPlan(
-                kind="ROUTING",
+                kind="NO_MATCH",
                 routing=routing,
                 fixed_answer=UNCONFIRMED_MESSAGE,
                 clear_pending_after=clear_pending_after,
@@ -1507,7 +1564,7 @@ class RagService:
         routing = decision.to_dict()
         if not catalog:
             return _ChatPlan(
-                kind="ROUTING",
+                kind="NO_MATCH",
                 routing=routing,
                 fixed_answer=UNCONFIRMED_MESSAGE,
                 clear_pending_after=clear_pending_after,
@@ -1612,7 +1669,7 @@ class RagService:
         if plan.kind == "DELIVER" and plan.delivery is not None:
             result = plan.delivery["result"]
         else:
-            result = build_assist_result(plan.fixed_answer or "")
+            result = self._result_for_fixed_plan(plan)
         prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
         yield sse_event(
             "trace",
@@ -1661,7 +1718,7 @@ class RagService:
                 "answer_mode": result.answer_mode.value if result.answer_mode else None,
                 "disclaimer": result.disclaimer,
                 "content": [block.to_dict() for block in result.content],
-                "references": plan.references,
+                "references": self._references_for_result(plan, result),
                 "next_suggestions": self._next_suggestions(plan, result),
             },
         )
@@ -1700,6 +1757,25 @@ class RagService:
                 require_citations=plan.require_citations,
             )
         return build_assist_result(raw_answer)
+
+    @staticmethod
+    def _result_for_fixed_plan(plan: _ChatPlan) -> ChatResult:
+        if plan.kind == "NO_MATCH":
+            return post_validate(
+                "[MODE:UNCONFIRMED]\n" + (plan.fixed_answer or UNCONFIRMED_MESSAGE),
+                [],
+                False,
+            )
+        return build_assist_result(plan.fixed_answer or "")
+
+    @staticmethod
+    def _references_for_result(plan: _ChatPlan, result: ChatResult) -> list[dict[str, Any]]:
+        if result.response_type.value in ("DOC_DELIVERED", "DOCUMENT_DELIVERED"):
+            return plan.references
+        if result.response_type.value == "ANSWERED" and result.answer_mode is not None:
+            if result.answer_mode.value in ("PRODUCT_KNOWLEDGE", "PRODUCT_EXPLAINED"):
+                return plan.references
+        return []
 
     @staticmethod
     def _match_meta_ack(question: str) -> str | None:

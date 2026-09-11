@@ -108,6 +108,15 @@ def test_unconfirmed_no_evidence_returns_fixed_message() -> None:
     assert result.valid_sources == []
 
 
+def test_unconfirmed_with_cited_candidates_never_exposes_sources() -> None:
+    raw = "[MODE:UNCONFIRMED]\n无法从现有资料确认。[S1]"
+    result = post_validate(raw, _sources(1), has_evidence=True)
+
+    assert result.response_type == ResponseType.UNCONFIRMED
+    assert result.answer == "无法从现有资料确认。"
+    assert result.valid_sources == []
+
+
 # --- hard rules ---
 
 

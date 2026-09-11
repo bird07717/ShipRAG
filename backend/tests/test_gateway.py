@@ -58,6 +58,92 @@ class _AssistantReadinessEngine:
         return _AssistantReadinessResult(self.row)
 
 
+class _AssistantReadinessRepository(GatewayRepository):
+    def __init__(
+        self,
+        row: dict[str, Any] | None,
+        *,
+        blockers: list[str] | None = None,
+    ) -> None:
+        super().__init__(
+            _AssistantReadinessEngine(row),  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]
+        )
+        self.blockers = blockers or []
+
+    async def resolve_policy(
+        self, *, knowledge_id: UUID, conversation_id: UUID | None
+    ) -> ResolvedPolicy:
+        return ResolvedPolicy(
+            knowledge_id=knowledge_id,
+            policy=ExecutionPolicy.RAG_ONLY,
+            config_version=1,
+            fallback_conditions=("NO_MATCH",),
+        )
+
+    async def get_readiness(self, knowledge_id: UUID) -> dict[str, Any]:
+        del knowledge_id
+        return {
+            "support": {"ready": True, "blockers": []},
+            "rag": {"ready": not self.blockers, "blockers": self.blockers},
+        }
+
+
+class _AssistantCatalogResult:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def mappings(self) -> _AssistantCatalogResult:
+        return self
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return iter(self.rows)
+
+
+class _AssistantCatalogEngine:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+        self.statement = ""
+
+    def connect(self) -> _AssistantCatalogEngine:
+        return self
+
+    async def __aenter__(self) -> _AssistantCatalogEngine:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    async def execute(self, statement: object, *_: object) -> _AssistantCatalogResult:
+        self.statement = str(statement)
+        return _AssistantCatalogResult(self.rows)
+
+
+class _AssistantCatalogRepository(GatewayRepository):
+    def __init__(self, engine: _AssistantCatalogEngine, *, ready: bool) -> None:
+        super().__init__(engine, None)  # type: ignore[arg-type]
+        self.ready = ready
+
+    async def resolve_policy(
+        self, *, knowledge_id: UUID, conversation_id: UUID | None
+    ) -> ResolvedPolicy:
+        del conversation_id
+        return ResolvedPolicy(
+            knowledge_id=knowledge_id,
+            policy=ExecutionPolicy.RAG_ONLY,
+            config_version=1,
+            fallback_conditions=("NO_MATCH",),
+        )
+
+    async def get_readiness(self, knowledge_id: UUID) -> dict[str, Any]:
+        del knowledge_id
+        blockers = [] if self.ready else ["LLM 模型未启用"]
+        return {
+            "support": {"ready": True, "blockers": []},
+            "rag": {"ready": self.ready, "blockers": blockers},
+        }
+
+
 class FakeSupport:
     def __init__(self, response_type: str) -> None:
         self.response_type = response_type
@@ -167,11 +253,13 @@ def test_policy_readiness_requires_only_the_engines_selected_by_policy() -> None
 
 
 async def test_assistant_readiness_accepts_enabled_knowledge_base_with_active_index() -> None:
-    repository = GatewayRepository(
-        _AssistantReadinessEngine(
-            {"status": "ENABLED", "active_index_id": uuid4(), "index_status": "ACTIVE"}
-        ),  # type: ignore[arg-type]
-        None,  # type: ignore[arg-type]
+    repository = _AssistantReadinessRepository(
+        {
+            "status": "ENABLED",
+            "assistant_online": True,
+            "active_index_id": uuid4(),
+            "index_status": "ACTIVE",
+        }
     )
 
     await repository.ensure_assistant_knowledge_base_ready(knowledge_id=uuid4())
@@ -181,27 +269,86 @@ async def test_assistant_readiness_returns_stable_public_errors() -> None:
     cases = [
         (None, "KNOWLEDGE_BASE_NOT_FOUND"),
         (
-            {"status": "DISABLED", "active_index_id": uuid4(), "index_status": "ACTIVE"},
+            {
+                "status": "ENABLED",
+                "assistant_online": False,
+                "active_index_id": uuid4(),
+                "index_status": "ACTIVE",
+            },
+            "KNOWLEDGE_BASE_NOT_FOUND",
+        ),
+        (
+            {
+                "status": "DISABLED",
+                "assistant_online": True,
+                "active_index_id": uuid4(),
+                "index_status": "ACTIVE",
+            },
             "FORBIDDEN",
         ),
         (
-            {"status": "ENABLED", "active_index_id": None, "index_status": None},
+            {
+                "status": "ENABLED",
+                "assistant_online": True,
+                "active_index_id": None,
+                "index_status": None,
+            },
             "KNOWLEDGE_BASE_NOT_READY",
         ),
         (
-            {"status": "ENABLED", "active_index_id": uuid4(), "index_status": "BUILDING"},
+            {
+                "status": "ENABLED",
+                "assistant_online": True,
+                "active_index_id": uuid4(),
+                "index_status": "BUILDING",
+            },
             "INDEX_NOT_READY",
         ),
     ]
 
     for row, expected_code in cases:
-        repository = GatewayRepository(
-            _AssistantReadinessEngine(row),  # type: ignore[arg-type]
-            None,  # type: ignore[arg-type]
-        )
+        repository = _AssistantReadinessRepository(row)
         with pytest.raises(ApiError) as raised:
             await repository.ensure_assistant_knowledge_base_ready(knowledge_id=uuid4())
         assert raised.value.code == expected_code
+
+
+async def test_assistant_readiness_rejects_policy_runtime_blockers() -> None:
+    repository = _AssistantReadinessRepository(
+        {
+            "status": "ENABLED",
+            "assistant_online": True,
+            "active_index_id": uuid4(),
+            "index_status": "ACTIVE",
+        },
+        blockers=["LLM 模型未启用"],
+    )
+
+    with pytest.raises(ApiError) as raised:
+        await repository.ensure_assistant_knowledge_base_ready(knowledge_id=uuid4())
+
+    assert raised.value.code == "KNOWLEDGE_BASE_NOT_READY"
+    assert raised.value.details == {"blockers": ["LLM 模型未启用"]}
+
+
+async def test_assistant_catalog_filters_publication_and_uses_full_readiness() -> None:
+    knowledge_id = uuid4()
+    engine = _AssistantCatalogEngine(
+        [{"knowledge_id": knowledge_id, "name": "知识库", "description": None}]
+    )
+    repository = _AssistantCatalogRepository(engine, ready=False)
+
+    items = await repository.list_assistant_knowledge_bases()
+
+    assert "kb.status = 'ENABLED' AND kb.assistant_online" in engine.statement
+    assert items == [
+        {
+            "knowledge_id": knowledge_id,
+            "name": "知识库",
+            "description": None,
+            "ready": False,
+        }
+    ]
 
 
 def kwargs(knowledge_id: UUID) -> dict[str, Any]:

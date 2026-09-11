@@ -1,7 +1,9 @@
 # RAG 链路黄金集（Golden Set）
 
-对上线链路（`RAG_ONLY` → `RagService`）的黑盒回归评测：48 个用例 / 57 轮真实请求，
+对上线链路（`RAG_ONLY` → `RagService`）的黑盒回归评测：53 个用例 / 63 轮真实请求，
 经 HTTP 调用真实后端与真实模型（SiliconFlow embedding/rerank/LLM），按文档命中判定。
+
+其中新增的 5 个 `noise` 用例尚未执行；已验证基线仍是下方 Run 10 的 48 个用例。
 
 ## 运行
 
@@ -46,6 +48,7 @@ Assistant 模式调用 `/api/v1/assistant/chat/stream`，为每轮请求提供
 | focus_coverage | 3 | 聚焦会话下问未覆盖部件：必须拒答且不得套用最接近流程（2026-08-31 真实案例：问"压力释放器"答了 FFC 换壳流程） |
 | meta | 1 | 元话语（"换一个问题"）：固定应答、不进 DOC_QA、秒级返回 |
 | retrieval | 1 | 图片描述不得驱动检索（caption-only 命中不得浮出文档） |
+| noise | 5 | 符号、单字、重复字符、键盘连打不得检索或暴露文档；已有焦点也不得误用 |
 
 判定规则（`expected` 字段）：
 

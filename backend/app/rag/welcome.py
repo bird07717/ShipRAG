@@ -97,4 +97,9 @@ def build_assistant_welcome(kb: dict[str, Any], catalog: list[dict[str, Any]]) -
     if payload["knowledge_base"]["ready"]:
         payload["message"] = _ASSISTANT_WELCOME_MESSAGE
         payload["suggestions"] = list(_ASSISTANT_GOLDEN_SUGGESTIONS)
+    else:
+        # Never expose administrative upload/index instructions through the
+        # public Assistant boundary.  The stable response shape is retained.
+        payload["message"] = "服务正在准备中，请稍后再试。"
+        payload["suggestions"] = []
     return payload

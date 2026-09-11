@@ -73,6 +73,43 @@ assistant_request = urllib.request.Request(
 with urllib.request.urlopen(assistant_request, timeout=10) as response:
     assistant_payload = json.load(response)
 
+create_knowledge_request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/api/v1/knowledge-bases",
+    data=json.dumps({"name": "m7-private-smoke", "description": "publication boundary"}).encode(),
+    headers={
+        "Authorization": "Bearer m7-smoke-service-token",
+        "Content-Type": "application/json",
+    },
+    method="POST",
+)
+with urllib.request.urlopen(create_knowledge_request, timeout=10) as response:
+    private_knowledge = json.load(response)
+
+with urllib.request.urlopen(assistant_request, timeout=10) as response:
+    assistant_after_create = json.load(response)
+
+private_knowledge_id = private_knowledge["id"]
+offline_welcome_request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/api/v1/assistant/knowledge-bases/{private_knowledge_id}/welcome",
+    headers={
+        "Authorization": "Bearer m7-smoke-assistant-token-0123456789",
+        "X-External-User-ID": "m7-production-smoke",
+    },
+)
+try:
+    urllib.request.urlopen(offline_welcome_request, timeout=10)
+except HTTPError as error:
+    offline_welcome_payload = json.load(error)
+    if error.code != 404 or offline_welcome_payload.get("error", {}).get("code") != (
+        "KNOWLEDGE_BASE_NOT_FOUND"
+    ):
+        raise SystemExit(
+            f"offline Assistant welcome returned unexpected error: "
+            f"{error.code} {offline_welcome_payload}"
+        )
+else:
+    raise SystemExit("offline knowledge base unexpectedly exposed its welcome")
+
 preflight_request = urllib.request.Request(
     f"http://127.0.0.1:{port}/api/v1/assistant/chat/stream",
     data=json.dumps(
@@ -122,6 +159,13 @@ if '<div id="app"></div>' not in html:
     raise SystemExit("production frontend entry did not load")
 if not isinstance(assistant_payload.get("items"), list):
     raise SystemExit("production Assistant knowledge-base endpoint failed")
+if private_knowledge.get("assistant_online") is not False:
+    raise SystemExit("new knowledge base did not default to Assistant offline")
+if any(
+    item.get("knowledge_id") == private_knowledge_id
+    for item in assistant_after_create.get("items", [])
+):
+    raise SystemExit("offline knowledge base leaked into the Assistant catalog")
 print(
     json.dumps(
         {
@@ -130,6 +174,7 @@ print(
             "frontend": "served",
             "assistant": "reachable",
             "assistant_preflight": "http-json",
+            "assistant_publication_default": "private",
         }
     )
 )

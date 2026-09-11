@@ -3,6 +3,7 @@ export interface KnowledgeBase {
   name: string;
   description: string | null;
   status: string;
+  assistant_online: boolean;
   runtime_state: string;
   active_index_id: string | null;
   rag_active_index_id?: string | null;

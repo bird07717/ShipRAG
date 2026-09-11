@@ -110,7 +110,7 @@ def test_rank_fallback_without_focus_cannot_deliver_or_clarify() -> None:
     assert decision.thresholds["fallback_guard"] == "NO_MATCH"
 
 
-def test_rank_fallback_with_focus_cannot_switch_documents() -> None:
+def test_rank_fallback_with_focus_does_not_assume_focus_is_relevant() -> None:
     candidates = [
         _candidate(DOC_B, 1, None, "B"),
         _candidate(DOC_B, 2, None, "B"),
@@ -124,10 +124,10 @@ def test_rank_fallback_with_focus_cannot_switch_documents() -> None:
         **_settings_kwargs(),
     )
 
-    assert decision.action == ACTION_STAY
-    assert decision.document_id == DOC_A
+    assert decision.action == ACTION_NO_MATCH
+    assert decision.document_id is None
     assert decision.pending_options == []
-    assert decision.thresholds["fallback_guard"] == "FOCUS_STAY"
+    assert decision.thresholds["fallback_guard"] == "FOCUS_NO_MATCH"
 
 
 def test_pending_confirmation_still_delivers_during_rank_fallback() -> None:
@@ -468,7 +468,7 @@ def test_doc_focus_offers_switch_on_moderate_other_doc():
     assert decision.pending_options[0]["document_id"] == str(DOC_B)
 
 
-def test_doc_focus_stays_when_no_alternative():
+def test_doc_focus_returns_no_match_when_focus_evidence_is_too_weak():
     decision = decide_doc_routing(
         question="随机问题",
         candidates=[_candidate(DOC_A, 1, 0.1)],
@@ -476,7 +476,8 @@ def test_doc_focus_stays_when_no_alternative():
         chat_context={},
         **_settings_kwargs(),
     )
-    assert decision.action == ACTION_STAY
+    assert decision.action == ACTION_NO_MATCH
+    assert decision.document_id is None
 
 
 def test_pending_reply_ordinal_resolves_to_deliver():
@@ -493,6 +494,25 @@ def test_pending_reply_ordinal_resolves_to_deliver():
         },
         **_settings_kwargs(),
     )
+    assert decision.action == ACTION_DELIVER
+    assert decision.document_id == DOC_B
+    assert decision.resolved_from == "CLARIFICATION_REPLY"
+
+
+def test_pending_reply_bare_number_resolves_to_deliver():
+    decision = decide_doc_routing(
+        question="2",
+        candidates=[],
+        focus_document_id=None,
+        chat_context={
+            "pending_options": [
+                {"document_id": str(DOC_A), "title": "如何U盘升级PDC"},
+                {"document_id": str(DOC_B), "title": "如何更换故障PDC"},
+            ]
+        },
+        **_settings_kwargs(),
+    )
+
     assert decision.action == ACTION_DELIVER
     assert decision.document_id == DOC_B
     assert decision.resolved_from == "CLARIFICATION_REPLY"

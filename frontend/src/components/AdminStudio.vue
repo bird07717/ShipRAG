@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, type Component } from "vue";
+import { computed, onMounted, onUnmounted, watch, type Component } from "vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 import { renderMarkdown } from "@/utils/markdown";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
+import EmptyState from "@/components/ui/EmptyState.vue";
 import DashboardView from "@/views/DashboardView.vue";
 import KnowledgeView from "@/views/KnowledgeView.vue";
 import DocumentsView from "@/views/DocumentsView.vue";
@@ -41,21 +42,49 @@ const viewProps = computed(() =>
 let indexPollTimer: ReturnType<typeof setInterval> | undefined;
 let taskPollTimer: ReturnType<typeof setInterval> | undefined;
 
-onMounted(() => {
+function handleCredentialRejected(): void {
+  store.credentialRejected = true;
+  store.error = "服务凭证缺失或无效，请重新配置";
+}
+
+function stopAutomaticRequests(): void {
+  clearInterval(indexPollTimer);
+  clearInterval(taskPollTimer);
+  indexPollTimer = undefined;
+  taskPollTimer = undefined;
+}
+
+function startAutomaticRequests(): void {
+  if (!store.hasServiceCredential || indexPollTimer || taskPollTimer) return;
   store.restoreTrackedTasks();
-  void store.run(() => store.refreshAll());
   indexPollTimer = setInterval(() => {
-    if (store.indexes.some((index) => index.status === "BUILDING")) {
+    if (store.hasServiceCredential && store.indexes.some((index) => index.status === "BUILDING")) {
       void store.refreshOperationalState();
     }
   }, 5_000);
-  taskPollTimer = setInterval(() => void store.pollTrackedTasks(), 3_000);
+  taskPollTimer = setInterval(() => {
+    if (store.hasServiceCredential) void store.pollTrackedTasks();
+  }, 3_000);
   void store.pollTrackedTasks();
+}
+
+watch(
+  () => store.hasServiceCredential,
+  (available) => {
+    if (available) startAutomaticRequests();
+    else stopAutomaticRequests();
+  },
+);
+
+onMounted(() => {
+  window.addEventListener("rag-service-auth-rejected", handleCredentialRejected);
+  if (store.hasServiceCredential) void store.run(() => store.refreshAll());
+  startAutomaticRequests();
 });
 
 onUnmounted(() => {
-  clearInterval(indexPollTimer);
-  clearInterval(taskPollTimer);
+  window.removeEventListener("rag-service-auth-rejected", handleCredentialRejected);
+  stopAutomaticRequests();
 });
 </script>
 
@@ -77,7 +106,18 @@ onUnmounted(() => {
       class="studio-alert"
       @close="store.notice = ''"
     />
-    <component :is="views[props.view] ?? DashboardView" v-bind="viewProps" />
+    <EmptyState
+      v-if="!store.hasServiceCredential && props.view !== 'configuration'"
+      title="需要配置服务凭证"
+      description="管理台已暂停自动加载和轮询，配置有效的 Service Token 后再访问管理功能。"
+    >
+      <template #action>
+        <el-button type="primary" @click="store.navigate('configuration', 'tab=credentials')">
+          配置服务凭证
+        </el-button>
+      </template>
+    </EmptyState>
+    <component :is="views[props.view] ?? DashboardView" v-else v-bind="viewProps" />
 
     <!-- Shared trace detail drawer (opened from Dashboard recent activity) -->
     <el-drawer

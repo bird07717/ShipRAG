@@ -17,6 +17,7 @@ class KnowledgeBaseResponse(BaseModel):
     name: str
     description: str | None
     status: Literal["ENABLED", "DISABLED", "DELETING"]
+    assistant_online: bool
     # active_index_id is the rolling compatibility alias for RAG.
     active_index_id: UUID | None
     rag_active_index_id: UUID | None = None

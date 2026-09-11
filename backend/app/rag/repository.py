@@ -825,6 +825,8 @@ class RagRepository:
         self,
         turn: Turn,
         *,
+        embedding_provider: str,
+        embedding_model: str,
         vector_candidates: list[RetrievalCandidate],
         bm25_candidates: list[RetrievalCandidate],
         fusion_candidates: list[RetrievalCandidate],
@@ -836,6 +838,8 @@ class RagRepository:
     ) -> None:
         retrieval_result = {
             "mode": "HYBRID",
+            "query_embedding_provider": embedding_provider,
+            "query_embedding_model": embedding_model,
             "embedding_model": turn.embedding_model_name,
             "vector_candidates": [item.trace_dict() for item in vector_candidates],
             "lexical_engine": "pg_search",
@@ -1165,7 +1169,11 @@ class RagRepository:
                 raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
 
     async def get_knowledge_base_summary(
-        self, knowledge_id: UUID, *, enabled_only: bool = False
+        self,
+        knowledge_id: UUID,
+        *,
+        enabled_only: bool = False,
+        assistant_online_only: bool = False,
     ) -> dict[str, Any]:
         async with self.engine.connect() as connection:
             result = await connection.execute(
@@ -1176,9 +1184,14 @@ class RagRepository:
                     FROM knowledge_base
                     WHERE id = :kb_id
                       AND (:enabled_only = FALSE OR status = 'ENABLED')
+                      AND (:assistant_online_only = FALSE OR assistant_online)
                     """
                 ),
-                {"kb_id": knowledge_id, "enabled_only": enabled_only},
+                {
+                    "kb_id": knowledge_id,
+                    "enabled_only": enabled_only,
+                    "assistant_online_only": assistant_online_only,
+                },
             )
             row = result.mappings().one_or_none()
         if row is None:

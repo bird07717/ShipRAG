@@ -503,15 +503,17 @@ class GatewayRepository:
 
     # External Assistant API -------------------------------------------------
 
-    async def ensure_assistant_knowledge_base_ready(self, *, knowledge_id: UUID) -> None:
-        """Validate the public knowledge-base/index boundary before SSE starts."""
+    async def ensure_assistant_knowledge_base_ready(
+        self, *, knowledge_id: UUID, conversation_id: UUID | None = None
+    ) -> None:
+        """Validate publication, ownership-sensitive policy and runtime readiness."""
         async with self.engine.connect() as connection:
             row = (
                 (
                     await connection.execute(
                         text(
                             """
-                            SELECT kb.status,
+                            SELECT kb.status, kb.assistant_online,
                                    COALESCE(kb.rag_active_index_id, kb.active_index_id)
                                        AS active_index_id,
                                    i.status AS index_status
@@ -529,6 +531,10 @@ class GatewayRepository:
             )
         if row is None:
             raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
+        if not row["assistant_online"]:
+            # Offline knowledge bases are outside the public Assistant surface.
+            # Use 404 so callers cannot enumerate unpublished content by UUID.
+            raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
         if row["status"] != "ENABLED":
             raise ApiError("FORBIDDEN", "知识库已停用", 403)
         if row["active_index_id"] is None:
@@ -536,23 +542,47 @@ class GatewayRepository:
         if row["index_status"] != "ACTIVE":
             raise ApiError("INDEX_NOT_READY", "知识库 Active Index 状态异常", 409)
 
+        policy = await self.resolve_policy(
+            knowledge_id=knowledge_id, conversation_id=conversation_id
+        )
+        readiness = await self.get_readiness(knowledge_id)
+        blockers = self._policy_blockers(policy.policy, readiness)
+        if blockers:
+            raise ApiError(
+                "KNOWLEDGE_BASE_NOT_READY",
+                "知识库当前不可用",
+                409,
+                {"blockers": blockers},
+            )
+
     async def list_assistant_knowledge_bases(self) -> list[dict[str, Any]]:
-        """Return only enabled knowledge bases with a usable RAG index."""
+        """Return published knowledge bases with readiness for their active policy."""
         async with self.engine.connect() as connection:
             result = await connection.execute(
                 text(
                     """
-                    SELECT kb.id AS knowledge_id, kb.name, kb.description,
-                           (kb.status = 'ENABLED' AND i.status = 'ACTIVE') AS ready
+                    SELECT kb.id AS knowledge_id, kb.name, kb.description
                     FROM knowledge_base kb
-                    LEFT JOIN knowledge_index i
-                      ON i.id = COALESCE(kb.rag_active_index_id, kb.active_index_id)
-                    WHERE kb.status = 'ENABLED'
+                    WHERE kb.status = 'ENABLED' AND kb.assistant_online
                     ORDER BY kb.name, kb.id
                     """
                 )
             )
-            return [dict(row) for row in result.mappings()]
+            rows = [dict(row) for row in result.mappings()]
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            knowledge_id = UUID(str(row["knowledge_id"]))
+            try:
+                policy = await self.resolve_policy(knowledge_id=knowledge_id, conversation_id=None)
+                readiness = await self.get_readiness(knowledge_id)
+                ready = not self._policy_blockers(policy.policy, readiness)
+            except ApiError:
+                # A concurrent administrative change must not fail the whole
+                # catalog.  The item remains visible but cannot be selected.
+                ready = False
+            items.append({**row, "ready": ready})
+        return items
 
     async def get_assistant_conversation(
         self, *, conversation_id: UUID, external_user_id: str, knowledge_id: UUID | None = None
@@ -584,6 +614,8 @@ class GatewayRepository:
                     JOIN knowledge_base kb ON kb.id = c.knowledge_id
                     WHERE c.id = :conversation_id
                       AND c.user_id = :external_user_id
+                      AND kb.status = 'ENABLED'
+                      AND kb.assistant_online
                       {knowledge_clause}
                       {retention_clause}
                     """
@@ -602,7 +634,12 @@ class GatewayRepository:
         before_activity: datetime | None = None,
         before_id: UUID | None = None,
     ) -> list[dict[str, Any]]:
-        clauses = ["c.knowledge_id = :knowledge_id", "c.user_id = :external_user_id"]
+        clauses = [
+            "c.knowledge_id = :knowledge_id",
+            "c.user_id = :external_user_id",
+            "kb.status = 'ENABLED'",
+            "kb.assistant_online",
+        ]
         if self.settings.conversation_retention_days > 0:
             clauses.append("c.last_activity_at >= now() - INTERVAL '1 day' * :retention_days")
         params: dict[str, Any] = {
@@ -734,6 +771,48 @@ class GatewayRepository:
         request_id = uuid4()
         try:
             async with self.engine.begin() as connection:
+                boundary = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT status, assistant_online
+                                FROM knowledge_base
+                                WHERE id = :knowledge_id
+                                FOR SHARE
+                                """
+                            ),
+                            {"knowledge_id": knowledge_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if boundary is None or not boundary["assistant_online"]:
+                    raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
+                if boundary["status"] != "ENABLED":
+                    raise ApiError("FORBIDDEN", "知识库已停用", 403)
+
+                if conversation_id is not None:
+                    visible_conversation = await connection.execute(
+                        text(
+                            """
+                            SELECT 1 FROM conversation
+                            WHERE id = :conversation_id
+                              AND knowledge_id = :knowledge_id
+                              AND user_id = :user_id
+                            FOR SHARE
+                            """
+                        ),
+                        {
+                            "conversation_id": conversation_id,
+                            "knowledge_id": knowledge_id,
+                            "user_id": external_user_id,
+                        },
+                    )
+                    if visible_conversation.scalar_one_or_none() is None:
+                        raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
+
                 existing = (
                     (
                         await connection.execute(
@@ -975,10 +1054,15 @@ class GatewayRepository:
             result = await connection.execute(
                 text(
                     """
-                    SELECT id, kb_id, display_name, filename, minio_bucket, minio_object_key,
-                           mime_type, file_size
-                    FROM document_source
-                    WHERE id = :document_id AND kb_id = :knowledge_id AND status = 'STORED'
+                    SELECT d.id, d.kb_id, d.display_name, d.filename,
+                           d.minio_bucket, d.minio_object_key, d.mime_type, d.file_size
+                    FROM document_source d
+                    JOIN knowledge_base kb ON kb.id = d.kb_id
+                    WHERE d.id = :document_id
+                      AND d.kb_id = :knowledge_id
+                      AND d.status = 'STORED'
+                      AND kb.status = 'ENABLED'
+                      AND kb.assistant_online
                     """
                 ),
                 {"document_id": document_id, "knowledge_id": knowledge_id},
@@ -999,9 +1083,12 @@ class GatewayRepository:
                     FROM image_asset a
                     JOIN document_element e ON e.id = a.element_id
                     JOIN document_source d ON d.id = e.document_id
+                    JOIN knowledge_base kb ON kb.id = d.kb_id
                     WHERE a.id = :image_asset_id
                       AND d.kb_id = :knowledge_id
                       AND d.status = 'STORED'
+                      AND kb.status = 'ENABLED'
+                      AND kb.assistant_online
                     """
                 ),
                 {"image_asset_id": image_asset_id, "knowledge_id": knowledge_id},

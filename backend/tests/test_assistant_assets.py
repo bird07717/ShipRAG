@@ -43,11 +43,17 @@ class _WelcomeRepository:
     def __init__(self, *, enabled: bool) -> None:
         self.enabled = enabled
         self.requested_enabled_only: bool | None = None
+        self.requested_assistant_online_only: bool | None = None
 
     async def get_knowledge_base_summary(
-        self, _: object, *, enabled_only: bool = False
+        self,
+        _: object,
+        *,
+        enabled_only: bool = False,
+        assistant_online_only: bool = False,
     ) -> dict[str, Any]:
         self.requested_enabled_only = enabled_only
+        self.requested_assistant_online_only = assistant_online_only
         if not self.enabled:
             raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
         return {
@@ -116,6 +122,7 @@ async def test_assistant_welcome_only_queries_enabled_knowledge_bases() -> None:
         "如何手动自检VDR",
     ]
     assert repository.requested_enabled_only is True
+    assert repository.requested_assistant_online_only is True
 
 
 @pytest.mark.asyncio
@@ -130,3 +137,4 @@ async def test_assistant_welcome_hides_disabled_knowledge_bases() -> None:
 
     assert raised.value.code == "KNOWLEDGE_BASE_NOT_FOUND"
     assert repository.requested_enabled_only is True
+    assert repository.requested_assistant_online_only is True

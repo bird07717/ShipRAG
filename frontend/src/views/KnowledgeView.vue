@@ -97,7 +97,7 @@ function isDeleting(kb: KnowledgeBase): boolean {
         </div>
       </div>
 
-      <ListSkeleton v-if="store.loading && !store.knowledgeBases.length" :columns="5" />
+      <ListSkeleton v-if="store.loading && !store.knowledgeBases.length" :columns="6" />
       <el-table
         v-else-if="store.filteredKnowledgeBases.length"
         :data="store.filteredKnowledgeBases"
@@ -119,6 +119,13 @@ function isDeleting(kb: KnowledgeBase): boolean {
         <el-table-column prop="active_chunk_count" label="切片数" width="100" />
         <el-table-column label="状态" width="120">
           <template #default="scope"><StatusBadge :status="scope.row.runtime_state" /></template>
+        </el-table-column>
+        <el-table-column label="Assistant" width="110">
+          <template #default="scope">
+            <el-tag :type="scope.row.assistant_online ? 'success' : 'info'" size="small">
+              {{ scope.row.assistant_online ? "已上线" : "未上线" }}
+            </el-tag>
+          </template>
         </el-table-column>
         <el-table-column label="更新时间" min-width="170">
           <template #default="scope">{{ store.formatDate(scope.row.updated_at) }}</template>
@@ -246,6 +253,11 @@ function isDeleting(kb: KnowledgeBase): boolean {
           <el-descriptions-item label="生效索引（Active Index）">
             <span class="mono">RAG：{{ detailTarget.rag_active_index_id ?? detailTarget.active_index_id ?? "—" }}</span>
             <span class="mono">Support：{{ detailTarget.support_active_index_id ?? "—" }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="Assistant 对外状态">
+            <el-tag :type="detailTarget.assistant_online ? 'success' : 'info'" size="small">
+              {{ detailTarget.assistant_online ? "已上线" : "未上线" }}
+            </el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="构建中索引（Building Index）">
             <span class="mono">{{ detailTarget.building_index_id ?? "—" }}</span>

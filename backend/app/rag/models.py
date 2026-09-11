@@ -160,3 +160,4 @@ class PreparedRag:
     rerank_candidates: list[RetrievalCandidate] = field(default_factory=list)
     rerank_status: str = "SKIPPED"
     rerank_error_code: str | None = None
+    input_guard_reason: str | None = None

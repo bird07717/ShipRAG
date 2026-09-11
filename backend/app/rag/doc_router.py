@@ -38,6 +38,7 @@ _AFFIRMATIVE_PATTERN = re.compile(
 )
 _NEGATIVE_PATTERN = re.compile(r"^(?:不用|不要|不换|算了|取消|否|不|没有)[了呀啊。！!，,\s]*$")
 _ORDINAL_PATTERN = re.compile(r"第\s*([一二三四五六七八九十]|\d+)\s*(?:个|份|篇|个文档)")
+_BARE_ORDINAL_PATTERN = re.compile(r"^([1-9]\d*)[。！!，,\s]*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +187,7 @@ def resolve_pending_option(question: str, options: list[dict[str, Any]]) -> dict
         return options[0]
     if _NEGATIVE_PATTERN.match(normalized):
         return None
-    ordinal_match = _ORDINAL_PATTERN.search(normalized)
+    ordinal_match = _ORDINAL_PATTERN.search(normalized) or _BARE_ORDINAL_PATTERN.match(normalized)
     if ordinal_match:
         token = ordinal_match.group(1)
         index = _ORDINAL_MAP.get(token, None) if not token.isdigit() else int(token)
@@ -282,15 +283,15 @@ def decide_doc_routing(
     # perfect 1.0 match.  Explicit pending-option confirmations were handled
     # above; the chat planner can still resolve an explicitly named catalog
     # title after this conservative decision.
-    if doc_scores and (
-        rerank_degraded or score_meta["score_source"] == "RANK_FALLBACK"
-    ):
+    if doc_scores and (rerank_degraded or score_meta["score_source"] == "RANK_FALLBACK"):
         thresholds["rerank_degraded"] = rerank_degraded
         if focus_document_id is not None:
-            thresholds["fallback_guard"] = "FOCUS_STAY"
+            # Rank-only fallback has no calibrated relevance.  Keeping the
+            # focus state is useful, but answering from the focused document
+            # would turn an unrelated input into a false document hit.
+            thresholds["fallback_guard"] = "FOCUS_NO_MATCH"
             return DocRoutingDecision(
-                action=ACTION_STAY,
-                document_id=focus_document_id,
+                action=ACTION_NO_MATCH,
                 doc_scores=doc_scores,
                 phase_before=phase,
                 thresholds=thresholds,
@@ -431,9 +432,11 @@ def decide_doc_routing(
             thresholds=thresholds,
         )
 
+    # Keep the conversation focus in storage, but do not use that document
+    # for this turn when the current question has no evidence above the stay
+    # floor.  A later meaningful follow-up can still return to the focus.
     return DocRoutingDecision(
-        action=ACTION_STAY,
-        document_id=focus_document_id,
+        action=ACTION_NO_MATCH,
         doc_scores=doc_scores,
         phase_before=phase,
         thresholds=thresholds,

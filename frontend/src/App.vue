@@ -14,6 +14,7 @@ import { computed, onMounted, onUnmounted, ref, watch, type Component } from "vu
 import AdminStudio from "@/components/AdminStudio.vue";
 import DemoChat from "@/components/DemoChat.vue";
 import HealthPanel from "@/components/HealthPanel.vue";
+import EmptyState from "@/components/ui/EmptyState.vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import { useAdminStore } from "@/composables/adminStore";
 
@@ -147,7 +148,7 @@ watch(
 onMounted(() => {
   window.addEventListener("hashchange", syncHash);
   syncHash();
-  if (isDemoChat.value && !store.knowledgeBases.length) {
+  if (isDemoChat.value && store.hasServiceCredential && !store.knowledgeBases.length) {
     void store.run(() => store.refreshAll());
   }
 });
@@ -188,13 +189,29 @@ const indexStats = computed(() => {
     </aside>
 
     <main class="main" :class="{ 'chat-mode': isDemoChat }">
-      <DemoChat v-if="isDemoChat" />
+      <DemoChat v-if="isDemoChat && store.hasServiceCredential" />
+      <div v-else-if="isDemoChat" class="page">
+        <PageHeader :title="activeMenu.label" :description="activeMenu.subtitle" />
+        <div class="page-body">
+          <EmptyState
+            title="需要配置服务凭证"
+            description="问答测试已暂停加载，请先配置有效的 Service Token。"
+          >
+            <template #action>
+              <el-button type="primary" @click="navigate('configuration', 'tab=credentials')">
+                配置服务凭证
+              </el-button>
+            </template>
+          </EmptyState>
+        </div>
+      </div>
       <div v-else class="page">
         <PageHeader :title="activeMenu.label" :description="activeMenu.subtitle">
           <template #actions>
             <el-button
               v-if="activeView === 'knowledge'"
               type="primary"
+              :disabled="!store.hasServiceCredential"
               @click="store.knowledgeDrawerOpen = true"
             >
               新建知识库
@@ -202,7 +219,7 @@ const indexStats = computed(() => {
             <el-button
               v-if="activeView === 'documents'"
               type="primary"
-              :disabled="!store.selectedKnowledgeId"
+              :disabled="!store.hasServiceCredential || !store.selectedKnowledgeId"
               @click="store.uploadDrawerOpen = true"
             >
               上传文档
@@ -213,7 +230,7 @@ const indexStats = computed(() => {
           <section v-if="activeView === 'dashboard'" class="panel index-note">
             <div class="index-note-text">
               <h3>双链路知识发布</h3>
-              <p>RAG 在技术构建成功后自动切换；Support Profile 经人工审核后独立发布。线上会话始终冻结各自使用的版本。</p>
+              <p>RAG 技术构建生成候选索引，经管理员明确切换后供新会话使用；Support Profile 经人工审核后独立发布。既有会话始终使用各自冻结的版本。</p>
             </div>
             <div class="index-stats">
               <div class="index-stat">

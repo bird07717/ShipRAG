@@ -52,11 +52,34 @@ describe("RAG index operations workspace", () => {
     expect(wrapper.findAll("button").some((button) => button.text().includes("前往 Profile Review"))).toBe(false);
   });
 
-  it("rolls the RAG index back only through an explicit confirmation", async () => {
+  it("activates a ready candidate only through an explicit confirmation", async () => {
     const { ElMessageBox } = await import("element-plus");
     const confirm = vi.spyOn(ElMessageBox, "confirm").mockResolvedValue({
       action: "confirm",
     } as never);
+    const activate = vi
+      .spyOn(adminApi, "activateIndex")
+      .mockResolvedValue({ ...index, status: "ACTIVE" });
+
+    const wrapper = mount(IndexBuildView, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+
+    const button = wrapper.findAll("button").find((b) => b.text().includes("设为当前 RAG"));
+    expect(button).toBeDefined();
+    await button!.trigger("click");
+    await flushPromises();
+
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("将 Index v2 设为当前 RAG 索引"),
+      "设为当前 RAG 索引",
+      expect.objectContaining({ confirmButtonText: "确认切换" }),
+    );
+    expect(activate).toHaveBeenCalledWith("idx-2");
+  });
+
+  it("uses rollback only for a historical index", async () => {
+    const { ElMessageBox } = await import("element-plus");
+    vi.spyOn(ElMessageBox, "confirm").mockResolvedValue({ action: "confirm" } as never);
     const deprecated: KnowledgeIndex = { ...index, id: "idx-1", version: 1, status: "DEPRECATED" };
     adminStore.indexes = [deprecated];
     const rollback = vi
@@ -65,17 +88,10 @@ describe("RAG index operations workspace", () => {
 
     const wrapper = mount(IndexBuildView, { global: { plugins: [ElementPlus] } });
     await flushPromises();
-
     const button = wrapper.findAll("button").find((b) => b.text().includes("回滚 RAG"));
-    expect(button).toBeDefined();
     await button!.trigger("click");
     await flushPromises();
 
-    expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining("显式将 RAG 在线索引回滚到 Index v1"),
-      "回滚 RAG Index",
-      expect.objectContaining({ confirmButtonText: "确认回滚" }),
-    );
     expect(rollback).toHaveBeenCalledWith("kb-1", "idx-1");
   });
 
@@ -88,6 +104,9 @@ describe("RAG index operations workspace", () => {
 
     expect(
       wrapper.findAll("button").some((b) => b.text().includes("回滚 RAG")),
+    ).toBe(false);
+    expect(
+      wrapper.findAll("button").some((b) => b.text().includes("设为当前 RAG")),
     ).toBe(false);
   });
 

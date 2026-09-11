@@ -230,7 +230,9 @@ class AssistantFacadeService:
             )
             if visible is None:
                 raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
-        await self.repository.ensure_assistant_knowledge_base_ready(knowledge_id=knowledge_id)
+        await self.repository.ensure_assistant_knowledge_base_ready(
+            knowledge_id=knowledge_id, conversation_id=conversation_id
+        )
         policy = await self.repository.resolve_policy(
             knowledge_id=knowledge_id, conversation_id=conversation_id
         )

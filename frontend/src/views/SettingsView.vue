@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 
 const store = useAdminStore();
 const credential = ref(sessionStorage.getItem("rag_service_token") ?? "");
-const credentialConfigured = ref(Boolean(sessionStorage.getItem("rag_service_token")));
+const credentialConfigured = computed(() => store.hasServiceCredential);
 
 const sections = [
   { key: "api", label: "服务凭证" },
@@ -17,7 +17,6 @@ async function saveCredential(): Promise<void> {
   const token = credential.value.trim();
   store.serviceToken = token;
   store.saveToken(token);
-  credentialConfigured.value = Boolean(token);
   await store.run(() => store.refreshAll(), "服务凭证已保存，管理数据已重新加载");
 }
 
@@ -25,7 +24,6 @@ async function clearCredential(): Promise<void> {
   await store.run(async () => {
     store.clearToken();
     credential.value = "";
-    credentialConfigured.value = false;
   });
 }
 </script>
@@ -59,7 +57,7 @@ async function clearCredential(): Promise<void> {
           <div class="form-section">
             <h4>服务凭证（Service Token）</h4>
             <p class="desc">
-              如果部署环境已由反向代理统一注入凭据，无需在此配置；其他环境可在这里添加。凭据仅保存在当前浏览器会话（sessionStorage），关闭标签页后自动失效。
+              访问管理功能前需在这里添加凭据。凭据仅保存在当前浏览器会话（sessionStorage），关闭标签页后自动失效。
             </p>
             <el-input
               v-model="credential"

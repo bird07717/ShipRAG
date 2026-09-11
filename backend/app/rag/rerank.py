@@ -196,6 +196,14 @@ def create_rerank_provider(settings: Settings, snapshot: ModelSnapshot) -> Reran
     has_any_key = settings.has_secret(
         environment_api_key(settings, "RERANK", provider)
     ) or settings.has_secret(snapshot.api_key)
-    if mode == "fake" or (mode == "auto" and not has_any_key):
+    if mode == "fake":
+        return FakeRerankProvider()
+    if mode == "auto" and not has_any_key:
+        if settings.app_env in {"staging", "production"}:
+            raise RerankError(
+                "MODEL_NOT_CONFIGURED",
+                f"{provider} Rerank 未配置，部署环境禁止回退到 fake",
+                degradable=False,
+            )
         return FakeRerankProvider()
     return SiliconFlowRerankProvider(settings, snapshot)
