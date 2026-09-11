@@ -12,22 +12,24 @@
 | 后端全量 Pytest 无法完成 | 已解决 | 2026-09-11 在本地基础设施健康且数据库升级到 Alembic `0041` 后，完整 615 项 Pytest 与三项 smoke 均通过；原 `test_service_api_requires_bearer_token` 超时未再复现。 |
 | 前端覆盖率门槛 | 已解决 | 2026-09-11 补齐管理 API、composables 和 App 分支测试后，19 个测试文件共 127 项通过；`src/api/**` 函数 100%，`src/composables/**` 语句/行 90.31%、函数 95.78%、分支 81.63%，`App.vue` 分支 94.64%，全部达到现有门槛。 |
 | 前端生产包体积 | 已确认警告 | 2026-09-11 生产构建通过，但 Vite 警告入口 JavaScript 压缩后为 1,295.09 kB（gzip 428.50 kB），超过 500 kB 警告阈值；可评估动态导入或手动分包。 |
-| Assistant 请求记录保留 | 已确认容量风险 | `assistant_request` 当前没有独立的终态记录清理任务；已关联 Conversation 的记录可随会话级联删除，但关联前失败且 `conversation_id` 为空的记录可能持续保留。正常 ASGI 发送失败和客户端断连会幂等取消仍为 `RUNNING` 的请求及其关联运行态；进程强制终止等无法执行响应收口的遗留状态已提供 `app.assistant.recovery` 预览/事务恢复命令。容量仍需通过保留策略和表增长监控处理。 |
-| Assistant 幂等指标口径 | 已确认观测缺口 | `/api/v1/metrics/assistant` 的 `idempotency` 区块当前查询 `support_idempotency`，没有统计 Assistant 门面的 `assistant_request`，因此不能表示外部 Assistant 请求保护数或重放率；应由业务后台指标或受控数据分析补充，后续再修正平台指标。 |
+| Assistant 请求记录保留 | 代码已解决，待生产部署 | `0042` 增加终态孤儿清理索引，维护 Worker 启动时及之后每天只删除超过 `ASSISTANT_REQUEST_RETENTION_DAYS`、`conversation_id IS NULL` 且为 `COMPLETED`/`FAILED`/`CANCELLED` 的请求；默认 7 天，0 禁用，明确不删除 `RUNNING`。已关联请求仍随 Conversation 级联删除。生产目前仍为 `0041`，部署前原有 1 条无会话 `FAILED` 记录仍可能存在。 |
+| Assistant 幂等指标口径 | 代码已解决，待生产部署 | `0042` 为 `assistant_request` 增加 `replay_count` 和 `last_replayed_at`，终态重放在同一事务内原子更新；`/api/v1/metrics/assistant` 已改为按 `assistant_request.knowledge_id` 统计保护请求及累计重放。生产目前仍为 `0041`，部署新迁移和后端前指标仍保持旧口径。 |
 | Assistant 发布配置管理 | 已确认待实现 | `0041` 已提供新建默认下线和统一外部访问门禁，但在“不新增接口”的当前范围内，管理台只读展示状态，不能切换上线或按知识库维护欢迎语及三条标准问题；现有知识库继续使用全局 Golden Set 欢迎配置。增加管理侧写契约后再实现配置、验证和发布闭环。 |
 | Assistant 知识库列表就绪检查规模 | 当前规模可接受 | 为保持 `ready` 与真实问答条件一致，列表会按每个已上线知识库读取策略和完整就绪态；当前生产只有 1 个知识库。若扩展到数十个知识库或列表请求频率明显上升，应改为批量快照查询或短时缓存并在配置变化时失效，避免查询次数线性增长。 |
 | 服务器 GitHub 非交互拉取 | 已确认操作约束 | 生产服务器仓库的 `origin` 使用 GitHub SSH 地址；`cm` 账号可在交互式输入 SSH 私钥口令后正常拉取。非交互自动化无法提供该口令，后续服务器 `git pull` 由用户手动执行。 |
-| 生产 Nginx 后端地址缓存 | 本地已修复，待部署 | 2026-09-11 生产后端重建并更换容器 IP 后，未重建的前端 Nginx 继续访问旧地址并返回 502。当前本地配置已改用 Nginx 动态 upstream 和 Docker DNS，生产 smoke 增加后端换 IP 回归；修复部署前仍需在每次重建后端后重启前端。 |
-| 生产模型凭据缺失导致 fake 查询链路 | 本地已修复，待部署和配置 | 2026-09-11 生产 Trace 核实当前查询 Embedding 与 Rerank 实际使用 deterministic fake，而 Active Index 向量并非由该 fake 模型生成，导致噪声输入也能按候选顺序获得貌似稳定的文档分数。源码已禁止 staging/production 的 M2/M3/M5 fake 回退，并记录实际查询模型；服务器在拉取、配置有效模型凭据并重建前仍保持旧行为。部署后必须先确认模型密钥来源和 Active Index 模型一致，再执行新增但尚未运行的 `noise` Golden Set。 |
+| 生产 Nginx 后端地址缓存 | 已解决 | 2026-09-11 已在生产部署共享 upstream、Docker DNS 和运行时 `resolve`；后端容器地址变化不再要求同步重启前端。Production Compose Smoke 已覆盖“后端换 IP、前端不重启”的恢复场景，生产外部健康入口当前正常。 |
+| 生产模型凭据缺失导致 fake 查询链路 | 已解决 | staging/production 已禁止 M2/M3/M5 显式或隐式回退 fake，并记录实际查询模型。2026-09-11 生产 Golden Trace 确认 58 个检索轮次实际使用 SiliconFlow Embedding、Rerank 和 LLM，5 个噪声轮次在模型调用前由输入门禁短路；查询模型与 Active Index 快照一致。 |
+| 管理台无凭证请求刷屏 | 已解决 | 管理台凭证门禁和 401 后停止轮询已部署。生产核对时，认证失败最后集中发生在新前端部署前，最近 15 分钟新增为 0；历史错误日志按现有 30 天策略清理。后端仍按认证契约记录真正到达的未授权请求。 |
 
 ## 已核实的测试基线
 
 2026-09-11 的最新验证结果：
 
-- `bash scripts/check.sh` 完整通过：Ruff lint/format、Mypy（112 个源文件）、后端 615 项 Pytest、摄取/RAG/管理三项 fake smoke、前端 ESLint/类型检查/覆盖率测试和生产构建均成功。
+- `bash scripts/check.sh` 完整通过：Ruff lint/format、Mypy（113 个源文件）、后端 635 项 Pytest、摄取/RAG/管理三项 fake smoke、前端 ESLint/类型检查/覆盖率测试和生产构建均成功。
 - 后端 smoke 累计覆盖率精确为 80.06%，达到 80% 门槛；前端 19 个测试文件共 127 项通过，API、composables、utils、components、views 和 `App.vue` 的各自门槛全部通过。
 - 先前记录的后端 `test_service_api_requires_bearer_token` 超时与前端 API/composables 覆盖率不足均已解决，不再构成提交阻塞。
-- RAG Golden Runner、真实模型请求、Production Compose Smoke 和服务器部署验证不属于本轮补测试范围，未执行；新增 `noise` Golden Set 仍保持“仅提交用例、未运行”状态。
+- Production Compose Smoke 已使用全新数据库验证 Alembic `0042`、Assistant 默认私有、发布门禁、SSE、两个 Worker、服务健康及 Nginx 后端换 IP 自动恢复；生产服务器当前容器健康，但数据库仍位于 Alembic `0041`，待下一次部署升级。
+- 生产 Assistant Golden Run 11 已真实执行 53 个用例/63 轮，原断言为 51/53（96.2%），错误交付、范围外误命中、噪声误命中和 HTTP/SSE 错误均为 0；5 个噪声用例全部通过。两项不一致确认是断言与安全引用规则/拒答语义不一致，修正断言后离线重放同一响应为 53/53，真实模型全量复跑待执行。
 
 确认方式：在已 bootstrap 的环境运行 `bash scripts/check.sh`，或针对每项运行相应 Pytest/Ruff 命令；将真实输出与当前工作树对应后更新本文件。
 

@@ -83,3 +83,44 @@ def test_assistant_public_references_are_evaluated_without_admin_catalog() -> No
 
     assert passed is True
     assert problems == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "当前文档未涉及U盘升级PDC失败后的具体故障处理步骤。",
+        "文档未描述升级失败时的排查流程。",
+        "当前知识库没有足够的可靠信息，无法确认该问题。",
+    ],
+)
+def test_safe_refusal_expectations_accept_supported_wording_without_references(
+    answer: str,
+) -> None:
+    runner = _runner()
+    passed, problems = runner.evaluate({"tolerance": "NONE"}, set())
+    answer_problems = runner.evaluate_answer(
+        {
+            "answer_must_any": [
+                "当前文档未涉及",
+                "未描述升级失败时的排查流程",
+                "无法确认",
+                "没有足够",
+            ]
+        },
+        answer,
+    )
+
+    assert passed is True
+    assert problems == []
+    assert answer_problems == []
+
+
+def test_safe_refusal_tolerance_rejects_exposed_document_reference() -> None:
+    runner = _runner()
+    passed, problems = runner.evaluate(
+        {"tolerance": "NONE"},
+        {"故障解决文档14—FFC 更换外壳"},
+    )
+
+    assert passed is False
+    assert problems == ["范围外问题命中了文档: ['故障解决文档14—FFC 更换外壳']"]

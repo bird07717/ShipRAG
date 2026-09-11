@@ -15,7 +15,7 @@ bash scripts/bootstrap.sh
 
 该脚本创建虚拟环境、依据 `backend/requirements.lock` 安装后端依赖、以 editable 模式安装后端、执行前端 `npm ci`，并在缺少 `.env` 时由 `.env.example` 复制。开始前审阅 `.env.example` 的变量名称和说明；敏感值仅写入本地安全配置或部署 Secret。
 
-关键配置类别：应用与 CORS、PostgreSQL、Redis/RQ、MinIO、模型提供者、嵌入/检索阈值、保留期、模型密钥加密，以及生产的 `SERVICE_TOKEN` 和 `ASSISTANT_SERVICE_TOKEN`。生产示例为 `.env.production.example`；Production Compose 对必要密码、服务凭据和 `MODEL_SECRET_KEY` 使用必填变量。恢复已有数据库时必须沿用能解密其中模型凭据的密钥及版本，不能生成新值替代。
+关键配置类别：应用与 CORS、PostgreSQL、Redis/RQ、MinIO、模型提供者、嵌入/检索阈值、保留期、模型密钥加密，以及生产的 `SERVICE_TOKEN` 和 `ASSISTANT_SERVICE_TOKEN`。`ASSISTANT_REQUEST_RETENTION_DAYS` 默认 7，控制未关联 Conversation 的 Assistant 终态请求保留期，设为 0 禁用清理；维护 Worker 启动时清理一次并注册每日任务，永不由该任务删除 `RUNNING`。生产示例为 `.env.production.example`；Production Compose 对必要密码、服务凭据和 `MODEL_SECRET_KEY` 使用必填变量。恢复已有数据库时必须沿用能解密其中模型凭据的密钥及版本，不能生成新值替代。
 
 staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐式使用 fake。`auto` 必须能从对应环境变量或可解密的 `model_config` 快照取得有效凭据；否则相关摄取/问答请求明确失败。部署校验还要确认在线查询模型与 Active Index 的 Embedding 模型一致，不能只确认服务进程已启动。
 
@@ -53,11 +53,11 @@ bash scripts/dev-up.sh
 
 Docker 发布端口的流量会在到达 UFW 使用的常规 `INPUT` 链之前被转发，因此只添加 `ufw allow/deny 18080` 不能可靠限制 Compose 发布的 `18080`。该端口必须使用上游网络防火墙，或在 Docker 的 `DOCKER-USER` 链按业务后台来源地址限制；不要通过关闭 Docker 的 `iptables` 功能规避该问题，这会破坏容器网络。变更前后分别检查 `sudo iptables -S DOCKER-USER`、`docker compose ... ps`，并从允许和不允许的来源各测试一次。
 
-生产 smoke 脚本是 `scripts/smoke-production.sh`，会创建临时 compose 项目并清理卷。仅在已理解 Docker 影响、可执行相关容器操作的环境运行。
+生产 smoke 脚本是 `scripts/smoke-production.sh`，会创建临时 compose 项目并清理卷。它在 production 配置校验中为 M2/M3/M5 使用 `auto`，遵守禁止 fake 的门禁；脚本不发起模型支持的摄取或聊天，因此不会产生外部模型调用。仅在已理解 Docker 影响、可执行相关容器操作的环境运行。
 
 Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文件（保留可提交的示例）、虚拟环境、Node 依赖、Python 测试/静态检查缓存、Coverage 分片、前端构建/覆盖率产物、`VDR600/` 本地资料和 RAG 验收报告均不进入镜像构建上下文。修改 Dockerfile 的 `COPY` 范围或新增构建输入时，应同步检查该文件。
 
-## 待确认
+## 生产核验与待确认
 
-- 2026-09-10 已确认目标生产服务器的 PostgreSQL、Redis、MinIO、后端和前端健康，两个 Worker 正常运行，数据库位于 Alembic `0040`，迁移备份校验通过；Assistant 鉴权、知识库、会话、真实 SSE、幂等、用户隔离以及文档/图片资源代理均已完成生产验收。
+- 2026-09-11 已确认目标生产服务器使用提交 `49c799a`，PostgreSQL、Redis、MinIO、后端和前端健康，两个 Worker 正常运行，数据库位于 Alembic `0041`；Assistant 鉴权、知识库、会话、真实 SSE、幂等、用户隔离以及文档/图片资源代理均已完成生产验收。当前工作树已新增 `0042`，生产需在下一次部署执行迁移后才能使用 Assistant 重放计数和终态孤儿保留任务。生产 Golden Trace 已确认真实模型链路，不再使用 fake 查询链路。
 - 正式上线前仍需由具备 sudo 权限的管理员确认 UFW 与 `DOCKER-USER` 的实际规则，并轮换曾用于联调的临时凭据。服务器仓库通过 GitHub SSH 拉取，`cm` 账号需在交互式终端输入 SSH 私钥口令，因此服务器 `git pull` 由用户手动执行。

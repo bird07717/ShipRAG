@@ -14,22 +14,24 @@
 ## 正在进行的工作
 
 - 生产服务器已完成源码、PostgreSQL 和 MinIO 数据迁移，并于 2026-09-10 同步到完成 Assistant 生产验收的版本；核验时服务器工作树与 `origin/main` 一致，生产 `.env` 权限为 `600`，迁移备份校验通过。
-- 生产 PostgreSQL 位于 Alembic `0040`，共有 1 个知识库、64 条文档记录、2004 个分块和 1096 条图片记录；MinIO 有 70 个文档对象和 1232 个图片对象。活动索引状态为 `ACTIVE`，当前没有排队或运行中的任务。
-- PostgreSQL、Redis 和 MinIO 保持原数据卷持续运行；2026-09-10 已使用现有 `v1.0.1` 源码构建并切换后端、前端和两个 Worker 至 `1.0.1` 镜像。随后仅重建前端以显式转发 Assistant SSE 的 `X-Accel-Buffering` 响应头；前后端健康检查均返回 HTTP 200，Alembic 仍为 `0040`，知识库和文档数量不变。
+- 生产 PostgreSQL 已位于 Alembic `0041 (head)`；此前核对共有 1 个知识库、64 条文档记录、2004 个分块和 1096 条图片记录，MinIO 有 70 个文档对象和 1232 个图片对象。活动索引状态为 `ACTIVE`。
+- PostgreSQL、Redis 和 MinIO 保持原数据卷持续运行；生产服务器于 2026-09-11 使用提交 `49c799a` 重建后端、前端和两个 Worker，相关容器健康，外部 `/health/ready` 返回 ready，Alembic 为 `0041 (head)`。
 - Assistant 生产验收已覆盖鉴权、知识库与欢迎语、会话与消息、真实 SSE、幂等重放与冲突、外部用户隔离、文档/图片下载及删除资源拒绝。SSE 经生产 Nginx 返回 HTTP 200、`text/event-stream`、`Cache-Control: no-cache, no-transform`、`X-Accel-Buffering: no`，并到达 `complete` 终态，已具备内网联调条件。
 - 生产服务器仓库的 `origin` 使用 GitHub SSH 地址；`cm` 账号可在交互式输入 SSH 私钥口令后正常拉取。自动化执行使用非交互模式时无法提供该口令，因此后续服务器 `git pull` 由用户手动执行。
 - 已新增 Assistant 遗留请求预览/恢复命令；当前数据库原有的 25 条遗留 `assistant_request` 及对应 Assistant 消息/Trace 已保留记录并恢复为失败终态。另有 2 条确认无业务价值的内部 Support 轮次，已在完整数据库备份后精确删除 2 条 Trace 与 4 条消息，未删除所属会话。
 - Assistant 对接契约已统一：会话归属、知识库/Active Index、幂等及并发前置失败在 SSE 建立前返回 HTTP JSON；SSE `context` 使用公开字段白名单，已知短暂错误保留可重试语义；流发送失败或客户端断连会事务取消仍为 `RUNNING` 的预留请求及其关联消息/Trace；资源代理转发可用的 `Content-Length`，且不再暴露已删除文档的图片；业务后台新会话锁使用稳定 `client_chat_id`。
 - 2026-09-11 生产服务器源码和后端已更新到 Assistant 欢迎语版本；欢迎语不再展示知识库名称、描述和文档数量，三条推荐问题固定使用已通过 Assistant Golden Set 的标准精确命中用例。更新时只重建后端导致其容器 IP 变化，旧前端 Nginx 仍缓存原地址，外部 `/api/` 和 `/health/` 暂时返回 502；重启前端可立即恢复。
-- 当前本地 Nginx 配置已改用共享 upstream、Docker DNS 和运行时 `resolve`，生产 smoke 已增加“后端容器换 IP、前端不重启”的恢复验证；该根治变更尚未部署到生产服务器。
-- 2026-09-11 生产 Trace 定位出查询 Embedding/Rerank 因缺少可用模型凭据而落到 deterministic fake，且查询向量模型与 Active Index 不一致，这是乱码仍命中文档的主要原因。本地已改为 staging/production 缺凭据失败关闭、Trace 记录实际查询模型、明显噪声检索前短路、Rerank 降级不沿用焦点文档，并收紧非知识回答的来源/下载引用清理；服务器尚未拉取和部署。
-- 管理台本地已增加 Service Token 门禁：无凭证时仅允许进入凭证配置页，不挂载其余管理视图或启动轮询；收到 401 后停止后续自动请求，保存新凭证后恢复，避免认证错误持续刷屏。该变更尚未部署到生产服务器。
+- 生产 Nginx 已使用共享 upstream、Docker DNS 和运行时 `resolve`，避免后端容器重建换 IP 后继续使用旧地址；生产 smoke 包含“后端容器换 IP、前端不重启”的恢复验证。
+- staging/production 已禁止查询 Embedding/Rerank/LLM 在缺少凭据时静默使用 fake，并记录实际查询模型；明显噪声在检索前短路，Rerank 降级不沿用焦点文档，非知识回答会清理来源和下载引用。2026-09-11 生产 Golden Trace 复核确认 58 个检索轮次使用真实 SiliconFlow 模型，5 个噪声轮次由输入门禁短路。
+- 管理台已部署 Service Token 门禁：无凭证时仅允许进入凭证配置页，不挂载其余管理视图或启动轮询；收到 401 后停止后续自动请求，保存新凭证后恢复，避免认证错误持续刷屏。
 - 对外业务后台指南已按标准服务契约重构，包含可跳转目录、整体接入及恢复流程、详细接口关系、逐接口请求/响应字段说明、SSE 事件契约、错误处理和验收清单；文档注明测试阶段使用临时 Token、正式上线前必须轮换，但不记录真实凭据，也不包含平台核心逻辑或我方运维操作。
-- 本地已新增迁移 `0041`，将 Assistant 对外上线状态与知识库可维护状态分离：既有启用知识库在迁移时保持上线，新知识库默认下线；Assistant 列表、欢迎语、问答、会话与资源访问统一执行上线及归属门禁，列表 `ready` 使用当前执行策略的完整就绪条件。该变更尚未部署到生产服务器。
+- 迁移 `0041` 已部署，将 Assistant 对外上线状态与知识库可维护状态分离：既有启用知识库在迁移时保持上线，新知识库默认下线；Assistant 列表、欢迎语、问答、会话与资源访问统一执行上线及归属门禁，列表 `ready` 使用当前执行策略的完整就绪条件。
 - 管理台已只读展示 Assistant 上线状态，并修正 RAG 候选索引“自动生效”的错误文案：`READY` 候选复用现有激活接口设为当前索引，只有历史版本使用回滚。
 - 2026-09-11 本地验证通过：本次 Python 文件 Ruff format/check、后端 Mypy（112 个源文件）、111 项相关后端测试通过且 1 项按条件跳过；前端 ESLint、类型检查、18 个测试文件共 109 项测试和生产构建通过。隔离迁移验证确认 `0040` 既有启用知识库升级后保持上线、`0041` 后新建知识库默认下线；Production Compose Smoke 确认默认私有、未上线欢迎语不可访问、服务健康及 Nginx 后端换 IP 自动恢复。
-- RAG Golden Set 已新增 5 个 `noise` 用例（共 53 个用例/63 轮），覆盖纯符号、单字、重复字符、键盘连打及已有文档焦点时的乱码；按要求仅提交用例，尚未执行，既有已验证基线仍为 Run 10 的 48 个用例。
-- 2026-09-11 已补齐提交门禁测试：新增构建模型加载、Assistant 遗留恢复、维护任务和索引 GC 单元测试，并扩展管理 API、凭证门禁、路由/RAG store、Profile/Release/模型管理测试。`scripts/check.sh` 完整通过：Ruff lint/format、Mypy（112 个源文件）、后端 615 项 Pytest、三项 fake smoke、后端精确累计覆盖率 80.06%、前端 ESLint/类型检查、19 个文件共 127 项测试及全部目录覆盖率门禁、生产构建均通过；构建仍有已记录的大包体积警告。Golden Runner、真实模型请求和服务器部署验证未执行。
+- 2026-09-11 已在生产服务器通过 Assistant 对外接口执行全部 53 个 Golden 用例/63 轮：51/53 通过（96.2%），5/5 噪声输入全部由门禁返回 `UNCONFIRMED`，错交付、范围外误命中、噪声误命中及 HTTP/SSE 错误均为 0；延迟 p50 4.868s、p95 14.630s、max 26.453s。两个失败分别是追问缺少公开文档引用，以及安全拒答措辞不在用例限定词中；报告保存在服务器 `rag-acceptance/reports/baseline-20260911-080747.json`。
+- 已根据生产 Trace 修正上述两项 Golden 断言：文档未覆盖追问或回答为通用建议时不得为了通过测试而暴露引用；安全拒答统一接受“未涉及、未找到、无法确认、没有足够”。修正后离线重放 Run 11 原始响应为 53/53，真实模型全量复跑尚待执行。
+- 2026-09-11 生产运营数据只读复核：近 7 天 Assistant 共 116 个完成轮次、0 个失败 Trace，p95 11.633s；数据库 `assistant_request` 为 116 条 `COMPLETED` 和 1 条无会话 `FAILED`，没有 `RUNNING`。当前工作树已新增 `0042`：Assistant 指标改为统计 `assistant_request` 并持久化终态重放次数，维护 Worker 每日清理超过配置期限的终态孤儿请求；生产仍为 `0041`，需部署后生效。管理台认证失败刷屏在前端门禁部署后已停止，最近 15 分钟新增为 0。
+- 2026-09-11 已补齐提交门禁测试：新增构建模型加载、Assistant 遗留恢复/终态孤儿保留、维护任务和索引 GC 单元及 PostgreSQL 集成测试，并扩展管理 API、凭证门禁、路由/RAG store、Profile/Release/模型管理测试。最终工作树的 `scripts/check.sh` 完整通过：Ruff lint/format、Mypy（113 个源文件）、后端 635 项 Pytest、三项 fake smoke、后端累计覆盖率 80% 门槛、前端 ESLint/类型检查、19 个文件共 127 项测试及全部目录覆盖率门禁、生产构建均通过；构建仍有已记录的大包体积警告。Production Compose Smoke 也已在全新数据库验证 `0042`、两个 Worker、Assistant 私有默认边界和 Nginx 动态 DNS；真实模型 Golden 和服务器部署状态已按上条另行验证。
 
 ## 当前阻塞
 
@@ -40,4 +42,5 @@
 1. 完成 UFW/`DOCKER-USER` 来源限制和临时凭据轮换。
 2. RAG 或生产配置变更前后，按 `rag-acceptance/README.md` 执行并记录黄金集对比。
 3. 后续在允许增加管理侧写契约时，实现知识库 Assistant 上线/下线开关、按知识库维护欢迎语和三条标准问题、验证后发布；当前三条问题仍为代码中的全局 Golden Set 固定值，管理台只读展示上线状态。
-4. 服务器拉取本地修复后，先配置与 Active Index 一致的 Embedding、Rerank、LLM 有效凭据并重建应用，再检查 Trace 的实际 provider/model，最后按 Assistant 模式执行新增 `noise` Golden Set；未配置凭据时新版本会明确失败，不会静默使用 fake。
+4. 将修正后的 Golden 用例同步到服务器并在相同生产环境复跑全量 Assistant Golden Set；确认全绿后建立新基线，并继续关注相对 Run 10 的延迟长尾回升。
+5. 下次生产更新执行 Alembic `0042` 并重建后端和维护 Worker，确认 Assistant 指标开始统计请求/重放，且维护队列只清理过期终态孤儿请求。

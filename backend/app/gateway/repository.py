@@ -841,7 +841,20 @@ class GatewayRepository:
                         raise ApiError("IDEMPOTENCY_KEY_REUSED", "幂等键已用于不同请求", 409)
                     if row["status"] == "RUNNING":
                         raise ApiError("REQUEST_IN_PROGRESS", "相同请求仍在处理中", 409)
-                    return "REPLAY", row
+                    replayed = await connection.execute(
+                        text(
+                            """
+                            UPDATE assistant_request
+                            SET replay_count = replay_count + 1,
+                                last_replayed_at = now(),
+                                updated_at = now()
+                            WHERE id = :id
+                            RETURNING *
+                            """
+                        ),
+                        {"id": row["id"]},
+                    )
+                    return "REPLAY", dict(replayed.mappings().one())
                 if conversation_id is not None:
                     running = await connection.execute(
                         text(

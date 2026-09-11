@@ -8,7 +8,77 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import Settings
+from app.gateway.repository import GatewayRepository
 from app.rag.repository import RagRepository
+
+
+@pytest.mark.asyncio
+async def test_assistant_replay_count_is_persisted_atomically() -> None:
+    database_url = os.getenv("SUPPORT_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("SUPPORT_TEST_DATABASE_URL is not configured")
+
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    knowledge_id = uuid4()
+    request_id = uuid4()
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO knowledge_base (id, name, assistant_online) "
+                    "VALUES (:id, :name, true)"
+                ),
+                {"id": knowledge_id, "name": f"assistant-replay-{knowledge_id}"},
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO assistant_request (
+                        id, external_user_id, knowledge_id, idempotency_key,
+                        request_hash, status
+                    ) VALUES (
+                        :id, 'business-user-1', :knowledge_id, 'replay-key-1',
+                        'request-hash-1', 'COMPLETED'
+                    )
+                    """
+                ),
+                {"id": request_id, "knowledge_id": knowledge_id},
+            )
+
+        repository = GatewayRepository(engine, Settings(_env_file=None, app_env="test"))
+        state, replayed = await repository.reserve_assistant_request(
+            external_user_id="business-user-1",
+            knowledge_id=knowledge_id,
+            idempotency_key="replay-key-1",
+            request_hash="request-hash-1",
+            conversation_id=None,
+        )
+
+        async with engine.connect() as connection:
+            persisted = (
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT replay_count, last_replayed_at "
+                            "FROM assistant_request WHERE id = :id"
+                        ),
+                        {"id": request_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        assert state == "REPLAY"
+        assert replayed["replay_count"] == 1
+        assert persisted["replay_count"] == 1
+        assert persisted["last_replayed_at"] is not None
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM knowledge_base WHERE id = :id"),
+                {"id": knowledge_id},
+            )
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

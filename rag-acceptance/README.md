@@ -3,7 +3,8 @@
 对上线链路（`RAG_ONLY` → `RagService`）的黑盒回归评测：53 个用例 / 63 轮真实请求，
 经 HTTP 调用真实后端与真实模型（SiliconFlow embedding/rerank/LLM），按文档命中判定。
 
-其中新增的 5 个 `noise` 用例尚未执行；已验证基线仍是下方 Run 10 的 48 个用例。
+2026-09-11 已在生产服务器通过 Assistant 对外接口完成全部 53 个用例；最新结果见
+下方 Run 11，历史全绿基线仍保留下方 Run 10 供对比。
 
 ## 运行
 
@@ -79,6 +80,31 @@ Assistant 模式调用 `/api/v1/assistant/chat/stream`，为每轮请求提供
 但不可机检，已通过 prompt 规则消除。Run 7 中间态：P6-P8 逐项验证时 focus_coverage
 从 0/3 修到 3/3；Run 8 重嵌后 identifier 一例被弱单候选澄清劫持，P10 修复。
 Run 10 首跑 44/48——后 4 轮因 SiliconFlow 余额耗尽（402）失败，充值后复跑全绿。）
+
+### Run 11：生产 Assistant 全量基线（2026-09-11）
+
+| 指标 | 结果 |
+| --- | --- |
+| 用例 / 轮次 | 53 / 63 |
+| 通过 | 51（96.2%） |
+| 错交付 / 范围外误命中 / 噪声误命中 | 0 / 0 / 0 |
+| HTTP 或 SSE 错误 | 0 |
+| 延迟 p50 / p95 / max | 4.868s / 14.630s / 26.453s |
+
+分类结果：`standard` 10/10、`colloquial` 10/10、`identifier` 5/5、
+`cross_doc` 6/6、`out_of_scope` 5/5、`knowledge` 2/2、`noise` 5/5、
+`meta` 1/1、`retrieval` 1/1、`follow_up` 4/5、`focus_coverage` 2/3。
+
+两项失败均未错误交付文档：`rag_fup_001` 的追问正确谈及 PDC 升级失败，但公开
+响应未携带预期文档引用；`rag_focus_001` 已安全拒答，但使用“没有足够的可靠信息，
+无法确认”，没有命中用例限定的“未涉及/未找到”措辞。生产 Trace 显示 58 个检索
+轮次使用真实 SiliconFlow Embedding、Rerank 和 LLM，5 个噪声轮次由输入门禁短路。
+服务器报告为 `rag-acceptance/reports/baseline-20260911-080747.json`。
+
+Run 11 后已修正这两项断言：聚焦文档不覆盖追问、或回答进入通用建议时，必须不
+暴露文档引用，并通过安全拒答语义判断上下文是否正确；拒答词表统一接受“未涉及、
+未找到、无法确认、没有足够”。用修正后的断言离线重放同一份 Run 11 响应为
+53/53；该结果仅验证断言修正，不能替代下一次真实模型全量运行。
 
 ### 已实施的优化（累计）
 

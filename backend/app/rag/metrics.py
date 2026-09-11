@@ -463,9 +463,11 @@ class MetricsRepository:
         start = end - timedelta(days=days)
         parameters: dict[str, Any] = {"start": start, "end": end}
         kb_clause = ""
+        assistant_request_kb_clause = ""
         conv_kb_clause = ""
         if knowledge_id is not None:
             kb_clause = " AND kb_id = :kb_id"
+            assistant_request_kb_clause = " AND knowledge_id = :kb_id"
             conv_kb_clause = " AND c.knowledge_id = :kb_id"
             parameters["kb_id"] = knowledge_id
 
@@ -565,8 +567,9 @@ class MetricsRepository:
                         text(f"""
                             SELECT count(*) AS protected,
                                    COALESCE(sum(replay_count), 0)::bigint AS replays
-                            FROM support_idempotency
-                            WHERE created_at >= :start AND created_at < :end{kb_clause}
+                            FROM assistant_request
+                            WHERE created_at >= :start AND created_at < :end
+                                {assistant_request_kb_clause}
                         """),
                         parameters,
                     )

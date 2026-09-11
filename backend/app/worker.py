@@ -8,6 +8,10 @@ from rq import Queue, Worker
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.tasks.assistant_retention import (
+    ensure_periodic_assistant_request_retention,
+    run_assistant_request_retention_sync,
+)
 from app.tasks.gc import ensure_periodic_index_gc, run_index_gc_sync
 from app.tasks.log_retention import run_request_error_log_retention_sync
 from app.tasks.recovery import (
@@ -52,6 +56,16 @@ def main() -> None:
                     "Pruned %s expired request error log row(s)",
                     retention_result["deleted_count"],
                 )
+        assistant_retention_enabled = settings.assistant_request_retention_days > 0
+        if assistant_retention_enabled:
+            assistant_retention_result = run_assistant_request_retention_sync(settings)
+            if assistant_retention_result["deleted_count"]:
+                logger.info(
+                    "Pruned %s expired orphan Assistant request row(s)",
+                    assistant_retention_result["deleted_count"],
+                )
+            if ensure_periodic_assistant_request_retention(connection):
+                logger.info("Daily Assistant request retention scheduled")
         # Periodic GC runs on the maintenance queue as a self-rescheduling
         # delayed job; the built-in scheduler on this worker promotes due
         # jobs.  The sentinel keeps concurrent worker startups from
@@ -67,8 +81,10 @@ def main() -> None:
     worker.work(
         with_scheduler=(
             "maintenance" in settings.queue_names
-            and settings.index_gc_enabled
-            and settings.index_gc_interval_seconds > 0
+            and (
+                (settings.index_gc_enabled and settings.index_gc_interval_seconds > 0)
+                or settings.assistant_request_retention_days > 0
+            )
         )
     )
 

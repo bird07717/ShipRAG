@@ -45,7 +45,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - 明显低信息输入（纯符号、单字符、同字符重复、连续键盘字符）在检索和模型调用前返回 `UNCONFIRMED`；待确认选项存在时，`1` 等合法选择回复不受该门禁影响。
 - Rerank 降级为无分数排名时不得据此选中或沿用文档；即使会话已有焦点也返回不带来源和下载引用的 `UNCONFIRMED`，但保留焦点供下一轮有效追问。任何 `UNCONFIRMED`、`OUT_OF_SCOPE` 或通用解释响应都不得公开文档引用。
 - 运行策略有 `RAG_ONLY` 和 `SUPPORT_WITH_RAG_FALLBACK`；会话模式可覆盖引擎选择。
-- 对外 Assistant 请求使用幂等记录与外部用户隔离；其响应通过 `public_payload` 过滤内部字段。
+- 对外 Assistant 请求使用幂等记录与外部用户隔离；终态幂等重放会原子累计 `replay_count` 并刷新最后重放时间，其响应通过 `public_payload` 过滤内部字段。
 - 对外 Assistant 只列出 `assistant_online=true` 且知识库本身启用的项目；欢迎语、问答、会话、文档和图片入口都执行同一上线边界及知识库归属检查。新知识库默认不对外，迁移前已经启用的知识库保持原可见性。
 - Assistant 列表的 `ready` 按知识库当前执行策略使用完整 Gateway 就绪条件计算；Chat 在预留幂等请求前再次执行同一策略就绪检查。已上线但依赖异常的知识库可以保留在列表中，但必须返回 `ready=false`。
 - 对外 Assistant 就绪态欢迎语使用简洁的用户侧文案，不暴露知识库名称、描述或文档数量；三条快捷问题目前仍全局固定取自已通过的 Assistant Golden Set `standard + EXACT` 用例。未就绪时只返回通用准备中文案，不暴露上传或索引管理指令。按知识库配置三个标准问题及后台上线写操作尚未实现，见 `current-state.md`。管理端 Chat 欢迎语仍使用知识库目录生成，不受此规则影响。
@@ -54,6 +54,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - Assistant SSE `context` 只允许输出会话、用户消息、Assistant 消息和 Trace 标识，不透传 Index 等内部 Trace 字段；已知短暂上游/超时错误保留可重试语义。
 - Assistant 文档/图片接口只允许读取状态为 `STORED` 的所属文档资源，按 64 KiB 分块代理 MinIO，并转发可信的内容类型、可用的对象长度和文档文件名；调用方无需为取得长度缓冲完整对象。
 - 超过指定时间仍为 `RUNNING` 的 Assistant 请求可通过 `app.assistant.recovery` 预览并事务恢复；恢复会保留请求行，并同步将关联的流式消息和 Trace 标为失败。
+- 维护 Worker 启动时及之后每天清理超过 `ASSISTANT_REQUEST_RETENTION_DAYS`、未关联 Conversation 且处于终态的 Assistant 请求；关联会话的请求随 Conversation 级联清理，`RUNNING` 请求只能经正常收口或遗留恢复处理。
 - API 密钥可存储为加密密文，密钥轮换由 `app.tasks.key_rotation` 支持；文档只可记录变量名，不能记录值。
 
 ## 测试

@@ -32,6 +32,9 @@ class _FakeResult:
     def one_or_none(self) -> dict[str, Any] | None:
         return self._rows[0] if self._rows else None
 
+    def one(self) -> dict[str, Any]:
+        return self._rows[0]
+
     def scalar_one_or_none(self) -> Any:
         return self._rows[0] if self._rows else None
 
@@ -157,6 +160,38 @@ async def test_assistant_request_reservation_rejects_offline_knowledge_base() ->
 
     assert raised.value.code == "KNOWLEDGE_BASE_NOT_FOUND"
     assert all("INSERT INTO assistant_request" not in sql for sql, _ in connection.executed)
+
+
+async def test_assistant_request_replay_increments_observability_fields() -> None:
+    knowledge_id = uuid4()
+    request_id = uuid4()
+    existing = {
+        "id": request_id,
+        "request_hash": "request-hash-1",
+        "status": "COMPLETED",
+        "replay_count": 0,
+    }
+    replayed = {**existing, "replay_count": 1}
+    repo, connection = _gateway_repository(
+        [[{"status": "ENABLED", "assistant_online": True}], [existing], [replayed]]
+    )
+
+    state, request = await repo.reserve_assistant_request(
+        external_user_id="business-user-1",
+        knowledge_id=knowledge_id,
+        idempotency_key="request-key-1",
+        request_hash="request-hash-1",
+        conversation_id=None,
+    )
+
+    assert state == "REPLAY"
+    assert request["replay_count"] == 1
+    sql, params = connection.executed[2]
+    assert "replay_count = replay_count + 1" in sql
+    assert "last_replayed_at = now()" in sql
+    assert "updated_at = now()" in sql
+    assert "RETURNING *" in sql
+    assert params == {"id": request_id}
 
 
 async def test_assistant_request_reservation_rechecks_conversation_association() -> None:

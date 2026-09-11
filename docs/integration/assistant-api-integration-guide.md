@@ -179,6 +179,7 @@ HTTP `401`、JSON 错误正文和 `WWW-Authenticate: Bearer`，不会先返回 S
 ```env
 ASSISTANT_SERVICE_TOKEN=<至少 32 字符的随机值>
 ASSISTANT_SERVICE_TOKEN_PREVIOUS=
+ASSISTANT_REQUEST_RETENTION_DAYS=7
 ```
 
 可以在受控运维终端生成值：
@@ -794,6 +795,14 @@ Idempotency-Key: <UUID>
 - 使用同一个 Key 提交不同参数。
 - 超时后立即使用新 Key 静默重发。
 - 同一 Conversation 并发发送多个问题。
+
+### 20.4 幂等结果保留窗口
+
+平台只在对应 `assistant_request` 记录仍保留期间保证重放：已关联 Conversation 的请求随
+Conversation 生命周期保留；未关联 Conversation 的终态请求按
+`ASSISTANT_REQUEST_RETENTION_DAYS` 从最后一次更新或重放起保留，当前联调基线为 7 天。
+超过窗口后再次提交同一 Key 可能被视为新请求，因此业务后台应在窗口内处理结果未知的
+重试，并长期保存自身业务终态，不能把平台幂等记录当作永久消息存储。
 
 ## 21. 文档下载
 

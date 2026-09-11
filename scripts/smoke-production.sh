@@ -28,14 +28,14 @@ export MINIO_ROOT_PASSWORD="m7-smoke-minio-password"
 # Fixed test-only AES-256 key; production receives its key from a Secret.
 export MODEL_SECRET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 export MODEL_SECRET_KEY_VERSION="1"
-export M2_EMBEDDING_PROVIDER="fake"
-# Production settings reject the fake LLM provider.  This smoke check does not
-# issue a chat request, so auto avoids external model calls while preserving
-# the same production validation path.
+# Production settings reject fake providers. This smoke check does not issue
+# model-backed ingestion or chat requests, so auto preserves the production
+# validation path without making external model calls.
+export M2_EMBEDDING_PROVIDER="auto"
 export M3_LLM_PROVIDER="auto"
 export M4_OCR_PROVIDER="fake"
 export M4_VISION_PROVIDER="fake"
-export M5_RERANK_PROVIDER="fake"
+export M5_RERANK_PROVIDER="auto"
 
 docker compose \
   --project-name "${project_name}" \

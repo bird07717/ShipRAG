@@ -119,3 +119,19 @@ def test_index_job_timeout_defaults_to_two_hours() -> None:
 def test_index_job_timeout_rejects_unsafe_values() -> None:
     with pytest.raises(ValidationError, match="RQ index job timeout"):
         Settings(_env_file=None, rq_index_job_timeout_seconds=30)
+
+
+def test_assistant_request_retention_defaults_to_seven_days_and_allows_disable() -> None:
+    assert Settings(_env_file=None).assistant_request_retention_days == 7
+    assert (
+        Settings(
+            _env_file=None, assistant_request_retention_days=0
+        ).assistant_request_retention_days
+        == 0
+    )
+
+
+@pytest.mark.parametrize("days", [-1, 3_651])
+def test_assistant_request_retention_rejects_out_of_range_values(days: int) -> None:
+    with pytest.raises(ValidationError, match="Assistant request retention days"):
+        Settings(_env_file=None, assistant_request_retention_days=days)

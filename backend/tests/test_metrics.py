@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.api.metrics import get_metrics_repository
 from app.api.rag import get_rag_repository
@@ -173,6 +175,48 @@ class _StubTraceRepository:
 AUTH = {"Authorization": "Bearer test-token"}
 
 
+class _RepositoryResult:
+    def __init__(self, *, rows: list[dict[str, Any]] | None = None) -> None:
+        self.rows = rows or []
+
+    def mappings(self) -> _RepositoryResult:
+        return self
+
+    def all(self) -> list[dict[str, Any]]:
+        return self.rows
+
+    def one(self) -> dict[str, Any]:
+        return self.rows[0]
+
+
+class _MetricsConnection:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def __aenter__(self) -> _MetricsConnection:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        return None
+
+    async def execute(self, statement: Any, parameters: dict[str, Any]) -> _RepositoryResult:
+        sql = str(statement)
+        self.calls.append((sql, parameters))
+        if "FROM assistant_request" in sql:
+            return _RepositoryResult(rows=[{"protected": 3, "replays": 2}])
+        if "FROM conversation c" in sql:
+            return _RepositoryResult(rows=[{"total": 0, "active": 0, "expired": 0}])
+        return _RepositoryResult()
+
+
+class _MetricsEngine:
+    def __init__(self) -> None:
+        self.connection = _MetricsConnection()
+
+    def connect(self) -> _MetricsConnection:
+        return self.connection
+
+
 class TestMetricsRangeValidation:
     def test_default_range_is_last_seven_days(self) -> None:
         start, end = MetricsRepository.resolve_range(None, None)
@@ -198,6 +242,27 @@ class TestMetricsRangeValidation:
         with pytest.raises(Exception) as error:
             MetricsRepository.resolve_range(now - timedelta(days=100), now)
         assert "92" in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_assistant_metrics_read_assistant_request_with_knowledge_filter() -> None:
+    engine = _MetricsEngine()
+    repository = MetricsRepository(cast(AsyncEngine, engine))
+    knowledge_id = uuid4()
+
+    result = await repository.assistant(knowledge_id=knowledge_id)
+
+    assert result["idempotency"] == {
+        "assistant_protected": 3,
+        "assistant_replays": 2,
+        "ingestion_operations": {},
+    }
+    idempotency_sql, parameters = next(
+        call for call in engine.connection.calls if "FROM assistant_request" in call[0]
+    )
+    assert "FROM support_idempotency" not in idempotency_sql
+    assert "knowledge_id = :kb_id" in idempotency_sql
+    assert parameters["kb_id"] == knowledge_id
 
 
 class TestMetricsApi:

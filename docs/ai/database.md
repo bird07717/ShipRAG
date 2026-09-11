@@ -2,7 +2,7 @@
 
 ## 类型与迁移
 
-数据库是 PostgreSQL，开发和生产编排使用 ParadeDB PostgreSQL 17 镜像，并要求 `vector` 与 `pg_search` 扩展。Alembic 配置在 `backend/alembic.ini`，迁移位于 `backend/alembic/versions/`；当前仓库可见的最新修订是 `0041_assistant_knowledge_publication`。实际环境是否已升级到 head，必须通过 `alembic current` 或数据库检查确认。
+数据库是 PostgreSQL，开发和生产编排使用 ParadeDB PostgreSQL 17 镜像，并要求 `vector` 与 `pg_search` 扩展。Alembic 配置在 `backend/alembic.ini`，迁移位于 `backend/alembic/versions/`；当前仓库可见的最新修订是 `0042_assistant_request_observability_retention`。实际环境是否已升级到 head，必须通过 `alembic current` 或数据库检查确认。
 
 数据库访问使用 SQLAlchemy async/asyncpg，但业务 SQL 大多由 repository 层直接管理；迁移而不是本文是表结构和约束的权威来源。
 
@@ -25,12 +25,12 @@
 - `document_source` 的活跃文件哈希在同一知识库内唯一；其原始对象键、图像对象键也唯一。内容索引可随 `knowledge_index` 版本重建。
 - `document_chunk.embedding` 固定为 `vector(1024)`，使用 HNSW cosine 索引；BM25 通过 `pg_search` 索引支持混合检索。
 - `conversation` 关联知识库，并可冻结 RAG/Support 索引或发布版本；`message` 有会话内顺序约束，`rag_trace` 关联会话/消息并支持回退父子链路。
-- `assistant_request` 的 `(external_user_id, knowledge_id, idempotency_key)` 唯一，同一非空 Conversation 只允许一条 `RUNNING` 记录；`support_idempotency` 记录 Support 重放计数。不要绕过这些约束手工重复执行对外写操作。
-- `assistant_request.conversation_id` 使用 `ON DELETE CASCADE`，但当前没有该表的独立保留期清理任务；在关联 Conversation 前失败且保持空外键的记录可能持续保留，需监控并制定清理策略。详见 [`known-issues.md`](known-issues.md)。
+- `assistant_request` 的 `(external_user_id, knowledge_id, idempotency_key)` 唯一，同一非空 Conversation 只允许一条 `RUNNING` 记录；`replay_count >= 0`，终态重放会更新计数、`last_replayed_at` 和 `updated_at`。`support_idempotency` 仅记录 Support 内部重放，不作为 Assistant 门面指标。不要绕过这些约束手工重复执行对外写操作。
+- `assistant_request.conversation_id` 使用 `ON DELETE CASCADE`。未关联 Conversation 且为 `COMPLETED`、`FAILED` 或 `CANCELLED` 的记录由独立的部分索引支持按 `updated_at` 清理；保留期任务明确不删除 `RUNNING`。
 
 ## 数据流
 
-上传时，原文件先进入 MinIO，`document_source` 保存元数据；异步构建在版本化索引中产生元素、图像、分块和向量。读取时，RAG/Support 根据会话冻结或当前发布的索引检索，再将消息、Trace 和可选幂等终态写回 PostgreSQL。过期的会话/Trace/错误日志和无引用索引由维护任务清理；对象删除通过清理记录实现可恢复的后台处理。
+上传时，原文件先进入 MinIO，`document_source` 保存元数据；异步构建在版本化索引中产生元素、图像、分块和向量。读取时，RAG/Support 根据会话冻结或当前发布的索引检索，再将消息、Trace 和可选幂等终态写回 PostgreSQL。过期的会话/Trace/错误日志、Assistant 终态孤儿请求和无引用索引由维护任务清理；对象删除通过清理记录实现可恢复的后台处理。
 
 ## 操作注意
 

@@ -174,6 +174,12 @@ class Settings(BaseSettings):
     # them forever.
     conversation_retention_days: int = 7
 
+    # Terminal Assistant requests that never became associated with a
+    # conversation retain their idempotent result for this window.  Linked
+    # requests follow the conversation lifecycle through ON DELETE CASCADE.
+    # 0 disables orphan pruning.
+    assistant_request_retention_days: int = 7
+
     # Conversation content is visible for seven days.  Trace payload is
     # redacted after that window and retained as a minimal operations record
     # for a further period.
@@ -222,6 +228,13 @@ class Settings(BaseSettings):
     def validate_conversation_retention_days(cls, value: int) -> int:
         if not 0 <= value <= 3_650:
             raise ValueError("conversation retention days must be between 0 and 3650")
+        return value
+
+    @field_validator("assistant_request_retention_days")
+    @classmethod
+    def validate_assistant_request_retention_days(cls, value: int) -> int:
+        if not 0 <= value <= 3_650:
+            raise ValueError("Assistant request retention days must be between 0 and 3650")
         return value
 
     @field_validator("trace_full_retention_days", "trace_summary_retention_days")

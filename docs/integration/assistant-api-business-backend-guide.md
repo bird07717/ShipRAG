@@ -914,7 +914,7 @@ Content-Type: application/json
 
 1. 用户身份：`X-External-User-ID` 必须来自业务后台当前登录态，禁止接受前端任意传值后直接透传。
 2. 权限控制：业务后台应先校验用户是否可以使用目标知识库；Assistant 返回的可见列表仍是最终可调用范围。
-3. 幂等控制：业务后台应保存“业务发送记录 ID、`Idempotency-Key`、请求体摘要、`conversation_id`、终态”。结果未知时复用原 Key；明确失败后由用户重新发起时使用新 Key。
+3. 幂等控制：业务后台应保存“业务发送记录 ID、`Idempotency-Key`、请求体摘要、`conversation_id`、终态”。结果未知时复用原 Key；明确失败后由用户重新发起时使用新 Key。平台只在幂等记录保留期间保证重放：已关联请求随 Conversation 生命周期保留，未关联 Conversation 的终态请求当前从最后更新或重放起保留 7 天；超过窗口后同一 Key 可能被视为新请求，业务后台不得把平台记录当作永久消息存储。
 4. 并发控制：同一会话严格串行。首次请求使用业务后台生成的稳定 `client_chat_id` 串行化，取得 `conversation_id` 后保存 `client_chat_id → conversation_id` 映射。
 5. SSE 转发：必须使用支持流式读取和即时刷新的 HTTP 客户端及网关配置；不得缓存完整答案后一次性返回。
 6. 资源访问：文档和图片只能通过接口 8、接口 9 受控访问；禁止将对象存储地址或 Assistant Token 返回给前端。
