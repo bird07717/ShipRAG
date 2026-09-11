@@ -6,6 +6,18 @@
 2026-09-11 已在生产服务器通过 Assistant 对外接口完成全部 53 个用例；最新结果见
 下方 Run 11，历史全绿基线仍保留下方 Run 10 供对比。
 
+RAG 首轮单强直达的本地离线实验见
+[`single-strong-experiment.md`](single-strong-experiment.md)：只读回放历史分数，
+不改变在线 RAG/Support 策略，也不是新一轮真实模型 Golden 结果。
+
+第二轮真实模型受控实验见 [`document-rerank-experiment.md`](document-rerank-experiment.md)：
+比较文档级重排、候选多样性，并核验新题与多模态；发现 PDC 聚合错选及 DC24V
+旧式图片摄取缺口，最终建议优先处理冲突保护与内容完整性；上述为实验时状态。
+
+后续本地实现及未解决项见 [`first-turn-implementation.md`](first-turn-implementation.md)：
+已接入冲突保护、精确型号补召回、默认 shadow 的单强判定和 VML 完整性保护；
+尚未部署生产或复跑真实全量 Golden，DC24V 浮动文字正文仍需转换核验后重建。
+
 ## 运行
 
 ```bash

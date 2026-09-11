@@ -9,6 +9,7 @@ import type {
   ProfilePublishCheck,
   DocumentProfileIntent,
   KnowledgeBase,
+  KnowledgeAssistantConfig,
   KnowledgeIndex,
   IndexTask,
   KnowledgeRelease,
@@ -407,7 +408,18 @@ export const adminStore = reactive({
   },
 
   async loadKnowledgeBases(): Promise<void> {
-    this.knowledgeBases = await adminApi.listKnowledgeBases();
+    const incoming = await adminApi.listKnowledgeBases();
+    this.knowledgeBases = incoming.map((kb) => {
+      const current = this.knowledgeBases.find((item) => item.id === kb.id);
+      if (current && (current.assistant_config_revision ?? 0) > (kb.assistant_config_revision ?? 0)) {
+        return {
+          ...kb,
+          assistant_online: current.assistant_online,
+          assistant_config_revision: current.assistant_config_revision,
+        };
+      }
+      return kb;
+    });
     const currentStillExists = this.knowledgeBases.some((kb) => kb.id === this.selectedKnowledgeId);
     const savedKnowledgeId = readSelectedKnowledgeId();
     const savedStillExists = this.knowledgeBases.some((kb) => kb.id === savedKnowledgeId);
@@ -417,6 +429,13 @@ export const adminStore = reactive({
         : (this.knowledgeBases[0]?.id ?? "");
     }
     writeSelectedKnowledgeId(this.selectedKnowledgeId);
+  },
+  applyKnowledgeAssistantConfig(config: KnowledgeAssistantConfig): void {
+    const kb = this.knowledgeBases.find((item) => item.id === config.knowledge_id);
+    if (kb && config.revision >= (kb.assistant_config_revision ?? 0)) {
+      kb.assistant_online = config.assistant_online;
+      kb.assistant_config_revision = config.revision;
+    }
   },
 
   async loadSystemInfo(): Promise<void> {

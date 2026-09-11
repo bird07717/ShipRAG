@@ -803,6 +803,48 @@ class RagRepository:
         ]
         return sorted(candidates, key=lambda item: order[item.chunk_id])
 
+    async def title_recall_candidates(
+        self, *, knowledge_id: UUID, index_id: UUID, question: str, terms: list[str]
+    ) -> list[RetrievalCandidate]:
+        """At most three documents, one indexed chunk each; never cross KB/index."""
+        import re
+
+        patterns = [rf"(^|[^a-z0-9]){re.escape(term)}([^a-z0-9]|$)" for term in terms[:3]]
+        normalized = re.sub(r"\s+", "", question).casefold().rstrip("？?。.!！;；,，")
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text("""
+                SELECT picked.id FROM document_source d
+                JOIN LATERAL (
+                    SELECT c.id FROM document_chunk c
+                    WHERE c.document_id=d.id AND c.kb_id=:kb_id AND c.index_id=:index_id
+                    ORDER BY c.is_procedural DESC, c.token_count DESC, c.sequence_no, c.id
+                    LIMIT 1
+                ) picked ON true
+                WHERE d.kb_id=:kb_id AND d.status='STORED' AND (
+                    lower(d.display_name) ~ ANY(CAST(:patterns AS text[])) OR
+                    (:exact_allowed AND strpos(
+                        regexp_replace(lower(d.display_name),'[[:space:]]','','g'), :question
+                    ) > 0)
+                )
+                ORDER BY d.id LIMIT 4
+            """),
+                {
+                    "kb_id": knowledge_id,
+                    "index_id": index_id,
+                    "patterns": patterns,
+                    "question": normalized,
+                    "exact_allowed": len(normalized) >= 6,
+                },
+            )
+            chunk_ids = [UUID(str(value)) for value in result.scalars()]
+        # A generic product code may match the whole library. Do not add
+        # arbitrary documents just because their UUIDs sort first.
+        if len(chunk_ids) > 3:
+            return []
+        candidates = await self.get_chunks_by_ids(index_id=index_id, chunk_ids=chunk_ids)
+        return [item for item in candidates if item.document_id is not None]
+
     async def get_rerank_image_assets(
         self, *, index_id: UUID, image_asset_ids: list[UUID]
     ) -> dict[UUID, dict[str, Any]]:

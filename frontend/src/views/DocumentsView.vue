@@ -7,6 +7,7 @@ import type {
   DocumentProfileStatus,
   ProfileQualityStatus,
 } from "@/types/admin";
+import DocumentPreview from "@/components/DocumentPreview.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import ListSkeleton from "@/components/ui/ListSkeleton.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
@@ -282,6 +283,9 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
           <span class="mono muted">{{ store.documentInspectionIndexId || "无可检查索引" }}</span>
         </div>
         <el-tabs>
+          <el-tab-pane label="内容预览" lazy>
+            <DocumentPreview v-if="store.documentDrawerOpen" :elements="store.elements" />
+          </el-tab-pane>
           <el-tab-pane :label="`元素（Elements）· ${store.elements.length}`">
             <div class="scroll-list">
               <pre v-for="item in store.elements" :key="String(item.id)">{{ store.formatJson(item) }}</pre>

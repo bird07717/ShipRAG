@@ -58,7 +58,7 @@ Vue 管理台 / 业务后端
 ## 架构约束
 
 - 管理 API 与对外 Assistant API 不能共用凭据边界；后者只暴露窄化契约。
-- 知识库后台可维护状态、RAG/Support 发布状态和 Assistant 对外上线状态彼此独立；新知识库默认不对 Assistant 上线。
+- 知识库后台可维护状态、RAG/Support 发布状态和 Assistant 对外上线状态彼此独立；新知识库默认不对 Assistant 上线。管理台按库保存推荐问题并确认上下线，使用管理凭据和配置修订检查；Assistant 欢迎接口只消费已上线库的保存值，保持外部契约。
 - 聊天会话会冻结使用的索引/发布版本，避免在线版本切换改变既有会话语义。
 - RAG 索引自动激活与 Support Profile 人工审核发布彼此独立。
 - 生产运行时容器采用只读根文件系统与 `/tmp` tmpfs；部署细节见 [`environment.md`](environment.md)。

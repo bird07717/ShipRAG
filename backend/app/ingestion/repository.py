@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.common.errors import ApiError
 from app.core.config import Settings
+from app.ingestion.models import CONTENT_REVISION
 from app.tasks.repository import TaskRecordRepository
 
 
@@ -1056,9 +1057,10 @@ class IngestionRepository:
                         """
                         SELECT document_id, source_hash FROM index_document
                         WHERE index_id = :index_id AND status = 'READY'
+                          AND metadata->>'content_revision' = :content_revision
                         """
                     ),
-                    {"index_id": prev_index_id},
+                    {"index_id": prev_index_id, "content_revision": CONTENT_REVISION},
                 )
                 prev_hashes = {
                     row["document_id"]: row["source_hash"] for row in prev_docs_result.mappings()

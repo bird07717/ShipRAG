@@ -21,6 +21,24 @@ staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐�
 
 ## 本地启动
 
+### RAG 首轮与旧式文档配置
+
+| 环境变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `M3_RAG_CONFLICT_GUARD` | `true` | 聚合直达与最强块文档冲突时改为澄清。 |
+| `M3_RAG_TITLE_RECALL` | `true` | 精确型号的有界标题补召回，仍参加 Rerank。 |
+| `M3_RAG_SINGLE_STRONG_MODE` | `shadow` | `off` 关闭、`shadow` 只记录、`enabled` 开启单强直达。 |
+| `M3_RAG_SINGLE_STRONG_FLOOR` | `0.85` | 单强原始最高块分数下限。 |
+| `M3_RAG_SINGLE_STRONG_GAP` | `0.18` | 相对另一文档最高块的分差下限。 |
+
+以上配置已接入两个环境示例和 Production Compose。修改生产配置需重新创建相应容器；代码更新需重建镜像。上线前先保持 `shadow`，用真实 Golden 及 Trace 检查错误交付和延迟，再决定是否启用。
+
+解析版本升级不自动重建索引；但下一次构建遇到旧版本结果会重新解析，可能产生全库 OCR/视觉/嵌入耗时和费用。DC24V 的浮动文字 DOCX 目前会被安全拦截，应先转换为可编辑正文并人工核对步骤，再构建候选索引、验收后手动激活；不得为绕过错误直接修改版本元数据。现有活动索引保持不变。
+
+根目录执行 `PYTHONPATH=backend .venv/bin/python rag-acceptance/verify_legacy_docx.py <本地DOCX路径>` 可只读查看解析计数和告警；追加 `--real-ocr --output <报告路径>` 使用本地数据库的 OCR 配置验证恢复，可能产生模型费用，不上传、不构建索引。无法可靠恢复时保存 `BLOCKED` 报告并退出码 2；识别完成仍须人工核验内容与顺序。
+
+### 开发进程
+
 推荐：
 
 ```bash
@@ -61,3 +79,20 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 
 - 2026-09-11 已确认目标生产服务器使用提交 `49c799a`，PostgreSQL、Redis、MinIO、后端和前端健康，两个 Worker 正常运行，数据库位于 Alembic `0041`；Assistant 鉴权、知识库、会话、真实 SSE、幂等、用户隔离以及当时仍存在的文档/图片资源代理均已完成生产验收。当前源码已删除 Assistant 原文下载接口，但该变更尚待生产部署；工作树已新增 `0042`，生产需在下一次部署执行迁移后才能使用 Assistant 重放计数和终态孤儿保留任务。生产 Golden Trace 已确认真实模型链路，不再使用 fake 查询链路。
 - 正式上线前仍需由具备 sudo 权限的管理员确认 UFW 与 `DOCKER-USER` 的实际规则，并轮换曾用于联调的临时凭据。服务器仓库通过 GitHub SSH 拉取，`cm` 账号需在交互式终端输入 SSH 私钥口令，因此服务器 `git pull` 由用户手动执行。
+
+
+## 回答优化功能验证
+
+部署管理侧回答优化前执行 `cd backend && ../.venv/bin/python -m alembic upgrade head` 至 `0044`，再更新后端、前端。无需重建业务索引；本地已升级，生产是否升级必须另行核验。
+
+定向后端验证：`cd backend && ../.venv/bin/python -m pytest -q -o addopts='' tests/test_answer_reviews.py tests/test_assistant_facade.py`；后端 PostgreSQL 测试复用测试环境连接并清理临时知识库。前端验证：`npm --prefix frontend run test -- tests/answer-reviews.spec.ts tests/reviews-api.spec.ts`。人工验收入口：管理台概览 → 查看回答与优化 → 选择知识库 → 查看 → 保存标记 → 按当前配置复测。复测会调用配置的模型，最多20轮、180秒。
+
+## Assistant 内容一致性验证
+
+分页、失败重放与长文档边界：`cd backend && ../.venv/bin/pytest -q -o addopts='' tests/test_assistant_boundaries.py tests/test_assistant_content_postgres.py tests/test_assistant_facade.py tests/test_assistant_content_consistency.py tests/test_chat_doc_routing_flow.py tests/test_chat_repository_state.py tests/test_support_core.py`。PostgreSQL 用例须实际运行，跳过不算通过。三项 fake 冒烟由 `scripts/check.sh` 执行，不执行 Golden Set；测试依赖本地 PostgreSQL/Redis/MinIO，数据库应已升级至当前 head。
+
+长文档原文交付不再受 `M3_DOC_DELIVERY_MAX_TOKENS` 限制，旧变量仅为启动兼容保留，不必提高数值；模型上下文和生成超时仍使用原配置。完整交付会增大 SSE 单个 `complete` 事件、消息快照和历史页体积；业务后台应按 SSE 空行边界组装完整事件，不能按网络分块解析 JSON，可降低历史消息页 `limit`。没有新增接口、下载入口、迁移或索引重建要求；需要以新请求验证，旧截断的历史快照不重新生成。
+
+定向命令：`cd backend && ../.venv/bin/pytest -q -o addopts='' tests/test_assistant_content_consistency.py tests/test_assistant_content_postgres.py tests/test_assistant_facade.py tests/test_gateway.py tests/test_chat_doc_routing_flow.py`。数据库用例复用隔离测试数据并清理临时知识库，不能将数据库不可达而跳过的结果当作通过。
+
+人工验收：在同一已上线测试库用新幂等键分别发送 `include_images=true/false`，检查 `complete.content` 的正文、表格、来源和图片块；再加载历史消息，并用原请求体和原 Key 重放，对照三个结果。分别覆盖 RAG、Support 直接交付和 Support 回退 RAG。关闭图片不应改变文档命中，历史与重放均不得返回管理 `url`/`download_url`。该修复本身仅需更新后端，无新增迁移或索引重建要求；同批其他功能的迁移要求仍按对应说明执行。

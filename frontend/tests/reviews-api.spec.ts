@@ -1,0 +1,21 @@
+import { afterEach, expect, it, vi } from "vitest";
+import { reviewsApi } from "@/api/reviews";
+afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear(); });
+it("uses management credentials and scoped review endpoints", async () => {
+  sessionStorage.setItem("rag_service_token", "management-token");
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+  vi.stubGlobal("fetch", fetch);
+  await reviewsApi.list("kb-a", { marked: true, status: "OPEN", query: "设备 & 电源", offset: 20 });
+  await reviewsApi.detail("kb-a", "request-a");
+  await reviewsApi.save("kb-b", "request-b", { revision: 2, category: "ACCEPTABLE", status: "CLOSED", expected_document_id: null, expectation: "", notes: "无需修改" });
+  await reviewsApi.retest("kb-b", "review-b", 3, "run-id");
+  const calls = fetch.mock.calls;
+  expect(calls[0]![0]).toContain("/knowledge-bases/kb-a/answer-records?");
+  expect(new URL(calls[0]![0], "http://test").searchParams.get("query")).toBe("设备 & 电源");
+  expect(calls[1]![0]).toBe("/api/v1/knowledge-bases/kb-a/answer-records/request-a");
+  expect(calls[2]![0]).toBe("/api/v1/knowledge-bases/kb-b/answer-records/request-b/review");
+  expect(JSON.parse(calls[2]![1].body).revision).toBe(2);
+  expect(calls[3]![0]).toBe("/api/v1/knowledge-bases/kb-b/answer-reviews/review-b/retests");
+  expect(JSON.parse(calls[3]![1].body)).toEqual({ revision: 3, run_id: "run-id" });
+  expect(new Headers(calls[3]![1].headers).get("Authorization")).toBe("Bearer management-token");
+});

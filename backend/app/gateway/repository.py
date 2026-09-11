@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.common.errors import ApiError
 from app.core.config import Settings
@@ -30,9 +31,15 @@ class GatewayRepository:
         return ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK
 
     async def resolve_policy(
-        self, *, knowledge_id: UUID, conversation_id: UUID | None
+        self,
+        *,
+        knowledge_id: UUID,
+        conversation_id: UUID | None,
+        connection: AsyncConnection | None = None,
     ) -> ResolvedPolicy:
-        async with self.engine.connect() as connection:
+        async with (
+            self.engine.connect() if connection is None else nullcontext(connection)
+        ) as connection:
             if conversation_id is not None:
                 conversation = (
                     (
@@ -120,8 +127,12 @@ class GatewayRepository:
             "readiness": readiness,
         }
 
-    async def get_readiness(self, knowledge_id: UUID) -> dict[str, Any]:
-        async with self.engine.connect() as connection:
+    async def get_readiness(
+        self, knowledge_id: UUID, *, connection: AsyncConnection | None = None
+    ) -> dict[str, Any]:
+        async with (
+            self.engine.connect() if connection is None else nullcontext(connection)
+        ) as connection:
             kb = (
                 (
                     await connection.execute(
@@ -281,6 +292,27 @@ class GatewayRepository:
             blockers.extend(str(item) for item in readiness["support"]["blockers"])
         blockers.extend(str(item) for item in readiness["rag"]["blockers"])
         return list(dict.fromkeys(blockers))
+
+    async def assistant_runtime_blockers(
+        self,
+        knowledge_id: UUID,
+        *,
+        conversation_id: UUID | None = None,
+        connection: AsyncConnection | None = None,
+    ) -> list[str]:
+        # One policy-aware check shared by admin publication, public welcome,
+        # catalog and chat. An existing transaction can own the connection.
+        if connection is None:
+            policy = await self.resolve_policy(
+                knowledge_id=knowledge_id, conversation_id=conversation_id
+            )
+            readiness = await self.get_readiness(knowledge_id)
+        else:
+            policy = await self.resolve_policy(
+                knowledge_id=knowledge_id, conversation_id=conversation_id, connection=connection
+            )
+            readiness = await self.get_readiness(knowledge_id, connection=connection)
+        return self._policy_blockers(policy.policy, readiness)
 
     async def update_policy(
         self, knowledge_id: UUID, execution_policy: ExecutionPolicy
@@ -542,11 +574,9 @@ class GatewayRepository:
         if row["index_status"] != "ACTIVE":
             raise ApiError("INDEX_NOT_READY", "知识库 Active Index 状态异常", 409)
 
-        policy = await self.resolve_policy(
-            knowledge_id=knowledge_id, conversation_id=conversation_id
+        blockers = await self.assistant_runtime_blockers(
+            knowledge_id, conversation_id=conversation_id
         )
-        readiness = await self.get_readiness(knowledge_id)
-        blockers = self._policy_blockers(policy.policy, readiness)
         if blockers:
             raise ApiError(
                 "KNOWLEDGE_BASE_NOT_READY",
@@ -574,9 +604,7 @@ class GatewayRepository:
         for row in rows:
             knowledge_id = UUID(str(row["knowledge_id"]))
             try:
-                policy = await self.resolve_policy(knowledge_id=knowledge_id, conversation_id=None)
-                readiness = await self.get_readiness(knowledge_id)
-                ready = not self._policy_blockers(policy.policy, readiness)
+                ready = not await self.assistant_runtime_blockers(knowledge_id)
             except ApiError:
                 # A concurrent administrative change must not fail the whole
                 # catalog.  The item remains visible but cannot be selected.
@@ -766,6 +794,7 @@ class GatewayRepository:
         idempotency_key: str,
         request_hash: str,
         conversation_id: UUID | None,
+        input_payload: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Atomically reserve an external request or return its durable replay."""
         request_id = uuid4()
@@ -873,10 +902,11 @@ class GatewayRepository:
                         """
                         INSERT INTO assistant_request (
                             id, external_user_id, knowledge_id, idempotency_key,
-                            request_hash, conversation_id, status
+                            request_hash, conversation_id, input_payload, status
                         ) VALUES (
                             :id, :user_id, :knowledge_id, :idempotency_key,
-                            :request_hash, :conversation_id, 'RUNNING'
+                            :request_hash, :conversation_id,
+                            CAST(:input_payload AS jsonb), 'RUNNING'
                         )
                         """
                     ),
@@ -886,6 +916,7 @@ class GatewayRepository:
                         "knowledge_id": knowledge_id,
                         "idempotency_key": idempotency_key,
                         "request_hash": request_hash,
+                        "input_payload": json.dumps(input_payload or {}, ensure_ascii=False),
                         "conversation_id": conversation_id,
                     },
                 )
@@ -987,10 +1018,33 @@ class GatewayRepository:
             await connection.execute(
                 text(
                     """
-                    UPDATE assistant_request
+                    WITH failed_request AS MATERIALIZED (
+                        UPDATE assistant_request
+                        SET status = :status,
+                            terminal_error = CAST(:payload AS jsonb), updated_at = now()
+                        WHERE id = :id AND status = 'RUNNING'
+                        RETURNING assistant_message_id, trace_id
+                    ), failed_trace AS (
+                        UPDATE rag_trace AS t
+                        SET status = :status,
+                            answer = COALESCE(
+                                CAST(:payload AS jsonb)->>'partial_content', t.answer
+                            ),
+                            error = COALESCE(t.error, '{}'::jsonb) || CAST(:payload AS jsonb),
+                            finished_at = COALESCE(t.finished_at, now())
+                        FROM failed_request AS r
+                        WHERE t.trace_id = r.trace_id
+                        RETURNING t.message_id
+                    )
+                    UPDATE message AS m
                     SET status = :status,
-                        terminal_error = CAST(:payload AS jsonb), updated_at = now()
-                    WHERE id = :id AND status = 'RUNNING'
+                        content = COALESCE(CAST(:payload AS jsonb)->>'partial_content', m.content),
+                        response_payload = jsonb_build_object(
+                            'error', CAST(:payload AS jsonb), 'content', '[]'::jsonb
+                        ),
+                        updated_at = now()
+                    FROM failed_request AS r
+                    WHERE m.id = r.assistant_message_id
                     """
                 ),
                 {
@@ -1040,6 +1094,9 @@ class GatewayRepository:
                     UPDATE message AS m
                     SET status = 'CANCELLED',
                         content = :partial_content,
+                        response_payload = jsonb_build_object(
+                            'error', CAST(:payload AS jsonb), 'content', '[]'::jsonb
+                        ),
                         updated_at = now()
                     WHERE m.status = 'STREAMING'
                       AND (

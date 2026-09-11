@@ -2,7 +2,7 @@
 
 ## 类型与迁移
 
-数据库是 PostgreSQL，开发和生产编排使用 ParadeDB PostgreSQL 17 镜像，并要求 `vector` 与 `pg_search` 扩展。Alembic 配置在 `backend/alembic.ini`，迁移位于 `backend/alembic/versions/`；当前仓库可见的最新修订是 `0042_assistant_request_observability_retention`。实际环境是否已升级到 head，必须通过 `alembic current` 或数据库检查确认。
+数据库是 PostgreSQL，开发和生产编排使用 ParadeDB PostgreSQL 17 镜像，并要求 `vector` 与 `pg_search` 扩展。Alembic 配置在 `backend/alembic.ini`，迁移位于 `backend/alembic/versions/`；当前仓库可见的最新修订是 `0044_answer_reviews`。实际环境是否已升级到 head，必须通过 `alembic current` 或数据库检查确认。
 
 数据库访问使用 SQLAlchemy async/asyncpg，但业务 SQL 大多由 repository 层直接管理；迁移而不是本文是表结构和约束的权威来源。
 
@@ -23,11 +23,13 @@
 - `knowledge_base` → `knowledge_index`、`document_source`；索引与文档/内容表通过外键关联。`knowledge_index` 在单一知识库内版本唯一，构建中和活动索引各有局部唯一约束。
 - `document_source.display_name` 是可修改的展示元数据；`filename`、文档 UUID 和 MinIO 对象键是稳定源文件标识。改名不修改分块、向量和历史回答快照，应用服务对同一知识库的有效文档名称执行不区分大小写的重复检查。
 - `knowledge_base.assistant_online` 是独立的 Assistant 对外发布边界：迁移时原有 `ENABLED` 知识库回填为上线，后续新建行默认下线。该字段不替代知识库状态或 RAG/Support 活动版本。
+- `knowledge_base.assistant_suggestions` 为最多三个字符串的 JSONB 配置；`assistant_config_revision` 为非负整数，保存问题及上下线均递增，用于拒绝旧页面覆盖。迁移 `0043` 仅为迁移前已上线知识库回填原全局问题，原未上线库和新建库为空，不改变上线状态。长度、文本及重复校验由应用层执行，数据库约束 JSONB 数组及最多三项。
 - `document_source` 的活跃文件哈希在同一知识库内唯一；其原始对象键、图像对象键也唯一。内容索引可随 `knowledge_index` 版本重建。
 - `document_chunk.embedding` 固定为 `vector(1024)`，使用 HNSW cosine 索引；BM25 通过 `pg_search` 索引支持混合检索。
 - `conversation` 关联知识库，并可冻结 RAG/Support 索引或发布版本；`message` 有会话内顺序约束，`rag_trace` 关联会话/消息并支持回退父子链路。
 - `assistant_request` 的 `(external_user_id, knowledge_id, idempotency_key)` 唯一，同一非空 Conversation 只允许一条 `RUNNING` 记录；`replay_count >= 0`，终态重放会更新计数、`last_replayed_at` 和 `updated_at`。`support_idempotency` 仅记录 Support 内部重放，不作为 Assistant 门面指标。不要绕过这些约束手工重复执行对外写操作。
 - `assistant_request.conversation_id` 使用 `ON DELETE CASCADE`。未关联 Conversation 且为 `COMPLETED`、`FAILED` 或 `CANCELLED` 的记录由独立的部分索引支持按 `updated_at` 清理；保留期任务明确不删除 `RUNNING`。
+- 新 Assistant 失败/取消的公开错误同步保存到 `message.response_payload.error`，并写入显式空 `content`，避免读取旧内部成功块；该写入与请求终态收口同事务。失败关联 Trace 同步状态和错误，已终态请求不二次覆盖。历史消息优先读取错误快照，旧记录兼容 Trace，不新增列或迁移。
 
 ## 数据流
 
@@ -38,3 +40,11 @@
 - 新字段、表、索引、枚举约束必须使用 Alembic 迁移，不直接修改线上 schema。
 - 更改嵌入维度、索引结构或保留策略会影响已有数据和任务，需要同时评估迁移、重建和回滚。
 - 数据库凭据、模型 API 密钥、对象存储密钥只出现在安全配置中；不得写入认知文档。
+
+
+## 回答标记与复测（0044）
+
+- `answer_review` 按 `request_id` 唯一保存人工标记；关联 `knowledge_id`，持久化原始响应/历史/诊断 JSONB、分类、状态、预期文档 UUID 与保存时名称、备注和修订号。请求/会话/Trace/文档标识有意不设删除级联外键，避免日志保留或文档删除清掉用例；写入服务强制校验归属，知识库删除仍级联清理。
+- `answer_retest` 关联问题标记，主键为客户端生成的幂等运行 UUID；保存标记修订、期望快照、执行状态、逐轮结果与起止时间。同一标记 `RUNNING` 部分唯一索引防止并发复测。
+- `assistant_request.input_payload` 保存新请求的业务输入 JSONB，默认空对象兼容旧记录；`(knowledge_id, created_at DESC, id DESC)` 索引服务管理分页查询。
+- 人工问题与复测记录不走短期 Trace 保留清理；只保留图片资产 ID，不复制 MinIO 对象或阻止原索引 GC。导出与保留范围以管理用途为限。

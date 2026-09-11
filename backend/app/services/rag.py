@@ -16,7 +16,7 @@ from app.common.text import (
     emphasize_document_title_mentions,
     estimate_tokens,
     markdown_document_title,
-    strip_redundant_document_heading,
+    strip_leading_document_heading,
 )
 from app.core.config import Settings
 from app.ingestion.embedding import EmbeddingError, EmbeddingProvider, create_embedding_provider
@@ -30,6 +30,7 @@ from app.rag.doc_router import (
     decide_doc_routing,
     normalize_for_match,
 )
+from app.rag.first_turn import protect_aggregation, single_strong_document, title_recall_terms
 from app.rag.llm import LlmError, LlmProvider, create_llm_provider
 from app.rag.models import (
     ModelSnapshot,
@@ -404,6 +405,31 @@ class RagService:
             ][:3]
             if expansion_survivors:
                 fusion_candidates = [*fusion_candidates, *expansion_survivors]
+            # RAG-only bounded title/model recall. These are candidates, not
+            # direct matches: the original question must still pass rerank.
+            title_recall_record: dict[str, Any] | None = None
+            if (
+                self.settings.m3_rag_title_recall
+                and not turn.history
+                and turn.focus_document_id is None
+                and not turn.chat_context.get("pending_options")
+            ):
+                terms = title_recall_terms(retrieval_query)
+                if terms:
+                    title_candidates = await self.repository.title_recall_candidates(
+                        knowledge_id=turn.knowledge_id,
+                        index_id=turn.index_id,
+                        question=retrieval_query,
+                        terms=terms,
+                    )
+                    title_recall_record = {
+                        "rule": "v1",
+                        "terms": terms,
+                        "chunk_ids": [str(item.chunk_id) for item in title_candidates],
+                    }
+                    fusion_candidates = merge_expanded_candidates(
+                        fusion_candidates, title_candidates
+                    )
             timings["fusion_ms"] = _elapsed_ms(fusion_started)
 
             rerank_started = time.perf_counter()
@@ -458,6 +484,8 @@ class RagService:
                     "reason": "NO_CANDIDATES",
                 }
             timings["rerank_ms"] = _elapsed_ms(rerank_started)
+            if title_recall_record is not None:
+                rerank_result["title_recall"] = title_recall_record
             if query_rewrite_record is not None:
                 # Persisted inside rag_trace.rerank_result for observability;
                 # only attached when a rewrite was actually attempted.
@@ -935,6 +963,7 @@ class RagService:
         reuse_assistant_message_id: UUID | None = None,
         parent_trace_id: UUID | None = None,
         fallback_reason: str | None = None,
+        include_images: bool = True,
     ) -> AsyncIterator[bytes]:
         prepared = await self.prepare(
             knowledge_id=knowledge_id,
@@ -966,7 +995,9 @@ class RagService:
             return
 
         if plan.kind == "DELIVER" or plan.fixed_answer is not None:
-            async for frame in self._emit_final_chat_turn(prepared, plan, usage={}):
+            async for frame in self._emit_final_chat_turn(
+                prepared, plan, usage={}, include_images=include_images
+            ):
                 yield frame
             return
 
@@ -1026,6 +1057,8 @@ class RagService:
             if llm_timed_out:
                 raw_answer += "\n\n（本次回答因超时被截断，如需完整内容请重试或追问。）"
             result = self._finalize_chat_result(plan, raw_answer)
+
+            result = self._apply_image_preference(result, include_images=include_images)
 
             prepared.timings["llm_ms"] = _elapsed_ms(llm_started)
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
@@ -1144,6 +1177,7 @@ class RagService:
         reuse_assistant_message_id: UUID | None = None,
         parent_trace_id: UUID | None = None,
         fallback_reason: str | None = None,
+        include_images: bool = True,
     ) -> dict[str, Any]:
         prepared = await self.prepare(
             knowledge_id=knowledge_id,
@@ -1172,6 +1206,7 @@ class RagService:
                 result = plan.delivery["result"]
             else:
                 result = self._result_for_fixed_plan(plan)
+            result = self._apply_image_preference(result, include_images=include_images)
             await self._apply_post_state(plan, turn, question)
             await self.repository.complete_turn(
                 turn,
@@ -1219,6 +1254,7 @@ class RagService:
             if llm_timed_out:
                 raw_answer += "\n\n（本次回答因超时被截断，如需完整内容请重试或追问。）"
             result = self._finalize_chat_result(plan, raw_answer)
+            result = self._apply_image_preference(result, include_images=include_images)
             prepared.timings["llm_ms"] = _elapsed_ms(llm_started)
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
             usage = provider.usage
@@ -1319,6 +1355,46 @@ class RagService:
             )
             return _ChatPlan(kind="ROUTING"), ApiError("INTERNAL_ERROR", "文档路由失败", 500)
 
+    async def _deliver_chat_document(
+        self,
+        prepared: PreparedRag,
+        document_id: UUID,
+        routing: dict[str, Any],
+        *,
+        clear_pending_after: bool = False,
+    ) -> _ChatPlan:
+        turn = prepared.turn
+        document = await self.repository.get_document_blocks(
+            knowledge_id=turn.knowledge_id,
+            index_id=turn.index_id,
+            document_id=document_id,
+        )
+        # Validate/build before committing focus; all direct paths use the
+        # same optimistic context-version transition and full delivery.
+        delivery = self._build_delivery_payload(document)
+        focus_epoch = await self.repository.set_conversation_focus(
+            turn.conversation_id,
+            document_id,
+            turn.index_id,
+            expected_context_version=turn.context_version,
+            user_message_id=turn.user_message_id,
+            assistant_message_id=turn.assistant_message_id,
+        )
+        prepared.turn = replace(
+            turn,
+            focus_document_id=document_id,
+            focus_epoch=focus_epoch,
+            context_version=turn.context_version + 1,
+            chat_context={},
+        )
+        return _ChatPlan(
+            kind="DELIVER",
+            delivery=delivery,
+            routing=routing,
+            references=delivery["references"],
+            clear_pending_after=clear_pending_after,
+        )
+
     async def _plan_chat_turn(
         self,
         *,
@@ -1363,35 +1439,21 @@ class RagService:
             rerank_degraded=prepared.rerank_status == "DEGRADED",
         )
         had_pending = bool(turn.chat_context.get("pending_options"))
+        first_turn = (
+            not turn.history
+            and turn.focus_document_id is None
+            and not had_pending
+            and prepared.rerank_status == "PASSED"
+            and self._match_meta_ack(question) is None
+        )
+        if first_turn and self.settings.m3_rag_conflict_guard:
+            decision = protect_aggregation(decision, candidates)
 
         if decision.action == ACTION_DELIVER and decision.document_id is not None:
-            document = await self.repository.get_document_blocks(
-                knowledge_id=turn.knowledge_id,
-                index_id=turn.index_id,
-                document_id=decision.document_id,
-            )
-            focus_epoch = await self.repository.set_conversation_focus(
-                turn.conversation_id,
+            return await self._deliver_chat_document(
+                prepared,
                 decision.document_id,
-                turn.index_id,
-                expected_context_version=turn.context_version,
-                user_message_id=turn.user_message_id,
-                assistant_message_id=turn.assistant_message_id,
-            )
-            turn = replace(
-                turn,
-                focus_document_id=decision.document_id,
-                focus_epoch=focus_epoch,
-                context_version=turn.context_version + 1,
-                chat_context={},
-            )
-            prepared.turn = turn
-            delivery = self._build_delivery_payload(document)
-            return _ChatPlan(
-                kind="DELIVER",
-                delivery=delivery,
-                routing=decision.to_dict(),
-                references=delivery["references"],
+                decision.to_dict(),
             )
 
         clear_pending_after = had_pending
@@ -1425,35 +1487,12 @@ class RagService:
             matched = self._match_catalog_title(question, catalog)
             if matched is not None:
                 matched_id = UUID(str(matched["document_id"]))
-                document = await self.repository.get_document_blocks(
-                    knowledge_id=turn.knowledge_id,
-                    index_id=turn.index_id,
-                    document_id=matched_id,
-                )
-                focus_epoch = await self.repository.set_conversation_focus(
-                    turn.conversation_id,
-                    matched_id,
-                    turn.index_id,
-                    expected_context_version=turn.context_version,
-                    user_message_id=turn.user_message_id,
-                    assistant_message_id=turn.assistant_message_id,
-                )
-                turn = replace(
-                    turn,
-                    focus_document_id=matched_id,
-                    focus_epoch=focus_epoch,
-                    context_version=turn.context_version + 1,
-                    chat_context={},
-                )
-                prepared.turn = turn
-                delivery = self._build_delivery_payload(document)
                 routing = decision.to_dict()
                 routing["resolved_from"] = "TITLE_MATCH"
-                return _ChatPlan(
-                    kind="DELIVER",
-                    delivery=delivery,
-                    routing=routing,
-                    references=delivery["references"],
+                return await self._deliver_chat_document(
+                    prepared,
+                    matched_id,
+                    routing,
                     clear_pending_after=clear_pending_after,
                 )
 
@@ -1471,6 +1510,50 @@ class RagService:
                 fixed_answer=UNCONFIRMED_MESSAGE,
                 clear_pending_after=clear_pending_after,
             )
+
+        if (
+            first_turn
+            and self.settings.m3_rag_single_strong_mode != "off"
+            and decision.action in (ACTION_NO_MATCH, ACTION_CLARIFY)
+            and decision.resolved_from != "RAG_AGGREGATION_CONFLICT"
+        ):
+            strong = single_strong_document(
+                candidates,
+                floor=self.settings.m3_rag_single_strong_floor,
+                gap=self.settings.m3_rag_single_strong_gap,
+            )
+            if strong is not None:
+                document_id, best, runner = strong
+                title = next(
+                    item.document for item in candidates if item.document_id == document_id
+                )
+                decision = replace(
+                    decision,
+                    thresholds={
+                        **decision.thresholds,
+                        "rag_single_strong": {
+                            "rule": "v1",
+                            "mode": self.settings.m3_rag_single_strong_mode,
+                            "document_id": str(document_id),
+                            "best": best,
+                            "runner_best": runner,
+                            "floor": self.settings.m3_rag_single_strong_floor,
+                            "gap": self.settings.m3_rag_single_strong_gap,
+                        },
+                    },
+                )
+                if self.settings.m3_rag_single_strong_mode == "enabled":
+                    decision = replace(
+                        decision,
+                        action=ACTION_DELIVER,
+                        document_id=document_id,
+                        document_title=title,
+                        pending_options=[],
+                        resolved_from="RAG_SINGLE_STRONG",
+                    )
+                    return await self._deliver_chat_document(
+                        prepared, document_id, decision.to_dict()
+                    )
 
         if decision.action == ACTION_STAY and turn.focus_document_id is not None:
             document = await self.repository.get_document_blocks(
@@ -1608,21 +1691,17 @@ class RagService:
         )
 
     def _build_delivery_payload(self, document: dict[str, Any]) -> dict[str, Any]:
-        max_tokens = self.settings.m3_doc_delivery_max_tokens
+        # Delivery copies parsed document elements, not an LLM prompt. Token
+        # budgets here used to silently omit entire steps and trailing images.
         document_title = str(document["title"])
         blocks: list[RoutingContentBlock] = []
         image_asset_ids: list[str] = []
-        used_tokens = 0
-        truncated = False
-        leading_text = True
+        heading_pending = True
         for element in document.get("elements", []):
             if element.get("element_type") == "IMAGE":
                 asset_id = element.get("image_asset_id")
                 if asset_id is not None:
                     image_asset_ids.append(str(asset_id))
-                    if used_tokens >= max_tokens:
-                        truncated = True
-                        break
                     blocks.append(
                         RoutingContentBlock(
                             type="image",
@@ -1630,34 +1709,24 @@ class RagService:
                             image_asset_id=str(asset_id),
                         )
                     )
-                    used_tokens += 1
                 elif element.get("content"):
-                    tokens = estimate_tokens(str(element["content"]))
-                    if used_tokens + tokens > max_tokens:
-                        truncated = True
-                        break
                     blocks.append(RoutingContentBlock(type="text", text=str(element["content"])))
-                    used_tokens += tokens
                 continue
             if not element.get("content"):
                 continue
             content = str(element["content"])
-            if leading_text and element.get("element_type") == "TEXT":
-                content = strip_redundant_document_heading(content, document_title)
+            if element.get("element_type") == "TEXT":
                 if not content.strip():
                     continue
-            leading_text = False
-            tokens = estimate_tokens(content)
-            if used_tokens + tokens > max_tokens:
-                truncated = True
-                break
-            blocks.append(RoutingContentBlock(type="text", text=content))
-            used_tokens += tokens
-        if truncated:
+                if heading_pending:
+                    heading_pending = False
+                    content = strip_leading_document_heading(content)
+                    if not content.strip():
+                        continue
             blocks.append(
                 RoutingContentBlock(
-                    type="text",
-                    text="（文档较长，以上内容已截断。）",
+                    type="table" if element.get("element_type") == "TABLE" else "text",
+                    text=content,
                 )
             )
         summary = markdown_document_title(document_title)
@@ -1678,14 +1747,31 @@ class RagService:
             "references": [self._document_reference(document["document_id"], document_title)],
         }
 
+    @staticmethod
+    def _apply_image_preference(result: ChatResult, *, include_images: bool) -> ChatResult:
+        """Filter delivery, not retrieval evidence; apply before saving the answer."""
+        if include_images:
+            return result
+        return replace(
+            result,
+            content=[block for block in result.content if block.type != "image"],
+            valid_sources=[{**source, "image_asset_ids": []} for source in result.valid_sources],
+        )
+
     async def _emit_final_chat_turn(
-        self, prepared: PreparedRag, plan: _ChatPlan, *, usage: dict[str, Any]
+        self,
+        prepared: PreparedRag,
+        plan: _ChatPlan,
+        *,
+        usage: dict[str, Any],
+        include_images: bool = True,
     ) -> AsyncIterator[bytes]:
         turn = prepared.turn
         if plan.kind == "DELIVER" and plan.delivery is not None:
             result = plan.delivery["result"]
         else:
             result = self._result_for_fixed_plan(plan)
+        result = self._apply_image_preference(result, include_images=include_images)
         prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
         yield sse_event(
             "trace",

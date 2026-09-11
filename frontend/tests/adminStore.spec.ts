@@ -6,6 +6,7 @@ import { ElMessageBox } from "element-plus";
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
 import AdminStudio from "@/components/AdminStudio.vue";
+import type { KnowledgeBase } from "@/types/admin";
 
 const kb = {
   id: "kb-1",
@@ -22,6 +23,27 @@ const kb = {
   created_at: "2026-08-17T00:00:00Z",
   updated_at: "2026-08-17T00:00:00Z",
 };
+
+describe("Assistant list consistency", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("keeps newer publication state when an earlier list request finishes later", async () => {
+    adminStore.knowledgeBases = [
+      { ...kb, assistant_online: false, assistant_config_revision: 0 },
+      { ...kb, id: "kb-2", assistant_online: false, assistant_config_revision: 0 },
+    ];
+    let resolve!: (rows: KnowledgeBase[]) => void;
+    vi.spyOn(adminApi, "listKnowledgeBases").mockImplementation(() => new Promise((done) => { resolve = done; }));
+    const loading = adminStore.loadKnowledgeBases();
+    adminStore.selectedKnowledgeId = "kb-2";
+    adminStore.applyKnowledgeAssistantConfig({ knowledge_id: "kb-1", assistant_online: true, suggestions: [], revision: 2 });
+    adminStore.applyKnowledgeAssistantConfig({ knowledge_id: "kb-1", assistant_online: false, suggestions: [], revision: 1 });
+    resolve([{ ...kb, assistant_online: false, assistant_config_revision: 0 }, { ...kb, id: "kb-2", assistant_online: false }]);
+    await loading;
+    expect(adminStore.knowledgeBases[0]).toMatchObject({ assistant_online: true, assistant_config_revision: 2 });
+    expect(adminStore.knowledgeBases[1]?.assistant_online).toBe(false);
+  });
+});
 
 const index = {
   id: "idx-1",

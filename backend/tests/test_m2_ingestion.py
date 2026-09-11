@@ -17,7 +17,7 @@ from app.common.errors import ApiError
 from app.common.text import (
     emphasize_document_title_mentions,
     markdown_document_title,
-    strip_redundant_document_heading,
+    strip_leading_document_heading,
 )
 from app.core.config import Settings
 from app.ingestion.chunker import build_chunks, build_parent_chunks
@@ -718,17 +718,20 @@ def test_markdown_document_title_is_bold_and_escapes_untrusted_markup() -> None:
     )
 
 
-def test_strip_redundant_document_heading_only_removes_matching_first_line() -> None:
-    assert (
-        strip_redundant_document_heading(
-            "故障解决文档5—如何配VAU图像\n第一步：打开配置界面。",
-            "如何配VAU图像",
-        )
-        == "第一步：打开配置界面。"
-    )
-    assert strip_redundant_document_heading("如何配VAU图像", "如何配VAU图像") == ""
-    body = "操作说明\n第一步：打开配置界面。"
-    assert strip_redundant_document_heading(body, "如何配VAU图像") == body
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("与显示名完全不同的旧标题\n第一步：打开配置界面。", "第一步：打开配置界面。"),
+        ("仅有标题", ""),
+        ("\n  \r\n标题\r\n第一步\r\n第二步", "第一步\r\n第二步"),
+        ("标题\n标题\n正文", "标题\n正文"),
+        ("标题\n\n  正文缩进\n", "\n  正文缩进\n"),
+        ("  \n", "  \n"),
+        ("", ""),
+    ],
+)
+def test_strip_leading_document_heading_removes_exactly_one_line(content, expected) -> None:
+    assert strip_leading_document_heading(content) == expected
 
 
 @pytest.mark.asyncio

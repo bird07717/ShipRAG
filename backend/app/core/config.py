@@ -128,7 +128,14 @@ class Settings(BaseSettings):
     # A single-option clarify needs a confident best chunk; a lone weak
     # candidate falls through to the catalog-aware routing answer instead.
     m3_doc_single_clarify_best_floor: float = 0.65
+    # Deprecated compatibility setting: original document delivery is complete;
+    # only LLM prompt/generation paths retain their separate token budgets.
     m3_doc_delivery_max_tokens: int = 8_000
+    m3_rag_conflict_guard: bool = True
+    m3_rag_title_recall: bool = True
+    m3_rag_single_strong_mode: Literal["off", "shadow", "enabled"] = "shadow"
+    m3_rag_single_strong_floor: float = 0.85
+    m3_rag_single_strong_gap: float = 0.18
 
     m3_query_rewrite_enabled: bool = True
     m3_query_rewrite_max_chars: int = 40
@@ -432,6 +439,8 @@ class Settings(BaseSettings):
         "m3_doc_stay_score",
         "m3_doc_switch_gap",
         "m3_doc_lock_best_floor",
+        "m3_rag_single_strong_floor",
+        "m3_rag_single_strong_gap",
     )
     @classmethod
     def validate_m3_doc_scores(cls, value: float) -> float:

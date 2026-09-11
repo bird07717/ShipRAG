@@ -8,6 +8,8 @@ import type {
   BuildRequestResult,
   GarbageCollectionResult,
   KnowledgeBase,
+  KnowledgeAssistantConfig,
+  KnowledgeAssistantCheck,
   KnowledgeIndex,
   IndexTask,
   MetricsLatency,
@@ -95,6 +97,18 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
 export const adminApi = {
   getSystemInfo: () => apiRequest<SystemInfo>("/system/info"),
   listKnowledgeBases: () => apiRequest<KnowledgeBase[]>("/knowledge-bases"),
+  getKnowledgeAssistant: (knowledgeId: string) =>
+    apiRequest<KnowledgeAssistantCheck>(`/knowledge-bases/${knowledgeId}/assistant-config`),
+  saveKnowledgeAssistant: (knowledgeId: string, revision: number, suggestions: string[]) =>
+    apiRequest<KnowledgeAssistantConfig>(`/knowledge-bases/${knowledgeId}/assistant-config`, {
+      method: "PUT",
+      body: JSON.stringify({ revision, suggestions }),
+    }),
+  setKnowledgeAssistantPublication: (knowledgeId: string, revision: number, online: boolean) =>
+    apiRequest<KnowledgeAssistantConfig>(`/knowledge-bases/${knowledgeId}/assistant-publication`, {
+      method: "PUT",
+      body: JSON.stringify({ revision, assistant_online: online }),
+    }),
   createKnowledgeBase: (name: string, description: string) =>
     apiRequest<KnowledgeBase>("/knowledge-bases", {
       method: "POST",

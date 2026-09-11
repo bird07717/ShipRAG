@@ -3,11 +3,13 @@ from __future__ import annotations
 import re
 import unicodedata
 import zipfile
+from collections.abc import Iterator
 from io import BytesIO
 from pathlib import PurePosixPath
 from xml.etree import ElementTree
 
 import mammoth
+from PIL import Image
 
 from app.ingestion.models import ParsedDocument, ParsedElement
 
@@ -22,6 +24,29 @@ W = f"{{{WORD_NS}}}"
 A = f"{{{DRAWING_NS}}}"
 R = f"{{{REL_NS}}}"
 WP = f"{{{WORD_DRAWING_NS}}}"
+V = "{urn:schemas-microsoft-com:vml}"
+MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+
+
+def _content_nodes(node: ElementTree.Element) -> Iterator[ElementTree.Element]:
+    """Read one OOXML alternative, never both DrawingML and VML fallback."""
+    yield node
+    children = list(node)
+    if node.tag == f"{MC}AlternateContent":
+        supported = next(
+            (
+                child
+                for child in children
+                if child.tag == f"{MC}Choice"
+                and any(n.tag in (f"{A}blip", f"{V}imagedata") for n in child.iter())
+            ),
+            None,
+        )
+        fallback = next((child for child in children if child.tag == f"{MC}Fallback"), None)
+        chosen = supported if supported is not None else fallback
+        children = [chosen] if chosen is not None else []
+    for child in children:
+        yield from _content_nodes(child)
 
 
 class DocxParseError(ValueError):
@@ -114,7 +139,13 @@ def _paragraph_elements(
 ) -> list[ParsedElement]:
     elements: list[ParsedElement] = []
     text_parts: list[str] = []
-    seen_images: set[str] = set()
+    floating_images = {
+        id(image)
+        for shape in _content_nodes(paragraph)
+        if shape.tag == f"{V}shape"
+        and re.search(r"position\s*:\s*absolute", shape.attrib.get("style", ""), re.I)
+        for image in shape.iter(f"{V}imagedata")
+    }
 
     def flush_text() -> None:
         text = normalize_text("".join(text_parts))
@@ -129,28 +160,35 @@ def _paragraph_elements(
                 )
             )
 
-    for node in paragraph.iter():
+    for node in _content_nodes(paragraph):
         if node.tag == f"{W}t" and node.text:
             text_parts.append(node.text)
         elif node.tag == f"{W}tab":
             text_parts.append("\t")
         elif node.tag == f"{W}br":
             text_parts.append("\n")
-        elif node.tag == f"{A}blip":
-            relationship_id = node.attrib.get(f"{R}embed")
-            if relationship_id and relationship_id not in seen_images:
+        elif node.tag in (f"{A}blip", f"{V}imagedata"):
+            relationship_id = node.attrib.get(f"{R}embed") or node.attrib.get(f"{R}id")
+            if relationship_id:
                 flush_text()
-                elements.append(
-                    _image_element(
-                        archive,
-                        relationship_id,
-                        relationships,
-                        content_types,
-                        section_path,
-                        paragraph,
-                    )
+                image = _image_element(
+                    archive,
+                    relationship_id,
+                    relationships,
+                    content_types,
+                    section_path,
+                    paragraph,
                 )
-                seen_images.add(relationship_id)
+                if node.tag == f"{V}imagedata":
+                    image.metadata["image_markup"] = "VML"
+                    image.metadata["legacy_floating_layout"] = id(node) in floating_images
+                    try:
+                        with Image.open(BytesIO(image.image_bytes or b"")) as bitmap:
+                            # Only a candidate for OCR, never proof of text.
+                            image.metadata["legacy_text_candidate"] = bitmap.height <= 80
+                    except (OSError, ValueError):
+                        image.metadata["legacy_text_candidate"] = False
+                elements.append(image)
     flush_text()
     return elements
 
@@ -188,7 +226,7 @@ def parse_docx(data: bytes) -> ParsedDocument:
 
             elements: list[ParsedElement] = []
             headings: list[str] = []
-            for child in body:
+            for paragraph_id, child in enumerate(body):
                 if child.tag == f"{W}p":
                     paragraph_elements = _paragraph_elements(
                         archive,
@@ -197,6 +235,8 @@ def parse_docx(data: bytes) -> ParsedDocument:
                         content_types,
                         headings,
                     )
+                    for element in paragraph_elements:
+                        element.metadata["paragraph_id"] = paragraph_id
                     heading_level = _heading_level(child)
                     if heading_level is not None:
                         heading_text = " ".join(
@@ -212,6 +252,23 @@ def parse_docx(data: bytes) -> ParsedDocument:
                                 element.metadata["heading_level"] = heading_level
                     elements.extend(paragraph_elements)
                 elif child.tag == f"{W}tbl":
+                    if any(n.tag == f"{V}imagedata" for n in _content_nodes(child)):
+                        # Legacy text-image cells must retain XML reading order;
+                        # do not move all images behind a text-only table.
+                        for cell_no, cell in enumerate(child.findall(f".//{W}tc")):
+                            for p_no, paragraph in enumerate(cell.findall(f"./{W}p")):
+                                cell_elements = _paragraph_elements(
+                                    archive, paragraph, relationships, content_types, headings
+                                )
+                                for element in cell_elements:
+                                    element.metadata["paragraph_id"] = (
+                                        f"{paragraph_id}:{cell_no}:{p_no}"
+                                    )
+                                elements.extend(cell_elements)
+                        mammoth_warnings.append(
+                            "LEGACY_IMAGE_TABLE_LINEARIZED: 旧式图片表格按单元格阅读顺序提取"
+                        )
+                        continue
                     markdown = _table_markdown(child)
                     if markdown:
                         elements.append(
@@ -240,6 +297,23 @@ def parse_docx(data: bytes) -> ParsedDocument:
 
     if not elements:
         raise DocxParseError("DOCX 未解析出可入库内容")
+    referenced = sum(node.tag in (f"{A}blip", f"{V}imagedata") for node in _content_nodes(root))
+    extracted = sum(element.element_type == "IMAGE" for element in elements)
+    if referenced > extracted:
+        raise DocxParseError("IMAGE_EXTRACTION_INCOMPLETE: 文档图片未完整提取")
+    text_length = sum(len(e.content) for e in elements if e.element_type != "IMAGE")
+    fragments = [e for e in elements if e.metadata.get("legacy_text_candidate")]
+    # Small logos/icons are not automatically promoted into body text. Only
+    # the sparse-body, many-fragment legacy format enters text restoration.
+    if len(fragments) < 10 or text_length >= 80:
+        for element in fragments:
+            element.metadata["legacy_text_candidate"] = False
+    elif any(e.metadata.get("legacy_floating_layout") for e in fragments):
+        mammoth_warnings.append(
+            "LEGACY_FLOATING_TEXT_LAYOUT: 文字图片按页面绝对坐标排版，需转换为可编辑正文后重建"
+        )
+    if extracted and text_length < 80:
+        mammoth_warnings.append("IMAGE_DOMINANT_DOCUMENT: 正文稀疏，需核验图片文字及阅读顺序")
     for sequence_no, element in enumerate(elements, start=1):
         element.metadata["source_sequence_no"] = sequence_no
     return ParsedDocument(elements=elements, mammoth_warnings=mammoth_warnings)

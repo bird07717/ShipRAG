@@ -14,7 +14,6 @@ from app.api.dependencies import get_resources
 from app.api.engine_dependencies import (
     get_assistant_facade,
     get_gateway_repository,
-    get_rag_repository,
 )
 from app.api.schemas import (
     AssistantChatStreamRequest,
@@ -24,10 +23,12 @@ from app.api.schemas import (
     AssistantMessageListResponse,
     AssistantWelcomeResponse,
 )
+from app.assistant.configuration import AssistantConfiguration
 from app.assistant.service import (
     AssistantFacadeService,
     decode_cursor,
     encode_cursor,
+    public_error,
     public_payload,
 )
 from app.common.assets import attachment_content_disposition
@@ -35,7 +36,6 @@ from app.common.errors import ApiError
 from app.core.resources import AppResources
 from app.gateway.repository import GatewayRepository
 from app.observability.recorder import observe_stream_errors
-from app.rag.repository import RagRepository
 from app.rag.welcome import build_assistant_welcome
 
 
@@ -94,6 +94,17 @@ def _message(row: dict[str, Any]) -> dict[str, Any]:
     status = "GENERATING" if str(row["status"]) == "STREAMING" else str(row["status"])
     error = None
     if status in {"FAILED", "CANCELLED"} and isinstance(trace_error, dict):
+        saved_error = payload.get("error")
+        trace_error = public_error(
+            saved_error
+            if isinstance(saved_error, dict)
+            else {
+                "code": "ANSWER_FAILED",
+                "message": "回答未完成",
+                **trace_error,
+            },
+            request_id="",
+        )
         error = {
             "code": str(trace_error.get("code", "ANSWER_FAILED")),
             "message": str(trace_error.get("message", "回答未完成")),
@@ -104,10 +115,18 @@ def _message(row: dict[str, Any]) -> dict[str, Any]:
         "conversation_id": row["conversation_id"],
         "role": row["role"],
         "status": status,
-        "content": row["content"],
+        "content": payload.get("answer")
+        if isinstance(payload.get("answer"), str)
+        else row["content"],
         "trace_id": row.get("trace_id"),
         "response_type": row.get("response_type") or payload.get("response_type"),
-        "content_blocks": row.get("content_blocks") or payload.get("content") or [],
+        # An explicitly empty public snapshot must not resurrect legacy
+        # internal blocks (including images suppressed by include_images).
+        "content_blocks": (
+            payload.get("content") or []
+            if "content" in payload
+            else public_payload(row.get("content_blocks") or [])
+        ),
         "sections": payload.get("sections") or [],
         "document": payload.get("document"),
         "references": payload.get("references") or [],
@@ -129,14 +148,10 @@ async def list_knowledge_bases(
 
 @router.get("/knowledge-bases/{knowledge_id}/welcome", response_model=AssistantWelcomeResponse)
 async def welcome(
-    knowledge_id: UUID, repository: Annotated[RagRepository, Depends(get_rag_repository)]
+    knowledge_id: UUID, repository: Annotated[GatewayRepository, Depends(get_gateway_repository)]
 ) -> dict[str, Any]:
-    payload = build_assistant_welcome(
-        await repository.get_knowledge_base_summary(
-            knowledge_id, enabled_only=True, assistant_online_only=True
-        ),
-        await repository.list_kb_documents(knowledge_id),
-    )
+    config = await AssistantConfiguration(repository).get(knowledge_id, public=True)
+    payload = build_assistant_welcome(ready=config["ready"], suggestions=config["suggestions"])
     return {
         "knowledge_id": knowledge_id,
         "message": payload["message"],
@@ -204,12 +219,21 @@ async def messages(
         raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
     try:
         before_sequence = int(before) if before else None
+        if before is not None and (
+            not before.isascii()
+            or not before.isdecimal()
+            or before_sequence is None
+            or not 1 <= before_sequence <= 2**31 - 1
+        ):
+            raise ValueError("Invalid sequence cursor")
     except ValueError as exc:
         raise ApiError("INVALID_CURSOR", "分页游标无效", 422) from exc
     rows = await repository.list_assistant_messages(
         conversation_id=conversation_id, limit=limit + 1, before_sequence=before_sequence
     )
-    page, more = rows[:limit], len(rows) > limit
+    # The repository returns the newest limit+1 rows in ascending order.
+    # Drop the oldest look-ahead row, never the newest message.
+    page, more = rows[-limit:], len(rows) > limit
     return {
         "items": [_message(row) for row in page],
         "next_before": str(page[0]["sequence_no"]) if more and page else None,

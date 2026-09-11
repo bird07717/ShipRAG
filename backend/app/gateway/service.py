@@ -71,6 +71,7 @@ class ChatGatewayService:
                 question=question,
                 request_id=request_id,
                 user_id=user_id,
+                include_images=include_images,
                 retrieval_overrides=await self._retrieval_overrides(policy),
             )
             await self._record_execution(response, policy, ChatEngine.RAG)
@@ -119,6 +120,7 @@ class ChatGatewayService:
             ),
             parent_trace_id=UUID(str(support_response["trace_id"])),
             fallback_reason=response_type,
+            include_images=include_images,
             retrieval_overrides=await self._retrieval_overrides(policy),
         )
         await self.repository.link_fallback(
@@ -227,6 +229,7 @@ class ChatGatewayService:
                 reuse_user_message_id=message_pair.get("user_message_id"),
                 reuse_assistant_message_id=message_pair.get("assistant_message_id"),
                 fallback_idempotency_key=kwargs.get("idempotency_key"),
+                include_images=kwargs.get("include_images", True),
             ):
                 yield frame
         except ApiError as exc:
@@ -255,6 +258,7 @@ class ChatGatewayService:
         parent_trace_id: UUID | None = None,
         fallback_reason: str | None = None,
         fallback_idempotency_key: str | None = None,
+        include_images: bool = True,
         **_unused: Any,
     ) -> AsyncIterator[bytes]:
         async for frame in self.rag.chat_stream(
@@ -265,6 +269,7 @@ class ChatGatewayService:
             product_name="",
             scope_description=_PRODUCT_SCOPE,
             user_id=user_id,
+            include_images=include_images,
             reuse_user_message_id=(
                 UUID(str(reuse_user_message_id)) if reuse_user_message_id else None
             ),

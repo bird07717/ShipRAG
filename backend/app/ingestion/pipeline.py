@@ -26,7 +26,8 @@ from app.ingestion.image_understanding import (
     create_ocr_provider,
     create_vision_provider,
 )
-from app.ingestion.models import EmbeddingInput, ParsedElement
+from app.ingestion.legacy_text import restore_legacy_text
+from app.ingestion.models import CONTENT_REVISION, EmbeddingInput, ParsedElement
 from app.ingestion.parser import parse_docx
 from app.ingestion.repository import BuildReference, IngestionRepository
 
@@ -170,6 +171,11 @@ class IndexPipeline:
         if hashlib.sha256(data).hexdigest() != document["source_hash"]:
             raise ValueError("源文档哈希与索引快照不一致")
         parsed = await asyncio.to_thread(parse_docx, data)
+        parsed.elements = await restore_legacy_text(
+            parsed.elements,
+            self.ocr_provider,
+            concurrency=self.settings.m4_image_concurrency,
+        )
 
         image_count = sum(element.element_type == "IMAGE" for element in parsed.elements)
         await self._update_task(
@@ -290,11 +296,24 @@ class IndexPipeline:
                     """
                     SELECT id FROM index_document
                     WHERE index_id = :index_id AND document_id = :document_id
+                      AND status = 'READY' AND source_hash = :source_hash
+                      AND metadata->>'content_revision' = :content_revision
                     """
                 ),
-                {"index_id": prev_index_id, "document_id": document_id},
+                {
+                    "index_id": prev_index_id,
+                    "document_id": document_id,
+                    "source_hash": document["source_hash"],
+                    "content_revision": CONTENT_REVISION,
+                },
             )
-            old_index_document_id = result.scalar_one()
+            old_index_document_id = result.scalar_one_or_none()
+
+        if old_index_document_id is None:
+            # Also protect REUSE tasks queued before the parser upgrade and
+            # jobs whose active index changed after the snapshot was created.
+            await self._process_document(index, document, task_id, position, total)
+            return
 
         # 复制 MinIO 图片对象（路径中的 index_id 替换为新索引 ID）
         async with self.engine.connect() as connection:
@@ -497,7 +516,11 @@ class IndexPipeline:
                 {
                     "id": index_document_id,
                     "metadata": json.dumps(
-                        {"build_mode": "REUSE", "reused_from": str(old_index_document_id)}
+                        {
+                            "build_mode": "REUSE",
+                            "reused_from": str(old_index_document_id),
+                            "content_revision": CONTENT_REVISION,
+                        }
                     ),
                 },
             )
@@ -934,6 +957,7 @@ class IndexPipeline:
                     "metadata": json.dumps(
                         {
                             "parser": "mammoth+ooxml",
+                            "content_revision": CONTENT_REVISION,
                             "mammoth_warnings": mammoth_warnings,
                             "element_count": len(elements),
                             "chunk_count": len(chunks),

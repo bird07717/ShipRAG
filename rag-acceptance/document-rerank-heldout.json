@@ -1,0 +1,19 @@
+[
+  {"id":"new_01","question":"我想更新LRU的软件版本，应该如何操作？","category":"explicit","expected":{"tolerance":"EXACT","document_keys":["如何升级LRU"]}},
+  {"id":"new_02","question":"LRU单元损坏，怎么把它换下来？","category":"explicit","expected":{"tolerance":"EXACT","document_keys":["如何更换LRU单元"]}},
+  {"id":"new_03","question":"PDC的接线盒需要检查，具体步骤是什么？","category":"explicit","expected":{"tolerance":"EXACT","document_keys":["PDC如何检查接线盒"]}},
+  {"id":"new_04","question":"FFC的接线盒应该按什么步骤检查？","category":"explicit","expected":{"tolerance":"EXACT","document_keys":["FFC如何检查接线盒"]}},
+  {"id":"new_05","question":"PSU板上直流保险丝坏了，如何更换？","category":"explicit","expected":{"tolerance":"EXACT","document_keys":["PSU板上DC保险丝"]}},
+  {"id":"new_06","question":"PSU板上交流保险丝怎么换？","category":"explicit","expected":{"tolerance":"EXACT","document_keys":["PSU板上AC保险丝"]}},
+  {"id":"new_07","question":"FFC600内部的电池组该怎么替换？","category":"explicit","expected":{"tolerance":"EXACT","document_keys":["FFC600"]}},
+  {"id":"new_08","question":"船名信息填错了，在哪儿改？","category":"explicit","expected":{"tolerance":"EXACT","document_keys":["修改船名"]}},
+  {"id":"new_09","question":"保险丝坏了，怎么换？","category":"must_clarify","expected":{"tolerance":"NONE","document_keys":[]}},
+  {"id":"new_10","question":"接线盒出问题，怎么检查？","category":"must_clarify","expected":{"tolerance":"NONE","document_keys":[]}},
+  {"id":"new_11","question":"设备需要升级，怎么操作？","category":"must_clarify","expected":{"tolerance":"NONE","document_keys":[]}},
+  {"id":"new_12","question":"电池坏了，怎么换？","category":"must_clarify","expected":{"tolerance":"NONE","document_keys":[]}},
+  {"id":"new_13","question":"MU报警，需要怎么处理？","category":"must_clarify","expected":{"tolerance":"NONE","document_keys":[]}},
+  {"id":"new_14","question":"明天出门需要带雨伞吗？","category":"out_of_scope","expected":{"tolerance":"NONE","document_keys":[]}},
+  {"id":"new_15","question":"怎样申请公司的年假？","category":"out_of_scope","expected":{"tolerance":"NONE","document_keys":[]}},
+  {"id":"new_16","question":"？？？？？？","category":"noise","expected":{"tolerance":"NONE","document_keys":[]}},
+  {"id":"new_17","question":"哈哈哈哈哈哈哈","category":"noise","expected":{"tolerance":"NONE","document_keys":[]}}
+]

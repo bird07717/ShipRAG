@@ -84,7 +84,9 @@ def _document() -> FocusedDocument:
         problem_code="PDC_USB_UPGRADE",
         index_id=uuid4(),
         blocks=[
-            DocumentContentBlock(uuid4(), 1, "text", "设备 IP 为 172.16.8.150。"),
+            DocumentContentBlock(
+                uuid4(), 1, "text", "如何使用U盘升级PDC\n设备 IP 为 172.16.8.150。"
+            ),
             DocumentContentBlock(uuid4(), 2, "table", "步骤表格"),
             DocumentContentBlock(
                 uuid4(),
@@ -204,14 +206,14 @@ def test_document_delivery_keeps_order_and_optionally_suppresses_images() -> Non
     assert hidden_images == []
 
 
-def test_document_delivery_removes_redundant_leading_document_heading() -> None:
+def test_document_delivery_removes_leading_heading_without_matching_title() -> None:
     document = FocusedDocument(
         id=uuid4(),
         title="如何配VAU图像",
         problem_code="VAU_IMAGE_CONFIG",
         index_id=uuid4(),
         blocks=[
-            DocumentContentBlock(uuid4(), 1, "text", "故障解决文档5—如何配VAU图像"),
+            DocumentContentBlock(uuid4(), 1, "text", "与当前显示名称完全不同的旧标题"),
             DocumentContentBlock(uuid4(), 2, "text", "第一步：打开VAU配置界面。"),
         ],
     )
@@ -226,6 +228,31 @@ def test_document_delivery_removes_redundant_leading_document_heading() -> None:
             "source_id": str(document.blocks[1].element_id),
         }
     ]
+
+
+@pytest.mark.parametrize("include_images", [True, False])
+def test_document_delivery_strips_heading_once_and_preserves_other_elements(include_images) -> None:
+    document = _document()
+    document.blocks = [
+        DocumentContentBlock(uuid4(), 1, "text", " \n"),
+        DocumentContentBlock(uuid4(), 2, "table", "表头\n表格正文"),
+        DocumentContentBlock(uuid4(), 3, "image", image_asset_id=uuid4()),
+        DocumentContentBlock(uuid4(), 4, "text", "旧标题\n第一步"),
+        DocumentContentBlock(uuid4(), 5, "text", "旧标题\n第二步"),
+    ]
+
+    content, images = deliver_document(document, include_images=include_images)
+
+    assert [item["text"] for item in content if item["type"] != "image"] == [
+        "表头\n表格正文",
+        "第一步",
+        "旧标题\n第二步",
+    ]
+    assert [item["sequence_no"] for item in content] == (
+        [2, 3, 4, 5] if include_images else [2, 4, 5]
+    )
+    assert len(images) == int(include_images)
+    assert document.blocks[3].text == "旧标题\n第一步"
 
 
 def test_context_v1_migrates_legacy_workflow_and_keeps_candidates_outside_prompt_memory() -> None:

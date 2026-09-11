@@ -3,7 +3,8 @@ import { computed, ref } from "vue";
 import { Collection, MoreFilled, Search } from "@element-plus/icons-vue";
 
 import { useAdminStore } from "@/composables/adminStore";
-import type { KnowledgeBase } from "@/types/admin";
+import type { KnowledgeAssistantConfig, KnowledgeBase } from "@/types/admin";
+import KnowledgeAssistantSettings from "@/components/KnowledgeAssistantSettings.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import ListSkeleton from "@/components/ui/ListSkeleton.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
@@ -24,11 +25,19 @@ function openDetail(kb: KnowledgeBase): void {
 }
 
 async function selectAndOpen(kb: KnowledgeBase): Promise<void> {
+  openDetail(kb);
   if (store.selectedKnowledgeId !== kb.id) {
     store.selectedKnowledgeId = kb.id;
     await store.selectKnowledge();
   }
-  openDetail(kb);
+}
+
+function assistantChanged(config: KnowledgeAssistantConfig): void {
+  store.applyKnowledgeAssistantConfig(config);
+  if (detailTarget.value?.id === config.knowledge_id && config.revision >= (detailTarget.value.assistant_config_revision ?? 0)) {
+    detailTarget.value.assistant_online = config.assistant_online;
+    detailTarget.value.assistant_config_revision = config.revision;
+  }
 }
 
 async function deleteKnowledge(kb: KnowledgeBase): Promise<void> {
@@ -269,6 +278,14 @@ function isDeleting(kb: KnowledgeBase): boolean {
             {{ store.formatDate(detailTarget.updated_at) }}
           </el-descriptions-item>
         </el-descriptions>
+
+        <KnowledgeAssistantSettings
+          v-if="detailOpen && !isDeleting(detailTarget)"
+          :key="detailTarget.id"
+          :knowledge-id="detailTarget.id"
+          :knowledge-name="detailTarget.name"
+          @changed="assistantChanged"
+        />
 
         <div class="drawer-footer">
           <el-button

@@ -45,16 +45,27 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - 明显低信息输入（纯符号、单字符、同字符重复、连续键盘字符）在检索和模型调用前返回 `UNCONFIRMED`；待确认选项存在时，`1` 等合法选择回复不受该门禁影响。
 - Rerank 降级为无分数排名时不得据此选中或沿用文档；即使会话已有焦点也返回不带来源和下载引用的 `UNCONFIRMED`，但保留焦点供下一轮有效追问。任何 `UNCONFIRMED`、`OUT_OF_SCOPE` 或通用解释响应都不得公开文档引用。
 - 运行策略有 `RAG_ONLY` 和 `SUPPORT_WITH_RAG_FALLBACK`；会话模式可覆盖引擎选择。
+- RAG 首轮保护位于 `rag/first_turn.py` 和 `services/rag.py`，不修改共享 `doc_router.py`，不读取 Support Profile/标准问题/标签。首轮指无历史、无焦点、无待确认选项；重排成功且非寒暄时，聚合直达目标与原始最高分块所属文档冲突就转为两份文档澄清，不自动改选。用户确认仍走既有交付与会话版本校验。
+- 精确字母数字型号可在首轮补召回当前知识库、当前会话索引内的文档块：按最新显示名称匹配，最多三份文档、每份一块；匹配超过三份时不随机截取。候选仍参加原问题 Rerank，不因标题含型号而直达；`rerank_result.title_recall` 记录补召回来源。
+- RAG 单强直达默认 `shadow`：原始最高块分数至少 0.85、领先另一文档最高块至少 0.18，且至少两份不同候选文档；只在原 NO_MATCH/CLARIFY 且无聚合冲突时判断。影子结果在路由 thresholds 的 `rag_single_strong` 中记录；`enabled` 才改变回答，并交付整份文档步骤和图片，不只交付单块。降级排名、既有焦点和待确认回复不触发新规则。
+- DOCX 解析支持旧式 `v:imagedata`，保留重复引用的实际出现次数，兼容分支只取一份；图片未完整提取时失败，正文稀疏时告警。少于 80 字符正文且至少十个小型 VML 图片时进入文字碎片恢复；仅顺序内联版式允许真实 OCR、预处理和异常输出校验。绝对定位的浮动文字图片以 `LEGACY_FLOATING_TEXT_LAYOUT` 中止构建，不按 XML 锚点顺序拼接步骤；普通小图标仍走原图片处理流程。
+- 摄取结果记录 `content_revision=ooxml-vml-1`，构建计划及执行 REUSE 时都检查版本，执行时同时检查源哈希与 READY 状态。无当前版本标记的旧结果须重新解析，不能冒用新版本；旧活动索引不因此被修改。该摄取规则为公共基础能力，RAG/Support 都受影响，但两条问答路由没有混用。DC24V 浮动版式正文仍需转换核验，不能宣称已恢复其检索质量。
 - 对外 Assistant 请求使用幂等记录与外部用户隔离；终态幂等重放会原子累计 `replay_count` 并刷新最后重放时间，其响应通过 `public_payload` 过滤内部字段。
+- Assistant 消息分页从数据库正序返回的最近 `limit+1` 条中取末尾 `limit` 条，以本页最早序号作为 `next_before`；不丢弃最新消息。游标仅接受正的 ASCII 十进制 int32 序号；会话列表仍按倒序取前 `limit` 条，两种分页不可共用截取方向。
+- 失败幂等重放使用公开错误字段白名单，保留保存的 `retryable`、请求/会话/消息/Trace 标识与 `partial_content`；新 HTTP 请求的标识在响应头和 `accepted` 中，旧错误快照的 `request_id` 不被覆盖。旧记录缺少布尔重试标志时按已知错误码补默认值，未知错误不建议重试。
+- 新失败/取消请求在收口事务中同步关联 Message 的公开错误快照；失败同时同步关联 Trace，终态请求不被重复收口覆盖。历史错误优先使用 Message 快照，再兼容旧 Trace；Trace 详情过期不影响新消息已保存的错误语义。旧历史不批量回填。
+- RAG 原文交付不再使用 Token 预算截断元素，完整返回当前索引中已解析的正文、表格和图片引用，保留顺序、重复图片出现次数、标题去重及 `include_images`。同步、流式、Support→RAG 回退共用同一构造；Support 原有完整交付不变。`M3_DOC_DELIVERY_MAX_TOKENS` 仅保留为废弃兼容配置，不再控制交付；LLM Prompt、生成预算与超时不变。此保证不包括摄取前已经缺失的源内容或 DOCX 页面排版。
+- `include_images` 默认 `true`。Gateway 在同步/流式直入 RAG 及 Support 回退 RAG 时传递该参数；RAG 在结果保存前过滤图片块及交付来源中的图片 ID，不改变用于检索、重排和文档问答的图片证据。Support 原有图片控制保持不变。新 Assistant 请求保存过滤后的公开终态，历史与幂等重放沿用该快照。
+- Assistant 历史消息优先采用 `message.response_payload` 的公开答案和内容块；显式空 `content` 不得回退到内部 `content_blocks`。没有公开内容快照的旧记录才读取内部块，并递归移除 `url`/`download_url`；历史读取和旧终态重放均执行同一地址过滤，不回写原记录、不重新调用模型。修复前已经保存的错误带图结果不会按新规则追溯重算，重新验证需使用新幂等键。
 - 对外 Assistant 只列出 `assistant_online=true` 且知识库本身启用的项目；欢迎语、问答、会话和图片入口都执行同一上线边界及知识库归属检查。新知识库默认不对外，迁移前已经启用的知识库保持原可见性。
 - Assistant 列表的 `ready` 按知识库当前执行策略使用完整 Gateway 就绪条件计算；Chat 在预留幂等请求前再次执行同一策略就绪检查。已上线但依赖异常的知识库可以保留在列表中，但必须返回 `ready=false`。
-- 对外 Assistant 就绪态欢迎语使用简洁的用户侧文案，不暴露知识库名称、描述或文档数量；三条快捷问题目前仍全局固定取自已通过的 Assistant Golden Set `standard + EXACT` 用例。未就绪时只返回通用准备中文案，不暴露上传或索引管理指令。按知识库配置三个标准问题及后台上线写操作尚未实现，见 `current-state.md`。管理端 Chat 欢迎语仍使用知识库目录生成，不受此规则影响。
+- 对外 Assistant 就绪态欢迎语使用简洁的用户侧文案，不暴露知识库名称、描述或文档数量；三条快捷问题读取当前知识库的 `assistant_suggestions`，与 Profile 标准问题独立维护。未就绪时只返回通用准备中文案，不暴露上传或索引管理指令。欢迎语、列表、管理上线和 Chat 共享 Gateway 的策略就绪判断。管理端 Chat 欢迎语仍使用知识库目录生成，不受此规则影响。
 - Assistant Chat 会在创建 `StreamingResponse` 前完成会话权限、知识库及 Active Index 可用性、策略、幂等和同会话并发检查；这些前置失败保持 HTTP JSON 错误，`accepted` 后的生成期失败才使用 SSE `error`。
 - Assistant Chat 的已预留请求由专用流响应持有；ASGI 发送失败或客户端断连时会在响应收口阶段幂等地将仍为 `RUNNING` 的请求及其关联消息/Trace 标记为取消，正常终态与幂等重放不会被改写。进程强制终止等无法执行收口的情况仍由遗留请求恢复命令处理。
 - Assistant SSE `context` 只允许输出会话、用户消息、Assistant 消息和 Trace 标识，不透传 Index 等内部 Trace 字段；已知短暂上游/超时错误保留可重试语义。
 - Assistant 不提供原文下载接口；公开回答中的文档 ID 和标题只用于来源展示。图片接口只允许读取状态为 `STORED` 的所属文档图片，按 64 KiB 分块代理 MinIO，并转发可信的内容类型和可用的对象长度。
 - 管理 API 允许修改 `document_source.display_name`，但不修改原始文件名、对象存储键、文档 ID 或索引内容，也不触发索引重建；同一知识库内新增或重命名后的有效显示名称不得重复。后续 RAG/Support 回答从文档源读取最新显示名称，既有 Message、Assistant 幂等终态和 Trace 保持原快照。
-- 回答正文中出现文档标题时使用 Markdown `**《文档标题》**`；文档直达回答的 `answer` 只包含该标题，不添加“已找到”或“以下是文档内容”等引导语。交付内容会移除与当前显示名称相同、或带既有“故障解决文档N—”前缀的重复首行标题，后续步骤及章节标题保持原样。结构化 `document.title` 和 `references[].title` 保持无 Markdown 的纯文本契约。
+- 回答正文中出现文档标题时使用 Markdown `**《文档标题》**`；文档直达回答的 `answer` 只包含该标题，不添加“已找到”或“以下是文档内容”等引导语。按源文档首行必为标题的约定，RAG/Support 文档交付统一无条件删除第一条非空 TEXT 元素中的首条非空行，每份文档只删除一次，不比较显示名称或旧标题前缀；标题独占文本块时也不继续删除下一块。图片、表格及后续正文保持原样，源文档和索引不修改。结构化 `document.title` 和 `references[].title` 保持无 Markdown 的纯文本契约。
 - 超过指定时间仍为 `RUNNING` 的 Assistant 请求可通过 `app.assistant.recovery` 预览并事务恢复；恢复会保留请求行，并同步将关联的流式消息和 Trace 标为失败。
 - 维护 Worker 启动时及之后每天清理超过 `ASSISTANT_REQUEST_RETENTION_DAYS`、未关联 Conversation 且处于终态的 Assistant 请求；关联会话的请求随 Conversation 级联清理，`RUNNING` 请求只能经正常收口或遗留恢复处理。
 - API 密钥可存储为加密密文，密钥轮换由 `app.tasks.key_rotation` 支持；文档只可记录变量名，不能记录值。
@@ -62,3 +73,22 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 ## 测试
 
 `backend/tests/` 覆盖 API、网关、RAG、Support、摄取、任务和 PostgreSQL 集成。常规全套校验由根目录 `scripts/check.sh` 编排；以当前配置和实际结果为准，详见 [`environment.md`](environment.md) 与 [`known-issues.md`](known-issues.md)。
+
+## 知识库 Assistant 管理
+
+- 管理凭据下提供 `GET /api/v1/knowledge-bases/{id}/assistant-config`（配置及 `ready`/`blockers`）、`PUT` 同路径（`revision`、`suggestions`）和 `PUT /api/v1/knowledge-bases/{id}/assistant-publication`（`revision`、`assistant_online`）。成功写入返回 `knowledge_id`、`assistant_online`、`suggestions` 和新 `revision`；外部 `/assistant/*` 不增加管理接口，公开欢迎响应结构不变。
+- 每条推荐问题去除首尾空白后为 4 至 200 字，最多三条，NFKC、忽略大小写/空白及末尾问号后不得重复。下线库可保存 0～3 条，线上库必须保留三条；上线检查完整性和当前执行策略的就绪条件。缺失问题或运行未就绪返回 409，文本校验失败返回 422。
+- `AssistantConfiguration` 在同一事务内锁定知识库、检查修订和执行写入；上线就绪检查复用该事务连接。冲突返回 409 `ASSISTANT_CONFIG_CONFLICT`，需重新加载；下线不查询运行就绪，问题保存不隐式切换上线状态。删除中的知识库拒绝配置写入。
+- 不建立审批状态机或冻结运行版本；管理员通过管理 Chat 试问后确认上线，修改线上问题立即生效。索引、模型和 Profile 调整后由管理员重新试问；需要检查期间停止对外时先下线。下线阻止后续入口访问，不承诺撤回已经发送或缓存的内容，也不主动中断已建立的流。
+- 使用方法：管理台“知识库”→ 点击目标库 → “Assistant 上线与推荐问题”→ 填写并保存 → 分别试问并人工检查 → “检查就绪”→ “确认上线”。正式部署前执行 Alembic `upgrade head` 至 `0043`，再更新后端和前端。
+
+
+## Assistant 回答优化（管理侧）
+
+- `api/answer_reviews.py` 仅注册到管理认证边界。按知识库提供 `GET /knowledge-bases/{id}/answer-records`（`query`、`marked`、`status`、`limit`、`offset`）、`GET /answer-records/{request_id}`、`PUT /answer-records/{request_id}/review` 和 `POST /answer-reviews/{review_id}/retests`，后三者同样带知识库前缀。对外 Assistant 路径、事件和响应结构不变。
+- 列表以 `assistant_request.id` 为单位，不因幂等重放或引擎回退重复计数。详情展示已保存的公开终态响应、前置消息及 Trace 诊断；不读取当前索引来重建历史回答。无问题内容或快照的旧请求明确显示缺失。
+- `assistant/reviews.py` 使用独立 `answer_review` 表保存原始快照，问题分类、预期文档、预期表现、备注和三种处理状态 `OPEN/VERIFY/CLOSED`；`ACCEPTABLE` 表示合理回答无需修改。首次保存要求 `revision=0`，后续写入需携带当前修订；并发首次创建与后续修改均串行校验。预期文档必须为同库 `STORED` 文档。
+- `assistant_request.input_payload` 仅在新预留请求时保存 `question`、`choice_id`、`include_images`，幂等重放不覆盖；旧数据不猜测补写。问题标记保存该输入及前置消息，不保存管理凭据。
+- `assistant/retest.py` 用新内部会话逐轮重问前置问题和当前问题，复用 Gateway 当前配置与真实模型，Trace 来源为 `INTERNAL_CHAT`；不创建外部 Assistant 请求、不复用原会话。每次复测保存期望与标记修订，以及各轮实际响应、索引、运行快照和耗时；人工判断正文，不自动把执行成功当作质量通过或关闭问题。
+- 复测请求携带 `run_id` 和 `revision`；相同标识重放已有记录，不重复调用模型，每条问题同时最多一次复测。总时限180秒、最多20轮；上下文缺失拒绝执行，前置澄清目标变化停止续问。中断/失败保存已完成轮次；进程强制终止留下的运行记录在超过5分钟后再次发起复测时收敛为失败。
+- 人工保存的问题及复测不随会话、Trace 或源文档删除而丢失；知识库删除会级联清理。仅保存图片资产引用，不延长图片/索引保留期，资源过期时前端明确显示不可用。JSON 用例导出是保存快照，本期尚未接入 Golden 批量执行或自动调参。

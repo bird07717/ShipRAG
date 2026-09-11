@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 ElementType = Literal["TEXT", "TABLE", "IMAGE"]
 ChunkType = Literal["TEXT", "TABLE", "IMAGE", "MIXED"]
+CONTENT_REVISION = "ooxml-vml-1"
 
 
 @dataclass(slots=True)

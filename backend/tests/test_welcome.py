@@ -41,32 +41,16 @@ def test_welcome_includes_description_when_present() -> None:
     assert "覆盖VDR设备的安装、维护与故障排查资料" in payload["message"]
 
 
-def test_assistant_welcome_uses_verified_golden_questions() -> None:
-    payload = build_assistant_welcome(
-        _kb(description="覆盖VDR设备的安装、维护与故障排查资料"),
-        [
-            {"document_id": "a", "title": "故障解决文档11—如何U盘升级PDC"},
-            {"document_id": "b", "title": "故障解决文档13—FFC 如何检查接线盒"},
-        ],
-    )
-
-    assert payload["message"] == (
-        "您好，我是您的智能技术助手。请描述您遇到的问题或想完成的操作，"
-        "我会为您提供清晰、可执行的建议。"
-    )
-    assert "2 份文档" not in payload["message"]
-    assert "VDR 产品知识库" not in payload["message"]
-    assert "覆盖VDR设备的安装、维护与故障排查资料" not in payload["message"]
-    assert payload["suggestions"] == [
-        "如何使用U盘升级PDC",
-        "如何更换PSU电源板",
-        "如何手动自检VDR",
-    ]
+def test_assistant_welcome_uses_only_configured_questions() -> None:
+    questions = ["如何检查设备电源", "如何查看系统状态", "如何执行设备自检"]
+    payload = build_assistant_welcome(ready=True, suggestions=questions)
+    assert payload["suggestions"] == questions
+    assert "知识库" not in payload["message"]
+    assert build_assistant_welcome(ready=True, suggestions=[])["suggestions"] == []
 
 
 def test_assistant_welcome_never_exposes_admin_setup_guidance() -> None:
-    payload = build_assistant_welcome(_kb(active_index_id=None), [{"title": "手册"}])
-
+    payload = build_assistant_welcome(ready=False, suggestions=["如何检查设备电源"])
     assert payload["message"] == "服务正在准备中，请稍后再试。"
     assert payload["suggestions"] == []
 

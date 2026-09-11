@@ -251,6 +251,7 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
       <header class="panel-header">
         <div>
           <h3>Assistant 调用（近 {{ assistantMetrics.days }} 天）</h3>
+          <el-button text @click="store.navigate('logs', 'tab=assistant-answers')">查看回答与优化</el-button>
           <span class="sub">外部软件后台的调用运营视图 — 按来源、用户、错误率、幂等重放与会话留存聚合</span>
         </div>
       </header>

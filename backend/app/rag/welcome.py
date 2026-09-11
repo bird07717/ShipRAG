@@ -20,13 +20,6 @@ _SUGGESTION_MIN_CHARS = 4
 _ASSISTANT_WELCOME_MESSAGE = (
     "您好，我是您的智能技术助手。请描述您遇到的问题或想完成的操作，我会为您提供清晰、可执行的建议。"
 )
-# Keep these prompts identical to the standard EXACT cases that passed the
-# Assistant Golden Set, so every starter question has a verified answer path.
-_ASSISTANT_GOLDEN_SUGGESTIONS = (
-    "如何使用U盘升级PDC",
-    "如何更换PSU电源板",
-    "如何手动自检VDR",
-)
 
 
 def build_suggestions(catalog: list[dict[str, Any]]) -> list[str]:
@@ -91,15 +84,9 @@ def build_welcome(kb: dict[str, Any], catalog: list[dict[str, Any]]) -> dict[str
     }
 
 
-def build_assistant_welcome(kb: dict[str, Any], catalog: list[dict[str, Any]]) -> dict[str, Any]:
-    """Build the public Assistant welcome without exposing catalog metadata."""
-    payload = build_welcome(kb, catalog)
-    if payload["knowledge_base"]["ready"]:
-        payload["message"] = _ASSISTANT_WELCOME_MESSAGE
-        payload["suggestions"] = list(_ASSISTANT_GOLDEN_SUGGESTIONS)
-    else:
-        # Never expose administrative upload/index instructions through the
-        # public Assistant boundary.  The stable response shape is retained.
-        payload["message"] = "服务正在准备中，请稍后再试。"
-        payload["suggestions"] = []
-    return payload
+def build_assistant_welcome(*, ready: bool, suggestions: list[str]) -> dict[str, Any]:
+    """Use the full Gateway readiness and the selected KB's saved questions."""
+    return {
+        "message": _ASSISTANT_WELCOME_MESSAGE if ready else "服务正在准备中，请稍后再试。",
+        "suggestions": list(suggestions) if ready else [],
+    }

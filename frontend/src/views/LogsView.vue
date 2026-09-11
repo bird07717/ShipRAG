@@ -15,13 +15,14 @@ import StatusBadge from "@/components/ui/StatusBadge.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
 import MetricCard from "@/components/ui/MetricCard.vue";
+import AnswerReviewsView from "@/views/AnswerReviewsView.vue";
 import TracesView from "@/views/TracesView.vue";
 
 const props = defineProps<{ navigationQuery?: string }>();
 const store = useAdminStore();
 const loadError = ref("");
 
-const LOG_TABS = new Set(["request-errors", "failed-turns", "task-failures", "escalations", "traces"]);
+const LOG_TABS = new Set(["assistant-answers", "request-errors", "failed-turns", "task-failures", "escalations", "traces"]);
 
 function navigationState(query = ""): {
   tab: string;
@@ -423,6 +424,10 @@ watch(
     <section class="panel">
       <div class="panel-body tabs-body">
         <el-tabs v-model="activeTab" @tab-change="handleTabChange">
+          <el-tab-pane label="Assistant 回答优化" name="assistant-answers" lazy>
+            <AnswerReviewsView v-if="activeTab === 'assistant-answers' && store.selectedKnowledgeId" :key="store.selectedKnowledgeId" :knowledge-id="store.selectedKnowledgeId" />
+            <p v-else>请先选择要检查的知识库。</p>
+          </el-tab-pane>
           <!-- 1. Request errors -->
           <el-tab-pane label="请求错误" name="request-errors">
             <el-alert

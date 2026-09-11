@@ -68,6 +68,32 @@ def public_payload(value: Any) -> Any:
     return value
 
 
+def public_error(error: dict[str, Any], *, request_id: str) -> dict[str, Any]:
+    """Keep durable failure semantics while excluding internal diagnostics."""
+    fields = (
+        "request_id",
+        "conversation_id",
+        "message_id",
+        "trace_id",
+        "code",
+        "message",
+        "retryable",
+        "partial_content",
+    )
+    result = {key: public_payload(error[key]) for key in fields if error.get(key) is not None}
+    result.setdefault("request_id", request_id)
+    result.setdefault("code", "REQUEST_PREVIOUSLY_FAILED")
+    result.setdefault("message", "请求未完成，请使用新的幂等键重试")
+    if not isinstance(result.get("retryable"), bool):
+        result["retryable"] = result["code"] in _RETRYABLE_ERROR_CODES | {
+            "CLIENT_DISCONNECTED",
+            "STREAM_INTERRUPTED",
+            "ABANDONED_ASSISTANT_REQUEST",
+            "REQUEST_PREVIOUSLY_FAILED",
+        }
+    return result
+
+
 def parse_sse(frame: bytes) -> tuple[str | None, dict[str, Any] | None]:
     event: str | None = None
     data: list[str] = []
@@ -247,6 +273,11 @@ class AssistantFacadeService:
                 include_images=include_images,
             ),
             conversation_id=conversation_id,
+            input_payload={
+                "question": question,
+                "choice_id": choice_id,
+                "include_images": include_images,
+            },
         )
         durable_id = UUID(str(stored["id"]))
         return PreparedAssistantStream(
@@ -325,18 +356,12 @@ class AssistantFacadeService:
             if status == "COMPLETED":
                 response = dict(stored.get("terminal_response") or {})
                 if response:
-                    yield sse("complete", response)
+                    # Old cached replies may predate public URL filtering.
+                    # Keep their IDs/text/timestamps; never rerun the model.
+                    yield sse("complete", public_payload(response))
                     return
             error = dict(stored.get("terminal_error") or {})
-            yield sse(
-                "error",
-                {
-                    "request_id": request_id,
-                    "code": error.get("code", "REQUEST_PREVIOUSLY_FAILED"),
-                    "message": error.get("message", "请求未完成，请使用新的幂等键重试"),
-                    "retryable": True,
-                },
-            )
+            yield sse("error", public_error(error, request_id=request_id))
             return
 
         known_context: dict[str, Any] = {}
@@ -484,10 +509,20 @@ class AssistantFacadeService:
                 self.repository.mark_assistant_trace_runtime(request_id=request_id, policy=policy)
             )
             await asyncio.shield(
-                self.repository.fail_assistant_request(
+                self.repository.cancel_assistant_request(
                     request_id=durable_id,
-                    payload={"code": "CLIENT_DISCONNECTED", "message": "客户端已断开"},
-                    cancelled=True,
+                    external_request_id=request_id,
+                    payload={
+                        "request_id": request_id,
+                        "conversation_id": known_context.get("conversation_id"),
+                        "message_id": known_context.get("assistant_message_id"),
+                        "trace_id": known_context.get("trace_id"),
+                        "code": "CLIENT_DISCONNECTED",
+                        "message": "客户端已断开",
+                        "retryable": True,
+                        "partial_content": "".join(answer_parts),
+                    },
+                    partial_content="".join(answer_parts),
                 )
             )
             raise

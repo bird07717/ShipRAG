@@ -326,7 +326,7 @@ curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/knowledge-bases/5ae9881a-a568-43
 | --- | --- | --- | --- | --- |
 | `knowledge_id` | UUID string | 是 | 当前欢迎语所属知识库。 | 可用于校验响应是否对应当前选择。 |
 | `message` | string | 是 | 欢迎文案。 | 作为页面初始提示展示，不写入会话历史。 |
-| `suggestions` | string[] | 是 | 服务就绪时返回 3 条经过回归验证的标准问题；服务未就绪时可能为空。 | 可渲染为快捷提问；点击后仍按一次新问答处理。 |
+| `suggestions` | string[] | 是 | 服务就绪时返回当前知识库配置的 3 条标准问题；服务未就绪时可能为空。 | 按响应顺序渲染快捷提问；点击后将原文作为 `question`，仍按一次新问答处理。 |
 
 失败响应示例：
 
@@ -337,7 +337,7 @@ Content-Type: application/json
 {"error":{"code":"KNOWLEDGE_BASE_NOT_FOUND","message":"知识库不存在","details":{},"request_id":"..."}}
 ```
 
-特殊规则：欢迎语只用于展示，不产生会话或历史消息；只能使用接口 2 当前返回的知识库 ID。知识库下线后可能返回 HTTP 404；失败时业务页面可使用本地默认文案，不应阻断其他知识库的问答功能。
+特殊规则：欢迎语只用于展示，不产生会话或历史消息；只能使用接口 2 当前返回的知识库 ID。每次进入或切换知识库应重新获取，不得长期硬编码或缓存推荐问题；后台保存的新问题在后续读取时生效。知识库下线后可能返回 HTTP 404；失败时业务页面可使用本地默认文案，不应阻断其他知识库的问答功能。
 
 ---
 
@@ -581,7 +581,7 @@ curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/conversations/b23a568e-5d20-42f3
 | `items[].content` | string | 是 | 用户问题或 Assistant 最终文本。 | 作为历史正文展示。 |
 | `items[].trace_id` | UUID string/null | 否 | Assistant 回答的追踪标识。 | 故障反馈时随 `request_id` 一并提供。 |
 | `items[].response_type` | string/null | 否 | 回答类型。 | 用于选择展示组件；未知值按普通文本兼容。 |
-| `items[].content_blocks` | object[] | 是 | 结构化内容块，常见类型为 `text`、`table`、`image`。 | 按 `type` 渲染；未知类型忽略。 |
+| `items[].content_blocks` | object[] | 是 | 当时公开回答的结构化内容块，对应流式终态的 `content`，可能为空。 | 按顺序和 `type` 渲染；未知类型忽略。图片只使用资源 ID，不使用管理端地址。 |
 | `items[].content_blocks[].type` | string | 条件必有 | 内容块类型。 | `text/table` 展示文本，`image` 使用资源 ID 加载图片。 |
 | `items[].content_blocks[].text` | string/null | 否 | 文本或表格内容。 | 存在时按原顺序展示。 |
 | `items[].content_blocks[].image_asset_id` | UUID string/null | 否 | 图片资源 ID。 | 存在时调用接口 8。 |
@@ -609,6 +609,8 @@ Content-Type: application/json
 ```
 
 特殊规则：单页 `items` 按时间正序返回；首次请求返回最近一页，更早消息使用 `next_before` 查询。调用方应兼容回答状态不是 `COMPLETED` 的历史记录。
+
+分页时原样回传 `next_before`，不要用消息数量自行计算；游标不可为空字符串、负数或超出范围。新消息到来后，继续旧游标只查询更早消息；刷新最近消息需不带 `before`。长回答较多时可降低 `limit`，避免一次加载过大的历史页。
 
 ---
 
@@ -643,7 +645,7 @@ Body：
 | `conversation_id` | UUID string / null | 否 | 首次问答省略或传 `null`，追问传服务返回的会话 ID。 |
 | `question` | string | 是 | 本次新增问题，长度 1～4000；不要拼接完整历史。 |
 | `choice_id` | string / null | 否 | 用户选择建议选项时回传，长度 1～100。 |
-| `include_images` | boolean | 否 | 是否返回图片资源，默认 `true`。 |
+| `include_images` | boolean | 否 | 是否在本轮回答中返回结构化图片块，默认 `true`；`false` 不返回图片块，但保留正文、表格和文档来源，不表示关闭图片理解。 |
 
 请求示例：
 
@@ -790,6 +792,9 @@ data: {"code":"TURN_DEADLINE_EXCEEDED","message":"服务繁忙，请稍后重试
 - 同一个 `Idempotency-Key` 不得对应不同请求体；冲突时按失败处理，不可自动换 Key 掩盖问题。
 - 同一会话同一时刻只允许一个问答请求。首次问答尚未取得 `conversation_id` 时，业务后台应按自己的稳定聊天窗口标识串行化请求。
 - 幂等重放可能直接返回 `accepted → complete` 或 `accepted → error`，调用方不得假定一定会收到 `delta`。
+- 失败重放保留原错误的 `retryable`、已有标识与 `partial_content`，不会重新生成回答；若保存了原 `request_id`，重放错误仍使用该标识，本次 HTTP 标识以响应头和 `accepted` 为准。明确失败后重新发起仍须使用新 Key。
+- 文档直达通过 `complete.content` 返回当前索引已解析的全部正文、表格和图片引用（关闭图片时不含图片），去除开头重复标题，不因文档较长省略尾部步骤。`answer` 仅为标题，不能代替正文；这不等于还原 DOCX 页面排版，也不承诺普通生成式问答复述整份文档。
+- 长文档可能产生较大的单个 SSE 事件；须收到事件结束空行后再解析 JSON，不能把 TCP/HTTP 数据块当作完整事件。图片仍按 ID 独立读取，不把图片二进制嵌入回答。
 - 客户端断开后，业务后台应取消对上游 SSE 的读取，避免无效连接继续占用资源。
 
 ---

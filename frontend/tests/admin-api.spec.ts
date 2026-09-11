@@ -3,6 +3,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { adminApi, apiRequest, ApiRequestError } from "@/api/admin";
 
 describe("admin API", () => {
+  it("keeps Assistant configuration writes on the management API with revisions", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    vi.stubGlobal("fetch", fetchMock);
+    await adminApi.getKnowledgeAssistant("kb-a");
+    await adminApi.saveKnowledgeAssistant("kb-b", 2, ["如何检查设备电源"]);
+    await adminApi.setKnowledgeAssistantPublication("kb-b", 3, true);
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "/api/v1/knowledge-bases/kb-a/assistant-config",
+      "/api/v1/knowledge-bases/kb-b/assistant-config",
+      "/api/v1/knowledge-bases/kb-b/assistant-publication",
+    ]);
+    expect(JSON.parse(fetchMock.mock.calls[1]![1].body)).toEqual({ revision: 2, suggestions: ["如何检查设备电源"] });
+    expect(JSON.parse(fetchMock.mock.calls[2]![1].body)).toEqual({ revision: 3, assistant_online: true });
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
     sessionStorage.clear();

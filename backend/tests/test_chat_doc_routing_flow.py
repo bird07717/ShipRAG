@@ -30,7 +30,7 @@ DOC_A_ELEMENTS = {
         {
             "element_id": uuid4(),
             "element_type": "TEXT",
-            "content": "更换单个存储体之后，需要对更换的存储体进行update升级。",
+            "content": TITLE_A + "\n更换单个存储体之后，需要对更换的存储体进行update升级。",
             "section_path": [],
             "image_asset_id": None,
             "image_caption": "",
@@ -111,7 +111,7 @@ class _RoutingRepository:
                     {
                         "element_id": uuid4(),
                         "element_type": "TEXT",
-                        "content": "准备工具并断电。",
+                        "content": TITLE_B + "\n准备工具并断电。",
                         "section_path": [],
                         "image_asset_id": None,
                         "image_caption": "",
@@ -286,7 +286,7 @@ async def test_aligning_clear_winner_delivers_document_without_llm():
 
 
 @pytest.mark.asyncio
-async def test_document_delivery_removes_redundant_leading_document_heading() -> None:
+async def test_document_delivery_removes_leading_heading_without_matching_title() -> None:
     title = "如何配VAU图像"
     document = {
         "document_id": str(DOC_A),
@@ -295,7 +295,7 @@ async def test_document_delivery_removes_redundant_leading_document_heading() ->
             {
                 "element_id": uuid4(),
                 "element_type": "TEXT",
-                "content": "故障解决文档5—如何配VAU图像",
+                "content": "与当前显示名称完全不同的旧标题",
                 "section_path": [],
                 "image_asset_id": None,
                 "image_caption": "",
@@ -326,6 +326,44 @@ async def test_document_delivery_removes_redundant_leading_document_heading() ->
 
     assert result["answer"] == "**《如何配VAU图像》**"
     assert result["content"] == [{"type": "text", "text": "第一步：打开VAU配置界面。"}]
+
+
+@pytest.mark.asyncio
+async def test_document_delivery_strips_heading_once_and_preserves_other_elements():
+    image_id = uuid4()
+    document = {
+        "document_id": str(DOC_A),
+        "title": "已重命名的标题",
+        "elements": [
+            {"element_type": "TEXT", "content": " \n"},
+            {"element_type": "TABLE", "content": "表头\n表格正文"},
+            {"element_type": "IMAGE", "image_asset_id": image_id},
+            {"element_type": "TEXT", "content": "旧标题\n第一步"},
+            {"element_type": "TEXT", "content": "旧标题\n第二步"},
+        ],
+    }
+    repo = _RoutingRepository(
+        turn=_turn(),
+        candidates=[_candidate(DOC_A, 1), _candidate(DOC_A, 2)],
+        document_blocks={str(DOC_A): document},
+    )
+    service = _service(repo, _RecordingLlmProvider(["不应被调用"]))
+
+    result = await service.generate(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=None,
+        question="如何U盘升级PDC",
+        request_id="req-heading-once",
+    )
+
+    assert [block["type"] for block in result["content"]] == ["table", "image", "text", "text"]
+    assert [block["text"] for block in result["content"] if block["type"] in {"text", "table"}] == [
+        "表头\n表格正文",
+        "第一步",
+        "旧标题\n第二步",
+    ]
+    assert result["content"][1]["image_asset_id"] == str(image_id)
+    assert document["elements"][3]["content"] == "旧标题\n第一步"
 
 
 @pytest.mark.asyncio
@@ -582,13 +620,13 @@ async def test_single_eligible_candidate_clarifies_with_pending():
 
 
 @pytest.mark.asyncio
-async def test_delivery_truncates_large_document():
+async def test_delivery_preserves_large_document():
     huge = dict(DOC_A_ELEMENTS)
     huge["elements"] = [
         {
             "element_id": uuid4(),
             "element_type": "TEXT",
-            "content": "长段落" * 10000,
+            "content": TITLE_A + "\n" + "长段落" * 10000,
             "section_path": [],
             "image_asset_id": None,
             "image_caption": "",
@@ -610,7 +648,7 @@ async def test_delivery_truncates_large_document():
 
     assert result["response_type"] == "DOC_DELIVERED"
     texts = [b for b in result["content"] if b["type"] == "text"]
-    assert any("已截断" in (b["text"] or "") for b in texts)
+    assert [b["text"] for b in texts] == ["长段落" * 10000]
     assert result["references"][0]["download_url"]
 
 

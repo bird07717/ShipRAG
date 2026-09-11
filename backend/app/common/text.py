@@ -8,10 +8,6 @@ from functools import partial
 # CJK Unified Ideographs + Extension A, common CJK punctuation and fullwidth forms
 _CJK_PATTERN = re.compile("[\u2e80-\u9fff\u3000-\u303f\uff00-\uffef\U00020000-\U0002a6df]")
 _MARKDOWN_INLINE_SPECIAL = re.compile(r"([\\`*_{}\[\]<>#+\-.!|])")
-_LEGACY_DOCUMENT_HEADING_PREFIX = re.compile(
-    r"^\s*故障解决文档\s*\d*\s*[\u2014\u2013\-:：]\s*",
-    flags=re.IGNORECASE,
-)
 
 _MOJIBAKE_MARKERS = (
     "锟斤拷",
@@ -72,33 +68,17 @@ def markdown_document_title(title: str) -> str:
     return f"**《{escaped}》**"
 
 
-def _normalize_heading(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    return "".join(
-        character
-        for character in normalized
-        if not character.isspace() and not unicodedata.category(character).startswith("P")
-    )
+def strip_leading_document_heading(content: str) -> str:
+    """Drop the first nonblank text line: source documents start with a title.
 
-
-def strip_redundant_document_heading(content: str, title: str) -> str:
-    """Remove a duplicated leading document-title line while preserving the body."""
-    if not content.strip() or not title.strip():
-        return content
-    lines = content.splitlines()
+    Call once on the document's first nonblank TEXT element, at delivery time.
+    Keep subsequent lines verbatim; never compare with the display name.
+    """
+    lines = content.splitlines(keepends=True)
     first_index = next((index for index, line in enumerate(lines) if line.strip()), None)
     if first_index is None:
         return content
-    heading = lines[first_index].strip()
-    normalized_title = _normalize_heading(title)
-    without_legacy_prefix = _LEGACY_DOCUMENT_HEADING_PREFIX.sub("", heading).strip()
-    if _normalize_heading(heading) != normalized_title and (
-        without_legacy_prefix == heading
-        or _normalize_heading(without_legacy_prefix) != normalized_title
-    ):
-        return content
-    remaining = lines[:first_index] + lines[first_index + 1 :]
-    return "\n".join(remaining).lstrip("\n")
+    return "".join(lines[first_index + 1 :])
 
 
 def _emphasized_title_replacement(match: re.Match[str], *, source: str, rendered: str) -> str:

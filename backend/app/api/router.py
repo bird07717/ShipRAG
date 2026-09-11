@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from app.api.answer_reviews import router as answer_reviews_router
 from app.api.assistant import router as assistant_router
 from app.api.chat import router as chat_router
 from app.api.conversations import router as conversations_router
@@ -13,6 +14,7 @@ from app.api.dependencies import (
     require_service_token,
 )
 from app.api.ingestion import router as ingestion_router
+from app.api.knowledge_assistant import router as knowledge_assistant_router
 from app.api.logs import router as logs_router
 from app.api.metrics import router as metrics_router
 from app.api.rag import router as rag_router
@@ -21,9 +23,11 @@ from app.api.support import router as support_router
 from app.core.config import Settings
 
 router = APIRouter(dependencies=[Depends(require_service_token)])
+router.include_router(answer_reviews_router)
 router.include_router(chat_router)
 router.include_router(conversations_router)
 router.include_router(ingestion_router)
+router.include_router(knowledge_assistant_router)
 router.include_router(logs_router)
 router.include_router(metrics_router)
 router.include_router(rag_router)

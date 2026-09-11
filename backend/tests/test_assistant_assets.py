@@ -39,35 +39,6 @@ class _Minio:
         return self.upstream
 
 
-class _WelcomeRepository:
-    def __init__(self, *, enabled: bool) -> None:
-        self.enabled = enabled
-        self.requested_enabled_only: bool | None = None
-        self.requested_assistant_online_only: bool | None = None
-
-    async def get_knowledge_base_summary(
-        self,
-        _: object,
-        *,
-        enabled_only: bool = False,
-        assistant_online_only: bool = False,
-    ) -> dict[str, Any]:
-        self.requested_enabled_only = enabled_only
-        self.requested_assistant_online_only = assistant_online_only
-        if not self.enabled:
-            raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
-        return {
-            "id": "a2eb2c52-2228-4c7f-baa5-ef06f4e26b7d",
-            "name": "受控知识库",
-            "description": None,
-            "status": "ENABLED",
-            "active_index_id": "e36e1b1c-52a4-4686-9274-b5a675527869",
-        }
-
-    async def list_kb_documents(self, _: object) -> list[dict[str, Any]]:
-        return [{"document_id": "d1", "title": "操作手册"}]
-
-
 def test_attachment_disposition_never_contains_control_characters() -> None:
     value = attachment_content_disposition("safe.docx\r\nX-Injected: yes")
 
@@ -116,36 +87,35 @@ async def test_assistant_asset_response_streams_chunks_and_releases_connection(
 
 
 @pytest.mark.asyncio
-async def test_assistant_welcome_only_queries_enabled_knowledge_bases() -> None:
-    repository = _WelcomeRepository(enabled=True)
+@pytest.mark.parametrize("ready", [True, False])
+async def test_assistant_welcome_uses_public_config_and_full_readiness(
+    monkeypatch: pytest.MonkeyPatch, ready: bool
+) -> None:
     knowledge_id = UUID("a2eb2c52-2228-4c7f-baa5-ef06f4e26b7d")
+    questions = ["如何检查设备电源", "如何查看系统状态", "如何执行设备自检"]
 
-    response = await welcome(knowledge_id, repository)  # type: ignore[arg-type]
+    async def get(self: Any, requested: UUID, *, public: bool = False) -> dict:
+        assert requested == knowledge_id
+        assert public is True
+        return {"ready": ready, "suggestions": questions}
 
+    monkeypatch.setattr(assistant_api.AssistantConfiguration, "get", get)
+    response = await welcome(knowledge_id, object())  # type: ignore[arg-type]
+    assert set(response) == {"knowledge_id", "message", "suggestions"}
     assert response["knowledge_id"] == knowledge_id
-    assert response["message"] == (
-        "您好，我是您的智能技术助手。请描述您遇到的问题或想完成的操作，"
-        "我会为您提供清晰、可执行的建议。"
-    )
-    assert response["suggestions"] == [
-        "如何使用U盘升级PDC",
-        "如何更换PSU电源板",
-        "如何手动自检VDR",
-    ]
-    assert repository.requested_enabled_only is True
-    assert repository.requested_assistant_online_only is True
+    assert response["suggestions"] == (questions if ready else [])
+    if not ready:
+        assert response["message"] == "服务正在准备中，请稍后再试。"
 
 
 @pytest.mark.asyncio
-async def test_assistant_welcome_hides_disabled_knowledge_bases() -> None:
-    repository = _WelcomeRepository(enabled=False)
+async def test_assistant_welcome_hides_offline_knowledge_bases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def get(self: Any, requested: UUID, *, public: bool = False) -> dict:
+        assert public is True
+        raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
 
-    with pytest.raises(ApiError) as raised:
-        await welcome(
-            UUID("a2eb2c52-2228-4c7f-baa5-ef06f4e26b7d"),
-            repository,  # type: ignore[arg-type]
-        )
-
-    assert raised.value.code == "KNOWLEDGE_BASE_NOT_FOUND"
-    assert repository.requested_enabled_only is True
-    assert repository.requested_assistant_online_only is True
+    monkeypatch.setattr(assistant_api.AssistantConfiguration, "get", get)
+    with pytest.raises(ApiError, match="知识库不存在"):
+        await welcome(UUID("a2eb2c52-2228-4c7f-baa5-ef06f4e26b7d"), object())  # type: ignore[arg-type]

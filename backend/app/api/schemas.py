@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.common.suggestions import validate_suggestions
+
 
 class KnowledgeBaseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
@@ -18,6 +20,7 @@ class KnowledgeBaseResponse(BaseModel):
     description: str | None
     status: Literal["ENABLED", "DISABLED", "DELETING"]
     assistant_online: bool
+    assistant_config_revision: int = 0
     # active_index_id is the rolling compatibility alias for RAG.
     active_index_id: UUID | None
     rag_active_index_id: UUID | None = None
@@ -30,6 +33,35 @@ class KnowledgeBaseResponse(BaseModel):
     document_count: int = 0
     active_chunk_count: int = 0
     building_index_id: UUID | None = None
+
+
+class KnowledgeAssistantConfig(BaseModel):
+    knowledge_id: UUID
+    assistant_online: bool
+    suggestions: list[str]
+    revision: int
+
+
+class KnowledgeAssistantCheck(KnowledgeAssistantConfig):
+    ready: bool
+    blockers: list[str]
+
+
+class KnowledgeAssistantUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=0)
+    suggestions: list[str] = Field(max_length=3)
+
+    @field_validator("suggestions")
+    @classmethod
+    def check_suggestions(cls, value: list[str]) -> list[str]:
+        return validate_suggestions(value)
+
+
+class KnowledgeAssistantPublication(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=0)
+    assistant_online: bool
 
 
 class TaskSubmissionResponse(BaseModel):
@@ -1168,3 +1200,28 @@ class ProblemProfileResponse(ProblemProfileUpsert):
     readiness_reasons: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+
+class AnswerReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    revision: int = Field(ge=0)
+    category: Literal[
+        "WRONG_DOCUMENT",
+        "MISSING_KNOWLEDGE",
+        "INCOMPLETE_CONTENT",
+        "WRONG_ANSWER",
+        "OTHER",
+        "ACCEPTABLE",
+    ]
+    status: Literal["OPEN", "VERIFY", "CLOSED"] = "OPEN"
+    expected_document_id: UUID | None = None
+    expectation: str = Field(default="", max_length=2000)
+    notes: str = Field(default="", max_length=4000)
+
+
+class AnswerRetestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: UUID
+    revision: int = Field(ge=1)

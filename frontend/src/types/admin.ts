@@ -1,9 +1,22 @@
+export interface KnowledgeAssistantConfig {
+  knowledge_id: string;
+  assistant_online: boolean;
+  suggestions: string[];
+  revision: number;
+}
+
+export interface KnowledgeAssistantCheck extends KnowledgeAssistantConfig {
+  ready: boolean;
+  blockers: string[];
+}
+
 export interface KnowledgeBase {
   id: string;
   name: string;
   description: string | null;
   status: string;
   assistant_online: boolean;
+  assistant_config_revision?: number;
   runtime_state: string;
   active_index_id: string | null;
   rag_active_index_id?: string | null;
