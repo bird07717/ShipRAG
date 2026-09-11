@@ -6,8 +6,10 @@ project_name="enterprise-rag-m7-smoke"
 http_port="${M7_PRODUCTION_SMOKE_PORT:-18008}"
 compose_file="${project_root}/compose.production.yaml"
 backend_image="${BACKEND_IMAGE:-enterprise-rag-backend:1.0.1}"
+dns_blocker="${project_name}-dns-ip-blocker"
 
 cleanup() {
+  docker rm --force "${dns_blocker}" >/dev/null 2>&1 || true
   docker compose \
     --project-name "${project_name}" \
     --file "${compose_file}" \
@@ -132,3 +134,77 @@ print(
     )
 )
 PY
+
+# Reproduce a backend replacement that changes its container IP while keeping
+# the frontend/Nginx container alive. The proxy must recover through Docker DNS
+# without requiring an Nginx restart.
+backend_container="$(
+  docker compose \
+    --project-name "${project_name}" \
+    --file "${compose_file}" \
+    ps --quiet backend
+)"
+backend_ip_before="$(
+  docker inspect \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+    "${backend_container}"
+)"
+compose_network="$(
+  docker inspect \
+    --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' \
+    "${backend_container}"
+)"
+
+docker compose \
+  --project-name "${project_name}" \
+  --file "${compose_file}" \
+  stop backend
+docker compose \
+  --project-name "${project_name}" \
+  --file "${compose_file}" \
+  rm --force backend
+docker run \
+  --detach \
+  --rm \
+  --name "${dns_blocker}" \
+  --network "${compose_network}" \
+  "${backend_image}" \
+  python -c "import time; time.sleep(120)" >/dev/null
+docker compose \
+  --project-name "${project_name}" \
+  --file "${compose_file}" \
+  up --detach --no-deps --wait --wait-timeout 120 backend
+
+backend_container="$(
+  docker compose \
+    --project-name "${project_name}" \
+    --file "${compose_file}" \
+    ps --quiet backend
+)"
+backend_ip_after="$(
+  docker inspect \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+    "${backend_container}"
+)"
+if [[ "${backend_ip_before}" == "${backend_ip_after}" ]]; then
+  echo "backend IP did not change; dynamic DNS regression was not exercised" >&2
+  exit 1
+fi
+
+proxy_recovered="false"
+for _ in $(seq 1 30); do
+  if curl --fail --silent \
+    --max-time 5 \
+    "http://127.0.0.1:${http_port}/health/ready" >/dev/null; then
+    proxy_recovered="true"
+    break
+  fi
+  sleep 1
+done
+if [[ "${proxy_recovered}" != "true" ]]; then
+  echo "frontend proxy did not recover after backend IP changed" >&2
+  exit 1
+fi
+
+docker rm --force "${dns_blocker}" >/dev/null
+echo "production nginx dynamic DNS: passed (${backend_ip_before} -> ${backend_ip_after})"
