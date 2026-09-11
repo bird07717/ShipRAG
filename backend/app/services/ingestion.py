@@ -31,6 +31,13 @@ class IngestionService:
         self.minio = minio
         self.settings = settings
 
+    async def rename_document(self, document_id: UUID, display_name: str) -> dict[str, Any]:
+        normalized_display_name = repair_utf8_mojibake(display_name.strip())
+        if not normalized_display_name:
+            raise ApiError("VALIDATION_ERROR", "文档显示名称不能为空", 422)
+        reject_control_characters(normalized_display_name, field_name="文档显示名称")
+        return await self.repository.rename_document(document_id, normalized_display_name)
+
     async def upload_document(
         self,
         *,

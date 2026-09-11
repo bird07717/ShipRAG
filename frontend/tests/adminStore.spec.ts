@@ -192,6 +192,38 @@ describe("adminStore", () => {
     expect(adminStore.notice).toBe("知识库删除任务已提交；完成后将弹出提醒");
   });
 
+  it("renames a document without requesting an index rebuild", async () => {
+    const document = {
+      id: "doc-1",
+      knowledge_id: kb.id,
+      filename: "source.docx",
+      display_name: "旧名称",
+      file_size: 1024,
+      status: "STORED",
+      created_at: "2026-09-11T00:00:00Z",
+      updated_at: "2026-09-11T00:00:00Z",
+    };
+    const updated = {
+      ...document,
+      display_name: "新名称",
+      updated_at: "2026-09-11T01:00:00Z",
+    };
+    adminStore.documents = [document];
+    adminStore.selectedDocument = document;
+    vi.spyOn(ElMessageBox, "prompt").mockResolvedValue({
+      value: "  新名称  ",
+      action: "confirm",
+    } as never);
+    const rename = vi.spyOn(adminApi, "renameDocument").mockResolvedValue(updated);
+
+    await adminStore.renameDocument(document);
+
+    expect(rename).toHaveBeenCalledWith("doc-1", "新名称");
+    expect(adminStore.documents).toEqual([updated]);
+    expect(adminStore.selectedDocument).toEqual(updated);
+    expect(adminStore.notice).toContain("无需重建索引");
+  });
+
   it("notifies once when a tracked background task completes", async () => {
     stubApi();
     adminStore.selectedKnowledgeId = kb.id;

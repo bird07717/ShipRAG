@@ -261,6 +261,8 @@ async def test_aligning_clear_winner_delivers_document_without_llm():
 
     assert result["response_type"] == "DOC_DELIVERED"
     assert TITLE_A in result["answer"]
+    assert f"**《{TITLE_A}》**" in result["answer"]
+    assert "下载原文档" not in json.dumps(result, ensure_ascii=False)
     assert llm.prompts == []  # zero-LLM delivery path
     assert result["usage"] == {}
     types = [block["type"] for block in result["content"]]
@@ -789,7 +791,9 @@ async def test_doc_focus_stay_degrades_to_chunk_rag_when_document_too_large():
         candidates=[_candidate(DOC_A, 1)],
         document_blocks={str(DOC_A): _huge_document()},
     )
-    llm = _RecordingLlmProvider(["[MODE:PRODUCT_KNOWLEDGE]\n将U盘插入USB端口。[S1]"])
+    llm = _RecordingLlmProvider(
+        [f"[MODE:PRODUCT_KNOWLEDGE]\n请参考《{TITLE_A}》，将U盘插入USB端口。[S1]"]
+    )
     service = _service(repo, llm)
 
     result = await service.generate(
@@ -814,6 +818,8 @@ async def test_doc_focus_stay_degrades_to_chunk_rag_when_document_too_large():
     # citations are stripped from content blocks
     assert [block["type"] for block in result["content"]] == ["text"]
     assert "将U盘插入USB端口" in result["content"][0]["text"]
+    assert f"**《{TITLE_A}》**" in result["answer"]
+    assert f"**《{TITLE_A}》**" in result["content"][0]["text"]
     assert "[S1]" not in result["content"][0]["text"]
     # references still point at the focus document
     assert result["references"][0]["document_id"] == str(DOC_A)

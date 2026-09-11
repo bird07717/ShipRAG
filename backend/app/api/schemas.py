@@ -158,6 +158,10 @@ class DocumentResponse(BaseModel):
     updated_at: datetime
 
 
+class DocumentUpdate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=500)
+
+
 class BuildRequestResponse(BaseModel):
     requested: bool
     coalesced: bool

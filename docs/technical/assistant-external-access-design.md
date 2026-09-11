@@ -28,7 +28,7 @@
 - 统一 Chat Gateway。
 - RAG 和 Technical Support 两条回答链路。
 - 模型、Prompt、检索参数、知识库、文档和发布管理。
-- SSE 输出、Markdown、图片、来源和文档下载。
+- SSE 输出、Markdown、图片和文档来源展示；不提供原文下载。
 - Trace、请求错误日志和管理端会话回放。
 - Conversation 定时清理和旧 Index 回收。
 
@@ -79,7 +79,7 @@ DemoChat 当前具备：
 - SSE 增量回答。
 - 检索/生成状态。
 - Markdown 渲染，禁用原生 HTML 并使用 DOMPurify 消毒。
-- 文本、表格、图片、引用和文档下载。
+- 文本、表格、图片和引用。
 - 澄清选项。
 - Stop、Loading、Error 和自动滚动。
 - 内部引擎、模式和 fallback 标签。
@@ -243,7 +243,6 @@ GET  /api/v1/assistant/conversations
 GET  /api/v1/assistant/conversations/{id}
 GET  /api/v1/assistant/conversations/{id}/messages
 POST /api/v1/assistant/chat/stream
-GET  /api/v1/assistant/knowledge-bases/{kb_id}/documents/{id}/content
 GET  /api/v1/assistant/knowledge-bases/{kb_id}/image-assets/{id}/content
 ```
 
@@ -274,7 +273,7 @@ conversation.last_activity_at >= now() - 7 days
 - 继续提问。
 - 澄清选择。
 - 幂等重放。
-- 文档和图片资源。
+- 图片资源；文档 ID 和标题仅作为回答来源元数据。
 
 不存在、过期、越权和知识库不匹配统一返回：
 
@@ -703,4 +702,3 @@ Rerank 可降级异常和内部 fallback 不作为外部错误。
 - `conversation_retention_days=0` 不删除会话。
 - Trace 7 天脱敏、30 天删除。
 - Index 删除后脱敏 Trace 摘要仍可查询。
-

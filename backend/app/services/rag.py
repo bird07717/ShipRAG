@@ -12,7 +12,11 @@ from uuid import UUID
 from minio import Minio
 
 from app.common.errors import SERVER_BUSY_MESSAGE, ApiError, user_safe_chat_message
-from app.common.text import estimate_tokens
+from app.common.text import (
+    emphasize_document_title_mentions,
+    estimate_tokens,
+    markdown_document_title,
+)
 from app.core.config import Settings
 from app.ingestion.embedding import EmbeddingError, EmbeddingProvider, create_embedding_provider
 from app.ingestion.models import EmbeddingInput
@@ -824,6 +828,9 @@ class RagService:
                 prepared.answer_parts.append(delta)
                 yield sse_event("message", {"delta": delta})
             answer = "".join(prepared.answer_parts)
+            answer = emphasize_document_title_mentions(
+                answer, [source.document for source in prepared.sources]
+            )
             valid_sources, citation_result = self._validate_citations(answer, prepared.sources)
             prepared.timings["llm_ms"] = _elapsed_ms(llm_started)
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
@@ -1641,10 +1648,12 @@ class RagService:
             blocks.append(
                 RoutingContentBlock(
                     type="text",
-                    text="（文档较长，以上内容已截断，完整内容请下载原文档。）",
+                    text="（文档较长，以上内容已截断。）",
                 )
             )
-        summary = "已为你找到《" + document["title"] + "》，以下是文档完整内容："
+        summary = (
+            "已为你找到 " + markdown_document_title(str(document["title"])) + "，以下是文档内容："
+        )
         document_source = {
             "source_id": "S1",
             "document_id": document["document_id"],
@@ -1750,13 +1759,33 @@ class RagService:
     def _finalize_chat_result(self, plan: _ChatPlan, raw_answer: str) -> ChatResult:
         if plan.kind in ("DOC_QA", "CHUNK_RAG"):
             source_dicts = [s.public_dict() for s in plan.sources]
-            return post_validate(
+            result = post_validate(
                 raw_answer,
                 source_dicts,
                 True,
                 require_citations=plan.require_citations,
             )
-        return build_assist_result(raw_answer)
+        else:
+            result = build_assist_result(raw_answer)
+        titles = [
+            str(reference.get("title") or reference.get("document") or "")
+            for reference in (plan.references or result.valid_sources)
+        ]
+        if not titles:
+            return result
+        answer = emphasize_document_title_mentions(result.answer, titles)
+        content = [
+            replace(
+                block,
+                text=(
+                    emphasize_document_title_mentions(block.text, titles)
+                    if block.text is not None
+                    else None
+                ),
+            )
+            for block in result.content
+        ]
+        return replace(result, answer=answer, content=content)
 
     @staticmethod
     def _result_for_fixed_plan(plan: _ChatPlan) -> ChatResult:
@@ -1787,14 +1816,14 @@ class RagService:
     @staticmethod
     def _render_doc_list(docs: list[dict[str, Any]]) -> str:
         return "\n".join(
-            str(index) + ". 《" + str(doc.get("title", "")) + "》"
+            str(index) + ". " + markdown_document_title(str(doc.get("title", "")))
             for index, doc in enumerate(docs, start=1)
         )
 
     @staticmethod
     def _render_weak_candidates(weak: list[dict[str, Any]]) -> str:
         return "\n".join(
-            f"{index}. 《{item.get('title', '')!s}》"
+            f"{index}. {markdown_document_title(str(item.get('title', '')))}"
             f"（相关度 {float(item.get('score', 0.0)):.2f}，命中 {item.get('hits', 0)} 个片段）"
             for index, item in enumerate(weak, start=1)
         )

@@ -173,8 +173,15 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         <el-table-column label="上传时间" min-width="170">
           <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="" width="80" align="right">
+        <el-table-column label="" width="140" align="right">
           <template #default="scope">
+            <el-button
+              link
+              type="primary"
+              @click.stop="store.renameDocument(scope.row)"
+            >
+              重命名
+            </el-button>
             <el-button
               link
               type="danger"

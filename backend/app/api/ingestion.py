@@ -12,6 +12,7 @@ from app.api.schemas import (
     DocumentDeleteResponse,
     DocumentProfileContextResponse,
     DocumentResponse,
+    DocumentUpdate,
     DocumentUploadResponse,
     GarbageCollectionResponse,
     ImageAssetResponse,
@@ -179,6 +180,15 @@ async def get_document(
     repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
 ) -> dict[str, Any]:
     return await repository.get_document(document_id)
+
+
+@router.patch("/documents/{document_id}", response_model=DocumentResponse, tags=["documents"])
+async def update_document(
+    document_id: UUID,
+    payload: DocumentUpdate,
+    service: Annotated[IngestionService, Depends(get_ingestion_service)],
+) -> dict[str, Any]:
+    return await service.rename_document(document_id, payload.display_name)
 
 
 @router.get(

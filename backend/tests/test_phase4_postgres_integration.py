@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.ingestion.repository import IngestionRepository
+from app.rag.repository import RagRepository
 from app.releases.models import PROFILE_ENRICHMENT_VERSION
 from app.releases.repository import ReleaseRepository
 
@@ -148,6 +149,28 @@ async def _link_document(
                 "source_hash": file_hash,
             },
         )
+
+
+async def test_document_rename_is_visible_to_future_catalog_reads_without_rebuild() -> None:
+    async with _engine() as engine:
+        async with _knowledge_base(engine) as knowledge_id:
+            document_id = await _insert_document(engine, knowledge_id, "旧名称", FILE_HASH_A1)
+            await _insert_document(engine, knowledge_id, "占用名称", FILE_HASH_A2)
+            settings = Settings(_env_file=None, app_env="test")
+            ingestion_repository = IngestionRepository(engine, settings)
+            rag_repository = RagRepository(engine, settings)
+
+            updated = await ingestion_repository.rename_document(document_id, "新名称")
+            catalog = await rag_repository.list_kb_documents(knowledge_id)
+
+            assert updated["display_name"] == "新名称"
+            assert updated["filename"] == "旧名称.docx"
+            assert {item["document_id"]: item["title"] for item in catalog}[str(document_id)] == (
+                "新名称"
+            )
+            with pytest.raises(ApiError) as raised:
+                await ingestion_repository.rename_document(document_id, "占用名称")
+            assert raised.value.code == "DOCUMENT_NAME_CONFLICT"
 
 
 async def _insert_elements(engine: AsyncEngine, index_id: UUID, document_id: UUID) -> None:

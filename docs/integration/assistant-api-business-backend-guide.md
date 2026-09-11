@@ -21,7 +21,7 @@ Shipdemo Assistant API
 
 ### 1.2 服务说明
 
-向业务后台提供知识库查询、欢迎语、会话管理、流式问答、历史消息查询，以及回答所引用图片和文档的受控下载能力。
+向业务后台提供知识库查询、欢迎语、会话管理、流式问答、历史消息查询，以及回答所引用图片的受控读取能力。
 
 业务 App、Web 页面不得直接调用本服务；所有请求应由业务后台发起或代理。
 
@@ -100,12 +100,13 @@ HTTP 错误字段：
 | `ANSWERED` | 已生成正常回答。 | 展示 `answer` 及相关内容。 |
 | `UNCONFIRMED` | 当前资料不足以确认。 | 展示回答并提示用户补充信息。 |
 | `OUT_OF_SCOPE` | 问题不在服务范围内。 | 展示范围提示。 |
-| `DOC_DELIVERED` / `DOCUMENT_DELIVERED` | 已匹配并交付文档。 | 展示 `document`、`content` 和下载入口。 |
+| `DOC_DELIVERED` / `DOCUMENT_DELIVERED` | 已匹配并交付文档内容。 | 展示 `document` 和 `content`；不提供原文下载入口。 |
 | `CLARIFICATION_REQUIRED` | 需要用户进一步选择或补充。 | 根据 `clarification` 构建交互。 |
 | `ESCALATION_REQUIRED` | 建议转人工或升级处理。 | 根据 `escalation` 进入业务侧流程。 |
 | 其他值 | 后续扩展类型。 | 按普通文本回答兼容，不直接报错。 |
 
-- `UNCONFIRMED`、`OUT_OF_SCOPE` 及不引用产品资料的通用解释不会返回可下载文档引用；调用方仅在 `references` 或 `document` 实际包含文档 ID 时展示下载入口。
+- `document` 和 `references` 中的文档 ID、标题仅用于内容归属与来源展示，不得据此拼接原文下载地址；Assistant API 不提供原文下载能力。
+- `answer` 和文本内容块使用 Markdown；其中 `**《文档标题》**` 表示需要加粗展示的文档标题。
 - 流式问答在服务接受请求前发生的鉴权、参数、会话归属、知识库/索引可用性、幂等或并发错误，以 HTTP 4xx/5xx JSON 返回；接受请求后的生成错误，以 SSE `error` 事件返回。
 - `cursor`、`before` 均为不透明游标，只能原样回传，不得拆解、拼接或自行生成。
 
@@ -122,7 +123,7 @@ HTTP 错误字段：
 6. 收到 context/complete：保存 client_chat_id → conversation_id 映射
 7. 后续追问：携带同一 conversation_id，并为每次新提问生成新的 Idempotency-Key
 8. 页面恢复或历史查询：调用会话列表、会话详情和历史消息接口
-9. 展示引用资源：根据 document_id/image_asset_id，由业务后台代理下载
+9. 展示引用信息与图片：文档标题用于来源展示；根据 image_asset_id 由业务后台代理图片
 ```
 
 ### 4.2 流式问答状态处理
@@ -143,7 +144,7 @@ HTTP 错误字段：
 1. 使用接口 4 查询当前用户在目标知识库下的会话列表。
 2. 用户选择会话后，使用接口 5 确认会话仍然存在。
 3. 使用接口 6 加载最近一页消息；存在 `next_before` 时按需加载更早消息。
-4. 历史回答包含资源 ID 时，通过接口 8 或接口 9 重新获取资源。
+4. 历史回答包含 `image_asset_id` 时，通过接口 8 重新获取图片；文档 ID 和标题只用于来源展示。
 5. 会话返回 404 时，删除业务后台中的旧映射，并按首次问答流程创建新会话。
 
 ## 5. 接口调用关系
@@ -151,21 +152,21 @@ HTTP 错误字段：
 | 顺序 | 当前接口 | 关键输入来源 | 关键输出 | 后续用途 | 是否必调 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 接口 1：就绪检查 | 固定基础地址 | `status` | 判断是否允许发起业务请求 | 上线验收必调，运行期建议定时调用 |
-| 2 | 接口 2：知识库列表 | 当前用户身份 | 已上线知识库的 `knowledge_id`、`ready` | 欢迎语、问答、资源下载 | 必调 |
+| 2 | 接口 2：知识库列表 | 当前用户身份 | 已上线知识库的 `knowledge_id`、`ready` | 欢迎语、问答和图片读取 | 必调 |
 | 3 | 接口 3：欢迎语 | 接口 2 的 `knowledge_id` | `message`、`suggestions` | 页面展示或快捷提问 | 可选 |
 | 4 | 接口 7：首次问答 | `knowledge_id`、新 `Idempotency-Key` | `conversation_id`、最终回答 | 建立会话映射并继续追问 | 必调 |
-| 5 | 接口 7：继续问答 | 已保存的 `conversation_id`、新 `Idempotency-Key` | 新消息、引用和资源 ID | 更新当前对话 | 按需重复调用 |
+| 5 | 接口 7：继续问答 | 已保存的 `conversation_id`、新 `Idempotency-Key` | 新消息、文档引用和图片 ID | 更新当前对话 | 按需重复调用 |
 | 6 | 接口 4：会话列表 | `knowledge_id` | `conversation_id`、`next_cursor` | 选择历史会话、继续分页 | 有历史页面时调用 |
 | 7 | 接口 5：会话详情 | 接口 4 或接口 7 的 `conversation_id` | 会话元数据 | 校验和展示会话 | 可选 |
-| 8 | 接口 6：历史消息 | `conversation_id` | 消息、`next_before`、资源 ID | 恢复对话、继续分页或下载资源 | 有历史页面时调用 |
-| 9 | 接口 8/9：资源下载 | 回答或历史消息中的资源 ID | 文档/图片二进制 | 由业务后台代理给前端 | 有资源时调用 |
+| 8 | 接口 6：历史消息 | `conversation_id` | 消息、`next_before`、文档引用和图片 ID | 恢复对话、继续分页或读取图片 | 有历史页面时调用 |
+| 9 | 接口 8：读取回答图片 | 回答或历史消息中的 `image_asset_id` | 图片二进制 | 由业务后台代理给前端 | 有图片时调用 |
 
 关键传递关系：
 
-- `knowledge_id` 只能来自接口 2，后续传给接口 3、7、8、9。
+- `knowledge_id` 只能来自接口 2，后续传给接口 3、7、8。
 - `conversation_id` 来自接口 7 的 `context`/`complete` 或接口 4，后续传给接口 5、6、7。
-- `document_id` 来自 `complete.references[].document_id`、`complete.document.id` 或历史消息中的对应字段，传给接口 8。
-- `image_asset_id` 来自 `complete.content` 或历史消息的 `content_blocks`，传给接口 9。
+- `document_id` 来自 `complete.references[].document_id`、`complete.document.id` 或历史消息中的对应字段，仅用于来源关联和展示，不传给资源接口。
+- `image_asset_id` 来自 `complete.content` 或历史消息的 `content_blocks`，传给接口 8。
 - `next_cursor` 只回传给接口 4；`next_before` 只回传给接口 6。
 - `Idempotency-Key` 由业务后台生成，不来自其他接口；一次用户主动发送对应一个 Key。
 
@@ -582,10 +583,10 @@ curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/conversations/b23a568e-5d20-42f3
 | `items[].content_blocks` | object[] | 是 | 结构化内容块，常见类型为 `text`、`table`、`image`。 | 按 `type` 渲染；未知类型忽略。 |
 | `items[].content_blocks[].type` | string | 条件必有 | 内容块类型。 | `text/table` 展示文本，`image` 使用资源 ID 加载图片。 |
 | `items[].content_blocks[].text` | string/null | 否 | 文本或表格内容。 | 存在时按原顺序展示。 |
-| `items[].content_blocks[].image_asset_id` | UUID string/null | 否 | 图片资源 ID。 | 存在时调用接口 9。 |
+| `items[].content_blocks[].image_asset_id` | UUID string/null | 否 | 图片资源 ID。 | 存在时调用接口 8。 |
 | `items[].sections` | object[] | 是 | 可选的分段结构。 | 支持时分段展示，否则使用 `content`。 |
-| `items[].document` | object/null | 否 | 单文档交付信息，常用字段为 `id`、`title`。 | 使用 `id` 调用接口 8，不拼接内部地址。 |
-| `items[].references` | object[] | 是 | 回答引用列表，常用字段为 `document_id`、`title`。 | 显示标题；存在 `document_id` 时可调用接口 8。 |
+| `items[].document` | object/null | 否 | 单文档交付信息，常用字段为 `id`、`title`。 | 展示文档归属；不得使用 `id` 拼接下载地址。 |
+| `items[].references` | object[] | 是 | 回答引用列表，常用字段为 `document_id`、`title`。 | 展示来源标题；不提供原文下载操作。 |
 | `items[].clarification` | object/null | 否 | 需要用户补充信息时的结构化内容。 | 根据内容生成补充提问交互。 |
 | `items[].escalation` | object/null | 否 | 建议转人工或升级处理的信息。 | 交给业务侧人工流程。 |
 | `items[].disclaimer` | string/null | 否 | 回答附加提示。 | 在回答附近展示。 |
@@ -733,13 +734,13 @@ SSE 事件关系：
 | `content` | object[] | 是 | 结构化内容块，常见类型为 `text`、`table`、`image`。 | 按数组顺序和 `type` 渲染。 |
 | `content[].type` | string | 条件必有 | 内容块类型。 | `text/table` 展示文本，`image` 加载图片；未知类型忽略。 |
 | `content[].text` | string/null | 否 | 文本或表格内容。 | 存在时原样展示。 |
-| `content[].image_asset_id` | UUID string/null | 否 | 图片资源 ID。 | 存在时调用接口 9。 |
+| `content[].image_asset_id` | UUID string/null | 否 | 图片资源 ID。 | 存在时调用接口 8。 |
 | `content[].source_id` | string/null | 否 | 内容块对应的引用标识。 | 可用于关联引用，不用于拼接下载地址。 |
 | `sections` | object[] | 是 | 分段回答结构，可能为空。 | 支持时分段展示，否则使用 `answer`。 |
-| `document` | object/null | 否 | 单文档交付信息，常用字段为 `id`、`title`。 | 使用 `document.id` 调用接口 8。 |
-| `references` | object[] | 是 | 回答引用列表。 | 展示引用；包含 `document_id` 时可下载。 |
-| `references[].document_id` | UUID string | 条件必有 | 被引用文档 ID。 | 与当前 `knowledge_id` 一起传给接口 8。 |
-| `references[].title` | string | 否 | 被引用文档标题。 | 用于展示下载入口名称。 |
+| `document` | object/null | 否 | 单文档交付信息，常用字段为 `id`、`title`。 | 展示文档归属；不得使用 `id` 拼接下载地址。 |
+| `references` | object[] | 是 | 回答引用列表。 | 展示来源，不提供原文下载操作。 |
+| `references[].document_id` | UUID string | 条件必有 | 被引用文档 ID。 | 用于业务侧来源关联，不传给资源接口。 |
+| `references[].title` | string | 否 | 被引用文档标题。 | 作为普通文本展示；回答正文中的 `**《标题》**` 按 Markdown 加粗。 |
 | `clarification` | object/null | 否 | 需要用户补充信息时的内容。 | 转换为补充提问交互。 |
 | `escalation` | object/null | 否 | 转人工或升级处理信息。 | 对接业务侧人工流程。 |
 | `disclaimer` | string/null | 否 | 附加提示。 | 在回答附近展示。 |
@@ -792,70 +793,9 @@ data: {"code":"TURN_DEADLINE_EXCEEDED","message":"服务繁忙，请稍后重试
 
 ---
 
-### 6.8 接口 8：下载引用文档
+### 6.8 接口 8：读取回答图片
 
-接口名称：下载引用文档
-
-接口用途：根据回答或历史消息中的 `document_id` 获取原始文档内容。
-
-method：`GET`
-
-url：`{BASE_URL}/api/v1/assistant/knowledge-bases/{knowledge_id}/documents/{document_id}/content`
-
-请求参数：
-
-| 位置 | 参数 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| Path | `knowledge_id` | 是 | 当前会话所属知识库 UUID。 |
-| Path | `document_id` | 是 | `complete.references[].document_id`、`complete.document.id` 或历史消息返回的文档 UUID。 |
-
-请求示例：
-
-```bash
-curl -fS "${SHIPDEMO_BASE_URL}/api/v1/assistant/knowledge-bases/5ae9881a-a568-436b-9330-2da5e9a2a9c9/documents/79271b06-cf5e-4c6c-aea9-c8b48f803543/content" \
-  -H "Authorization: Bearer ${SHIPDEMO_ASSISTANT_TOKEN}" \
-  -H "X-External-User-ID: user-12345" \
-  --output document.bin
-```
-
-成功响应示例：
-
-```http
-HTTP/1.1 200 OK
-Content-Type: application/pdf
-Content-Length: 245760
-Content-Disposition: attachment; filename="document.pdf"; filename*=UTF-8''document.pdf
-
-[binary body]
-```
-
-响应字段说明：
-
-| 响应项 | 类型 | 是否必有 | 说明 | 调用方处理 |
-| --- | --- | --- | --- | --- |
-| Body | binary stream | 是 | 原始文档二进制内容。 | 边读边转发，不完整加载到内存。 |
-| `Content-Type` | Header | 是 | 文档 MIME 类型；无法识别时为 `application/octet-stream`。 | 原样转发给前端。 |
-| `Content-Length` | Header | 否 | 文档字节数；无法取得时可能缺失。 | 有值时原样转发并用于进度展示。 |
-| `Content-Disposition` | Header | 是 | `attachment` 及安全编码后的文件名。 | 原样转发，使浏览器按附件下载。 |
-| `Cache-Control` | Header | 是 | 私有短时缓存策略。 | 不得改成公共缓存。 |
-| `X-Content-Type-Options` | Header | 是 | 固定为 `nosniff`。 | 原样转发。 |
-
-失败响应示例：
-
-```http
-HTTP/1.1 404 Not Found
-Content-Type: application/json
-
-{"error":{"code":"DOCUMENT_NOT_FOUND","message":"文档不存在","details":{},"request_id":"..."}}
-```
-
-特殊规则：业务后台必须校验当前登录用户有权访问该知识库后再代理下载；应流式转发二进制响应及 `Content-Type`、`Content-Disposition`，并在存在时转发 `Content-Length`，不得把 Assistant Token 暴露给终端。
-
----
-
-### 6.9 接口 9：下载回答图片
-
-接口名称：下载回答图片
+接口名称：读取回答图片
 
 接口用途：根据回答内容中的 `image_asset_id` 获取图片二进制内容。
 
@@ -917,7 +857,7 @@ Content-Type: application/json
 3. 幂等控制：业务后台应保存“业务发送记录 ID、`Idempotency-Key`、请求体摘要、`conversation_id`、终态”。结果未知时复用原 Key；明确失败后由用户重新发起时使用新 Key。平台只在幂等记录保留期间保证重放：已关联请求随 Conversation 生命周期保留，未关联 Conversation 的终态请求当前从最后更新或重放起保留 7 天；超过窗口后同一 Key 可能被视为新请求，业务后台不得把平台记录当作永久消息存储。
 4. 并发控制：同一会话严格串行。首次请求使用业务后台生成的稳定 `client_chat_id` 串行化，取得 `conversation_id` 后保存 `client_chat_id → conversation_id` 映射。
 5. SSE 转发：必须使用支持流式读取和即时刷新的 HTTP 客户端及网关配置；不得缓存完整答案后一次性返回。
-6. 资源访问：文档和图片只能通过接口 8、接口 9 受控访问；禁止将对象存储地址或 Assistant Token 返回给前端。
+6. 资源访问：文档 ID 和标题只用于来源展示；图片只能通过接口 8 受控读取，禁止将对象存储地址或 Assistant Token 返回给前端。
 7. 日志脱敏：可以记录 `X-Request-ID`、`Idempotency-Key`、状态码和耗时；不得记录 Token、完整问题、完整回答或文档二进制内容。
 8. 兼容性：未知 JSON 字段和未知非终止 SSE 事件应忽略；已声明字段类型变化、终止事件缺失或响应无法解析时应告警。
 
@@ -927,7 +867,7 @@ Content-Type: application/json
 | --- | --- |
 | Chat SSE 长连接 | Chat 使用独立连接池；连接池容量至少覆盖允许的最大并发，并预留突发余量。 |
 | 元数据请求 | 知识库、会话和历史查询使用独立小连接池，避免被 Chat 长连接占满。 |
-| 图片和文档下载 | 使用独立并发及带宽限制，全程流式转发，禁止先完整读入内存。 |
+| 图片读取 | 使用独立并发及带宽限制，全程流式转发，禁止先完整读入内存。 |
 | 重试流量 | 仅对短暂故障有限重试；问答结果未知时复用原 Key，避免重复生成放大压力。 |
 
 活跃 Chat 流可按“峰值发起速率 × 平均完整回答时间”估算。例如峰值 2 次/秒、平均 20 秒，平均约有 40 条活跃流；还需为突发流量预留连接、文件描述符和内存余量。该估算不是容量承诺。
@@ -958,5 +898,5 @@ Content-Type: application/json
 - 能正确处理 HTTP JSON 错误、SSE `complete`、SSE `error`、心跳、断流和幂等重放。
 - 同一会话不会并发发送，重复点击不会产生重复问答。
 - 会话列表、详情和历史消息均按当前用户隔离。
-- 图片和文档经业务后台代理可下载，响应类型和长度正确，前端不可见 Assistant Token。
+- 图片经业务后台代理可读取，响应类型和长度正确，前端不可见 Assistant Token；文档来源不显示下载入口。
 - 日志中无 Token、完整问答正文和资源内容。

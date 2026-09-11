@@ -50,6 +50,25 @@ class _ProfileContextRepositoryStub:
         return self.context
 
 
+class _DocumentRenameServiceStub:
+    def __init__(self) -> None:
+        self.call: tuple[UUID, str] | None = None
+
+    async def rename_document(self, document_id: UUID, display_name: str) -> dict[str, Any]:
+        self.call = (document_id, display_name)
+        return {
+            "id": document_id,
+            "knowledge_id": uuid4(),
+            "filename": "source.docx",
+            "display_name": display_name,
+            "file_hash": "a" * 64,
+            "file_size": 123,
+            "status": "STORED",
+            "created_at": "2026-09-11T00:00:00Z",
+            "updated_at": "2026-09-11T01:00:00Z",
+        }
+
+
 def test_liveness_returns_request_id(client: TestClient) -> None:
     response = client.get("/health/live", headers={"X-Request-ID": "test-request"})
 
@@ -79,6 +98,24 @@ def test_service_api_accepts_configured_token(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json()["environment"] == "test"
+
+
+def test_update_document_uses_ingestion_service(client: TestClient) -> None:
+    document_id = uuid4()
+    service = _DocumentRenameServiceStub()
+    client.app.dependency_overrides[get_ingestion_service] = lambda: service
+    try:
+        response = client.patch(
+            f"/api/v1/documents/{document_id}",
+            headers={"Authorization": "Bearer test-token"},
+            json={"display_name": "升级操作手册"},
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_ingestion_service, None)
+
+    assert response.status_code == 200
+    assert response.json()["display_name"] == "升级操作手册"
+    assert service.call == (document_id, "升级操作手册")
 
 
 def test_readiness_is_bounded_when_dependencies_are_offline(client: TestClient) -> None:

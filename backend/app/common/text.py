@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
+from functools import partial
 
 # CJK Unified Ideographs + Extension A, common CJK punctuation and fullwidth forms
 _CJK_PATTERN = re.compile("[\u2e80-\u9fff\u3000-\u303f\uff00-\uffef\U00020000-\U0002a6df]")
+_MARKDOWN_INLINE_SPECIAL = re.compile(r"([\\`*_{}\[\]<>#+\-.!|])")
 
 _MOJIBAKE_MARKERS = (
     "锟斤拷",
@@ -57,3 +60,37 @@ def estimate_tokens(text: str) -> int:
     cjk_count = len(_CJK_PATTERN.findall(text))
     other_count = len(text) - cjk_count
     return max(1, math.ceil(cjk_count + other_count / 4))
+
+
+def markdown_document_title(title: str) -> str:
+    """Render an untrusted document title as a bold Markdown label."""
+    escaped = _MARKDOWN_INLINE_SPECIAL.sub(r"\\\1", title.strip())
+    return f"**《{escaped}》**"
+
+
+def _emphasized_title_replacement(match: re.Match[str], *, source: str, rendered: str) -> str:
+    before = source[match.start() - 1] if match.start() else ""
+    after = source[match.end()] if match.end() < len(source) else ""
+    leading = (
+        ""
+        if not before or before.isspace() or unicodedata.category(before).startswith("P")
+        else " "
+    )
+    trailing = (
+        "" if not after or after.isspace() or unicodedata.category(after).startswith("P") else " "
+    )
+    return leading + rendered + trailing
+
+
+def emphasize_document_title_mentions(text: str, titles: list[str]) -> str:
+    """Bold exact 《title》 mentions without touching already formatted labels."""
+    result = text
+    for title in sorted({item.strip() for item in titles if item.strip()}, key=len, reverse=True):
+        label = f"《{title}》"
+        rendered = markdown_document_title(title)
+        result = re.sub(
+            rf"(?<!\*\*){re.escape(label)}(?!\*\*)",
+            partial(_emphasized_title_replacement, source=result, rendered=rendered),
+            result,
+        )
+    return result

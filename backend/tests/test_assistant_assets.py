@@ -77,6 +77,17 @@ def test_attachment_disposition_never_contains_control_characters() -> None:
     assert value.startswith('attachment; filename="')
 
 
+def test_assistant_document_download_route_is_not_registered(client: Any) -> None:
+    response = client.get(
+        "/api/v1/assistant/knowledge-bases/"
+        "a2eb2c52-2228-4c7f-baa5-ef06f4e26b7d/documents/"
+        "e36e1b1c-52a4-4686-9274-b5a675527869/content",
+        headers={"X-External-User-ID": "user-1"},
+    )
+
+    assert response.status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_assistant_asset_response_streams_chunks_and_releases_connection(
     monkeypatch: pytest.MonkeyPatch,

@@ -1062,29 +1062,6 @@ class GatewayRepository:
                 },
             )
 
-    async def assistant_document(self, *, knowledge_id: UUID, document_id: UUID) -> dict[str, Any]:
-        async with self.engine.connect() as connection:
-            result = await connection.execute(
-                text(
-                    """
-                    SELECT d.id, d.kb_id, d.display_name, d.filename,
-                           d.minio_bucket, d.minio_object_key, d.mime_type, d.file_size
-                    FROM document_source d
-                    JOIN knowledge_base kb ON kb.id = d.kb_id
-                    WHERE d.id = :document_id
-                      AND d.kb_id = :knowledge_id
-                      AND d.status = 'STORED'
-                      AND kb.status = 'ENABLED'
-                      AND kb.assistant_online
-                    """
-                ),
-                {"document_id": document_id, "knowledge_id": knowledge_id},
-            )
-            row = result.mappings().one_or_none()
-            if row is None:
-                raise ApiError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
-            return dict(row)
-
     async def assistant_image_asset(
         self, *, knowledge_id: UUID, image_asset_id: UUID
     ) -> dict[str, Any]:

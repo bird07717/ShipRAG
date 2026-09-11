@@ -1050,6 +1050,7 @@ async def test_support_service_delivers_complete_document_without_llm() -> None:
     )
 
     assert response["response_type"] == "DOCUMENT_DELIVERED"
+    assert response["answer"] == f"【已提供文档】\n\n**《{document.title}》**"
     ChatResponse.model_validate(response)
     assert response["routing"] == {
         "method": "PROBLEM_CODE",

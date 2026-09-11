@@ -441,6 +441,13 @@ onMounted(async () => {
               </div>
               <div class="bubble ai-bubble">
                 <template v-if="msg.content">
+                  <!-- eslint-disable vue/no-v-html -- DOMPurify 消毒后的 Markdown 输出 -->
+                  <div
+                    v-if="(msg.response_type === 'DOC_DELIVERED' || msg.response_type === 'DOCUMENT_DELIVERED') && msg.text"
+                    class="text-block document-title-answer"
+                    v-html="renderMarkdown(msg.text)"
+                  ></div>
+                  <!-- eslint-enable vue/no-v-html -->
                   <div
                     v-for="(block, i) in msg.content"
                     :key="`${msg.id}-${i}`"

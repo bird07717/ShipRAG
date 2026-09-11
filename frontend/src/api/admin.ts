@@ -107,6 +107,11 @@ export const adminApi = {
     ),
   listDocuments: (knowledgeId: string) =>
     apiRequest<DocumentItem[]>(`/knowledge-bases/${knowledgeId}/documents`),
+  renameDocument: (documentId: string, displayName: string) =>
+    apiRequest<DocumentItem>(`/documents/${documentId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ display_name: displayName }),
+    }),
   deleteDocument: (documentId: string) =>
     apiRequest<DocumentDeleteResult>(`/documents/${documentId}?request_build=true`, {
       method: "DELETE",

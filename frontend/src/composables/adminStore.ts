@@ -596,6 +596,31 @@ export const adminStore = reactive({
     if (!this.error) this.uploadDrawerOpen = false;
   },
 
+  async renameDocument(document: DocumentItem): Promise<void> {
+    let displayName = "";
+    try {
+      const result = await ElMessageBox.prompt("修改文档在知识库和后续回答中显示的名称。", "重命名文档", {
+        confirmButtonText: "保存",
+        cancelButtonText: "取消",
+        inputValue: document.display_name,
+        inputPlaceholder: "请输入文档名称",
+        inputValidator: (value) => {
+          const normalized = value.trim();
+          if (!normalized) return "文档名称不能为空";
+          return normalized.length <= 500 || "文档名称不能超过 500 个字符";
+        },
+      });
+      displayName = String(result.value ?? "").trim();
+    } catch {
+      return;
+    }
+    await this.run(async () => {
+      const updated = await adminApi.renameDocument(document.id, displayName);
+      this.documents = this.documents.map((item) => (item.id === updated.id ? updated : item));
+      if (this.selectedDocument?.id === updated.id) this.selectedDocument = updated;
+    }, "文档名称已更新；后续回答立即生效，无需重建索引");
+  },
+
   async deleteDocument(document: DocumentItem): Promise<void> {
     try {
       await ElMessageBox.confirm(

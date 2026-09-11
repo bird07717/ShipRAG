@@ -653,6 +653,20 @@ class IngestionRepository:
             if duplicate.scalar_one_or_none() is not None:
                 raise ApiError("DUPLICATE_DOCUMENT", "知识库中已存在相同文档", 409)
 
+            duplicate_name = await connection.execute(
+                text(
+                    """
+                    SELECT id FROM document_source
+                    WHERE kb_id = :kb_id AND status = 'STORED'
+                      AND lower(display_name) = lower(:display_name)
+                    LIMIT 1
+                    """
+                ),
+                {"kb_id": knowledge_id, "display_name": display_name},
+            )
+            if duplicate_name.scalar_one_or_none() is not None:
+                raise ApiError("DOCUMENT_NAME_CONFLICT", "知识库中已存在同名文档", 409)
+
             document_result = await connection.execute(
                 text(
                     """
@@ -1215,6 +1229,61 @@ class IngestionRepository:
         if row is None:
             raise ApiError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
         return self._document_response(dict(row))
+
+    async def rename_document(self, document_id: UUID, display_name: str) -> dict[str, Any]:
+        async with self.engine.begin() as connection:
+            document_result = await connection.execute(
+                text("SELECT kb_id FROM document_source WHERE id = :id AND status = 'STORED'"),
+                {"id": document_id},
+            )
+            knowledge_id = document_result.scalar_one_or_none()
+            if knowledge_id is None:
+                raise ApiError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
+
+            knowledge_result = await connection.execute(
+                text("SELECT status FROM knowledge_base WHERE id = :id FOR UPDATE"),
+                {"id": knowledge_id},
+            )
+            knowledge_status = knowledge_result.scalar_one_or_none()
+            if knowledge_status != "ENABLED":
+                raise ApiError("FORBIDDEN", "知识库已停用", 403)
+
+            locked_document = await connection.execute(
+                text(
+                    "SELECT id FROM document_source "
+                    "WHERE id = :id AND kb_id = :kb_id AND status = 'STORED' FOR UPDATE"
+                ),
+                {"id": document_id, "kb_id": knowledge_id},
+            )
+            if locked_document.scalar_one_or_none() is None:
+                raise ApiError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
+
+            duplicate = await connection.execute(
+                text(
+                    """
+                    SELECT id FROM document_source
+                    WHERE kb_id = :kb_id AND status = 'STORED' AND id <> :id
+                      AND lower(display_name) = lower(:display_name)
+                    LIMIT 1
+                    """
+                ),
+                {"id": document_id, "kb_id": knowledge_id, "display_name": display_name},
+            )
+            if duplicate.scalar_one_or_none() is not None:
+                raise ApiError("DOCUMENT_NAME_CONFLICT", "知识库中已存在同名文档", 409)
+
+            updated = await connection.execute(
+                text(
+                    """
+                    UPDATE document_source
+                    SET display_name = :display_name, updated_at = now()
+                    WHERE id = :id
+                    RETURNING *
+                    """
+                ),
+                {"id": document_id, "display_name": display_name},
+            )
+            return self._document_response(dict(updated.mappings().one()))
 
     async def get_index(self, index_id: UUID) -> dict[str, Any]:
         async with self.engine.connect() as connection:

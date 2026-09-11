@@ -297,19 +297,6 @@ async def _asset_response(
     )
 
 
-@router.get("/knowledge-bases/{knowledge_id}/documents/{document_id}/content")
-async def document_content(
-    knowledge_id: UUID,
-    document_id: UUID,
-    repository: Annotated[GatewayRepository, Depends(get_gateway_repository)],
-    resources: Annotated[AppResources, Depends(get_resources)],
-) -> StreamingResponse:
-    asset = await repository.assistant_document(knowledge_id=knowledge_id, document_id=document_id)
-    return await _asset_response(
-        resources, asset, filename=str(asset.get("filename") or asset["display_name"])
-    )
-
-
 @router.get("/knowledge-bases/{knowledge_id}/image-assets/{image_asset_id}/content")
 async def image_content(
     knowledge_id: UUID,

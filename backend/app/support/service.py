@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from app.common.errors import ApiError
+from app.common.text import emphasize_document_title_mentions, markdown_document_title
 from app.core.config import Settings
 from app.rag.llm import LlmError, create_llm_provider
 from app.rag.models import RetrievalConfig
@@ -177,7 +178,7 @@ class TechnicalSupportService:
         response.update(
             {
                 "response_type": "DOCUMENT_DELIVERED",
-                "answer": f"【已提供文档】《{document.title}》",
+                "answer": "【已提供文档】\n\n" + markdown_document_title(document.title),
                 "document": {
                     "id": str(document.id),
                     "problem_code": profile.problem_code if profile else None,
@@ -821,7 +822,7 @@ class TechnicalSupportService:
                         if draft.escalation.required
                         else "ANSWERED",
                         "support_mode": draft.mode.value,
-                        "answer": draft.answer,
+                        "answer": emphasize_document_title_mentions(draft.answer, [document.title]),
                         "sections": [section.model_dump(mode="json") for section in draft.sections],
                         "images": selected_images,
                         "document": {

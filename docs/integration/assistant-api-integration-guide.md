@@ -36,7 +36,7 @@ Android / iOS
 
 - `/api/v1/assistant/*` 使用独立 Assistant Token 认证，与管理端 `SERVICE_TOKEN` 分离。
 - 所有 Assistant API 都要求 `X-External-User-ID`。
-- 已提供知识库、欢迎信息、会话列表、会话详情、历史消息、SSE 问答、文档和图片资源接口。
+- 已提供知识库、欢迎信息、会话列表、会话详情、历史消息、SSE 问答和图片资源接口；不提供原始文档下载接口。
 - 问答请求严格拒绝模型、Prompt、回答策略和执行链路等未定义字段。
 - 新会话随首条消息创建；会话按 `X-External-User-ID` 和知识库隔离。
 - 已实现 SSE `accepted/progress/context/delta/complete/error` 事件和 15 秒空闲心跳。
@@ -804,25 +804,7 @@ Conversation 生命周期保留；未关联 Conversation 的终态请求按
 超过窗口后再次提交同一 Key 可能被视为新请求，因此业务后台应在窗口内处理结果未知的
 重试，并长期保存自身业务终态，不能把平台幂等记录当作永久消息存储。
 
-## 21. 文档下载
-
-### 请求
-
-```http
-GET {AI_BASE_URL}/api/v1/assistant/knowledge-bases/{knowledge_id}/documents/{document_id}/content
-```
-
-业务后台必须代理二进制响应，并向移动端提供业务后台自己的受认证下载地址或下载响应。
-
-要求：
-
-- 不把 Assistant Token 放入下载 URL。
-- 不把 AI 平台内网地址返回给移动端。
-- 保留 Content-Type、文件名和长度。
-- 上游在完整对象响应中返回 `Content-Length`；业务后台应直接转发，不得为计算长度而把整文件读入内存。
-- 下载前验证业务用户仍然登录。
-
-## 22. 图片加载
+## 21. 图片加载
 
 ### 请求
 
@@ -832,7 +814,7 @@ GET {AI_BASE_URL}/api/v1/assistant/knowledge-bases/{knowledge_id}/image-assets/{
 
 业务后台向移动端代理图片内容。缓存策略由业务后台依据安全要求决定。
 
-## 23. Markdown 和内容安全
+## 22. Markdown 和内容安全
 
 `answer` 和文本 Content Block 使用 Markdown。
 
@@ -842,12 +824,13 @@ Android/iOS 必须：
 - 禁止脚本和危险 URL Scheme。
 - 对链接执行白名单处理。
 - 支持段落、列表、标题、代码块、引用和表格。
+- 将回答正文中的 `**《文档标题》**` 按 Markdown 加粗显示；结构化 `document.title` 和 `references[].title` 保持普通文本处理。
 - 不把 Markdown 作为未经消毒的 HTML 直接插入页面。
 - 通过结构化 `image_asset_id` 加载图片。
 
 移动端统一显示“智能回答助手”，不显示模型名称或平台内部执行方式。
 
-## 24. 接入建议：超时设置
+## 23. 接入建议：超时设置
 
 本节数值是业务后台和代理层的接入建议，不是当前 AI 平台对调用方技术栈的已确认配置。
 建议配置：
@@ -863,7 +846,7 @@ Android/iOS 必须：
 
 收到 delta 后发生超时或断开时，不能自动使用新 Idempotency-Key 重发。应使用原 Key对账或由用户明确发起重试。
 
-## 25. 错误处理
+## 24. 错误处理
 
 | HTTP/事件 | 错误码 | 业务后台处理 |
 |---|---|---|
@@ -883,7 +866,7 @@ Android/iOS 必须：
 
 HTTP 404/409 等前置错误发生在 `accepted` 之前；收到 `accepted` 后，调用方只按 SSE 终态处理本轮结果。
 
-## 26. 日志和排障
+## 25. 日志和排障
 
 业务后台每次 AI 调用应记录：
 
@@ -910,9 +893,9 @@ error code
 
 移动端错误反馈至少提供可复制的 `request_id`。AI 平台管理人员可以使用 `request_id` 或 `trace_id` 定位完整执行记录。
 
-## 27. 接入验收清单
+## 26. 接入验收清单
 
-### 27.1 身份和安全
+### 26.1 身份和安全
 
 - [ ] Android/iOS 不包含 Assistant Token。
 - [ ] Android/iOS 不直接访问 AI 平台地址。
@@ -922,9 +905,9 @@ error code
 - [ ] 缺失、错误以及误用管理 Token 调用 Assistant API 均返回 HTTP 401。
 - [ ] external user ID 由业务后台生成，移动端不能覆盖。
 - [ ] 不同用户不能访问彼此 Conversation。
-- [ ] 资源下载经过业务后台认证代理。
+- [ ] 页面不展示文档下载入口，也不根据 `document_id` 拼接下载地址；图片经过业务后台认证代理。
 
-### 27.2 AI 配置透明性
+### 26.2 AI 配置透明性
 
 - [ ] 移动端没有模型选择入口。
 - [ ] 移动端没有回答策略选择入口。
@@ -933,7 +916,7 @@ error code
 - [ ] 回答页面不显示平台内部执行方式。
 - [ ] AI 平台调整模型或回答策略时，业务后台不需要修改接口代码。
 
-### 27.3 会话和历史
+### 26.3 会话和历史
 
 - [ ] 用户可以选择知识库。
 - [ ] 不同知识库的历史互相隔离。
@@ -942,7 +925,7 @@ error code
 - [ ] 最近 7 天列表和分页正确。
 - [ ] FAILED/CANCELLED 可以恢复并展示。
 
-### 27.4 Streaming
+### 26.4 Streaming
 
 - [ ] delta 实时到达移动端。
 - [ ] 代理不会缓冲完整回答。
@@ -951,7 +934,7 @@ error code
 - [ ] complete 可以校正累计 delta。
 - [ ] 每个流只有一个终态事件。
 
-### 27.5 Stop、幂等和异常
+### 26.5 Stop、幂等和异常
 
 - [ ] 用户 Stop 会取消 AI 上游请求。
 - [ ] App 切后台和网络断开不会产生重复回答。
@@ -960,9 +943,9 @@ error code
 - [ ] 用户明确重试时使用新 Key。
 - [ ] request_id 可以在 AI 平台定位对应 Trace。
 
-## 28. 当前代码依据与交接确认
+## 27. 当前代码依据与交接确认
 
-### 28.1 代码依据
+### 27.1 代码依据
 
 | 契约内容 | 当前项目代码依据 |
 |---|---|
@@ -977,7 +960,7 @@ error code
 | Nginx SSE 代理和缓冲设置 | `infra/nginx/default.conf` |
 | 7 天会话及 Trace 生命周期 | `backend/app/core/config.py`、`backend/app/tasks/gc.py` |
 
-### 28.2 联调前必须交付的值
+### 27.2 联调前必须交付的值
 
 AI 平台团队在联调前只需向业务后台安全交付或开放以下内容：
 
@@ -987,7 +970,7 @@ AI 平台团队在联调前只需向业务后台安全交付或开放以下内�
 
 `knowledge_id` 不作为静态秘密交付。业务后台使用知识库列表接口获取当前可用值。
 
-### 28.3 交接结论
+### 27.3 交接结论
 
 当前 AI 平台端接口能力已实现，业务后台可以按照本文档开始开发和联调。对业务后台、
 Android 和 iOS 内部技术实现的描述仅属于接口要求或建议；除第 1.2 节列出的平台能力外，

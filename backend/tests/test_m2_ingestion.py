@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.api.schemas import IndexBuildRequest
 from app.common.assets import reject_control_characters
 from app.common.errors import ApiError
+from app.common.text import emphasize_document_title_mentions, markdown_document_title
 from app.core.config import Settings
 from app.ingestion.chunker import build_chunks, build_parent_chunks
 from app.ingestion.embedding import FakeEmbeddingProvider, SiliconFlowEmbeddingProvider
@@ -440,6 +442,15 @@ class _FakeDeleteRepository:
         )
 
 
+class _FakeRenameRepository:
+    def __init__(self) -> None:
+        self.call: tuple[UUID, str] | None = None
+
+    async def rename_document(self, document_id: UUID, display_name: str) -> dict[str, Any]:
+        self.call = (document_id, display_name)
+        return {"id": str(document_id), "display_name": display_name}
+
+
 class _FakeKnowledgeDeleteRepository:
     def __init__(self) -> None:
         self.knowledge_id = uuid4()
@@ -489,15 +500,24 @@ class _RepositoryResult:
         *,
         row: dict[str, Any] | None = None,
         rows: list[dict[str, Any]] | None = None,
+        scalar: Any = None,
     ) -> None:
         self.row = row
         self.rows = rows or []
+        self.scalar = scalar
 
     def mappings(self) -> _RepositoryResult:
         return self
 
     def one_or_none(self) -> dict[str, Any] | None:
         return self.row
+
+    def one(self) -> dict[str, Any]:
+        assert self.row is not None
+        return self.row
+
+    def scalar_one_or_none(self) -> Any:
+        return self.scalar
 
     def __iter__(self) -> Any:
         return iter(self.rows)
@@ -652,6 +672,49 @@ async def test_delete_service_returns_soft_delete_result_without_build() -> None
 
 
 @pytest.mark.asyncio
+async def test_rename_document_normalizes_name_without_rebuilding() -> None:
+    repository = _FakeRenameRepository()
+    service = IngestionService(
+        cast(IngestionRepository, repository),
+        cast(Any, _FakeMinio()),
+        Settings(_env_file=None, app_env="test"),
+    )
+    document_id = uuid4()
+
+    response = await service.rename_document(document_id, "  升级操作手册  ")
+
+    assert repository.call == (document_id, "升级操作手册")
+    assert response == {"id": str(document_id), "display_name": "升级操作手册"}
+
+
+@pytest.mark.asyncio
+async def test_rename_document_rejects_blank_or_control_characters() -> None:
+    repository = _FakeRenameRepository()
+    service = IngestionService(
+        cast(IngestionRepository, repository),
+        cast(Any, _FakeMinio()),
+        Settings(_env_file=None, app_env="test"),
+    )
+
+    for name in ("   ", "bad\nname"):
+        with pytest.raises(ApiError) as raised:
+            await service.rename_document(uuid4(), name)
+        assert raised.value.code == "VALIDATION_ERROR"
+    assert repository.call is None
+
+
+def test_markdown_document_title_is_bold_and_escapes_untrusted_markup() -> None:
+    assert markdown_document_title("升级手册") == "**《升级手册》**"
+    assert markdown_document_title("a*b_[c]") == r"**《a\*b\_\[c\]》**"
+    assert (
+        emphasize_document_title_mentions(
+            "请查看《升级手册》，已有 **《升级手册》** 不重复处理。", ["升级手册"]
+        )
+        == "请查看 **《升级手册》**，已有 **《升级手册》** 不重复处理。"
+    )
+
+
+@pytest.mark.asyncio
 async def test_knowledge_base_delete_worker_removes_storage_before_database_purge() -> None:
     repository = _FakeKnowledgeDeleteRepository()
     minio = _RecordingMinio()
@@ -768,6 +831,68 @@ async def test_delete_knowledge_base_repository_rejects_an_active_build() -> Non
     assert raised.value.code == "KNOWLEDGE_BASE_BUILD_IN_PROGRESS"
     assert raised.value.status_code == 409
     assert len(engine.connection.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_rename_document_updates_only_display_metadata() -> None:
+    knowledge_id = uuid4()
+    document_id = uuid4()
+    now = datetime.now(UTC)
+    engine = _RepositoryEngine(
+        [
+            _RepositoryResult(scalar=knowledge_id),
+            _RepositoryResult(scalar="ENABLED"),
+            _RepositoryResult(scalar=document_id),
+            _RepositoryResult(scalar=None),
+            _RepositoryResult(
+                row={
+                    "id": document_id,
+                    "kb_id": knowledge_id,
+                    "filename": "source.docx",
+                    "display_name": "新名称",
+                    "file_hash": "a" * 64,
+                    "file_size": 123,
+                    "status": "STORED",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            ),
+        ]
+    )
+    repository = IngestionRepository(
+        cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
+    )
+
+    response = await repository.rename_document(document_id, "新名称")
+
+    assert response["display_name"] == "新名称"
+    sql = "\n".join(engine.connection.executed)
+    assert "SET display_name = :display_name" in sql
+    assert "knowledge_index" not in sql
+    assert "document_chunk" not in sql
+
+
+@pytest.mark.asyncio
+async def test_rename_document_rejects_duplicate_name_in_knowledge_base() -> None:
+    knowledge_id = uuid4()
+    document_id = uuid4()
+    engine = _RepositoryEngine(
+        [
+            _RepositoryResult(scalar=knowledge_id),
+            _RepositoryResult(scalar="ENABLED"),
+            _RepositoryResult(scalar=document_id),
+            _RepositoryResult(scalar=uuid4()),
+        ]
+    )
+    repository = IngestionRepository(
+        cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
+    )
+
+    with pytest.raises(ApiError) as raised:
+        await repository.rename_document(document_id, "已有名称")
+
+    assert raised.value.code == "DOCUMENT_NAME_CONFLICT"
+    assert all("UPDATE document_source" not in sql for sql in engine.connection.executed)
 
 
 def test_image_chunk_search_text_excludes_caption() -> None:
