@@ -38,6 +38,8 @@ class Turn:
     prompt_template: str
     llm: ModelSnapshot
     history: list[dict[str, str]]
+    history_diagnostics: dict[str, Any] = field(default_factory=dict)
+    has_prior_messages: bool = False
     rerank: ModelSnapshot | None = None
     # Enabled EMBEDDING row snapshot at turn start.  Query-side embedding
     # prefers it when it matches the active index; None falls back to env.

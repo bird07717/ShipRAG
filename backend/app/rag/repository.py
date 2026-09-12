@@ -286,7 +286,18 @@ class RagRepository:
                     "assistant_message_id": assistant_message_id,
                 },
             )
-            history = self._budget_history([dict(row) for row in history_result.mappings()])
+            history_rows = [dict(row) for row in history_result.mappings()]
+            history = self._budget_history(history_rows)
+            history_diagnostics: dict[str, Any] = {"strategy": "legacy"}
+            if self.settings.m3_history_strategy == "focused":
+                history, history_diagnostics = await self._focused_history(
+                    connection,
+                    resolved_conversation_id,
+                    focus_epoch,
+                    assistant_message_id if reuse_messages else None,
+                    focus_document_id=focus_document_id,
+                    index_id=effective_index_id,
+                )
 
             prompt_result = await connection.execute(
                 text("SELECT content FROM prompt_template WHERE active")
@@ -390,6 +401,7 @@ class RagRepository:
 
             runtime_snapshot = {
                 "schema_version": 1,
+                "history": history_diagnostics,
                 "engine": "RAG",
                 "index": {
                     "id": str(effective_index_id),
@@ -449,11 +461,12 @@ class RagRepository:
                         UPDATE message
                         SET content = '', sources = '[]'::jsonb,
                             content_blocks = '[]'::jsonb, response_type = NULL,
-                            support_mode = NULL, status = 'STREAMING', updated_at = now()
+                            support_mode = NULL, status = 'STREAMING', updated_at = now(),
+                            rag_user_message_id = :user_message_id
                         WHERE id = :assistant_id
                         """
                     ),
-                    {"assistant_id": assistant_message_id},
+                    {"assistant_id": assistant_message_id, "user_message_id": user_message_id},
                 )
             else:
                 sequence_result = await connection.execute(
@@ -470,13 +483,14 @@ class RagRepository:
                     text(
                         """
                         INSERT INTO message (
-                            id, conversation_id, sequence_no, role, content, status, focus_epoch
+                            id, conversation_id, sequence_no, role, content, status, focus_epoch,
+                            rag_user_message_id
                         ) VALUES (
                             :user_id, :conversation_id, :user_sequence,
-                            'USER', :question, 'COMPLETED', :focus_epoch
+                            'USER', :question, 'COMPLETED', :focus_epoch, NULL
                         ), (
                             :assistant_id, :conversation_id, :assistant_sequence,
-                            'ASSISTANT', '', 'STREAMING', :focus_epoch
+                            'ASSISTANT', '', 'STREAMING', :focus_epoch, :user_id
                         )
                         """
                     ),
@@ -553,6 +567,8 @@ class RagRepository:
                 api_key=self._decrypt_api_key(dict(llm_row)),
             ),
             history=history,
+            history_diagnostics=history_diagnostics,
+            has_prior_messages=bool(history_rows),
             rerank=ModelSnapshot(
                 provider=str(rerank_row["provider"]),
                 model_name=str(rerank_row["model_name"]),
@@ -568,6 +584,64 @@ class RagRepository:
             context_version=context_version,
             chat_context=chat_context,
             retrieval=retrieval,
+        )
+
+    async def _focused_history(
+        self,
+        connection: Any,
+        conversation_id: UUID,
+        focus_epoch: int,
+        excluded_message_id: UUID | None = None,
+        *,
+        focus_document_id: UUID | None = None,
+        index_id: UUID | None = None,
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        from app.rag.history import select_history
+
+        result = await connection.execute(
+            text("""
+            SELECT a.id, a.content AS answer, COALESCE(ar.status, a.status) AS status,
+                   a.focus_epoch, a.rag_history_context,
+                   (CAST(:focus_id AS uuid) IS NULL OR EXISTS (
+                       SELECT 1 FROM document_source d
+                       JOIN document_element e ON e.document_id = d.id
+                       WHERE d.id = :focus_id AND d.status = 'STORED'
+                         AND e.index_id = :index_id
+                         AND d.kb_id = (SELECT knowledge_id FROM conversation
+                                        WHERE id = :conversation_id)
+                   )) AS focus_valid,
+                   u.id AS user_id, u.content AS question, u.status AS user_status,
+                   u.focus_epoch AS user_epoch
+            FROM (
+                SELECT * FROM message
+                WHERE conversation_id = :conversation_id AND role = 'ASSISTANT'
+                  AND (CAST(:excluded AS uuid) IS NULL OR id != :excluded)
+                ORDER BY sequence_no DESC LIMIT :scan_limit
+            ) a
+            LEFT JOIN LATERAL (
+                SELECT user_message_id, status FROM assistant_request
+                WHERE assistant_message_id = a.id AND conversation_id = a.conversation_id
+                ORDER BY created_at DESC, id DESC LIMIT 1
+            ) ar ON true
+            LEFT JOIN message u
+              ON u.id = COALESCE(a.rag_user_message_id, ar.user_message_id)
+             AND u.conversation_id = a.conversation_id AND u.role = 'USER'
+             AND u.sequence_no < a.sequence_no
+            ORDER BY a.sequence_no DESC
+        """),
+            {
+                "conversation_id": conversation_id,
+                "excluded": excluded_message_id,
+                "focus_id": focus_document_id,
+                "index_id": index_id,
+                "scan_limit": max(20, self.settings.m3_history_max_messages * 4),
+            },
+        )
+        return select_history(
+            [dict(row) for row in result.mappings()],
+            focus_epoch=focus_epoch,
+            max_messages=self.settings.m3_history_max_messages,
+            token_budget=self.settings.m3_history_token_budget,
         )
 
     def _budget_history(self, messages: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -589,6 +663,29 @@ class RagRepository:
             selected.append({"role": str(item["role"]), "content": content})
         selected.reverse()
         return selected
+
+    async def get_generation_headings(
+        self, *, index_id: UUID, knowledge_id: UUID, document_ids: list[UUID]
+    ) -> dict[UUID, dict[str, Any]]:
+        """Read only the first native text element; never guess from chunk position."""
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text("""
+                SELECT d.id, COALESCE(NULLIF(d.display_name, ''), d.filename) AS title,
+                       h.id AS element_id, h.content
+                FROM document_source d
+                JOIN LATERAL (
+                    SELECT id, content FROM document_element
+                    WHERE document_id=d.id AND index_id=:index_id AND element_type='TEXT'
+                      AND content ~ '[^[:space:]]'
+                    ORDER BY sequence_no LIMIT 1
+                ) h ON true
+                WHERE d.kb_id=:knowledge_id AND d.status='STORED'
+                  AND d.id=ANY(CAST(:ids AS uuid[]))
+            """),
+                {"index_id": index_id, "knowledge_id": knowledge_id, "ids": document_ids},
+            )
+            return {row["id"]: dict(row) for row in result.mappings()}
 
     async def vector_search(
         self,
@@ -1093,6 +1190,7 @@ class RagRepository:
         expected_context_version: int | None = None,
         user_message_id: UUID | None = None,
         assistant_message_id: UUID | None = None,
+        origin_query: str | None = None,
     ) -> int:
         """Promote a delivered document through the shared state CAS."""
         async with self.engine.begin() as connection:
@@ -1130,19 +1228,33 @@ class RagRepository:
             if focus_epoch is None:
                 raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
             if user_message_id is not None and assistant_message_id is not None:
-                await connection.execute(
+                message_result = await connection.execute(
                     text(
                         """
-                        UPDATE message SET focus_epoch = :focus_epoch
-                        WHERE id IN (:user_message_id, :assistant_message_id)
+                        UPDATE message SET focus_epoch = :focus_epoch,
+                            rag_history_context = CASE WHEN role = 'ASSISTANT'
+                                THEN CASE WHEN CAST(:origin_query AS text) IS NULL
+                                    THEN '{}'::jsonb
+                                    ELSE jsonb_build_object(
+                                        'origin_query', CAST(:origin_query AS text)
+                                    ) END
+                                ELSE rag_history_context END
+                        WHERE conversation_id = :conversation_id AND (
+                            (id = :user_message_id AND role = 'USER') OR
+                            (id = :assistant_message_id AND role = 'ASSISTANT')
+                        )
                         """
                     ),
                     {
                         "focus_epoch": int(focus_epoch),
+                        "origin_query": origin_query,
+                        "conversation_id": conversation_id,
                         "user_message_id": user_message_id,
                         "assistant_message_id": assistant_message_id,
                     },
                 )
+                if message_result.rowcount != 2:
+                    raise ApiError("WORKFLOW_CONFLICT", "会话消息关联已变化，请重试", 409)
         return int(focus_epoch)
 
     async def clear_conversation_focus(self, conversation_id: UUID) -> None:

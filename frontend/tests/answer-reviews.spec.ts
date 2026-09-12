@@ -1,5 +1,6 @@
 import ElementPlus from "element-plus";
 import { flushPromises, mount } from "@vue/test-utils";
+import type { VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { adminApi } from "@/api/admin";
 import { reviewsApi } from "@/api/reviews";
@@ -29,7 +30,7 @@ function editor() {
   const wrapper = mount(AnswerReviewDetail, { props: { knowledgeId: "kb-a", requestId: "request-a" }, global: { plugins: [ElementPlus] } });
   wrappers.push(wrapper); return wrapper;
 }
-function button(wrapper: ReturnType<typeof editor>, label: string) {
+function button(wrapper: VueWrapper, label: string) {
   const found = wrapper.findAll("button").find((item) => item.text() === label);
   if (!found) throw new Error(`Missing ${label}`);
   return found;
@@ -126,6 +127,30 @@ describe("answer review workflow", () => {
     resolve({ items: [{ request_id: "a", question: "A库问题" } as AnswerRecord], total: 1 }); await flushPromises();
     expect(wrapper.text()).toContain("B库问题");
     expect(wrapper.text()).not.toContain("A库问题");
+  });
+
+  it("opens the answer detail drawer with a splitter-compatible size", async () => {
+    vi.spyOn(reviewsApi, "list").mockResolvedValue({
+      items: [{ request_id: "request-a", question: "如何检查设备" } as AnswerRecord],
+      total: 1,
+    });
+    const wrapper = mount(AnswerReviewsView, {
+      props: { knowledgeId: "kb-a" },
+      global: { plugins: [ElementPlus] },
+    });
+    wrappers.push(wrapper);
+    await flushPromises();
+
+    const drawer = wrapper.findComponent({ name: "ElDrawer" });
+    expect(drawer.props("modelValue")).toBe(false);
+    expect(drawer.props("size")).toMatch(/^\d+(?:\.\d+)?(?:px|%)$/);
+
+    await button(wrapper, "查看").trigger("click");
+    await flushPromises();
+
+    expect(drawer.props("modelValue")).toBe(true);
+    expect(wrapper.find('[role="dialog"][aria-label="Assistant 回答与优化"]').exists()).toBe(true);
+    expect(reviewsApi.detail).toHaveBeenCalledWith("kb-a", "request-a", expect.any(AbortSignal));
   });
 });
 

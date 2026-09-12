@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     m3_context_token_budget: int = 6_000
     m3_history_max_messages: int = 10
     m3_history_token_budget: int = 2_000
+    m3_history_strategy: Literal["legacy", "focused"] = "focused"
     m3_question_max_chars: int = 4_000
     m3_prompt_max_chars: int = 60_000
     m3_prompt_token_budget: int = 30_000

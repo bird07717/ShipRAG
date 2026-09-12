@@ -94,7 +94,7 @@ onBeforeUnmount(() => { version++; controller?.abort(); });
     <el-drawer
       :model-value="Boolean(selected)"
       title="Assistant 回答与优化"
-      size="min(960px, 95vw)"
+      size="960px"
       @close="selected = ''"
     >
       <AnswerReviewDetail

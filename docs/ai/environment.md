@@ -30,10 +30,11 @@ staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐�
 | `M3_RAG_SINGLE_STRONG_MODE` | `shadow` | `off` 关闭、`shadow` 只记录、`enabled` 开启单强直达。 |
 | `M3_RAG_FACT_QA_MODE` | `shadow` | 首轮明确事实问法：`off` 关闭、`shadow` 记录、`enabled` 在可靠选文档后复用 DOC_QA。完整操作请求仍交付全文。 |
 | `M3_RAG_EXPLANATION_MODE` | `enabled` | 可靠选文档后的首轮解释问答；`shadow/off` 回退原文交付，与事实短答独立，不降低选文档门槛。 |
+| `M3_HISTORY_STRATEGY` | `focused` | RAG 使用同焦点、完整轮次的历史；`legacy` 可临时回退旧历史选择。只影响 RAG，不改变 Support 自身工作流。 |
 | `M3_RAG_SINGLE_STRONG_FLOOR` | `0.85` | 单强原始最高块分数下限。 |
 | `M3_RAG_SINGLE_STRONG_GAP` | `0.18` | 相对另一文档最高块的分差下限。 |
 
-以上配置已接入两个环境示例和 Production Compose。修改生产配置需重新创建相应容器；代码更新需重建镜像。单强直达及事实短答保持 `shadow`；解释问答默认 `enabled`，可改为 `shadow/off` 回退首轮原文交付。生产采用前用目标环境的真实 Golden 及 Trace 核对质量与延迟。
+以上配置已接入两个环境示例和 Production Compose。修改生产配置需重新创建相应容器；代码更新需重建镜像。单强直达及事实短答保持 `shadow`；解释问答默认 `enabled`，可改为 `shadow/off` 回退首轮原文交付。`M3_HISTORY_STRATEGY=legacy` 是历史选择的运行时回退，不会撤销 `0045` 数据库结构，也不会恢复旧标题展示。生产采用前用目标环境的真实 Golden 及 Trace 核对质量与延迟。
 
 解析版本升级不自动重建索引；但下一次构建遇到旧版本结果会重新解析，可能产生全库 OCR/视觉/嵌入耗时和费用。DC24V 的浮动文字 DOCX 目前会被安全拦截，应先转换为可编辑正文并人工核对步骤，再构建候选索引、验收后手动激活；不得为绕过错误直接修改版本元数据。现有活动索引保持不变。
 
@@ -85,6 +86,12 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 
 - 2026-09-11 已确认目标生产服务器使用提交 `49c799a`，PostgreSQL、Redis、MinIO、后端和前端健康，两个 Worker 正常运行，数据库位于 Alembic `0041`；Assistant 鉴权、知识库、会话、真实 SSE、幂等、用户隔离以及当时仍存在的文档/图片资源代理均已完成生产验收。当前源码已删除 Assistant 原文下载接口，但该变更尚待生产部署；工作树已新增 `0042`，生产需在下一次部署执行迁移后才能使用 Assistant 重放计数和终态孤儿保留任务。生产 Golden Trace 已确认真实模型链路，不再使用 fake 查询链路。
 - 正式上线前仍需由具备 sudo 权限的管理员确认 UFW 与 `DOCKER-USER` 的实际规则，并轮换曾用于联调的临时凭据。服务器仓库通过 GitHub SSH 拉取，`cm` 账号需在交互式终端输入 SSH 私钥口令，因此服务器 `git pull` 由用户手动执行。
+
+## RAG 聚焦历史部署与验证
+
+部署本次 RAG 历史改动必须先让一次性 `migrate` 服务成功升级到 `0045`，再启动新后端和 Worker。生产 Compose 的正常命令仍为 `docker compose --env-file .env -f compose.production.yaml up -d --build --wait`；该编排会自动运行 `migrate`，后端和 Worker 只有在迁移成功后才启动。结束后检查 Compose 状态，并在后端容器中核对 `alembic current` 为 `0045 (head)`。若迁移失败，不要绕过依赖单独启动新后端，因为新代码会读取新增列。
+
+该变更无需重建文档索引。运行时回退可设置 `M3_HISTORY_STRATEGY=legacy` 后重建后端容器；数据库保持 `0045` 即可。上线前用新会话覆盖连续追问、文档切换确认、失败后重试和长历史预算；上线后检查 Trace 的 `generation.history`，应只出现消息 ID、轮次数和裁剪边界，不应出现历史正文。真实模型质量仍需按 `rag-acceptance/` 执行多轮 Golden，本次本地门禁未执行该项。
 
 
 ## 回答优化功能验证

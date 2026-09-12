@@ -457,6 +457,7 @@ class RagService:
             if (
                 self.settings.m3_rag_title_recall
                 and not turn.history
+                and not turn.has_prior_messages
                 and turn.focus_document_id is None
                 and not turn.chat_context.get("pending_options")
             ):
@@ -547,6 +548,7 @@ class RagService:
                 expanded_candidates, max_chunks=retrieval.context_max_chunks
             )
             prompt_started = time.perf_counter()
+            selected = await self._generation_candidates(turn, selected)
             prompt, retained, sources = self._fit_context_prompt(
                 selected,
                 template=turn.prompt_template,
@@ -744,16 +746,82 @@ class RagService:
     def _render_bounded_prompt(
         self, template: str, *, context: str, question: str, history: list[dict[str, str]]
     ) -> str:
-        prompt = render_prompt(
-            template,
-            context=context,
-            question=question,
-            history=history,
-            max_chars=self.settings.m3_prompt_max_chars,
-        )
-        if estimate_tokens(prompt) > self.settings.m3_prompt_token_budget:
-            raise ApiError("PROMPT_TOO_LARGE", "Prompt 超出服务端预算", 422)
-        return prompt
+        retained = list(history)
+        while True:
+            try:
+                prompt = render_prompt(
+                    template,
+                    context=context,
+                    question=question,
+                    history=retained,
+                    max_chars=self.settings.m3_prompt_max_chars,
+                )
+                if estimate_tokens(prompt) > self.settings.m3_prompt_token_budget:
+                    raise ApiError("PROMPT_TOO_LARGE", "Prompt 超出服务端预算", 422)
+            except ApiError as exc:
+                if (
+                    exc.code != "PROMPT_TOO_LARGE"
+                    or not retained
+                    or self.settings.m3_history_strategy == "legacy"
+                ):
+                    raise
+                # Drop an entire oldest round. Context evidence is reduced only
+                # after no history remains; never cut individual message text.
+                retained = retained[2:]
+            else:
+                history[:] = retained
+                return prompt
+
+    async def _generation_candidates(
+        self,
+        turn: Turn,
+        candidates: list[RetrievalCandidate],
+        *,
+        document: dict[str, Any] | None = None,
+    ) -> list[RetrievalCandidate]:
+        headings: dict[UUID, dict[str, Any]] = {}
+        if document is not None:
+            for element in document.get("elements", []):
+                if (
+                    element.get("element_type") == "TEXT"
+                    and str(element.get("content") or "").strip()
+                ):
+                    headings[UUID(str(document["document_id"]))] = {
+                        "title": document["title"],
+                        "element_id": element.get("element_id"),
+                        "content": element["content"],
+                    }
+                    break
+        elif candidates:
+            loader = getattr(self.repository, "get_generation_headings", None)
+            if loader is not None:
+                headings = await loader(
+                    index_id=turn.index_id,
+                    knowledge_id=turn.knowledge_id,
+                    document_ids=list({c.document_id for c in candidates}),
+                )
+        result = []
+        for candidate in candidates:
+            meta = headings.get(candidate.document_id)
+            if not meta:
+                result.append(candidate)
+                continue
+            content = candidate.content
+            section_prefix = "章节：" + " > ".join(candidate.section_path) + "\n"
+            prefix = section_prefix if content.startswith(section_prefix) else ""
+            body = content[len(prefix) :]
+            heading = next(
+                (line.strip() for line in str(meta["content"]).splitlines() if line.strip()), ""
+            )
+            if (
+                meta.get("element_id") in candidate.element_ids
+                and heading
+                and len(heading) <= 300
+                and (body.lstrip() == heading or body.lstrip().startswith(heading + "\n"))
+            ):
+                content = prefix + strip_leading_document_heading(body)
+            result.append(replace(candidate, content=content, document=str(meta["title"])))
+        return result
 
     def _fit_context_prompt(
         self,
@@ -1407,6 +1475,11 @@ class RagService:
                 else None,
                 "prompt_tokens": estimate_tokens(plan.prompt),
                 "sources": [source.public_dict() for source in plan.sources],
+                "history": {
+                    **prepared.turn.history_diagnostics,
+                    "used_message_ids": [h.get("message_id") for h in prepared.turn.history],
+                    "used_message_count": len(prepared.turn.history),
+                },
             }
             return plan, None
         except TimeoutError:
@@ -1487,6 +1560,14 @@ class RagService:
             expected_context_version=turn.context_version,
             user_message_id=turn.user_message_id,
             assistant_message_id=turn.assistant_message_id,
+            origin_query=(
+                str(turn.chat_context.get("pending_query") or "") or None
+                if any(
+                    str(option.get("document_id")) == str(document_id)
+                    for option in turn.chat_context.get("pending_options", [])
+                )
+                else None
+            ),
         )
         prepared.turn = replace(
             turn,
@@ -1542,6 +1623,7 @@ class RagService:
         had_pending = bool(turn.chat_context.get("pending_options"))
         first_turn = (
             not turn.history
+            and not turn.has_prior_messages
             and turn.focus_document_id is None
             and not had_pending
             and prepared.rerank_status == "PASSED"
@@ -1904,6 +1986,7 @@ class RagService:
                 [c for c in expanded if c.document_id == document_id],
                 max_chunks=turn.retrieval.context_max_chunks,
             )
+            selected = await self._generation_candidates(turn, selected, document=document)
             prompt, selected, sources = self._fit_context_prompt(
                 selected,
                 template=build_chunk_qa_prompt_template(product_name, scope_description),
