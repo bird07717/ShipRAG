@@ -381,6 +381,7 @@ class ZhipuLlmProvider:
                             retryable=False,
                             detail=f"HTTP {response.status_code}",
                         )
+                    finished = False
                     async for line in response.aiter_lines():
                         stripped = line.strip()
                         if (
@@ -391,6 +392,7 @@ class ZhipuLlmProvider:
                             continue
                         data = stripped[5:].strip()
                         if data == "[DONE]":
+                            finished = True
                             break
                         try:
                             event = json.loads(data)
@@ -398,6 +400,14 @@ class ZhipuLlmProvider:
                             raise LlmError(
                                 "UPSTREAM_PROTOCOL_ERROR", "模型流响应格式异常", retryable=False
                             ) from exc
+                        if not isinstance(event, dict):
+                            raise LlmError(
+                                "UPSTREAM_PROTOCOL_ERROR", "模型流响应格式异常", retryable=False
+                            )
+                        if event.get("error"):
+                            raise LlmError(
+                                "LLM_UPSTREAM_ERROR", "模型回答未完整生成", retryable=True
+                            )
                         if isinstance(event.get("usage"), dict):
                             self.usage = dict(event["usage"])
                         choices = event.get("choices")
@@ -408,6 +418,23 @@ class ZhipuLlmProvider:
                         content = delta.get("content") if isinstance(delta, dict) else None
                         if isinstance(content, str) and content:
                             yield content
+                        reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+                        if reason == "stop":
+                            finished = True
+                        elif reason:
+                            raise LlmError(
+                                "LLM_UPSTREAM_ERROR",
+                                "模型回答未完整生成",
+                                retryable=reason == "length",
+                                detail="finish_reason=" + str(reason),
+                            )
+                    if not finished:
+                        raise LlmError(
+                            "LLM_UPSTREAM_ERROR",
+                            "模型回答流意外中断",
+                            retryable=True,
+                            detail="missing terminal event",
+                        )
                     return
             raise LlmError(
                 "UPSTREAM_UNAVAILABLE",

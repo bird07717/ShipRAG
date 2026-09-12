@@ -805,7 +805,7 @@ async def test_chat_stream_doc_qa_strips_mode_tag_and_emits_deltas():
 
     assert [name for name, _ in events][:3] == ["trace", "source", "message"]
     deltas = [payload["delta"] for name, payload in events if name == "message"]
-    assert "".join(deltas) == "将U盘插入USB端口。[IMG:S1]"
+    assert "".join(deltas) == "将U盘插入USB端口。"
     done_payload = events[-1][1]
     assert done_payload["response_type"] == "ANSWERED"
     assert done_payload["answer_mode"] == "PRODUCT_KNOWLEDGE"
@@ -959,9 +959,9 @@ async def test_chat_stream_degraded_chunk_rag_strips_mode_tag():
     ]
     events = await _collect(frames)
 
-    # mode tag is stripped; the citation marker streams through untouched
+    # Internal mode and citation markers are absent from visible deltas.
     deltas = [payload["delta"] for name, payload in events if name == "message"]
-    assert "".join(deltas) == "将U盘插入USB端口。[S1]"
+    assert "".join(deltas) == "将U盘插入USB端口。"
     done_payload = events[-1][1]
     assert done_payload["response_type"] == "ANSWERED"
     assert done_payload["answer_mode"] == "PRODUCT_KNOWLEDGE"
@@ -1087,10 +1087,7 @@ async def test_turn_deadline_bounds_hung_retrieval():
 
 
 @pytest.mark.asyncio
-async def test_llm_deadline_finalizes_partial_answer_with_marker():
-    # When the LLM exceeds the remaining turn budget mid-stream, the turn
-    # is completed (not failed) with the partial answer plus a truncation
-    # marker, and the timeout is recorded in the trace timings.
+async def test_llm_deadline_never_completes_a_partial_answer():
     repo = _RoutingRepository(turn=_turn(), candidates=[])
     settings = Settings(
         _env_file=None,
@@ -1107,20 +1104,17 @@ async def test_llm_deadline_finalizes_partial_answer_with_marker():
         rerank_factory=lambda s, snap: FakeRerankProvider(),
     )
 
-    result = await service.generate(
-        knowledge_id=repo.turn.knowledge_id,
-        conversation_id=None,
-        question="如何升级",
-        request_id="req-llm-deadline",
-    )
-
-    assert result["response_type"] == "ANSWERED"
-    assert "回答开头。" in result["answer"]
-    assert "超时被截断" in result["answer"]
-    assert "不应到达的结尾" not in result["answer"]
-    assert repo.failed is None
-    assert repo.completed is not None
-    assert repo.completed["timings"].get("llm_deadline_exceeded") is True
+    with pytest.raises(ApiError) as error:
+        await service.generate(
+            knowledge_id=repo.turn.knowledge_id,
+            conversation_id=None,
+            question="如何升级",
+            request_id="req-llm-deadline",
+        )
+    assert error.value.code == "TURN_DEADLINE_EXCEEDED"
+    assert repo.completed is None
+    assert repo.failed["retryable"] is True
+    assert repo.failed["timings"].get("llm_deadline_exceeded") is True
 
 
 @pytest.mark.asyncio

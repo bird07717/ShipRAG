@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -124,3 +125,98 @@ def test_safe_refusal_tolerance_rejects_exposed_document_reference() -> None:
 
     assert passed is False
     assert problems == ["范围外问题命中了文档: ['故障解决文档14—FFC 更换外壳']"]
+
+
+@pytest.mark.parametrize(
+    "hits,body,disclaimer,passed",
+    [
+        (set(), "通用建议：确认连接", None, True),
+        ({"如何U盘升级PDC"}, "文档要求FAT32，通用建议更换U盘", "引用仅支持文档事实", True),
+        ({"如何U盘升级PDC"}, "通用建议更换U盘", "引用仅支持文档事实", False),
+        ({"如何U盘升级PDC"}, "文档要求FAT32", None, False),
+        ({"FFC更换外壳"}, "文档要求FAT32", "说明", False),
+    ],
+)
+def test_mixed_answer_expectation_allows_only_grounded_in_scope_references(
+    hits, body, disclaimer, passed
+):
+    runner = _runner()
+    expected = {
+        "allowed_document_keys": ["U盘升级PDC"],
+        "reference_content_must_groups": [["FAT32", "update"]],
+        "reference_requires_disclaimer": True,
+    }
+    document_ok, _ = runner.evaluate(expected, hits)
+    content_errors = runner.evaluate_content(
+        expected,
+        {
+            "answer": body,
+            "references": [{"title": title} for title in hits],
+            "disclaimer": disclaimer,
+        },
+    )
+    assert (document_ok and not content_errors) is passed
+
+
+def test_no_reference_check_distinguishes_negative_title_mention_from_evidence():
+    runner = _runner()
+    response = {"answer": "《FFC更换外壳》未涉及压力释放器的故障处理。", "references": []}
+    assert runner.extract_hits(response, {}, include_mentions=False) == set()
+    response["references"] = [{"title": "FFC更换外壳"}]
+    assert runner.extract_hits(response, {}, include_mentions=False) == {"FFC更换外壳"}
+
+
+def test_document_selection_can_explicitly_accept_public_suggestion_choices():
+    runner = _runner()
+    response = {
+        "answer": "请确认具体是PDC还是FFC，以便定位升级文档。",
+        "references": [],
+        "next_suggestions": ["如何U盘升级PDC？", "如何升级FFC？"],
+    }
+    assert runner.extract_hits(response, {}) == set()
+    assert runner.extract_hits(response, {}, include_suggestions=True) == {
+        "如何U盘升级PDC？",
+        "如何升级FFC？",
+    }
+
+
+@pytest.mark.parametrize(
+    "answer,passed",
+    [
+        ('当前知识库没有与"压力释放器"直接相关的文档。请确认具体部件。', True),
+        ("当前知识库没有与灯泡直接相关的文档。", False),
+    ],
+)
+def test_missing_document_wording_preserves_the_requested_object(answer, passed):
+    runner = _runner()
+    path = Path(__file__).resolve().parents[2] / "rag-acceptance" / "cases.jsonl"
+    cases = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    expected = next(case for case in cases if case["id"] == "rag_retrieval_001")["expected"]
+    assert (not runner.evaluate_answer(expected, answer)) is passed
+
+
+def test_all_positive_golden_turns_reject_empty_body_even_with_correct_reference():
+    import json
+
+    runner = _runner()
+    cases = [
+        json.loads(line)
+        for line in (Path(__file__).resolve().parents[2] / "rag-acceptance/cases.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    checked = 0
+    for case in cases:
+        for turn in case.get("turns") or [case]:
+            keys = turn["expected"].get("document_keys") or []
+            if not keys:
+                continue
+            response = {
+                "response_type": "ANSWERED",
+                "answer": "",
+                "content": [],
+                "references": [{"title": keys[0]}],
+            }
+            assert runner.evaluate_content(turn["expected"], response)
+            checked += 1
+    assert checked == 47

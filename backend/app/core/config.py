@@ -134,6 +134,8 @@ class Settings(BaseSettings):
     m3_rag_conflict_guard: bool = True
     m3_rag_title_recall: bool = True
     m3_rag_single_strong_mode: Literal["off", "shadow", "enabled"] = "shadow"
+    m3_rag_fact_qa_mode: Literal["off", "shadow", "enabled"] = "shadow"
+    m3_rag_explanation_mode: Literal["off", "shadow", "enabled"] = "enabled"
     m3_rag_single_strong_floor: float = 0.85
     m3_rag_single_strong_gap: float = 0.18
 

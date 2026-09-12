@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, cast
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -11,7 +12,7 @@ from app.core.config import Settings
 from app.ingestion.embedding import FakeEmbeddingProvider
 from app.rag.llm import FakeLlmProvider, LlmProvider
 from app.rag.models import ModelSnapshot, RetrievalCandidate, Turn
-from app.rag.query_rewrite import rewrite_query, should_rewrite
+from app.rag.query_rewrite import is_elliptical_retry, rewrite_query, should_rewrite
 from app.rag.repository import RagRepository
 from app.rag.rerank import FakeRerankProvider
 from app.services.rag import RagService
@@ -33,6 +34,20 @@ def test_should_rewrite_true_for_short_follow_up_with_history() -> None:
     assert should_rewrite("那它的密码呢", _HISTORY, max_chars=40) is True
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "拆电源板之前怎样避免线缆接错？",
+        "排查后报警消除了，是否就能确认维修成功且不需要更换备件？",
+        "文档说打开电脑的运行功能，Windows里如何打开？",
+        "如果UTC校准要长按Menu 3秒，我按了1秒，还差多少秒？",
+    ],
+)
+def test_sequence_followups_restore_omitted_device_from_history(question):
+    assert should_rewrite(question, _HISTORY, max_chars=40)
+    assert not should_rewrite(question, [], max_chars=40)
+
+
 def test_should_rewrite_false_for_long_standalone_question() -> None:
     question = (
         "VDR主机升级过程中断电导致系统无法启动，应该按照什么样的完整流程恢复固件并保留配置？" * 2
@@ -50,6 +65,24 @@ def test_should_rewrite_true_for_long_question_with_follow_up_marker() -> None:
 
 
 # --- rewrite_query ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "question,expected",
+    [
+        ("还是失败怎么办", True),
+        ("仍然报错了，如何解决", False),
+        ("仍然报错怎么办？", True),
+        ("然后呢？", True),
+        ("那怎么操作", True),
+        ("如何升级FFC", False),
+        ("还是PSU报警怎么办", False),
+        ("那天气怎样", False),
+        ("换个问题", False),
+    ],
+)
+def test_focus_fallback_only_recognizes_object_free_followups(question, expected):
+    assert is_elliptical_retry(question) is expected
 
 
 def _rewrite_provider(completions: list[str] | None = None) -> FakeLlmProvider:
@@ -267,6 +300,37 @@ async def test_prepare_falls_back_to_original_query_on_rewrite_failure() -> None
         "reason": "UPSTREAM_UNAVAILABLE",
     }
     assert "问题：那它的密码呢" in prepared.prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_kb", [True, False])
+async def test_failed_rewrite_borrows_only_current_knowledge_focus_title(same_kb):
+    from dataclasses import replace
+
+    turn = replace(_turn(_HISTORY), focus_document_id=uuid4())
+    repo = _RewriteRepository(turn, [_candidate()])
+    repo.get_document_source = AsyncMock(
+        return_value={
+            "knowledge_id": turn.knowledge_id if same_kb else uuid4(),
+            "display_name": "如何U盘升级PDC",
+        }
+    )
+    service = _service(repo, FakeLlmProvider())
+    prepared = await service.prepare(
+        knowledge_id=turn.knowledge_id,
+        conversation_id=turn.conversation_id,
+        question="还是失败怎么办",
+        request_id="retry-timeout",
+        mode="CHAT",
+    )
+    query = "如何U盘升级PDC：还是失败怎么办" if same_kb else "还是失败怎么办"
+    assert repo.bm25_queries[0] == query
+    assert prepared.retrieval_query == query
+    assert "问题：还是失败怎么办" in prepared.prompt
+    assert repo.saved is not None
+    record = repo.saved["rerank_result"]["query_rewrite"]
+    assert record["status"] == "DEGRADED"
+    assert record.get("fallback") == ("FOCUS_TITLE" if same_kb else None)
 
 
 @pytest.mark.asyncio

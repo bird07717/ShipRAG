@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -40,6 +41,7 @@ from app.rag.models import (
     Source,
     Turn,
 )
+from app.rag.presentation import ModelTextStream, clean_model_text
 from app.rag.prompt import (
     build_chunk_qa_prompt_template,
     build_context,
@@ -48,7 +50,12 @@ from app.rag.prompt import (
     build_routing_prompt_template,
     render_prompt,
 )
-from app.rag.query_rewrite import rewrite_query, should_rewrite
+from app.rag.query_rewrite import (
+    document_followup_excerpt,
+    is_elliptical_retry,
+    rewrite_query,
+    should_rewrite,
+)
 from app.rag.repository import RagRepository
 from app.rag.rerank import RerankError, RerankProvider, create_rerank_provider
 from app.rag.retrieval import apply_rerank, merge_expanded_candidates, reciprocal_rank_fusion
@@ -75,6 +82,25 @@ _CITATION_PATTERN = re.compile(r"\[S([1-9][0-9]*)\]")
 _META_ACK_PATTERN = re.compile(r"^(?:换一?个(?:问题|话题)|算了|先?不问了)[呀啊吧。！!，,\s]*$")
 _META_ACK_MESSAGE = "好的，请问您想了解什么？我将基于产品文档为您解答。"
 _KEYBOARD_ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
+
+
+def _is_fact_question(question: str) -> bool:
+    """Conservative opt-in experiment after a document is already resolved."""
+    if re.search(r"步骤|流程|全文|完整|如何|怎么|怎样", question):
+        return False
+    return len(question) <= 120 and bool(re.search(r"在哪里|在哪个|多少|是什么|为什么", question))
+
+
+def _is_explanation_question(question: str) -> bool:
+    if len(question) > 240 or re.search(r"全文|原文|完整|全部|所有|操作步骤|操作流程", question):
+        return False
+    return bool(
+        re.search(
+            r"为什么|为何|原因|原理|怎么理解|如何理解|意味着|说明什么|会怎样|会怎么样"
+            r"|有什么影响|有何影响|有什么区别|分别解决什么|还差多少",
+            question,
+        )
+    )
 
 
 def _elapsed_ms(started_at: float) -> int:
@@ -268,6 +294,7 @@ class RagService:
             if retrieval_overrides
             else turn.retrieval
         )
+        turn = replace(turn, retrieval=retrieval)
         provider: EmbeddingProvider | None = None
         rerank_provider: RerankProvider | None = None
         try:
@@ -303,6 +330,25 @@ class RagService:
                     )
                 finally:
                     await rewrite_provider.aclose()
+                if (
+                    query_rewrite_record.get("status") != "REWRITTEN"
+                    and turn.focus_document_id is not None
+                    and is_elliptical_retry(normalized_question)
+                ):
+                    try:
+                        focus = await self.repository.get_document_source(turn.focus_document_id)
+                    except ApiError as exc:
+                        if exc.code != "DOCUMENT_NOT_FOUND":
+                            raise
+                    else:
+                        title = str(focus.get("display_name") or focus.get("filename") or "")
+                        if title and str(focus.get("knowledge_id")) == str(turn.knowledge_id):
+                            retrieval_query = title + "：" + normalized_question
+                            query_rewrite_record = {
+                                **query_rewrite_record,
+                                "fallback": "FOCUS_TITLE",
+                                "rewritten": retrieval_query,
+                            }
                 timings["query_rewrite_ms"] = _elapsed_ms(rewrite_started)
 
             async def embed_query() -> list[list[float]]:
@@ -500,37 +546,17 @@ class RagService:
             selected = self._select_context(
                 expanded_candidates, max_chunks=retrieval.context_max_chunks
             )
-            selected = self._order_context_by_parent(selected)
-
             prompt_started = time.perf_counter()
-            retained = selected
-            trimmed_count = 0
-            while True:
-                context, sources = build_context(retained)
-                try:
-                    prompt = render_prompt(
-                        turn.prompt_template,
-                        context=context,
-                        question=normalized_question,
-                        history=turn.history,
-                        max_chars=self.settings.m3_prompt_max_chars,
-                    )
-                except ApiError as exc:
-                    if exc.code != "PROMPT_TOO_LARGE" or not retained:
-                        raise
-                else:
-                    if estimate_tokens(prompt) <= self.settings.m3_prompt_token_budget:
-                        break
-                    if not retained:
-                        raise ApiError("PROMPT_TOO_LARGE", "Prompt 超出服务端预算", 422)
-                # Degrade by dropping the lowest-ranked chunk instead of
-                # failing the turn: chunks are ranked best-first, so the tail
-                # is the least valuable context.
-                retained = retained[:-1]
-                trimmed_count += 1
+            prompt, retained, sources = self._fit_context_prompt(
+                selected,
+                template=turn.prompt_template,
+                question=normalized_question,
+                history=turn.history,
+            )
+            trimmed_count = len(selected) - len(retained)
             if trimmed_count:
                 timings["prompt_trimmed_chunks"] = trimmed_count
-                selected = retained
+            selected = retained
             timings["prompt_ms"] = _elapsed_ms(prompt_started)
             await self.repository.save_prepared(
                 turn,
@@ -553,6 +579,8 @@ class RagService:
                 sources=sources,
                 timings=timings,
                 started_at=started_at,
+                retrieval_query=retrieval_query,
+                query_embedding=embeddings[0],
                 rerank_candidates=reranked_candidates,
                 rerank_status=str(rerank_result["status"]),
                 rerank_error_code=(
@@ -713,6 +741,48 @@ class RagService:
             remaining_tokens -= candidate.token_count
         return selected
 
+    def _render_bounded_prompt(
+        self, template: str, *, context: str, question: str, history: list[dict[str, str]]
+    ) -> str:
+        prompt = render_prompt(
+            template,
+            context=context,
+            question=question,
+            history=history,
+            max_chars=self.settings.m3_prompt_max_chars,
+        )
+        if estimate_tokens(prompt) > self.settings.m3_prompt_token_budget:
+            raise ApiError("PROMPT_TOO_LARGE", "Prompt 超出服务端预算", 422)
+        return prompt
+
+    def _fit_context_prompt(
+        self,
+        candidates: list[RetrievalCandidate],
+        *,
+        template: str,
+        question: str,
+        history: list[dict[str, str]],
+    ) -> tuple[str, list[RetrievalCandidate], list[Source]]:
+        # Keep relevance order separate from reading order. Never slice the
+        # rendered order: the last step can be the strongest evidence.
+        retained = list(candidates)
+        while True:
+            ordered = self._order_context_by_parent(retained)
+            context, sources = build_context(ordered)
+            try:
+                prompt = self._render_bounded_prompt(
+                    template,
+                    context=context,
+                    question=question,
+                    history=history,
+                )
+            except ApiError as exc:
+                if exc.code != "PROMPT_TOO_LARGE" or not retained:
+                    raise
+                retained.pop()
+            else:
+                return prompt, ordered, sources
+
     async def _expand_context_neighbors(
         self,
         index_id: UUID,
@@ -775,7 +845,14 @@ class RagService:
                     or neighbor.sequence_no != candidate.sequence_no + sequence_delta
                 ):
                     continue
-                expanded.append(neighbor)
+                expanded.append(
+                    replace(
+                        neighbor,
+                        rank=candidate.rank,
+                        rerank_rank=candidate.rerank_rank,
+                        rerank_score=candidate.rerank_score,
+                    )
+                )
                 added.add(neighbor.chunk_id)
                 attached.append(str(neighbor.chunk_id))
             expansion_records.append(
@@ -989,10 +1066,12 @@ class RagService:
                     "code": plan_error.code,
                     "message": user_safe_chat_message(plan_error),
                     "trace_id": str(turn.trace_id),
-                    "retryable": False,
+                    "retryable": plan_error.code == "TURN_DEADLINE_EXCEEDED",
                 },
             )
             return
+
+        turn = prepared.turn
 
         if plan.kind == "DELIVER" or plan.fixed_answer is not None:
             async for frame in self._emit_final_chat_turn(
@@ -1013,21 +1092,15 @@ class RagService:
 
         provider: LlmProvider | None = None
         llm_started = time.perf_counter()
-        mode_buffer = ""
-        # DOC_QA and degraded CHUNK_RAG answers carry a leading [MODE:...] tag
-        # to strip; routing answers stream verbatim.
-        mode_detected = plan.kind == "ROUTING"
+        visible_text = ModelTextStream()
         try:
             provider = self.llm_factory(self.settings, turn.llm)
             prompt = plan.prompt
-            # The LLM consumes whatever is left of the turn deadline; on
-            # expiry the partial answer is finalized with a truncation
-            # marker instead of waiting for the provider's own 120s timeout.
-            llm_timed_out = False
+            # A partial answer is not a successful terminal response.
             try:
                 async with asyncio.timeout(
                     max(
-                        1.0,
+                        0.001,
                         self.settings.m3_turn_deadline_seconds
                         - (time.perf_counter() - prepared.started_at),
                     )
@@ -1036,26 +1109,19 @@ class RagService:
                         if not delta:
                             continue
                         prepared.answer_parts.append(delta)
-                        if not mode_detected:
-                            mode_buffer += delta
-                            if "]" in mode_buffer:
-                                mode_tag_end = mode_buffer.find("]") + 1
-                                after_tag = mode_buffer[mode_tag_end:].lstrip("\n")
-                                mode_detected = True
-                                if after_tag:
-                                    yield sse_event("message", {"delta": after_tag})
-                            elif len(mode_buffer) > 200:
-                                mode_detected = True
-                                yield sse_event("message", {"delta": mode_buffer})
-                            continue
-                        yield sse_event("message", {"delta": delta})
-            except TimeoutError:
-                llm_timed_out = True
+                        visible_delta = visible_text.feed(delta)
+                        if visible_delta:
+                            yield sse_event("message", {"delta": visible_delta})
+            except TimeoutError as exc:
                 prepared.timings["llm_deadline_exceeded"] = True
+                raise LlmError(
+                    "TURN_DEADLINE_EXCEEDED", SERVER_BUSY_MESSAGE, retryable=True
+                ) from exc
+            tail = visible_text.feed("", final=True)
+            if tail:
+                yield sse_event("message", {"delta": tail})
 
             raw_answer = "".join(prepared.answer_parts)
-            if llm_timed_out:
-                raw_answer += "\n\n（本次回答因超时被截断，如需完整内容请重试或追问。）"
             result = self._finalize_chat_result(plan, raw_answer)
 
             result = self._apply_image_preference(result, include_images=include_images)
@@ -1105,7 +1171,7 @@ class RagService:
                     status="CANCELLED",
                     code="CLIENT_DISCONNECTED",
                     message="客户端已断开",
-                    partial_answer="".join(prepared.answer_parts),
+                    partial_answer=clean_model_text("".join(prepared.answer_parts)),
                     timings=prepared.timings,
                     stage="llm",
                 )
@@ -1120,7 +1186,7 @@ class RagService:
                 status="FAILED",
                 code=exc.code,
                 message=exc.public_message,
-                partial_answer="".join(prepared.answer_parts),
+                partial_answer=clean_model_text("".join(prepared.answer_parts)),
                 timings=prepared.timings,
                 stage="llm",
                 retryable=exc.retryable,
@@ -1144,7 +1210,7 @@ class RagService:
                 status="FAILED",
                 code="INTERNAL_ERROR",
                 message="回答生成失败",
-                partial_answer="".join(prepared.answer_parts),
+                partial_answer=clean_model_text("".join(prepared.answer_parts)),
                 timings=prepared.timings,
                 stage="llm",
                 detail=_unexpected_detail(exc),
@@ -1231,15 +1297,14 @@ class RagService:
 
         provider: LlmProvider | None = None
         llm_started = time.perf_counter()
+        answer_parts: list[str] = []
         try:
             provider = self.llm_factory(self.settings, turn.llm)
             prompt = plan.prompt
-            answer_parts: list[str] = []
-            llm_timed_out = False
             try:
                 async with asyncio.timeout(
                     max(
-                        1.0,
+                        0.001,
                         self.settings.m3_turn_deadline_seconds
                         - (time.perf_counter() - prepared.started_at),
                     )
@@ -1247,12 +1312,12 @@ class RagService:
                     async for delta in provider.stream(prompt):
                         if delta:
                             answer_parts.append(delta)
-            except TimeoutError:
-                llm_timed_out = True
+            except TimeoutError as exc:
                 prepared.timings["llm_deadline_exceeded"] = True
+                raise LlmError(
+                    "TURN_DEADLINE_EXCEEDED", SERVER_BUSY_MESSAGE, retryable=True
+                ) from exc
             raw_answer = "".join(answer_parts)
-            if llm_timed_out:
-                raw_answer += "\n\n（本次回答因超时被截断，如需完整内容请重试或追问。）"
             result = self._finalize_chat_result(plan, raw_answer)
             result = self._apply_image_preference(result, include_images=include_images)
             prepared.timings["llm_ms"] = _elapsed_ms(llm_started)
@@ -1287,7 +1352,7 @@ class RagService:
                 status="FAILED",
                 code=exc.code,
                 message=exc.public_message,
-                partial_answer="",
+                partial_answer=clean_model_text("".join(answer_parts)),
                 timings=prepared.timings,
                 stage="llm",
                 retryable=exc.retryable,
@@ -1322,13 +1387,45 @@ class RagService:
     ) -> tuple[_ChatPlan, ApiError | None]:
         turn = prepared.turn
         try:
-            plan = await self._plan_chat_turn(
-                prepared=prepared,
-                question=question.strip(),
-                product_name=product_name,
-                scope_description=scope_description,
-            )
+            async with asyncio.timeout(
+                max(
+                    0.001,
+                    self.settings.m3_turn_deadline_seconds
+                    - (time.perf_counter() - prepared.started_at),
+                )
+            ):
+                plan = await self._plan_chat_turn(
+                    prepared=prepared,
+                    question=question.strip(),
+                    product_name=product_name,
+                    scope_description=scope_description,
+                )
+            plan.routing["generation"] = {
+                "kind": plan.kind,
+                "prompt_sha256": hashlib.sha256(plan.prompt.encode()).hexdigest()
+                if plan.prompt
+                else None,
+                "prompt_tokens": estimate_tokens(plan.prompt),
+                "sources": [source.public_dict() for source in plan.sources],
+            }
             return plan, None
+        except TimeoutError:
+            prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
+            await self.repository.fail_turn(
+                turn,
+                status="FAILED",
+                code="TURN_DEADLINE_EXCEEDED",
+                message="本轮处理超过总时限",
+                partial_answer="",
+                timings=prepared.timings,
+                stage="routing",
+                retryable=True,
+            )
+            return _ChatPlan(kind="ROUTING"), ApiError(
+                "TURN_DEADLINE_EXCEEDED",
+                "本次请求处理超时，请稍后重试",
+                504,
+            )
         except ApiError as exc:
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
             await self.repository.fail_turn(
@@ -1372,6 +1469,17 @@ class RagService:
         # Validate/build before committing focus; all direct paths use the
         # same optimistic context-version transition and full delivery.
         delivery = self._build_delivery_payload(document)
+        await self._focus_document(prepared, document_id)
+        return _ChatPlan(
+            kind="DELIVER",
+            delivery=delivery,
+            routing=routing,
+            references=delivery["references"],
+            clear_pending_after=clear_pending_after,
+        )
+
+    async def _focus_document(self, prepared: PreparedRag, document_id: UUID) -> None:
+        turn = prepared.turn
         focus_epoch = await self.repository.set_conversation_focus(
             turn.conversation_id,
             document_id,
@@ -1386,13 +1494,6 @@ class RagService:
             focus_epoch=focus_epoch,
             context_version=turn.context_version + 1,
             chat_context={},
-        )
-        return _ChatPlan(
-            kind="DELIVER",
-            delivery=delivery,
-            routing=routing,
-            references=delivery["references"],
-            clear_pending_after=clear_pending_after,
         )
 
     async def _plan_chat_turn(
@@ -1449,12 +1550,77 @@ class RagService:
         if first_turn and self.settings.m3_rag_conflict_guard:
             decision = protect_aggregation(decision, candidates)
 
-        if decision.action == ACTION_DELIVER and decision.document_id is not None:
+        excerpt = document_followup_excerpt(question)
+        if (
+            excerpt
+            and turn.focus_document_id is not None
+            and not had_pending
+            and prepared.rerank_status == "PASSED"
+            and not decision.thresholds.get("fallback_guard")
+        ):
+            document = await self.repository.get_document_blocks(
+                knowledge_id=turn.knowledge_id,
+                index_id=turn.index_id,
+                document_id=turn.focus_document_id,
+            )
+            # An explicit, verbatim instruction is stronger evidence of the
+            # user's intended document than cross-document similarity scores.
+            if any(
+                excerpt in str(element.get("content") or "")
+                for element in document.get("elements", [])
+                if element.get("element_type") in {"TEXT", "TABLE"}
+            ):
+                routing = decision.to_dict()
+                routing.update(
+                    decision=ACTION_STAY,
+                    resolved_from="FOCUS_EXCERPT",
+                    document_id=str(turn.focus_document_id),
+                    document_title=str(document["title"]),
+                    pending_options=[],
+                    focus_excerpt={"previous_decision": decision.action},
+                )
+                return await self._document_qa_plan(
+                    prepared=prepared,
+                    document_id=turn.focus_document_id,
+                    question=question,
+                    product_name=product_name,
+                    scope_description=scope_description,
+                    routing=routing,
+                    document=document,
+                )
+
+        async def selected_document(document_id: UUID, routing: dict[str, Any]) -> _ChatPlan:
+            fact_mode = self.settings.m3_rag_fact_qa_mode
+            explanation_mode = self.settings.m3_rag_explanation_mode
+            explanation_qa = False
+            if first_turn and explanation_mode != "off" and _is_explanation_question(question):
+                routing["explanation_qa"] = {"mode": explanation_mode, "rule": "explanation_v1"}
+                explanation_qa = explanation_mode == "enabled"
+            if first_turn and fact_mode != "off" and _is_fact_question(question):
+                routing["fact_qa"] = {"mode": fact_mode, "rule": "explicit_fact_v1"}
+                explanation_qa |= fact_mode == "enabled"
+            if explanation_qa:
+                plan = await self._document_qa_plan(
+                    prepared=prepared,
+                    document_id=document_id,
+                    question=question,
+                    product_name=product_name,
+                    scope_description=scope_description,
+                    routing=routing,
+                    clear_pending_after=had_pending,
+                )
+                if plan.kind in {"DOC_QA", "CHUNK_RAG"}:
+                    await self._focus_document(prepared, document_id)
+                return plan
             return await self._deliver_chat_document(
                 prepared,
-                decision.document_id,
-                decision.to_dict(),
+                document_id,
+                routing,
+                clear_pending_after=had_pending,
             )
+
+        if decision.action == ACTION_DELIVER and decision.document_id is not None:
+            return await selected_document(decision.document_id, decision.to_dict())
 
         clear_pending_after = had_pending
         catalog: list[dict[str, Any]] | None = None
@@ -1489,12 +1655,7 @@ class RagService:
                 matched_id = UUID(str(matched["document_id"]))
                 routing = decision.to_dict()
                 routing["resolved_from"] = "TITLE_MATCH"
-                return await self._deliver_chat_document(
-                    prepared,
-                    matched_id,
-                    routing,
-                    clear_pending_after=clear_pending_after,
-                )
+                return await selected_document(matched_id, routing)
 
         # Uncalibrated rank-only candidates must not reach document QA or
         # become public references, including when a focus already exists. The
@@ -1551,65 +1712,16 @@ class RagService:
                         pending_options=[],
                         resolved_from="RAG_SINGLE_STRONG",
                     )
-                    return await self._deliver_chat_document(
-                        prepared, document_id, decision.to_dict()
-                    )
+                    return await selected_document(document_id, decision.to_dict())
 
         if decision.action == ACTION_STAY and turn.focus_document_id is not None:
-            document = await self.repository.get_document_blocks(
-                knowledge_id=turn.knowledge_id,
-                index_id=turn.index_id,
+            return await self._document_qa_plan(
+                prepared=prepared,
                 document_id=turn.focus_document_id,
-            )
-            try:
-                context, sources = build_document_context(document)
-                prompt = render_prompt(
-                    build_doc_qa_prompt_template(product_name, scope_description),
-                    context=context,
-                    question=question,
-                    history=turn.history,
-                    max_chars=self.settings.m3_prompt_max_chars,
-                )
-            except ApiError as exc:
-                if exc.code != "PROMPT_TOO_LARGE":
-                    raise
-                # Degrade to chunk retrieval instead of failing: oversized
-                # focus documents must not lock the conversation into
-                # repeated 422s. The chunk variant of the QA prompt keeps the
-                # mode-tag machinery (incl. PRODUCT_GENERAL general answers)
-                # available on this path too.
-                chunk_context, _chunk_sources = build_context(prepared.selected_candidates)
-                try:
-                    degraded_prompt = render_prompt(
-                        build_chunk_qa_prompt_template(product_name, scope_description),
-                        context=chunk_context,
-                        question=question,
-                        history=turn.history,
-                        max_chars=self.settings.m3_prompt_max_chars,
-                    )
-                except ApiError:
-                    degraded_prompt = prepared.prompt
-                routing = decision.to_dict()
-                routing["degraded_to"] = "CHUNK_RAG"
-                routing["degradation_reason"] = "DOCUMENT_EXCEEDS_PROMPT_BUDGET"
-                return _ChatPlan(
-                    kind="CHUNK_RAG",
-                    prompt=degraded_prompt,
-                    sources=prepared.sources,
-                    routing=routing,
-                    require_citations=True,
-                    references=[
-                        self._document_reference(document["document_id"], document["title"])
-                    ],
-                    clear_pending_after=clear_pending_after,
-                )
-            return _ChatPlan(
-                kind="DOC_QA",
-                prompt=prompt,
-                sources=sources,
+                question=question,
+                product_name=product_name,
+                scope_description=scope_description,
                 routing=decision.to_dict(),
-                require_citations=False,
-                references=[self._document_reference(document["document_id"], document["title"])],
                 clear_pending_after=clear_pending_after,
             )
 
@@ -1675,12 +1787,11 @@ class RagService:
                     + self._render_weak_candidates(weak_candidates)
                 )
             fallback_suggestions = build_suggestions(weak_candidates) or build_suggestions(catalog)
-        prompt = render_prompt(
+        prompt = self._render_bounded_prompt(
             build_routing_prompt_template(product_name, scope_description),
             context=context,
             question=question,
             history=turn.history,
-            max_chars=self.settings.m3_prompt_max_chars,
         )
         return _ChatPlan(
             kind="ROUTING",
@@ -1688,6 +1799,148 @@ class RagService:
             routing=routing,
             clear_pending_after=clear_pending_after,
             fallback_suggestions=fallback_suggestions,
+        )
+
+    async def _scoped_document_candidates(
+        self,
+        prepared: PreparedRag,
+        document_id: UUID,
+        question: str,
+    ) -> tuple[list[RetrievalCandidate], dict[str, Any]]:
+        turn = prepared.turn
+        # Reuse the query vector and frozen model/index; only long documents
+        # pay for this bounded second retrieval within the confirmed document.
+        kwargs = {
+            "knowledge_id": turn.knowledge_id,
+            "index_id": turn.index_id,
+            "document_id": document_id,
+        }
+        query = prepared.retrieval_query or question
+        bm25 = await self.repository.bm25_search(
+            **kwargs,
+            query=query,
+            limit=turn.retrieval.bm25_top_k,
+        )
+        vector = (
+            await self.repository.vector_search(
+                **kwargs,
+                embedding=prepared.query_embedding,
+                limit=turn.retrieval.vector_top_k,
+            )
+            if prepared.query_embedding
+            else []
+        )
+        candidates = reciprocal_rank_fusion(
+            vector,
+            bm25,
+            rrf_k=self.settings.m5_rrf_k,
+            limit=turn.retrieval.fusion_top_k,
+        )
+        candidates = [c for c in candidates if c.document_id == document_id]
+        diagnostics: dict[str, Any] = {
+            "document_id": str(document_id),
+            "index_id": str(turn.index_id),
+            "candidate_count": len(candidates),
+            "status": "NO_CANDIDATES",
+        }
+        if not candidates or turn.rerank is None:
+            return [], diagnostics
+        provider = self.rerank_factory(self.settings, turn.rerank)
+        try:
+            async with asyncio.timeout(self.settings.m3_rerank_timeout_seconds):
+                documents = await self._build_rerank_documents(turn.index_id, candidates)
+                outcome = await provider.rerank(query, documents, turn.retrieval.rerank_top_n)
+            candidates = apply_rerank(candidates, outcome.items)
+            diagnostics.update(status="PASSED", candidates=[c.trace_dict() for c in candidates])
+            return candidates, diagnostics
+        except (RerankError, TimeoutError) as exc:
+            diagnostics.update(status="DEGRADED", error_code=getattr(exc, "code", "TIMEOUT"))
+            return [], diagnostics
+        finally:
+            await provider.aclose()
+
+    async def _document_qa_plan(
+        self,
+        *,
+        prepared: PreparedRag,
+        document_id: UUID,
+        question: str,
+        product_name: str,
+        scope_description: str,
+        routing: dict[str, Any],
+        clear_pending_after: bool = False,
+        document: dict[str, Any] | None = None,
+    ) -> _ChatPlan:
+        turn = prepared.turn
+        if document is None:
+            document = await self.repository.get_document_blocks(
+                knowledge_id=turn.knowledge_id,
+                index_id=turn.index_id,
+                document_id=document_id,
+            )
+        context, sources = build_document_context(document)
+        try:
+            prompt = self._render_bounded_prompt(
+                build_doc_qa_prompt_template(product_name, scope_description),
+                context=context,
+                question=question,
+                history=turn.history,
+            )
+        except ApiError as exc:
+            if exc.code != "PROMPT_TOO_LARGE":
+                raise
+            started = time.perf_counter()
+            candidates, diagnostics = await self._scoped_document_candidates(
+                prepared,
+                document_id,
+                question,
+            )
+            expanded, expansion = await self._expand_context_neighbors(
+                turn.index_id,
+                candidates,
+                max_chunks=turn.retrieval.context_max_chunks,
+            )
+            selected = self._select_context(
+                [c for c in expanded if c.document_id == document_id],
+                max_chunks=turn.retrieval.context_max_chunks,
+            )
+            prompt, selected, sources = self._fit_context_prompt(
+                selected,
+                template=build_chunk_qa_prompt_template(product_name, scope_description),
+                question=question,
+                history=turn.history,
+            )
+            prepared.timings["document_retrieval_ms"] = _elapsed_ms(started)
+            routing.update(
+                degraded_to="CHUNK_RAG",
+                degradation_reason="DOCUMENT_EXCEEDS_PROMPT_BUDGET",
+                document_retrieval=diagnostics,
+                document_context_expansion=expansion,
+            )
+            if not selected:
+                return _ChatPlan(
+                    kind="NO_MATCH",
+                    routing=routing,
+                    fixed_answer="当前文档中没有足够的相关内容，无法确认该问题。请补充具体章节或操作对象。",
+                    clear_pending_after=clear_pending_after,
+                )
+            return _ChatPlan(
+                kind="CHUNK_RAG",
+                prompt=prompt,
+                sources=sources,
+                routing=routing,
+                require_citations=True,
+                references=[self._document_reference(document["document_id"], document["title"])],
+                clear_pending_after=clear_pending_after,
+            )
+        return _ChatPlan(
+            kind="DOC_QA",
+            prompt=prompt,
+            sources=sources,
+            routing=routing,
+            require_citations=False,
+            references=[self._document_reference(document["document_id"], document["title"])],
+            clear_pending_after=clear_pending_after,
         )
 
     def _build_delivery_payload(self, document: dict[str, Any]) -> dict[str, Any]:
@@ -1860,6 +2113,8 @@ class RagService:
             )
         else:
             result = build_assist_result(raw_answer)
+        if not result.answer.strip() and not any(block.type == "image" for block in result.content):
+            raise LlmError("LLM_EMPTY_RESPONSE", SERVER_BUSY_MESSAGE, retryable=True)
         titles = [
             str(reference.get("title") or reference.get("document") or "")
             for reference in (plan.references or result.valid_sources)
@@ -1896,6 +2151,9 @@ class RagService:
             return plan.references
         if result.response_type.value == "ANSWERED" and result.answer_mode is not None:
             if result.answer_mode.value in ("PRODUCT_KNOWLEDGE", "PRODUCT_EXPLAINED"):
+                if plan.kind == "CHUNK_RAG":
+                    documents = {str(s.get("document_id")) for s in result.valid_sources}
+                    return [r for r in plan.references if str(r.get("document_id")) in documents]
                 return plan.references
         return []
 

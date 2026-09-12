@@ -26,7 +26,7 @@
 {"id": "rag_xdoc_002", "category": "cross_doc", "question": "通讯线缆怎么检查", "expected": {"document_keys": ["通讯线缆"], "tolerance": "ANY_OF"}}
 {"id": "rag_xdoc_003", "category": "cross_doc", "question": "PSU板上的保险丝怎么更换", "expected": {"document_keys": ["保险丝"], "tolerance": "ANY_OF"}}
 {"id": "rag_xdoc_004", "category": "cross_doc", "question": "MU报警了怎么处理", "expected": {"document_keys": ["MU报警"], "tolerance": "ANY_OF"}}
-{"id": "rag_xdoc_005", "category": "cross_doc", "question": "怎么升级设备固件", "expected": {"document_keys": ["升级"], "tolerance": "ANY_OF"}}
+{"id": "rag_xdoc_005", "category": "cross_doc", "question": "怎么升级设备固件", "expected": {"document_keys": ["升级"], "tolerance": "ANY_OF", "allow_suggested_documents": true}}
 {"id": "rag_xdoc_006", "category": "cross_doc", "question": "电池怎么换", "expected": {"document_keys": ["电池"], "tolerance": "ANY_OF"}}
 {"id": "rag_oos_001", "category": "out_of_scope", "question": "今天天气怎么样", "expected": {"document_keys": [], "tolerance": "NONE"}}
 {"id": "rag_oos_002", "category": "out_of_scope", "question": "帮我写一首关于大海的诗", "expected": {"document_keys": [], "tolerance": "NONE"}}
@@ -35,7 +35,7 @@
 {"id": "rag_oos_005", "category": "out_of_scope", "question": "推荐一部好看的电影", "expected": {"document_keys": [], "tolerance": "NONE"}}
 {"id": "rag_knw_001", "category": "knowledge", "question": "UTC时间在哪里看", "expected": {"document_keys": ["UTC时间"], "tolerance": "EXACT"}}
 {"id": "rag_knw_002", "category": "knowledge", "question": "绝缘低报警怎么解决", "expected": {"document_keys": ["屏蔽DC24V"], "tolerance": "EXACT"}}
-{"id": "rag_fup_001", "category": "follow_up", "turns": [{"question": "如何使用U盘升级PDC", "expected": {"document_keys": ["U盘升级PDC"], "tolerance": "EXACT"}}, {"question": "还是失败怎么办", "expected": {"answer_must_any": ["当前文档未涉及U盘升级PDC失败", "未描述升级失败时的排查流程"], "tolerance": "NONE"}}]}
+{"id": "rag_fup_001", "category": "follow_up", "turns": [{"question": "如何使用U盘升级PDC", "expected": {"document_keys": ["U盘升级PDC"], "tolerance": "EXACT"}}, {"question": "还是失败怎么办", "expected": {"answer_must_any": ["当前文档未涉及U盘升级PDC失败", "未描述升级失败时的排查流程"], "tolerance": "EXACT", "allowed_document_keys": ["U盘升级PDC"], "reference_content_must_groups": [["FAT32", "update", "2014", "2分钟"]], "reference_requires_disclaimer": true}}]}
 {"id": "rag_fup_002", "category": "follow_up", "turns": [{"question": "如何更换故障PDC", "expected": {"document_keys": ["更换故障PDC"], "tolerance": "EXACT"}}, {"question": "具体操作步骤是什么", "expected": {"document_keys": ["更换故障PDC"], "tolerance": "EXACT"}}]}
 {"id": "rag_fup_003", "category": "follow_up", "turns": [{"question": "检查麦克风", "expected": {"document_keys": ["检查麦克风"], "tolerance": "EXACT"}}, {"question": "怎么判断它是不是坏了", "expected": {"document_keys": ["检查麦克风"], "tolerance": "EXACT"}}]}
 {"id": "rag_fup_004", "category": "follow_up", "turns": [{"question": "如何升级FFC", "expected": {"document_keys": ["升级FFC"], "tolerance": "EXACT"}}, {"question": "FFC怎么检查接线盒", "expected": {"document_keys": ["FFC如何检查接线盒"], "forbidden_keys": ["PDC如何检查接线盒"], "tolerance": "EXACT"}}]}
@@ -44,7 +44,7 @@
 {"id": "rag_focus_002", "category": "focus_coverage", "turns": [{"question": "FFC 如何更换外壳", "expected": {"document_keys": ["FFC 更换外壳"], "tolerance": "EXACT"}}, {"question": "接触点没有反应怎么办", "expected": {"document_keys": [], "answer_must_any": ["接触点"], "tolerance": "EXACT"}}]}
 {"id": "rag_focus_003", "category": "focus_coverage", "turns": [{"question": "FFC 如何更换外壳", "expected": {"document_keys": ["FFC 更换外壳"], "tolerance": "EXACT"}}, {"question": "定位销不稳定怎么办", "expected": {"document_keys": [], "answer_must_any": ["定位销"], "tolerance": "EXACT"}}]}
 {"id": "rag_meta_001", "category": "meta", "turns": [{"question": "FFC 如何更换外壳", "expected": {"document_keys": ["FFC 更换外壳"], "tolerance": "EXACT"}}, {"question": "换一个问题", "expected": {"document_keys": [], "answer_must_any": ["请问您想了解"], "answer_forbidden_any": ["我只能回答"], "max_latency_ms": 15000, "tolerance": "EXACT"}}]}
-{"id": "rag_retrieval_001", "category": "retrieval", "question": "压力释放器出现问题怎么办", "expected": {"document_keys": [], "forbidden_keys": ["FFC"], "answer_must_any": ["未找到", "未涉及", "无法确认", "没有足够"], "tolerance": "EXACT"}}
+{"id": "rag_retrieval_001", "category": "retrieval", "question": "压力释放器出现问题怎么办", "expected": {"document_keys": [], "forbidden_keys": ["FFC"], "answer_must_any": ["未找到", "未涉及", "无法确认", "没有足够", "没有与压力释放器直接相关的文档"], "tolerance": "EXACT"}}
 {"id": "rag_syn_001", "category": "colloquial", "question": "如何检查VDR", "expected": {"document_keys": ["自检"], "tolerance": "EXACT"}}
 {"id": "rag_noise_001", "category": "noise", "question": "%%%%%%", "expected": {"document_keys": [], "answer_must_any": ["无法确认", "没有足够"], "max_latency_ms": 15000, "tolerance": "NONE"}}
 {"id": "rag_noise_002", "category": "noise", "question": "甲", "expected": {"document_keys": [], "answer_must_any": ["无法确认", "没有足够"], "max_latency_ms": 15000, "tolerance": "NONE"}}

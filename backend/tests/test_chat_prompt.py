@@ -34,7 +34,7 @@ def test_runtime_prompt_entries_snapshot() -> None:
     for entry in entries:
         assert entry["source"] == "RUNTIME"
         assert entry["active"] is False
-        assert entry["version"] == 1
+        assert entry["version"] == 3
         assert entry["description"]
         assert entry["content"] == templates[entry["name"]]
         validate_prompt_template(entry["content"])
@@ -153,16 +153,18 @@ def test_chunk_qa_template_mandates_general_mode_for_generic_skills() -> None:
 
 def test_doc_qa_template_enables_labeled_inference_for_explained_mode() -> None:
     assert "允许基于文档事实的有限推断" in DOC_QA_PROMPT_TEMPLATE
-    assert "逆否" in DOC_QA_PROMPT_TEMPLATE
-    assert "禁止引入文档之外假设的外推" in DOC_QA_PROMPT_TEMPLATE
+    assert "不能仅凭报警消除确认维修成功或无需更换备件" in DOC_QA_PROMPT_TEMPLATE
+    assert "无需申请备件更换" not in DOC_QA_PROMPT_TEMPLATE
+    assert "允许引入明确标注的通用原理或假设" in DOC_QA_PROMPT_TEMPLATE
     assert "按文档…推断" in DOC_QA_PROMPT_TEMPLATE
     assert "报警消除" in DOC_QA_PROMPT_TEMPLATE
 
 
 def test_chunk_qa_template_enables_labeled_inference_for_explained_mode() -> None:
     assert "允许基于片段事实的有限推断" in CHUNK_QA_PROMPT_TEMPLATE
-    assert "逆否" in CHUNK_QA_PROMPT_TEMPLATE
-    assert "禁止引入片段之外假设的外推" in CHUNK_QA_PROMPT_TEMPLATE
+    assert "不能仅凭报警消除确认维修成功或无需更换备件" in CHUNK_QA_PROMPT_TEMPLATE
+    assert "无需申请备件更换" not in CHUNK_QA_PROMPT_TEMPLATE
+    assert "允许引入明确标注的通用原理或假设" in CHUNK_QA_PROMPT_TEMPLATE
     assert "按文档…推断" in CHUNK_QA_PROMPT_TEMPLATE
     assert "报警消除" in CHUNK_QA_PROMPT_TEMPLATE
 

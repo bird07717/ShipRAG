@@ -1,7 +1,7 @@
 # RAG 链路黄金集（Golden Set）
 
 对上线链路（`RAG_ONLY` → `RagService`）的黑盒回归评测：53 个用例 / 63 轮真实请求，
-经 HTTP 调用真实后端与真实模型（SiliconFlow embedding/rerank/LLM），按文档命中判定。
+经 HTTP 调用真实后端与真实模型（SiliconFlow embedding/rerank/LLM），同时检查文档命中和实际回答正文。
 
 2026-09-11 已在生产服务器通过 Assistant 对外接口完成全部 53 个用例；最新结果见
 下方 Run 11，历史全绿基线仍保留下方 Run 10 供对比。
@@ -16,7 +16,18 @@ RAG 首轮单强直达的本地离线实验见
 
 后续本地实现及未解决项见 [`first-turn-implementation.md`](first-turn-implementation.md)：
 已接入冲突保护、精确型号补召回、默认 shadow 的单强判定和 VML 完整性保护；
-尚未部署生产或复跑真实全量 Golden，DC24V 浮动文字正文仍需转换核验后重建。
+当时尚未部署生产或复跑真实全量 Golden，DC24V 浮动文字正文仍需转换核验后重建。
+
+2026-09-12 的回答质量实现、真实模型对照和剩余问题见
+[`quality-implementation.md`](quality-implementation.md)。新增 20 个内容质量用例（30 轮）
+及 6 个首轮事实问答实验用例；前者依据当前索引原文制作，不是 20 条客户差评。
+
+解释、推断与 Assistant 兼容性优化见 [`reasoning-implementation.md`](reasoning-implementation.md)。
+新增 11 个解释边界用例（18 轮），以及使用现有接口的真实 HTTP 契约检查。
+主 Golden 的 `rag_fup_001` 允许有依据的混合回答引用当前 PDC 文档，保留未覆盖声明，
+并校验引用范围、正文事实和依据范围说明；纯通用回答仍可无引用。NONE 检查实际公开引用，
+不将“文档未涉及”的标题提及误计为引用；rag_xdoc_005 文档选择题接受既有 next_suggestions 中
+符合预期的升级文档。前后报告用同一套新断言重评。
 
 ## 运行
 
@@ -27,11 +38,27 @@ RAG 首轮单强直达的本地离线实验见
 # Assistant 对外接口模式
 .venv/bin/python rag-acceptance/run_golden.py --api-mode assistant
 
+# 正文质量（关键步骤、参数、图片、追问及引用）
+.venv/bin/python rag-acceptance/run_golden.py --api-mode assistant --cases rag-acceptance/quality-cases.jsonl
+
+# 解释、计算、条件推断、通用知识与文档引用边界
+.venv/bin/python rag-acceptance/run_golden.py --api-mode assistant --cases rag-acceptance/reasoning-cases.jsonl
+
+# 模拟业务后台完整调用；请指定已上线、就绪且包含图片的测试知识库
+PYTHONPATH=backend .venv/bin/python rag-acceptance/check_assistant_contract.py --kb-id <uuid> --base-url http://127.0.0.1:8000
+
+# 用同一组断言重新评分前后两份完整响应报告
+.venv/bin/python rag-acceptance/compare_golden.py before.json after.json --cases rag-acceptance/quality-cases.jsonl --output rag-acceptance/reports/comparison.json
+
 # 通用可选参数
 #   --base-url http://127.0.0.1:18000
 #   --kb-id <uuid>
 #   --external-user-id <稳定测试用户ID>  # 仅 Assistant 模式
 ```
+
+契约检查默认使用 VDR600 的 PSU 更换/拍照标记问题，可通过 `--question`、`--follow` 替换为
+当前库的文档交付题和解释追问。它创建独立测试用户的会话并真实调用模型，报告保留这些会话 ID；
+不改文档、索引、上线配置，也不清理其他用户数据。验收完成后测试会话按正常保留策略清理。
 
 凭据：
 
@@ -41,11 +68,13 @@ RAG 首轮单强直达的本地离线实验见
 
 Assistant 模式调用 `/api/v1/assistant/chat/stream`，为每轮请求提供
 `X-External-User-ID`、`X-Request-ID` 和 `Idempotency-Key`，解析 SSE 的
-`complete/error` 终态，并仅使用公开的 `references` 与回答中《文档标题》进行命中判定。
+`complete/error` 终态，使用公开的 `references` 与回答中《文档标题》进行命中判定；
+正文校验读取完整 `content`（包括表格），无内容块时才回退到 `answer`。
 目标知识库的管理策略必须为 `RAG_ONLY`；测试请求本身不能选择模型或回答模式。
 
 约 10~15 分钟。报告写入 `reports/baseline-<时间戳>.json`，含每轮的 response_type、
-命中文档、延迟、答案摘录与失败原因。
+命中文档、延迟、完整公开响应、答案摘录与失败原因。报告含知识库内容和会话标识，
+按本地诊断数据保存；旧报告只有摘要时不能用于新正文断言或 `compare_golden.py` 对照。
 
 ## 用例设计
 
@@ -72,6 +101,12 @@ Assistant 模式调用 `/api/v1/assistant/chat/stream`，为每轮请求提供
 - `answer_must_any`——归一化后的回答须包含其中至少一项（拒答标记、组件名等）；
 - `answer_forbidden_any`——回答不得包含其中任何一项（如被错误套用的文档步骤原文）；
 - `max_latency_ms`——该轮延迟上限（元话语轮防回归到重路径）。
+- 所有用例拒绝空答案；文档交付拒绝只有标题、没有正文和图片，并要求公开文档引用。
+- `response_types`、`content_must_all`、`content_must_groups`、`content_forbidden_any`——限定响应类型、全部必需内容、每组任选一项及禁止内容。
+- `min_images`、`min_tables`、`require_reference`、`document_ids`、`forbidden_document_ids`——检查交付结构和引用关联；管理响应有 `sources` 时也检查其与引用的文档一致性。
+
+规则断言不能替代完整语义评审。只命中标题、关键词或图片数量不代表整段回答全部正确；
+真实失败应结合公开响应与 Trace 人工核对，再决定修改源文档、检索、Prompt 或用例。
 
 命中提取自 `references[].title`、`sources[].document` 与答案文本中的《标题》
 （对 LLM 转写幻觉做 ≥0.85 相似度容差，例如"-中文"被写成"-英文"）。

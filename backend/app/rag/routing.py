@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from app.rag.presentation import clean_model_text, separate_general_advice
+
 
 class AnswerMode(str, Enum):
     PRODUCT_KNOWLEDGE = "PRODUCT_KNOWLEDGE"
@@ -24,6 +26,10 @@ class ResponseType(str, Enum):
 PRODUCT_GENERAL_DISCLAIMER = (
     "该回答用于解释与本产品相关的通用原理，"
     "不代表当前产品型号的具体参数、功能、步骤、兼容性或官方操作要求。"
+)
+PRODUCT_EXPLAINED_DISCLAIMER = (
+    "分析与推断基于已说明的依据和条件；通用建议不代表本产品的操作或验收要求，"
+    "文档引用仅支持有文档依据的内容。"
 )
 
 OUT_OF_SCOPE_MESSAGE = (
@@ -106,7 +112,7 @@ def _move_trailing_punctuation(answer: str) -> str:
     punct = "。，、；：！？.,;:!?"
     return re.sub(
         r"(\[IMG:S\d+\])([" + punct + r"]+)",
-        r"",
+        lambda match: match.group(2) + match.group(1),
         answer,
     )
 
@@ -121,7 +127,7 @@ def _build_content_blocks(answer: str, valid_sources: list[dict[str, Any]]) -> l
     for match in _IMG_PATTERN.finditer(answer):
         text_before = answer[last_end : match.start()].rstrip()
         if text_before:
-            blocks.append(ContentBlock(type="text", text=text_before))
+            blocks.append(ContentBlock(type="text", text=clean_model_text(text_before)))
 
         source_id = match.group(1)
         source = source_map.get(source_id)
@@ -138,10 +144,10 @@ def _build_content_blocks(answer: str, valid_sources: list[dict[str, Any]]) -> l
 
     remaining = answer[last_end:].rstrip()
     if remaining:
-        blocks.append(ContentBlock(type="text", text=remaining))
+        blocks.append(ContentBlock(type="text", text=clean_model_text(remaining)))
 
     if not blocks:
-        blocks.append(ContentBlock(type="text", text=answer))
+        blocks.append(ContentBlock(type="text", text=clean_model_text(answer)))
     return blocks
 
 
@@ -151,13 +157,14 @@ def build_assist_result(answer: str) -> ChatResult:
     Routing answers (clarification, catalog guidance, switch offers) carry no
     citations and no mode tag; they are surfaced verbatim.
     """
-    answer = answer.strip()
+    answer, general_advice = separate_general_advice(answer)
+    answer = clean_model_text(answer)
     return ChatResult(
         response_type=ResponseType.ANSWERED,
         answer_mode=None,
         answer=answer,
         content=[ContentBlock(type="text", text=answer)],
-        disclaimer=None,
+        disclaimer=PRODUCT_GENERAL_DISCLAIMER if general_advice else None,
         valid_sources=[],
         citation_result={
             "citation_missing": False,
@@ -199,9 +206,11 @@ def post_validate(
 ) -> ChatResult:
     source_registry = {s["source_id"]: s for s in sources}
 
-    mode, answer = _parse_mode_tag(raw_answer)
+    mode, answer = _parse_mode_tag(raw_answer.lstrip())
     if mode is None:
         mode = AnswerMode.UNCONFIRMED
+
+    answer, general_advice = separate_general_advice(answer)
 
     valid_sources, invalid_ids = _extract_citations(answer, source_registry)
     cited_ids = [s["source_id"] for s in valid_sources]
@@ -225,9 +234,10 @@ def post_validate(
     ):
         mode = AnswerMode.UNCONFIRMED
 
-    if mode == AnswerMode.PRODUCT_GENERAL and valid_sources:
+    if mode == AnswerMode.PRODUCT_GENERAL:
         answer = _CITATION_PATTERN.sub("", answer)
         valid_sources = []
+        cited_ids = []
 
     disclaimer: str | None = None
     if mode == AnswerMode.OUT_OF_SCOPE:
@@ -243,11 +253,13 @@ def post_validate(
         cited_ids = []
     elif mode == AnswerMode.PRODUCT_GENERAL:
         disclaimer = PRODUCT_GENERAL_DISCLAIMER
+    elif mode == AnswerMode.PRODUCT_EXPLAINED:
+        disclaimer = PRODUCT_EXPLAINED_DISCLAIMER
 
     if mode in (AnswerMode.OUT_OF_SCOPE, AnswerMode.UNCONFIRMED) and not valid_sources:
-        content = [ContentBlock(type="text", text=answer)]
+        content = [ContentBlock(type="text", text=clean_model_text(answer))]
     elif mode == AnswerMode.PRODUCT_GENERAL:
-        content = [ContentBlock(type="text", text=answer)]
+        content = [ContentBlock(type="text", text=clean_model_text(answer))]
     else:
         content = _build_content_blocks(answer, valid_sources)
 
@@ -258,8 +270,11 @@ def post_validate(
 
     citation_result = {
         "citation_missing": (
-            len(cited_ids) == 0 and response_type == ResponseType.ANSWERED and require_citations
+            len(cited_ids) == 0
+            and mode in {AnswerMode.PRODUCT_KNOWLEDGE, AnswerMode.PRODUCT_EXPLAINED}
+            and require_citations
         ),
+        "general_advice": general_advice,
         "valid_source_ids": cited_ids,
         "invalid_source_ids": invalid_ids,
         "registered_source_count": len(sources),
@@ -268,7 +283,7 @@ def post_validate(
     return ChatResult(
         response_type=response_type,
         answer_mode=mode if response_type == ResponseType.ANSWERED else None,
-        answer=answer,
+        answer=clean_model_text(_move_trailing_punctuation(answer)),
         content=content,
         disclaimer=disclaimer,
         valid_sources=valid_sources,

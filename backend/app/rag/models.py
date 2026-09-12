@@ -161,3 +161,5 @@ class PreparedRag:
     rerank_status: str = "SKIPPED"
     rerank_error_code: str | None = None
     input_guard_reason: str | None = None
+    retrieval_query: str = ""
+    query_embedding: list[float] = field(default_factory=list)

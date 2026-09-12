@@ -597,6 +597,7 @@ class RagRepository:
         index_id: UUID,
         embedding: list[float],
         limit: int,
+        document_id: UUID | None = None,
     ) -> list[RetrievalCandidate]:
         vector_literal = "[" + ",".join(format(value, ".9g") for value in embedding) + "]"
         async with self.engine.connect() as connection:
@@ -621,6 +622,8 @@ class RagRepository:
                     FROM document_chunk c
                     JOIN document_source d ON d.id = c.document_id
                     WHERE c.kb_id = :kb_id AND c.index_id = :index_id
+                      AND (CAST(:document_id AS uuid) IS NULL OR
+                           (c.document_id = :document_id AND d.status = 'STORED'))
                     ORDER BY c.embedding <=> CAST(:embedding AS vector), c.id
                     LIMIT :limit
                     """
@@ -630,6 +633,7 @@ class RagRepository:
                     "kb_id": knowledge_id,
                     "index_id": index_id,
                     "limit": limit,
+                    "document_id": document_id,
                 },
             )
             rows = list(result.mappings())
@@ -673,6 +677,7 @@ class RagRepository:
         index_id: UUID,
         query: str,
         limit: int,
+        document_id: UUID | None = None,
     ) -> list[RetrievalCandidate]:
         async with self.engine.connect() as connection:
             result = await connection.execute(
@@ -702,6 +707,8 @@ class RagRepository:
                     WHERE document_chunk.search_text ||| :query
                       AND document_chunk.kb_id = :kb_id
                       AND document_chunk.index_id = :index_id
+                      AND (CAST(:document_id AS uuid) IS NULL OR
+                           (document_chunk.document_id = :document_id AND d.status = 'STORED'))
                     ORDER BY pdb.score(document_chunk.id) DESC, document_chunk.id
                     LIMIT :limit
                     """
@@ -711,6 +718,7 @@ class RagRepository:
                     "kb_id": knowledge_id,
                     "index_id": index_id,
                     "limit": limit,
+                    "document_id": document_id,
                 },
             )
             rows = list(result.mappings())
@@ -900,6 +908,8 @@ class RagRepository:
                         selected_context = CAST(:context AS jsonb),
                         rerank_result = CAST(:rerank AS jsonb),
                         prompt = :prompt,
+                        runtime_snapshot = jsonb_set(COALESCE(runtime_snapshot, '{}'::jsonb),
+                            '{retrieval}', CAST(:effective_retrieval AS jsonb)),
                         latency = CAST(:latency AS jsonb)
                     WHERE trace_id = :trace_id AND status = 'RUNNING'
                     """
@@ -916,6 +926,7 @@ class RagRepository:
                         ensure_ascii=False,
                     ),
                     "prompt": prompt if self.settings.m3_trace_retain_prompt else None,
+                    "effective_retrieval": json.dumps(asdict(turn.retrieval)),
                     "latency": json.dumps(timings),
                 },
             )
@@ -942,6 +953,13 @@ class RagRepository:
                 " '{doc_routing}', CAST(:doc_routing AS jsonb))"
             )
             routing_params["doc_routing"] = json.dumps(doc_routing, ensure_ascii=False)
+            generation = doc_routing.get("generation")
+            if generation is not None:
+                routing_patch += (
+                    ", runtime_snapshot = jsonb_set(COALESCE(runtime_snapshot, '{}'::jsonb),"
+                    " '{generation}', CAST(:generation AS jsonb))"
+                )
+                routing_params["generation"] = json.dumps(generation)
         prompt_patch = ""
         if prompt is not None:
             prompt_patch = ", prompt = :prompt"

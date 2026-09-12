@@ -590,6 +590,8 @@ data: {"request_id":"req-1","conversation_id":"be55b152-2cfb-43a1-91f6-bd227bc92
 ```
 
 `complete.answer` 是完整且权威的最终文本。调用方必须使用它校正已经累计的 delta。
+普通 RAG 回答的 `content` 是相同内容的结构化版本：优先用它替换临时展示，空内容块时回退到 `answer`，避免同时追加两份重复正文。文档直达应先显示 `answer` 标题，再按顺序渲染 `content` 正文。
+回答可区分文档依据、分析与推断和通用建议；引用不为通用知识背书，`disclaimer` 应与回答一起显示。生成超时、上游截断或空回答以 `error` 收口，不能因已收到 delta 就按成功保存。
 `document`、`clarification`、`escalation` 和 `disclaimer` 等没有值的可选字段会被省略，
 调用方必须同时兼容“字段不存在”和 `null`，不能假设所有可选字段固定出现。
 
@@ -818,7 +820,7 @@ GET {AI_BASE_URL}/api/v1/assistant/knowledge-bases/{knowledge_id}/image-assets/{
 
 `answer` 和文本 Content Block 使用 Markdown。
 
-文档直达时，`answer` 仅返回 `**《文档标题》**`，不附加“已找到”或“以下是文档内容”等引导语；`content` 从有效正文或操作步骤开始，平台会过滤与显示名称重复的原文首行标题。
+文档直达时，`answer` 仅返回 `**《文档标题》**`，不附加“已找到”或“以下是文档内容”等引导语；`content` 从有效正文或操作步骤开始，按源文档首行必为标题的约定，平台无条件删除首条非空文本行，每份文档只删除一次，不比较显示名称。
 
 Android/iOS 必须：
 

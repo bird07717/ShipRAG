@@ -28,10 +28,12 @@ staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐�
 | `M3_RAG_CONFLICT_GUARD` | `true` | 聚合直达与最强块文档冲突时改为澄清。 |
 | `M3_RAG_TITLE_RECALL` | `true` | 精确型号的有界标题补召回，仍参加 Rerank。 |
 | `M3_RAG_SINGLE_STRONG_MODE` | `shadow` | `off` 关闭、`shadow` 只记录、`enabled` 开启单强直达。 |
+| `M3_RAG_FACT_QA_MODE` | `shadow` | 首轮明确事实问法：`off` 关闭、`shadow` 记录、`enabled` 在可靠选文档后复用 DOC_QA。完整操作请求仍交付全文。 |
+| `M3_RAG_EXPLANATION_MODE` | `enabled` | 可靠选文档后的首轮解释问答；`shadow/off` 回退原文交付，与事实短答独立，不降低选文档门槛。 |
 | `M3_RAG_SINGLE_STRONG_FLOOR` | `0.85` | 单强原始最高块分数下限。 |
 | `M3_RAG_SINGLE_STRONG_GAP` | `0.18` | 相对另一文档最高块的分差下限。 |
 
-以上配置已接入两个环境示例和 Production Compose。修改生产配置需重新创建相应容器；代码更新需重建镜像。上线前先保持 `shadow`，用真实 Golden 及 Trace 检查错误交付和延迟，再决定是否启用。
+以上配置已接入两个环境示例和 Production Compose。修改生产配置需重新创建相应容器；代码更新需重建镜像。单强直达及事实短答保持 `shadow`；解释问答默认 `enabled`，可改为 `shadow/off` 回退首轮原文交付。生产采用前用目标环境的真实 Golden 及 Trace 核对质量与延迟。
 
 解析版本升级不自动重建索引；但下一次构建遇到旧版本结果会重新解析，可能产生全库 OCR/视觉/嵌入耗时和费用。DC24V 的浮动文字 DOCX 目前会被安全拦截，应先转换为可编辑正文并人工核对步骤，再构建候选索引、验收后手动激活；不得为绕过错误直接修改版本元数据。现有活动索引保持不变。
 
@@ -50,6 +52,10 @@ bash scripts/dev-up.sh
 也可按 `docs/dev-startup.md` 使用 `honcho start` 选择进程。不要用生产编排代替开发热重载流程。
 
 ## 校验命令
+
+RAG 正文质量用例：`.venv/bin/python rag-acceptance/run_golden.py --api-mode assistant --cases rag-acceptance/quality-cases.jsonl`。事实问答实验用例为 `rag-acceptance/fact-qa-cases.jsonl`，分别在 shadow/enabled 的测试进程运行。两者都调用真实配置模型，并创建隔离的新会话，不修改源文件或活动索引。解释边界用例为 `rag-acceptance/reasoning-cases.jsonl`；业务契约检查使用 `rag-acceptance/check_assistant_contract.py --kb-id <uuid> --base-url <URL>`，创建独立测试用户会话并核验重放、分页、图片、并发与断连。普通全量门禁仍只使用 fake 模型。
+
+离线对照：`.venv/bin/python rag-acceptance/compare_golden.py <before.json> <after.json> --cases <cases.jsonl> --output <comparison.json>`。仅支持同库 Assistant 报告，使用同一份当前断言重评两边；报告必须保存完整 `response`，只有答案摘要的旧报告不能用作正文对比。
 
 | 范围 | 命令 | 来源与效果 |
 | --- | --- | --- |

@@ -24,6 +24,8 @@ from typing import Any
 
 import httpx
 
+from app.rag.evaluation import evaluate_content, response_text
+
 ROOT = Path(__file__).resolve().parent.parent
 BOOK_TITLE_PATTERN = re.compile(r"《([^》]{2,120})》")
 
@@ -31,7 +33,9 @@ BOOK_TITLE_PATTERN = re.compile(r"《([^》]{2,120})》")
 def normalize(value: str) -> str:
     value = unicodedata.normalize("NFKC", str(value or "")).casefold()
     return "".join(
-        ch for ch in value if not ch.isspace() and not unicodedata.category(ch).startswith("P")
+        ch
+        for ch in value
+        if not ch.isspace() and not unicodedata.category(ch).startswith("P")
     )
 
 
@@ -91,7 +95,13 @@ def _fuzzy_title_match(mention_norm: str, title_norm: str) -> bool:
     return difflib.SequenceMatcher(a=mention_norm, b=title_norm).ratio() >= 0.85
 
 
-def extract_hits(response: dict[str, Any], catalog_norm: dict[str, str]) -> set[str]:
+def extract_hits(
+    response: dict[str, Any],
+    catalog_norm: dict[str, str],
+    *,
+    include_mentions: bool = True,
+    include_suggestions: bool = False,
+) -> set[str]:
     """从响应的 references / sources / answer《》文本中提取命中的知识库文档标题。"""
     mentioned: set[str] = set()
     for ref in response.get("references") or []:
@@ -101,8 +111,10 @@ def extract_hits(response: dict[str, Any], catalog_norm: dict[str, str]) -> set[
         if src.get("document"):
             mentioned.add(str(src["document"]))
     answer = str(response.get("answer") or "")
-    for match in BOOK_TITLE_PATTERN.findall(answer):
-        mentioned.add(match)
+    if include_mentions:
+        mentioned.update(BOOK_TITLE_PATTERN.findall(answer))
+    if include_suggestions:
+        mentioned.update(str(item) for item in response.get("next_suggestions") or [])
 
     # The external Assistant contract intentionally has no document-catalog
     # endpoint. Its public references already carry document titles, so the
@@ -141,10 +153,17 @@ def evaluate(expected: dict[str, Any], hits: set[str]) -> tuple[bool, list[str]]
     # document-level constraint.
     matched = any(any(k in h for k in keys) for h in hit_norms) if keys else True
     if not matched:
-        problems.append(f"未命中期望文档 keys={expected.get('document_keys')} 实际={sorted(hits)}")
+        problems.append(
+            f"未命中期望文档 keys={expected.get('document_keys')} 实际={sorted(hits)}"
+        )
     bad = {h for h in hit_norms if any(f in h for f in forbidden)}
     if bad:
         problems.append(f"命中了禁止文档: {sorted(bad)}")
+    if "allowed_document_keys" in expected:
+        allowed = [normalize(k) for k in expected["allowed_document_keys"]]
+        unexpected = {h for h in hit_norms if not any(k in h for k in allowed)}
+        if unexpected:
+            problems.append(f"引用超出允许范围: {sorted(unexpected)}")
     return (not problems, problems)
 
 
@@ -319,11 +338,15 @@ async def main() -> int:
                 timeout=30.0,
             )
             if docs_resp.status_code != 200:
-                print(f"知识库目录接口不可用: HTTP {docs_resp.status_code} {docs_resp.text[:200]}")
+                print(
+                    f"知识库目录接口不可用: HTTP {docs_resp.status_code} {docs_resp.text[:200]}"
+                )
                 return 2
             docs = docs_resp.json()
             docs = docs if isinstance(docs, list) else docs.get("items", [])
-            catalog = [str(d.get("display_name") or d.get("filename") or "") for d in docs]
+            catalog = [
+                str(d.get("display_name") or d.get("filename") or "") for d in docs
+            ]
             catalog_norm = {t: normalize(t) for t in catalog if t}
             print(f"知识库目录: {len(catalog_norm)} 份文档")
 
@@ -363,14 +386,25 @@ async def main() -> int:
                         }
                     )
                     case_result["passed"] = False
-                    print(f"[FAIL] {case['id']}#{step} {turn['question'][:24]} -> {error}")
+                    print(
+                        f"[FAIL] {case['id']}#{step} {turn['question'][:24]} -> {error}"
+                    )
                     break
 
-                conversation_id = str(payload.get("conversation_id") or conversation_id or "")
-                hits = extract_hits(payload, catalog_norm)
+                conversation_id = str(
+                    payload.get("conversation_id") or conversation_id or ""
+                )
+                expected = turn["expected"]
+                hits = extract_hits(
+                    payload,
+                    catalog_norm,
+                    include_mentions=expected.get("tolerance") != "NONE",
+                    include_suggestions=bool(expected.get("allow_suggested_documents")),
+                )
                 passed, problems = evaluate(turn["expected"], hits)
                 problems = list(problems)
-                problems += evaluate_answer(turn["expected"], str(payload.get("answer") or ""))
+                problems += evaluate_answer(turn["expected"], response_text(payload))
+                problems += evaluate_content(turn["expected"], payload)
                 max_latency = turn["expected"].get("max_latency_ms")
                 if max_latency is not None and latency_ms > int(max_latency):
                     problems.append(f"延迟超限 {latency_ms}ms > {max_latency}ms")
@@ -385,6 +419,7 @@ async def main() -> int:
                         "passed": passed,
                         "problems": problems,
                         "answer_snippet": str(payload.get("answer") or "")[:180],
+                        "response": payload,
                     }
                 )
                 if not passed:
@@ -397,7 +432,9 @@ async def main() -> int:
                 await asyncio.sleep(0.5)
             results.append(case_result)
 
-    by_category: dict[str, dict[str, Any]] = defaultdict(lambda: {"cases": 0, "passed": 0})
+    by_category: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"cases": 0, "passed": 0}
+    )
     latencies: list[float] = []
     for case in results:
         bucket = by_category[case["category"]]
@@ -422,7 +459,9 @@ async def main() -> int:
             cat: {
                 "cases": stats["cases"],
                 "passed": stats["passed"],
-                "pass_rate": round(stats["passed"] / stats["cases"], 4) if stats["cases"] else 0.0,
+                "pass_rate": round(stats["passed"] / stats["cases"], 4)
+                if stats["cases"]
+                else 0.0,
             }
             for cat, stats in sorted(by_category.items())
         },
@@ -437,13 +476,17 @@ async def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"baseline-{run_id}.json"
-    out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     print("\n===== 黄金集基线报告 =====")
     print(f"接口模式: {args.api_mode}")
     print(f"用例: {total} | 通过: {passed} | 通过率: {report['pass_rate']:.1%}")
     for cat, stats in report["by_category"].items():
-        print(f"  {cat:<14} {stats['passed']}/{stats['cases']}  ({stats['pass_rate']:.0%})")
+        print(
+            f"  {cat:<14} {stats['passed']}/{stats['cases']}  ({stats['pass_rate']:.0%})"
+        )
     lat = report["latency_ms"]
     print(f"延迟: p50={lat['p50']:.0f}ms p95={lat['p95']:.0f}ms max={lat['max']:.0f}ms")
     print(f"报告: {out_path}")
