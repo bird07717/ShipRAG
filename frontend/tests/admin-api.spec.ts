@@ -35,6 +35,24 @@ describe("admin API", () => {
     expect(new Headers(request.headers).get("Authorization")).toBe("Bearer session-token");
   });
 
+  it("updates only the public knowledge-base description with optimistic concurrency", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminApi.updateKnowledgeBase("kb-1", {
+      description: "VAU 图像配置和故障排查",
+      expected_updated_at: "2026-09-13T00:00:00Z",
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/knowledge-bases/kb-1");
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(request.method).toBe("PATCH");
+    expect(JSON.parse(String(request.body))).toEqual({
+      description: "VAU 图像配置和故障排查",
+      expected_updated_at: "2026-09-13T00:00:00Z",
+    });
+  });
+
   it("returns the safe backend error message", async () => {
     vi.stubGlobal(
       "fetch",

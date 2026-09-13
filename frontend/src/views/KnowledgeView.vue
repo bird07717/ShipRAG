@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { Collection, MoreFilled, Search } from "@element-plus/icons-vue";
+import { ElMessageBox } from "element-plus";
 
 import { useAdminStore } from "@/composables/adminStore";
 import type { KnowledgeAssistantConfig, KnowledgeBase } from "@/types/admin";
@@ -13,6 +14,7 @@ const store = useAdminStore();
 
 const detailTarget = ref<KnowledgeBase | null>(null);
 const detailOpen = ref(false);
+const descriptionDraft = ref("");
 
 const statusOptions = computed(() => {
   const states = [...new Set(store.knowledgeBases.map((kb) => kb.runtime_state))];
@@ -21,7 +23,31 @@ const statusOptions = computed(() => {
 
 function openDetail(kb: KnowledgeBase): void {
   detailTarget.value = kb;
+  descriptionDraft.value = kb.description ?? "";
   detailOpen.value = true;
+}
+
+async function saveDescription(): Promise<void> {
+  const knowledge = detailTarget.value;
+  if (!knowledge || isDeleting(knowledge)) return;
+  if (knowledge.assistant_online) {
+    try {
+      await ElMessageBox.confirm(
+        "该知识库已对 Assistant 上线。保存后说明立即对外可见；启用专业技术助手时，新请求将使用新的 RAG 范围。",
+        "确认修改公开范围",
+        { confirmButtonText: "保存", cancelButtonText: "取消", type: "warning" },
+      );
+    } catch {
+      return;
+    }
+  }
+  try {
+    const updated = await store.updateKnowledgeBaseDescription(knowledge, descriptionDraft.value);
+    detailTarget.value = updated;
+    descriptionDraft.value = updated.description ?? "";
+  } catch {
+    // Keep the unsaved draft so a version conflict never discards operator input.
+  }
 }
 
 async function selectAndOpen(kb: KnowledgeBase): Promise<void> {
@@ -200,13 +226,17 @@ function isDeleting(kb: KnowledgeBase): boolean {
               placeholder="例如：VDR600 产品文档"
             />
           </el-form-item>
-          <el-form-item label="说明">
+          <el-form-item label="知识库说明 / RAG 专业范围（Assistant 对外可见）">
             <el-input
               v-model="store.newKnowledgeDescription"
               type="textarea"
               :rows="3"
-              placeholder="简要描述该知识库的用途（可选）"
+              maxlength="5000"
+              placeholder="填写支持的产品、型号或模块、问题类型，以及直接相关的基础技术（可选）"
             />
+            <p class="scope-editor__help">
+              请勿填写系统 Prompt、阈值、密钥、内部地址或仅管理员可见的信息。
+            </p>
           </el-form-item>
         </div>
       </el-form>
@@ -233,6 +263,33 @@ function isDeleting(kb: KnowledgeBase): boolean {
             <small>{{ detailTarget.description || "暂无说明" }}</small>
           </div>
           <StatusBadge :status="detailTarget.runtime_state" />
+        </div>
+
+        <div class="scope-editor">
+          <div class="scope-editor__heading">
+            <b>知识库说明 / RAG 专业范围（Assistant 对外可见）</b>
+            <span>{{ descriptionDraft.length }}/5000</span>
+          </div>
+          <el-input
+            v-model="descriptionDraft"
+            type="textarea"
+            :rows="4"
+            maxlength="5000"
+            placeholder="填写支持的产品、型号或模块、问题类型，以及直接相关的基础技术"
+            :disabled="isDeleting(detailTarget)"
+          />
+          <p class="scope-editor__help">
+            请勿填写系统 Prompt、阈值、密钥、内部地址或仅管理员可见的信息。修改不触发索引重建。
+          </p>
+          <el-button
+            type="primary"
+            plain
+            :disabled="isDeleting(detailTarget) || descriptionDraft.trim() === (detailTarget.description ?? '')"
+            :loading="store.isActionLoading(`update-knowledge:${detailTarget.id}`)"
+            @click="saveDescription"
+          >
+            保存说明
+          </el-button>
         </div>
 
         <div class="detail-metrics">
@@ -412,5 +469,31 @@ function isDeleting(kb: KnowledgeBase): boolean {
 
 .detail-meta {
   margin-bottom: 4px;
+}
+
+.scope-editor {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.scope-editor__heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.scope-editor__heading span,
+.scope-editor__help {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.scope-editor__help {
+  margin: 0;
+  line-height: 1.6;
 }
 </style>

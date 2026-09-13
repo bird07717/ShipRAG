@@ -30,11 +30,20 @@ staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐�
 | `M3_RAG_SINGLE_STRONG_MODE` | `shadow` | `off` 关闭、`shadow` 只记录、`enabled` 开启单强直达。 |
 | `M3_RAG_FACT_QA_MODE` | `shadow` | 首轮明确事实问法：`off` 关闭、`shadow` 记录、`enabled` 在可靠选文档后复用 DOC_QA。完整操作请求仍交付全文。 |
 | `M3_RAG_EXPLANATION_MODE` | `enabled` | 可靠选文档后的首轮解释问答；`shadow/off` 回退原文交付，与事实短答独立，不降低选文档门槛。 |
+| `M3_RAG_TECH_ASSIST_MODE` | `off` | 小体量专业技术助手总开关：`off` 保留旧行为，`shadow` 只记策略诊断，`enabled` 启用统一回答形式、受控领域扩展和最小条件承接。 |
+| `M3_RAG_SCOPE_MAX_TOKENS` | `800` | 每轮知识库名称/公开范围说明的 Prompt 快照估算 Token 上限；只截断运行时副本，不改数据库说明。 |
 | `M3_HISTORY_STRATEGY` | `focused` | RAG 使用同焦点、完整轮次的历史；`legacy` 可临时回退旧历史选择。只影响 RAG，不改变 Support 自身工作流。 |
+| `M3_TURN_DEADLINE_SECONDS` | `45.0` | 单轮 RAG 总时限；各上游快速失败时限必须小于该值。 |
+| `M3_DOC_LOCK_BEST_FLOOR` | `0.70` | 文档聚合锁定所需的最佳 Chunk 分数下限；开发模板、代码默认值和 Production Compose 保持一致。 |
+| `M3_DOC_SINGLE_CLARIFY_BEST_FLOOR` | `0.65` | 只有一个候选文档时，允许向用户发起文档确认的最佳 Chunk 分数下限。 |
 | `M3_RAG_SINGLE_STRONG_FLOOR` | `0.85` | 单强原始最高块分数下限。 |
 | `M3_RAG_SINGLE_STRONG_GAP` | `0.18` | 相对另一文档最高块的分差下限。 |
+| `M3_QUERY_REWRITE_TIMEOUT_SECONDS` | `3.0` | 多轮问题改写的单次超时；超时后沿用有界兜底查询。 |
+| `M3_QUERY_EMBEDDING_TIMEOUT_SECONDS` | `10.0` | 查询向量请求的单次快速失败时限。 |
+| `M3_QUERY_EMBEDDING_RETRIES` | `1` | 查询向量超时后的额外重试次数。 |
+| `M3_RERANK_TIMEOUT_SECONDS` | `15.0` | Rerank 快速失败时限；超时后进入既有排序降级路径。 |
 
-以上配置已接入两个环境示例和 Production Compose。修改生产配置需重新创建相应容器；代码更新需重建镜像。单强直达及事实短答保持 `shadow`；解释问答默认 `enabled`，可改为 `shadow/off` 回退首轮原文交付。`M3_HISTORY_STRATEGY=legacy` 是历史选择的运行时回退，不会撤销 `0045` 数据库结构，也不会恢复旧标题展示。生产采用前用目标环境的真实 Golden 及 Trace 核对质量与延迟。
+以上配置已接入开发、生产环境示例和 Production Compose。修改生产配置需重新创建相应容器；代码更新需重建镜像。单强直达及事实短答保持 `shadow`，解释问答默认 `enabled`；新技术助手总开关保持 `off`，完成真实模型、工程师语义和外部契约验收后才改为 `enabled`。`M3_HISTORY_STRATEGY=legacy` 是历史选择的运行时回退，不会撤销 `0045` 数据库结构，也不会恢复旧标题展示。生产采用前用目标环境的真实 Golden 及 Trace 核对质量与延迟。模型密钥未处于轮换状态时，不要在 `.env` 中保留空的 `MODEL_SECRET_KEY_PREVIOUS` 或 `MODEL_SECRET_KEY_PREVIOUS_VERSION`；轮换时两者必须同时填写有效值。
 
 解析版本升级不自动重建索引；但下一次构建遇到旧版本结果会重新解析，可能产生全库 OCR/视觉/嵌入耗时和费用。DC24V 的浮动文字 DOCX 目前会被安全拦截，应先转换为可编辑正文并人工核对步骤，再构建候选索引、验收后手动激活；不得为绕过错误直接修改版本元数据。现有活动索引保持不变。
 
@@ -48,7 +57,7 @@ staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐�
 bash scripts/dev-up.sh
 ```
 
-该命令先执行 `docker compose up -d --wait`，然后以 Honcho 启动 `Procfile` 中的 API、`worker-index`、`worker-maintenance` 和前端。每个后端进程会通过 `scripts/dev-migrate.sh` 的文件锁串行运行 `alembic upgrade head`。默认地址：前端 `http://127.0.0.1:5173`，后端 `http://127.0.0.1:18000`；前端开发代理转发 `/api`、`/health`。
+该命令先用 `docker compose up -d --wait postgres redis minio` 等待长期运行的基础设施健康，再以 `docker compose run --rm --no-deps minio-init` 完成一次性 Bucket 初始化，最后由 Honcho 启动 `Procfile` 中的 API、`worker-index`、`worker-maintenance` 和前端。这样不会因 `minio-init` 正常 `exited (0)` 而提前中止。每个后端进程会通过 `scripts/dev-migrate.sh` 的文件锁串行运行 `alembic upgrade head`。默认地址：前端 `http://127.0.0.1:5173`，后端 `http://127.0.0.1:18000`；前端开发代理转发 `/api`、`/health`。
 
 也可按 `docs/dev-startup.md` 使用 `honcho start` 选择进程。不要用生产编排代替开发热重载流程。
 
@@ -92,6 +101,12 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 部署本次 RAG 历史改动必须先让一次性 `migrate` 服务成功升级到 `0045`，再启动新后端和 Worker。生产 Compose 的正常命令仍为 `docker compose --env-file .env -f compose.production.yaml up -d --build --wait`；该编排会自动运行 `migrate`，后端和 Worker 只有在迁移成功后才启动。结束后检查 Compose 状态，并在后端容器中核对 `alembic current` 为 `0045 (head)`。若迁移失败，不要绕过依赖单独启动新后端，因为新代码会读取新增列。
 
 该变更无需重建文档索引。运行时回退可设置 `M3_HISTORY_STRATEGY=legacy` 后重建后端容器；数据库保持 `0045` 即可。上线前用新会话覆盖连续追问、文档切换确认、失败后重试和长历史预算；上线后检查 Trace 的 `generation.history`，应只出现消息 ID、轮次数和裁剪边界，不应出现历史正文。真实模型质量仍需按 `rag-acceptance/` 执行多轮 Golden，本次本地门禁未执行该项。
+
+## RAG 专业技术助手部署与验证
+
+本次实现没有新增迁移或索引重建要求，但仍依赖仓库现有 Alembic head。生产先部署代码并保持 `M3_RAG_TECH_ASSIST_MODE=off`：`docker compose --env-file .env -f compose.production.yaml up -d --build --wait` 会先运行 `migrate`，再重建后端、Worker 和前端。确认健康、既有 Assistant/RAG/Support 冒烟正常后，在隔离测试环境把目标知识库公开说明补齐并设置 `enabled`，重新创建后端和两个 Worker 容器。
+
+真实验收使用 `rag-acceptance/technical-assistant-cases.jsonl`，必须显式指定测试服务基础地址、已上线就绪的 RAG 知识库和独立测试身份；它会调用真实模型并持久化测试会话，本地完整门禁不会自动执行。检查完整/局部回答、无证据专业扩展、范围外收口、连续条件追问、`references=[]` 与免责声明，同时复跑既有主集、质量集、解释集及 Assistant 契约。通过工程师评审后才在生产设置 `enabled`；出现专有事实虚构、无关回答、来源越界或状态串联时改回 `off` 并重建应用容器，数据库和数据卷无需回退。
 
 
 ## 回答优化功能验证

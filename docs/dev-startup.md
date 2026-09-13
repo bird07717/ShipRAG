@@ -24,7 +24,7 @@ bash scripts/dev-up.sh        # 基础设施 + Alembic + API + 双 worker + 前�
 - `scripts/wait-infra.sh` — 基础设施端口就绪等待（兜底，最多 30s）
 - `scripts/dev-migrate.sh` — 等基础设施 → 使用文件锁串行执行 `alembic upgrade head`。
 - `scripts/dev-api.sh` — 通过迁移门槛后启动 `uvicorn --reload`。
-- `scripts/dev-up.sh` — 启动 Docker Compose 并交给 Honcho 运行全部开发进程。
+- `scripts/dev-up.sh` — 等待 PostgreSQL/Redis/MinIO 健康，单独执行一次性 `minio-init`，再交给 Honcho 运行全部开发进程。
 - `honcho` 已加入 `backend/pyproject.toml` dev 依赖并锁定于 `requirements.lock`
 
 ## 设计说明
@@ -49,7 +49,7 @@ honcho start worker-index frontend   # 任意子集
   没停干净。检查 `pgrep -f app.worker`，`kill` 掉残留后重试。
 - **Vite 提示 `Port 5173 is in use`**：旧的 `npm run dev` 还在跑，会自动改用 5174；
   建议先停掉旧的。
-- **基础设施等待超时**：先跑 `docker compose up -d --wait`。
+- **基础设施等待超时**：先跑 `docker compose up -d --wait postgres redis minio`；`minio-init exited (0)` 表示 Bucket 初始化成功，不是服务故障。
 
 ## 与上线态的关系
 

@@ -24,6 +24,7 @@
 - `document_source.display_name` 是可修改的展示元数据；`filename`、文档 UUID 和 MinIO 对象键是稳定源文件标识。改名不修改分块、向量和历史回答快照，应用服务对同一知识库的有效文档名称执行不区分大小写的重复检查。
 - `knowledge_base.assistant_online` 是独立的 Assistant 对外发布边界：迁移时原有 `ENABLED` 知识库回填为上线，后续新建行默认下线。该字段不替代知识库状态或 RAG/Support 活动版本。
 - `knowledge_base.assistant_suggestions` 为最多三个字符串的 JSONB 配置；`assistant_config_revision` 为非负整数，保存问题及上下线均递增，用于拒绝旧页面覆盖。迁移 `0043` 仅为迁移前已上线知识库回填原全局问题，原未上线库和新建库为空，不改变上线状态。长度、文本及重复校验由应用层执行，数据库约束 JSONB 数组及最多三项。
+- `knowledge_base.description` 继续作为 Assistant 可见的公开知识库说明和 RAG 专业范围，不新增列。管理更新以 `updated_at` 做乐观并发条件，在同一事务内返回更新后的完整知识库快照；空白由应用层归一化为 `null`。修改说明不创建 `task_record`，也不改变索引、Chunk 或向量。
 - `document_source` 的活跃文件哈希在同一知识库内唯一；其原始对象键、图像对象键也唯一。内容索引可随 `knowledge_index` 版本重建。
 - `document_chunk.embedding` 固定为 `vector(1024)`，使用 HNSW cosine 索引；BM25 通过 `pg_search` 索引支持混合检索。
 - `conversation` 关联知识库，并可冻结 RAG/Support 索引或发布版本；`message` 有会话内顺序约束，`rag_trace` 关联会话/消息并支持回退父子链路。
@@ -31,6 +32,7 @@
 - `assistant_request` 的 `(external_user_id, knowledge_id, idempotency_key)` 唯一，同一非空 Conversation 只允许一条 `RUNNING` 记录；`replay_count >= 0`，终态重放会更新计数、`last_replayed_at` 和 `updated_at`。`support_idempotency` 仅记录 Support 内部重放，不作为 Assistant 门面指标。不要绕过这些约束手工重复执行对外写操作。
 - `assistant_request.conversation_id` 使用 `ON DELETE CASCADE`。未关联 Conversation 且为 `COMPLETED`、`FAILED` 或 `CANCELLED` 的记录由独立的部分索引支持按 `updated_at` 清理；保留期任务明确不删除 `RUNNING`。
 - 新 Assistant 失败/取消的公开错误同步保存到 `message.response_payload.error`，并写入显式空 `content`，避免读取旧内部成功块；该写入与请求终态收口同事务。失败关联 Trace 同步状态和错误，已终态请求不二次覆盖。历史消息优先读取错误快照，旧记录兼容 Trace，不新增列或迁移。
+- RAG 技术助手启用时，`conversation.chat_context.rag_issue` 保存原问题、回答形式、一个待确认条件及来源用户/助手消息 ID。读取必须校验来源消息同会话、角色、成功状态和 `rag_user_message_id` 配对；写入或清理与本轮 Message/RAG Trace 成功终态共用事务和 `support_context_version` CAS。失败、取消、并发冲突和幂等重放不创建第二份状态；Support 不消费该命名空间。
 
 ## 数据流
 
@@ -40,6 +42,7 @@
 
 - RAG 质量优化没有新增迁移：`rag_trace.runtime_snapshot` 的 JSON 新增 `generation`，保存实际生成计划/提示词哈希/来源；已有 `retrieval` 改为记录本轮有效覆盖值。`selected_context` 继续表示准备阶段检索上下文，历史记录不回填。文档内二次检索同时在 SQL 限定知识库、索引、文档与有效源文件状态，再应用 Top K。
 - RAG 聚焦历史需要迁移 `0045`。本地开发库已在 2026-09-12 验证升级到 `0045 (head)`；生产状态仍须在目标服务器单独执行 `alembic current` 确认。该迁移不要求重建知识索引，也不改写历史回答或 Trace。
+- 本次知识库范围编辑、范围快照和 `rag_issue` 复用既有 `description`、`updated_at`、JSONB 与上下文版本字段，没有新增 Alembic 迁移；部署仍必须先执行当前仓库的 `upgrade head`，不能据此跳过既有 `0045`。
 
 - 新字段、表、索引、枚举约束必须使用 Alembic 迁移，不直接修改线上 schema。
 - 更改嵌入维度、索引结构或保留策略会影响已有数据和任务，需要同时评估迁移、重建和回滚。

@@ -98,7 +98,7 @@ HTTP 错误字段：
 | 值 | 含义 | 调用方处理 |
 | --- | --- | --- |
 | `ANSWERED` | 已生成正常回答。 | 优先按 `content` 渲染富文本，空内容块时使用 `answer`；避免重复展示相同正文。 |
-| `UNCONFIRMED` | 当前资料不足以确认。 | 展示回答并提示用户补充信息。 |
+| `UNCONFIRMED` | 当前条件不足以确认；回答可能只追问一个关键条件。 | 展示回答；用户补充条件时必须沿用同一 `conversation_id`。 |
 | `OUT_OF_SCOPE` | 问题不在服务范围内。 | 展示范围提示。 |
 | `DOC_DELIVERED` / `DOCUMENT_DELIVERED` | 已匹配并交付文档内容。 | `answer` 展示加粗文档标题，随后按顺序展示 `content`；不提供原文下载入口。 |
 | `CLARIFICATION_REQUIRED` | 需要用户进一步选择或补充。 | 根据 `clarification` 构建交互。 |
@@ -110,6 +110,7 @@ HTTP 错误字段：
 - 文档直达时，`answer` 仅为 `**《文档标题》**`，不包含“已找到”或“以下是文档内容”等引导语；`content` 从有效正文或操作步骤开始，按源文档首行必为标题的约定，平台无条件删除首条非空文本行，每份文档只删除一次，不比较显示名称。
 - 普通 RAG 回答的 `answer` 是最终文本，`content` 是同一回答的结构化版本；收到 `complete` 后替换临时展示，选择富文本或纯文本渲染，避免将两份相同正文依次追加。文档直达除外：标题 `answer` 与正文 `content` 需依次展示。
 - 回答可包含明确标注的文档依据、分析与推断、通用建议；`references` 仅支持有文档依据的部分，`disclaimer` 应在回答附近保留。模型内部模式/引用标记不会作为新生成回答的可见文本输出。
+- 无可靠文档正文时，服务可在当前知识库的公开专业范围内返回通用工程分析。这类回答不返回文档引用或图片，并携带 `disclaimer`；调用方不得因 `references=[]` 将其判为失败。
 - 流式问答在服务接受请求前发生的鉴权、参数、会话归属、知识库/索引可用性、幂等或并发错误，以 HTTP 4xx/5xx JSON 返回；接受请求后的生成错误，以 SSE `error` 事件返回。
 - `cursor`、`before` 均为不透明游标，只能原样回传，不得拆解、拼接或自行生成。
 
@@ -125,6 +126,7 @@ HTTP 错误字段：
 5. 首次流式问答：conversation_id 省略或传 null
 6. 收到 context/complete：保存 client_chat_id → conversation_id 映射
 7. 后续追问：携带同一 conversation_id，并为每次新提问生成新的 Idempotency-Key
+   - 若上一轮为 `UNCONFIRMED` 且询问了关键条件，用户的条件回复也按此步发送，不新建会话
 8. 页面恢复或历史查询：调用会话列表、会话详情和历史消息接口
 9. 展示引用信息与图片：文档标题用于来源展示；根据 image_asset_id 由业务后台代理图片
 ```
@@ -268,7 +270,7 @@ curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/knowledge-bases" \
 | `items` | array | 是 | 当前已上线并对 Assistant 可见的知识库列表；无上线项时为空数组。 | 遍历展示，不得假定至少存在一项。 |
 | `items[].knowledge_id` | UUID string | 是 | 知识库唯一标识。 | 保存为字符串，供欢迎语、问答和资源接口使用。 |
 | `items[].name` | string | 是 | 知识库名称。 | 用于页面展示。 |
-| `items[].description` | string/null | 否 | 知识库说明。 | 为空时隐藏说明区域。 |
+| `items[].description` | string/null | 否 | 对外公开的知识库专业范围说明；管理员修改后，后续列表查询返回新值。 | 用于选库和范围展示；为空时隐藏，不要长期缓存。 |
 | `items[].ready` | boolean | 是 | 当前运行策略所需索引、模型、Prompt 等依赖是否完整就绪。 | 仅允许选择 `true` 的知识库。 |
 
 失败响应示例：
@@ -796,6 +798,8 @@ data: {"code":"TURN_DEADLINE_EXCEEDED","message":"服务繁忙，请稍后重试
 - 幂等重放可能直接返回 `accepted → complete` 或 `accepted → error`，调用方不得假定一定会收到 `delta`。
 - 失败重放保留原错误的 `retryable`、已有标识与 `partial_content`，不会重新生成回答；若保存了原 `request_id`，重放错误仍使用该标识，本次 HTTP 标识以响应头和 `accepted` 为准。明确失败后重新发起仍须使用新 Key。
 - 文档直达通过 `complete.content` 返回当前索引已解析的全部正文、表格和图片引用（关闭图片时不含图片），去除开头重复标题，不因文档较长省略尾部步骤。`answer` 仅为标题，不能代替正文；这不等于还原 DOCX 页面排版，也不承诺普通生成式问答复述整份文档。
+- 局部问题可返回 `ANSWERED` 而不交付整篇文档；明确索要全文或完整流程时才优先返回 `DOC_DELIVERED`。调用方只按 `response_type`、`content` 和 `references` 渲染，不根据问题关键词自行预判展示形式。
+- 若 `UNCONFIRMED` 正文要求补充一个条件，下一轮应沿用同一 `conversation_id`；换设备、换故障或改问新任务时则直接发送完整新问题，不要伪造条件选项。
 - 长文档可能产生较大的单个 SSE 事件；须收到事件结束空行后再解析 JSON，不能把 TCP/HTTP 数据块当作完整事件。图片仍按 ID 独立读取，不把图片二进制嵌入回答。
 - 客户端断开后，业务后台应取消对上游 SSE 的读取，避免无效连接继续占用资源。
 

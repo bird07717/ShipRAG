@@ -438,6 +438,30 @@ export const adminStore = reactive({
     }
   },
 
+  async updateKnowledgeBaseDescription(
+    knowledge: KnowledgeBase,
+    description: string,
+  ): Promise<KnowledgeBase> {
+    const actionKey = `update-knowledge:${knowledge.id}`;
+    this.actionLoading[actionKey] = true;
+    this.error = "";
+    try {
+      const updated = await adminApi.updateKnowledgeBase(knowledge.id, {
+        description: description.trim() || null,
+        expected_updated_at: knowledge.updated_at,
+      });
+      const index = this.knowledgeBases.findIndex((item) => item.id === updated.id);
+      if (index >= 0) this.knowledgeBases[index] = updated;
+      this.notice = "知识库说明已保存；启用专业技术助手后，新请求将使用新的范围";
+      return updated;
+    } catch (cause) {
+      this.error = cause instanceof Error ? cause.message : "知识库说明保存失败";
+      throw cause;
+    } finally {
+      delete this.actionLoading[actionKey];
+    }
+  },
+
   async loadSystemInfo(): Promise<void> {
     try {
       this.systemInfo = await adminApi.getSystemInfo();

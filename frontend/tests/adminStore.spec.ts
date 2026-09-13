@@ -183,6 +183,38 @@ describe("adminStore", () => {
     expect(adminStore.notice).toBe("知识库已创建，默认不对 Assistant 上线");
   });
 
+  it("updates a knowledge-base description by id and sends the displayed revision", async () => {
+    adminStore.knowledgeBases = [kb, { ...kb, id: "kb-2" }];
+    const updated = {
+      ...kb,
+      description: "VAU 图像配置和故障排查",
+      updated_at: "2026-09-13T01:00:00Z",
+    };
+    const update = vi.spyOn(adminApi, "updateKnowledgeBase").mockResolvedValue(updated);
+
+    const result = await adminStore.updateKnowledgeBaseDescription(kb, "  VAU 图像配置和故障排查  ");
+
+    expect(update).toHaveBeenCalledWith("kb-1", {
+      description: "VAU 图像配置和故障排查",
+      expected_updated_at: kb.updated_at,
+    });
+    expect(result).toEqual(updated);
+    expect(adminStore.knowledgeBases[0]).toEqual(updated);
+    expect(adminStore.knowledgeBases[1]?.id).toBe("kb-2");
+  });
+
+  it("keeps the existing list value when a description update conflicts", async () => {
+    adminStore.knowledgeBases = [kb];
+    vi.spyOn(adminApi, "updateKnowledgeBase").mockRejectedValue(new Error("请重新加载后再保存"));
+
+    await expect(adminStore.updateKnowledgeBaseDescription(kb, "未保存的新说明")).rejects.toThrow(
+      "请重新加载后再保存",
+    );
+
+    expect(adminStore.knowledgeBases[0]?.description).toBeNull();
+    expect(adminStore.error).toBe("请重新加载后再保存");
+  });
+
   it("requires the knowledge name and deletes the selected knowledge base", async () => {
     stubApi();
     adminStore.knowledgeBases = [kb];

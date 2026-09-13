@@ -8,6 +8,7 @@ import type {
   BuildRequestResult,
   GarbageCollectionResult,
   KnowledgeBase,
+  KnowledgeBaseUpdatePayload,
   KnowledgeAssistantConfig,
   KnowledgeAssistantCheck,
   KnowledgeIndex,
@@ -113,6 +114,11 @@ export const adminApi = {
     apiRequest<KnowledgeBase>("/knowledge-bases", {
       method: "POST",
       body: JSON.stringify({ name, description: description || null }),
+    }),
+  updateKnowledgeBase: (knowledgeId: string, payload: KnowledgeBaseUpdatePayload) =>
+    apiRequest<KnowledgeBase>(`/knowledge-bases/${knowledgeId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
     }),
   deleteKnowledgeBase: (knowledgeId: string) =>
     apiRequest<TaskSubmission>(

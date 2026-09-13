@@ -52,6 +52,10 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - `M3_RAG_EXPLANATION_MODE` 默认 `enabled`，只对首轮可靠选中的文档及明确解释类问法启用 DOC_QA；完整全文/流程请求与确认交互保持原路径，焦点仍通过同一版本检查保存。`shadow/off` 可回退原文交付；与事实短答开关独立。
 - `rag/presentation.py` 流式缓冲并隐藏跨增量的 MODE/IMG/来源标记及控制字符，保留普通 Markdown；最终答案和文本块同样清理。图片仍通过结构化块交付。修复图片标点重排中的控制字符替换问题。超时、空回答、上游 EOF 未终止或 length 截断均失败收口，保留干净的部分文本和可重试状态，不保存为成功回答。Assistant 继续保存公开终态，历史/重放不会重新生成旧答案。
 - `M3_RAG_FACT_QA_MODE` 默认 `shadow`，只记录明确事实问法；`enabled` 才在首轮可靠选中文档后复用文档问答。完整步骤/流程请求、已有焦点和澄清确认不进入该实验，选文档规则不因此放宽。使用相同乐观版本检查建立焦点；对外 Assistant 契约和 Support 路由不变。
+- `M3_RAG_TECH_ASSIST_MODE` 默认 `off`。`enabled` 时，RAG 用确定性策略统一区分完整文档、局部短答、解释和排查；可靠文档仍是专有事实依据，无可靠正文且知识库公开说明非空时才进入 `DOMAIN_ASSIST`。`shadow` 只记录回答形式及领域扩展可用性，不额外调用模型、不写 `rag_issue`、不改变公开回答。
+- `DOMAIN_ASSIST` 沿用现有 LLM 和总时限，以内部模式前缀区分 `PRODUCT_GENERAL`/`UNCONFIRMED`/`OUT_OF_SCOPE`。流式层只实时放行专业分析；待确认、范围外或非法前缀在服务端校验后收口，不返回文档引用或图片。通用分析带工程经验免责声明和谨慎提示。
+- `RagRepository.begin_turn` 在知识库与 Active Index 锁定快照中同时读取名称、公开 `description` 及 `updated_at`。范围数据移除控制字符、折叠空白、转义标记边界，并受 `M3_RAG_SCOPE_MAX_TOKENS`（默认 800）限制；Trace 只记范围版本、长度、截断和 SHA256，不额外复制描述正文。直入 RAG 和 Support→RAG 回退共用该快照。
+- 新策略的待确认状态使用 `conversation.chat_context.rag_issue`，只保留原问题、回答形式和一个条件。读取时验证最初用户消息、当前条件来源用户消息及追问助手消息的会话、角色、完成状态和配对关系；新状态只与成功回答终态在同一事务内 CAS 提交，失败、取消和噪声轮不推进状态。Support 不消费该命名空间。
 
 - 嵌入维度在 Settings 与数据库契约中固定为 1024，变更需要迁移与重建计划。
 - 查询嵌入优先使用与 Active Index 模型一致的数据库模型快照，无法使用时才尝试环境配置；Trace 的 `retrieval_result` 同时记录索引模型及实际查询 Embedding provider/model，便于识别索引与查询向量不一致。
@@ -89,6 +93,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 ## 知识库 Assistant 管理
 
+- 管理凭据下新增 `PATCH /api/v1/knowledge-bases/{id}`，请求只含公开 `description` 和必填 `expected_updated_at`；空白说明归一化为 `null`，过期版本返回 409 `KNOWLEDGE_BASE_UPDATE_CONFLICT` 及当前更新时间，删除中拒绝修改。成功返回完整 `KnowledgeBaseResponse`。该操作不创建任务、不改 Active Index/Chunk、不触发重建；外部 Assistant API 没有新增管理入口。
 - 管理凭据下提供 `GET /api/v1/knowledge-bases/{id}/assistant-config`（配置及 `ready`/`blockers`）、`PUT` 同路径（`revision`、`suggestions`）和 `PUT /api/v1/knowledge-bases/{id}/assistant-publication`（`revision`、`assistant_online`）。成功写入返回 `knowledge_id`、`assistant_online`、`suggestions` 和新 `revision`；外部 `/assistant/*` 不增加管理接口，公开欢迎响应结构不变。
 - 每条推荐问题去除首尾空白后为 4 至 200 字，最多三条，NFKC、忽略大小写/空白及末尾问号后不得重复。下线库可保存 0～3 条，线上库必须保留三条；上线检查完整性和当前执行策略的就绪条件。缺失问题或运行未就绪返回 409，文本校验失败返回 422。
 - `AssistantConfiguration` 在同一事务内锁定知识库、检查修订和执行写入；上线就绪检查复用该事务连接。冲突返回 409 `ASSISTANT_CONFIG_CONFLICT`，需重新加载；下线不查询运行就绪，问题保存不隐式切换上线状态。删除中的知识库拒绝配置写入。

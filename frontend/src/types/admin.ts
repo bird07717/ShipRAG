@@ -30,6 +30,11 @@ export interface KnowledgeBase {
   updated_at: string;
 }
 
+export interface KnowledgeBaseUpdatePayload {
+  description: string | null;
+  expected_updated_at: string;
+}
+
 export interface SystemInfo {
   name: string;
   environment: string;

@@ -29,6 +29,12 @@ RAG 首轮单强直达的本地离线实验见
 不将“文档未涉及”的标题提及误计为引用；rag_xdoc_005 文档选择题接受既有 next_suggestions 中
 符合预期的升级文档。前后报告用同一套新断言重评。
 
+小体量专业技术助手的 50 个新场景见
+[`technical-assistant-cases.jsonl`](technical-assistant-cases.jsonl)：完整操作 8、局部回答 10、
+无可靠正文的专业扩展 10、连续排查 8、领域边界 10、条件关联边界 4。
+该文件已做 JSONL 和自动断言校验，尚未调用真实模型；其中标明 `data_dependency`
+的场景需相应源文档重制、上线后才能作为放行结果。
+
 ## 运行
 
 ```bash
@@ -43,6 +49,13 @@ RAG 首轮单强直达的本地离线实验见
 
 # 解释、计算、条件推断、通用知识与文档引用边界
 .venv/bin/python rag-acceptance/run_golden.py --api-mode assistant --cases rag-acceptance/reasoning-cases.jsonl
+
+# 小体量专业技术助手（必须显式指定测试服务和目标库，会调用真实模型）
+.venv/bin/python rag-acceptance/run_golden.py \
+  --api-mode assistant \
+  --base-url <test-service-base-url> \
+  --kb-id <online-ready-rag-knowledge-base-id> \
+  --cases rag-acceptance/technical-assistant-cases.jsonl
 
 # 模拟业务后台完整调用；请指定已上线、就绪且包含图片的测试知识库
 PYTHONPATH=backend .venv/bin/python rag-acceptance/check_assistant_contract.py --kb-id <uuid> --base-url http://127.0.0.1:8000
@@ -104,6 +117,8 @@ Assistant 模式调用 `/api/v1/assistant/chat/stream`，为每轮请求提供
 - 所有用例拒绝空答案；文档交付拒绝只有标题、没有正文和图片，并要求公开文档引用。
 - `response_types`、`content_must_all`、`content_must_groups`、`content_forbidden_any`——限定响应类型、全部必需内容、每组任选一项及禁止内容。
 - `min_images`、`min_tables`、`require_reference`、`document_ids`、`forbidden_document_ids`——检查交付结构和引用关联；管理响应有 `sources` 时也检查其与引用的文档一致性。
+- `answer_modes` 仅用于会公开该字段的管理/直入响应，Assistant 对外用例不得依赖内部模式；`require_no_reference` 确认通用工程回答没有冒充文档来源。
+- `require_disclaimer`、`disclaimer_must_all`——检查需要谨慎提示的回答已携带完整免责文本。
 
 规则断言不能替代完整语义评审。只命中标题、关键词或图片数量不代表整段回答全部正确；
 真实失败应结合公开响应与 Trace 人工核对，再决定修改源文档、检索、Prompt 或用例。

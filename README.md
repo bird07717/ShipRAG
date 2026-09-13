@@ -80,6 +80,7 @@ bash scripts/check-m7.sh
 | 当前状态、已知问题、技术决策 | [current-state.md](docs/ai/current-state.md)、[known-issues.md](docs/ai/known-issues.md)、[decisions.md](docs/ai/decisions.md) |
 | 对外 Assistant API 完整契约 | [assistant-api-integration-guide.md](docs/integration/assistant-api-integration-guide.md) |
 | 业务后台对接实施指南 | [assistant-api-business-backend-guide.md](docs/integration/assistant-api-business-backend-guide.md) |
+| 小体量 RAG 技术助手优化执行方案（本地已实现，默认关闭） | [rag-technical-assistant-optimization-plan.md](docs/technical/rag-technical-assistant-optimization-plan.md) |
 | 运维与 RAG 回归 | [ops-runbook.md](docs/ops-runbook.md)、[rag-acceptance/README.md](rag-acceptance/README.md) |
 
 ## 协作约定
