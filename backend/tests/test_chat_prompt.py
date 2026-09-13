@@ -8,6 +8,7 @@ from app.rag.models import RetrievalCandidate
 from app.rag.prompt import (
     CHUNK_QA_PROMPT_TEMPLATE,
     DOC_QA_PROMPT_TEMPLATE,
+    DOMAIN_ASSIST_PROMPT_TEMPLATE,
     ROUTING_PROMPT_TEMPLATE,
     build_chunk_qa_prompt_template,
     build_context,
@@ -25,16 +26,18 @@ def test_runtime_prompt_entries_snapshot() -> None:
         "runtime-doc-qa",
         "runtime-chunk-qa",
         "runtime-routing",
+        "runtime-domain-assist",
     ]
     templates = {
         "runtime-doc-qa": DOC_QA_PROMPT_TEMPLATE,
         "runtime-chunk-qa": CHUNK_QA_PROMPT_TEMPLATE,
         "runtime-routing": ROUTING_PROMPT_TEMPLATE,
+        "runtime-domain-assist": DOMAIN_ASSIST_PROMPT_TEMPLATE,
     }
     for entry in entries:
         assert entry["source"] == "RUNTIME"
         assert entry["active"] is False
-        assert entry["version"] == 3
+        assert entry["version"] == (1 if entry["name"] == "runtime-domain-assist" else 3)
         assert entry["description"]
         assert entry["content"] == templates[entry["name"]]
         validate_prompt_template(entry["content"])

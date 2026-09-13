@@ -13,8 +13,6 @@ from app.rag.models import RetrievalConfig
 from app.services.rag import RagService
 from app.support.service import TechnicalSupportService
 
-_PRODUCT_SCOPE = "本产品相关的问题，包括参数、功能、使用步骤、维护和故障排查"
-
 
 def _sse(event: str, payload: dict[str, Any]) -> bytes:
     return (
@@ -266,8 +264,6 @@ class ChatGatewayService:
             conversation_id=conversation_id,
             question=question,
             request_id=request_id,
-            product_name="",
-            scope_description=_PRODUCT_SCOPE,
             user_id=user_id,
             include_images=include_images,
             reuse_user_message_id=(
@@ -307,11 +303,7 @@ class ChatGatewayService:
                 yield frame
 
     async def _rag_generate(self, **kwargs: Any) -> dict[str, Any]:
-        return await self.rag.generate(
-            **kwargs,
-            product_name="",
-            scope_description=_PRODUCT_SCOPE,
-        )
+        return await self.rag.generate(**kwargs)
 
     async def _retrieval_config(self, policy: ResolvedPolicy) -> RetrievalConfig:
         return await self.rag.repository.get_engine_retrieval_config(policy.policy.value)

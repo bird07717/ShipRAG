@@ -10,8 +10,38 @@ from app.common.suggestions import validate_suggestions
 
 
 class KnowledgeBaseCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=5_000)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def normalize_description(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
+
+
+class KnowledgeBaseUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    description: str | None = Field(max_length=5_000)
+    expected_updated_at: datetime
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def normalize_description(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
 
 
 class KnowledgeBaseResponse(BaseModel):

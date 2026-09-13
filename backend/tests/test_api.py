@@ -11,7 +11,9 @@ from app.api.ingestion import (
     get_document_profile_repository,
     get_document_profile_service,
     get_ingestion_service,
+    update_knowledge_base,
 )
+from app.api.schemas import KnowledgeBaseCreate, KnowledgeBaseUpdate
 
 
 class _KnowledgeDeleteServiceStub:
@@ -25,6 +27,35 @@ class _KnowledgeDeleteServiceStub:
             "task_type": "KNOWLEDGE_BASE_DELETE",
             "status": "QUEUED",
             "replayed": False,
+        }
+
+
+class _KnowledgeRepositoryStub:
+    def __init__(self) -> None:
+        self.call: tuple[UUID, str | None, Any] | None = None
+
+    async def update_knowledge_base_description(
+        self, knowledge_id: UUID, *, description: str | None, expected_updated_at: Any
+    ) -> dict[str, Any]:
+        self.call = (knowledge_id, description, expected_updated_at)
+        return {
+            "id": knowledge_id,
+            "name": "产品库",
+            "description": description,
+            "status": "ENABLED",
+            "assistant_online": False,
+            "assistant_config_revision": 0,
+            "active_index_id": None,
+            "rag_active_index_id": None,
+            "support_active_index_id": None,
+            "support_active_release_id": None,
+            "rebuild_required": False,
+            "runtime_state": "EMPTY",
+            "created_at": "2026-09-13T00:00:00Z",
+            "updated_at": "2026-09-13T01:00:00Z",
+            "document_count": 0,
+            "active_chunk_count": 0,
+            "building_index_id": None,
         }
 
 
@@ -144,6 +175,27 @@ def test_delete_knowledge_base_uses_ingestion_service(client: TestClient) -> Non
     assert response.json()["task_type"] == "KNOWLEDGE_BASE_DELETE"
     assert response.json()["status"] == "QUEUED"
     assert service.deleted_id == knowledge_id
+
+
+@pytest.mark.asyncio
+async def test_knowledge_description_normalizes_on_create_and_patch() -> None:
+    assert KnowledgeBaseCreate(name=" 产品库 ", description="  ").model_dump() == {
+        "name": "产品库",
+        "description": None,
+    }
+    knowledge_id = uuid4()
+    repository = _KnowledgeRepositoryStub()
+    payload = KnowledgeBaseUpdate.model_validate(
+        {
+            "description": "  VAU 图像配置和故障排查  ",
+            "expected_updated_at": "2026-09-13T00:00:00Z",
+        }
+    )
+    response = await update_knowledge_base(knowledge_id, payload, repository)  # type: ignore[arg-type]
+
+    assert response["description"] == "VAU 图像配置和故障排查"
+    assert repository.call is not None
+    assert repository.call[:2] == (knowledge_id, "VAU 图像配置和故障排查")
 
 
 def test_rebuild_knowledge_profiles_returns_task_submission(client: TestClient) -> None:

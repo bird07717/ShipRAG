@@ -38,6 +38,10 @@ class _FakeResult:
     def scalar_one_or_none(self) -> Any:
         return self._rows[0] if self._rows else None
 
+    @property
+    def rowcount(self) -> int:
+        return len(self._rows)
+
 
 class _FakeConnection:
     def __init__(self, results: list[Any]) -> None:
@@ -413,6 +417,50 @@ async def test_complete_turn_without_routing_leaves_trace_untouched() -> None:
     trace_sql, _ = connection.executed[1]
     assert "jsonb_set" not in trace_sql
     assert "prompt = :prompt" not in trace_sql
+
+
+async def test_complete_turn_commits_rag_issue_patch_with_terminal_answer() -> None:
+    repo, connection = _repository([[{"updated": True}], [], [], []])
+    turn = Turn(
+        trace_id=uuid4(),
+        conversation_id=uuid4(),
+        user_message_id=uuid4(),
+        assistant_message_id=uuid4(),
+        knowledge_id=uuid4(),
+        index_id=uuid4(),
+        embedding_model_name="m",
+        prompt_template="t",
+        llm=ModelSnapshot("zhipu", "glm", {}),
+        history=[],
+        context_version=3,
+    )
+    issue = {
+        "version": 1,
+        "origin_user_message_id": str(turn.user_message_id),
+        "pending_condition": {
+            "source_user_message_id": str(turn.user_message_id),
+            "source_assistant_message_id": str(turn.assistant_message_id),
+        },
+    }
+
+    await repo.complete_turn(
+        turn,
+        answer="请确认设备型号？",
+        sources=[],
+        usage={},
+        citation_result={},
+        timings={},
+        context_patch={"rag_issue": issue},
+        pending_options_after=[],
+    )
+
+    context_sql, context_params = connection.executed[0]
+    assert "jsonb_strip_nulls" in context_sql
+    assert "support_context_version = :expected_context_version" in context_sql
+    assert context_params is not None and context_params["expected_context_version"] == 3
+    assert json.loads(str(context_params["context_patch"])) == {"rag_issue": issue}
+    assert "UPDATE message" in connection.executed[1][0]
+    assert "UPDATE rag_trace" in connection.executed[2][0]
 
 
 def test_turn_focus_defaults_are_backward_compatible() -> None:

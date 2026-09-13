@@ -279,6 +279,19 @@ async def test_prune_real_postgres_preserves_running_recent_and_linked_requests(
                 },
             )
 
+            eligible_before = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT count(*) FROM assistant_request
+                        WHERE conversation_id IS NULL
+                          AND status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+                          AND updated_at < now() - interval '1 day'
+                        """
+                    )
+                )
+            ).scalar_one()
+
             deleted_count = await assistant_retention.delete_expired_assistant_requests(
                 connection,
                 retention_days=1,
@@ -291,7 +304,10 @@ async def test_prune_real_postgres_preserves_running_recent_and_linked_requests(
                     )
                 ).scalars()
             )
-            assert deleted_count == 1
+            # The integration database can contain unrelated expired rows.
+            # This transaction rolls every deletion back, so compare against
+            # the complete eligible snapshot instead of assuming a clean DB.
+            assert deleted_count == eligible_before
             assert remaining == {recent_orphan_id, running_orphan_id, linked_terminal_id}
             await transaction.rollback()
     finally:

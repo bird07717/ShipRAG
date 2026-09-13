@@ -24,8 +24,10 @@ class ResponseType(str, Enum):
 
 
 PRODUCT_GENERAL_DISCLAIMER = (
-    "该回答用于解释与本产品相关的通用原理，"
-    "不代表当前产品型号的具体参数、功能、步骤、兼容性或官方操作要求。"
+    "本回答基于现有信息和通用工程经验，仅供技术排查参考，不构成海兰信正式技术结论。"
+    "通用经验不代表当前产品型号的具体参数或官方操作要求。"
+    "涉及设备参数、接线、升级或拆装时，请结合现场条件和正式资料核验，"
+    "必要时联系海兰信专业人员。"
 )
 PRODUCT_EXPLAINED_DISCLAIMER = (
     "分析与推断基于已说明的依据和条件；通用建议不代表本产品的操作或验收要求，"
@@ -203,10 +205,12 @@ def post_validate(
     has_evidence: bool,
     *,
     require_citations: bool = True,
+    preserve_unconfirmed_without_evidence: bool = False,
 ) -> ChatResult:
     source_registry = {s["source_id"]: s for s in sources}
 
-    mode, answer = _parse_mode_tag(raw_answer.lstrip())
+    parsed_mode, answer = _parse_mode_tag(raw_answer.lstrip())
+    mode = parsed_mode
     if mode is None:
         mode = AnswerMode.UNCONFIRMED
 
@@ -245,7 +249,17 @@ def post_validate(
         valid_sources = []
     elif mode == AnswerMode.UNCONFIRMED:
         if not has_evidence:
-            answer = UNCONFIRMED_MESSAGE
+            if preserve_unconfirmed_without_evidence and parsed_mode == AnswerMode.UNCONFIRMED:
+                cleaned = clean_model_text(_CITATION_PATTERN.sub("", answer)).strip()
+                question_end = min(
+                    [index for mark in ("？", "?") if (index := cleaned.find(mark)) >= 0],
+                    default=-1,
+                )
+                answer = (
+                    cleaned[: question_end + 1] if 0 <= question_end < 400 else UNCONFIRMED_MESSAGE
+                )
+            else:
+                answer = UNCONFIRMED_MESSAGE
         # An unconfirmed answer must never expose a document as if it were
         # evidence.  Trace candidates remain available to operators.
         answer = _CITATION_PATTERN.sub("", answer).strip()

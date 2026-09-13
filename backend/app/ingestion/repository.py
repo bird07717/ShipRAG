@@ -121,6 +121,67 @@ class IngestionRepository:
             raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
         return self._knowledge_response(dict(row))
 
+    async def update_knowledge_base_description(
+        self,
+        knowledge_id: UUID,
+        *,
+        description: str | None,
+        expected_updated_at: datetime,
+    ) -> dict[str, Any]:
+        async with self.engine.begin() as connection:
+            updated = await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_base
+                    SET description = :description, updated_at = now()
+                    WHERE id = :id AND status <> 'DELETING'
+                      AND updated_at = :expected_updated_at
+                    RETURNING id
+                    """
+                ),
+                {
+                    "id": knowledge_id,
+                    "description": description,
+                    "expected_updated_at": expected_updated_at,
+                },
+            )
+            if updated.scalar_one_or_none() is None:
+                current = await connection.execute(
+                    text("SELECT status, updated_at FROM knowledge_base WHERE id = :id"),
+                    {"id": knowledge_id},
+                )
+                row = current.mappings().one_or_none()
+                if row is None:
+                    raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
+                if row["status"] == "DELETING":
+                    raise ApiError("KNOWLEDGE_BASE_DELETING", "知识库正在删除，不能修改", 409)
+                raise ApiError(
+                    "KNOWLEDGE_BASE_UPDATE_CONFLICT",
+                    "知识库已被其他请求修改，请重新加载后再保存",
+                    409,
+                    {"current_updated_at": row["updated_at"].isoformat()},
+                )
+            refreshed = await connection.execute(
+                text(
+                    """
+                    SELECT kb.*,
+                           (SELECT count(*) FROM document_source d
+                            WHERE d.kb_id = kb.id AND d.status = 'STORED') AS document_count,
+                           COALESCE((SELECT chunk_count FROM knowledge_index i
+                                     WHERE i.id = COALESCE(
+                                         kb.rag_active_index_id, kb.active_index_id
+                                     )), 0) AS active_chunk_count,
+                           (SELECT id FROM knowledge_index i WHERE i.kb_id = kb.id
+                            AND i.status = 'BUILDING' LIMIT 1) AS building_index_id,
+                           (SELECT status FROM knowledge_index i WHERE i.kb_id = kb.id
+                            ORDER BY i.version DESC LIMIT 1) AS latest_index_status
+                    FROM knowledge_base kb WHERE kb.id = :id
+                    """
+                ),
+                {"id": knowledge_id},
+            )
+            return self._knowledge_response(dict(refreshed.mappings().one()))
+
     async def request_knowledge_base_deletion(self, knowledge_id: UUID) -> dict[str, Any]:
         async with self.engine.begin() as connection:
             knowledge_result = await connection.execute(

@@ -37,6 +37,9 @@ def evaluate_content(expected: dict[str, Any], response: dict[str, Any]) -> list
     allowed = expected.get("response_types")
     if allowed and response_type not in allowed:
         problems.append(f"响应类型不符: {response_type}，期望 {allowed}")
+    allowed_modes = expected.get("answer_modes")
+    if allowed_modes and response.get("answer_mode") not in allowed_modes:
+        problems.append(f"回答模式不符: {response.get('answer_mode')}，期望 {allowed_modes}")
     for key in expected.get("content_must_all") or []:
         if normalized(str(key)) not in norm:
             problems.append(f"正文缺少必需内容: {key}")
@@ -53,6 +56,15 @@ def evaluate_content(expected: dict[str, Any], response: dict[str, Any]) -> list
         problems.append("回答缺少必需表格")
     expected_ids = set(expected.get("document_ids") or [])
     references = response.get("references") or []
+    if expected.get("require_no_reference") and references:
+        problems.append("回答不应包含文档引用")
+    disclaimer = str(response.get("disclaimer") or "")
+    if expected.get("require_disclaimer") and not disclaimer:
+        problems.append("回答缺少免责声明")
+    disclaimer_norm = normalized(disclaimer)
+    for key in expected.get("disclaimer_must_all") or []:
+        if normalized(str(key)) not in disclaimer_norm:
+            problems.append(f"免责声明缺少必需内容: {key}")
     if references:
         for alternatives in expected.get("reference_content_must_groups") or []:
             if not any(normalized(str(key)) in norm for key in alternatives):

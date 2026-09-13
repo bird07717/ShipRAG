@@ -51,6 +51,46 @@ class ModelTextStream:
         return value
 
 
+class DomainAssistTextStream:
+    """Gate no-evidence output until its leading domain mode is known.
+
+    Only PRODUCT_GENERAL text is streamed live. OUT_OF_SCOPE, UNCONFIRMED and
+    invalid prefixes stay hidden until server-side validation builds the
+    authoritative final answer.
+    """
+
+    _PREFIX = re.compile(r"^\s*\[MODE:([A-Z_]+)\]\s*")
+
+    def __init__(self) -> None:
+        self.pending = ""
+        self.mode: str | None = None
+        self._visible = ModelTextStream()
+
+    @property
+    def streams_body(self) -> bool:
+        return self.mode == "PRODUCT_GENERAL"
+
+    def feed(self, chunk: str, *, final: bool = False) -> str:
+        cleaned = _CONTROL.sub("", chunk)
+        if self.mode is not None:
+            if self.streams_body:
+                return self._visible.feed(cleaned, final=final)
+            return ""
+        self.pending += cleaned
+        match = self._PREFIX.match(self.pending)
+        if match:
+            self.mode = match.group(1)
+            remainder = self.pending[match.end() :]
+            self.pending = ""
+            if self.streams_body:
+                return self._visible.feed(remainder, final=final)
+            return ""
+        if final or len(self.pending) > 64:
+            self.mode = "INVALID"
+            self.pending = ""
+        return ""
+
+
 def clean_model_text(text: str) -> str:
     return ModelTextStream().feed(text, final=True).strip()
 

@@ -20,6 +20,7 @@ from app.assistant.configuration import AssistantConfiguration
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.gateway.repository import GatewayRepository
+from app.ingestion.repository import IngestionRepository
 
 QUESTIONS = ["如何检查设备电源", "如何查看系统状态", "如何执行设备自检"]
 
@@ -109,6 +110,53 @@ async def test_concurrent_saves_conflict_without_cross_kb_writes(configuration: 
     assert failure.code == "ASSISTANT_CONFIG_CONFLICT"
     assert (await service.get(ids[0]))["revision"] == 1
     assert (await service.get(ids[1]))["suggestions"] == []
+
+
+async def test_public_description_update_is_atomic_and_does_not_create_builds(
+    configuration: Any,
+) -> None:
+    _, gateway, ids = configuration
+    repository = IngestionRepository(gateway.engine, Settings(_env_file=None, app_env="test"))
+    before = await repository.get_knowledge_base(ids[0])
+    async with gateway.engine.connect() as conn:
+        task_count = (
+            await conn.execute(
+                text("SELECT count(*) FROM task_record WHERE kb_id = :id"), {"id": ids[0]}
+            )
+        ).scalar_one()
+        index_count = (
+            await conn.execute(
+                text("SELECT count(*) FROM knowledge_index WHERE kb_id = :id"), {"id": ids[0]}
+            )
+        ).scalar_one()
+
+    updated = await repository.update_knowledge_base_description(
+        ids[0],
+        description="VAU 图像配置和故障排查",
+        expected_updated_at=before["updated_at"],
+    )
+    assert updated["description"] == "VAU 图像配置和故障排查"
+
+    with pytest.raises(ApiError) as conflict:
+        await repository.update_knowledge_base_description(
+            ids[0],
+            description="过期页面覆盖",
+            expected_updated_at=before["updated_at"],
+        )
+    assert conflict.value.code == "KNOWLEDGE_BASE_UPDATE_CONFLICT"
+    assert conflict.value.details["current_updated_at"] == updated["updated_at"].isoformat()
+
+    async with gateway.engine.connect() as conn:
+        assert (
+            await conn.execute(
+                text("SELECT count(*) FROM task_record WHERE kb_id = :id"), {"id": ids[0]}
+            )
+        ).scalar_one() == task_count
+        assert (
+            await conn.execute(
+                text("SELECT count(*) FROM knowledge_index WHERE kb_id = :id"), {"id": ids[0]}
+            )
+        ).scalar_one() == index_count
 
 
 async def test_offline_hides_existing_conversation_and_image(

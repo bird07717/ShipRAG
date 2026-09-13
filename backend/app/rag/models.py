@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -49,6 +50,14 @@ class Turn:
     context_version: int = 0
     chat_context: dict[str, Any] = field(default_factory=dict)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
+    knowledge_name: str = ""
+    knowledge_description: str | None = None
+    knowledge_updated_at: datetime | None = None
+    scope_description: str = ""
+    scope_sha256: str = ""
+    scope_chars: int = 0
+    scope_tokens: int = 0
+    scope_truncated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,3 +174,5 @@ class PreparedRag:
     input_guard_reason: str | None = None
     retrieval_query: str = ""
     query_embedding: list[float] = field(default_factory=list)
+    policy_question: str = ""
+    issue_resumed: bool = False

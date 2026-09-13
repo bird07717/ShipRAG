@@ -296,6 +296,27 @@ def test_quality_assertions_read_actual_delivery_body_and_reject_mutations():
     assert evaluate_content({"content_forbidden_any": ["断电"]}, response)
 
 
+def test_quality_evaluator_checks_domain_assist_boundaries():
+    response = {
+        "response_type": "ANSWERED",
+        "answer_mode": "PRODUCT_GENERAL",
+        "answer": "先检查供电。",
+        "content": [{"type": "text", "text": "先检查供电。"}],
+        "references": [],
+        "disclaimer": "仅供技术排查参考，必要时联系海兰信专业人员。",
+    }
+    expected = {
+        "response_types": ["ANSWERED"],
+        "answer_modes": ["PRODUCT_GENERAL"],
+        "require_no_reference": True,
+        "require_disclaimer": True,
+        "disclaimer_must_all": ["仅供技术排查参考", "海兰信专业人员"],
+    }
+    assert evaluate_content(expected, response) == []
+    assert evaluate_content(expected, {**response, "references": [{"document_id": "A"}]})
+    assert evaluate_content(expected, {**response, "disclaimer": None})
+
+
 def test_title_only_delivery_is_not_a_complete_answer():
     assert evaluate_content(
         {},

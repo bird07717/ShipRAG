@@ -57,8 +57,6 @@ async def rag_chat_stream(
                 conversation_id=payload.conversation_id,
                 question=payload.question,
                 request_id=payload.request_id or str(request.state.request_id),
-                product_name="",
-                scope_description="本产品相关的问题，包括参数、功能、使用步骤、维护和故障排查",
                 user_id=payload.user_id,
             ),
         ),
@@ -82,8 +80,6 @@ async def rag_chat(
         conversation_id=payload.conversation_id,
         question=payload.question,
         request_id=payload.request_id or str(request.state.request_id),
-        product_name="",
-        scope_description="本产品相关的问题，包括参数、功能、使用步骤、维护和故障排查",
         user_id=payload.user_id,
     )
 

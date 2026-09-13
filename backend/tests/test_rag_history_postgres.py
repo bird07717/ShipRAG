@@ -67,13 +67,36 @@ async def test_new_rag_turn_persists_pair_and_does_not_repeat_current_question(
 ):
     r = records
     await _insert_active_index(r.engine, r.kb)
-    repo = RagRepository(r.engine, Settings(_env_file=None, app_env="test"))
+    async with r.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE knowledge_base SET name='VAU 测试库', "
+                "description='VAU 图像配置、通信和故障排查' WHERE id=:id"
+            ),
+            {"id": r.kb},
+        )
+    repo = RagRepository(
+        r.engine,
+        Settings(_env_file=None, app_env="test", m3_rag_scope_max_tokens=100),
+    )
     first = await repo.begin_turn(
         knowledge_id=r.kb,
         conversation_id=None,
         question="如果还未更换呢？",
         request_id="history-first",
     )
+    assert first.knowledge_name == "VAU 测试库"
+    assert "VAU 图像配置、通信和故障排查" in first.scope_description
+    assert first.scope_tokens <= 100
+    async with r.engine.connect() as conn:
+        scope_snapshot = (
+            await conn.execute(
+                text("SELECT runtime_snapshot->'scope' FROM rag_trace WHERE trace_id=:id"),
+                {"id": first.trace_id},
+            )
+        ).scalar_one()
+    assert scope_snapshot["sha256"] == first.scope_sha256
+    assert scope_snapshot["tokens"] == first.scope_tokens
     async with r.engine.begin() as conn:
         pair = (
             await conn.execute(
@@ -98,6 +121,88 @@ async def test_new_rag_turn_persists_pair_and_does_not_repeat_current_question(
     ]
     assert second.has_prior_messages is True
     assert all("我只是做假设" not in h["content"] for h in second.history)
+
+
+async def test_rag_issue_is_loaded_only_when_its_message_pair_is_valid(
+    records,  # noqa: F811
+) -> None:
+    r = records
+    await _insert_active_index(r.engine, r.kb)
+    repo = RagRepository(r.engine, Settings(_env_file=None, app_env="test"))
+    first = await repo.begin_turn(
+        knowledge_id=r.kb,
+        conversation_id=None,
+        question="VAU 没有图像",
+        request_id="issue-first",
+    )
+    issue = {
+        "version": 1,
+        "origin_query": "VAU 没有图像",
+        "origin_user_message_id": str(first.user_message_id),
+        "answer_style": "TROUBLESHOOT",
+        "pending_condition": {
+            "question": "请确认具体型号？",
+            "source_user_message_id": str(first.user_message_id),
+            "source_assistant_message_id": str(first.assistant_message_id),
+        },
+    }
+    await repo.complete_turn(
+        first,
+        answer="请确认具体型号？",
+        sources=[],
+        usage={},
+        citation_result={},
+        timings={},
+        context_patch={"rag_issue": issue},
+        pending_options_after=[],
+    )
+    second = await repo.begin_turn(
+        knowledge_id=r.kb,
+        conversation_id=first.conversation_id,
+        question="PDC",
+        request_id="issue-second",
+    )
+    assert second.chat_context["rag_issue"] == issue
+
+    continued_issue = {
+        **issue,
+        "origin_query": "VAU 没有图像\n用户补充条件：PDC",
+        "pending_condition": {
+            "question": "请再确认软件版本？",
+            "source_user_message_id": str(second.user_message_id),
+            "source_assistant_message_id": str(second.assistant_message_id),
+        },
+    }
+    await repo.complete_turn(
+        second,
+        answer="请再确认软件版本？",
+        sources=[],
+        usage={},
+        citation_result={},
+        timings={},
+        context_patch={"rag_issue": continued_issue},
+        pending_options_after=[],
+    )
+    third = await repo.begin_turn(
+        knowledge_id=r.kb,
+        conversation_id=first.conversation_id,
+        question="V2.1",
+        request_id="issue-third",
+    )
+    assert third.chat_context["rag_issue"] == continued_issue
+
+    async with r.engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE message SET rag_user_message_id=NULL WHERE id=:id"),
+            {"id": second.assistant_message_id},
+        )
+    fourth = await repo.begin_turn(
+        knowledge_id=r.kb,
+        conversation_id=first.conversation_id,
+        question="PDC",
+        request_id="issue-invalid-source",
+    )
+    assert "rag_issue" not in fourth.chat_context
 
 
 @pytest.mark.parametrize("status", ["FAILED", "CANCELLED", "RUNNING"])

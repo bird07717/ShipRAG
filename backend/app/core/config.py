@@ -137,6 +137,8 @@ class Settings(BaseSettings):
     m3_rag_single_strong_mode: Literal["off", "shadow", "enabled"] = "shadow"
     m3_rag_fact_qa_mode: Literal["off", "shadow", "enabled"] = "shadow"
     m3_rag_explanation_mode: Literal["off", "shadow", "enabled"] = "enabled"
+    m3_rag_tech_assist_mode: Literal["off", "shadow", "enabled"] = "off"
+    m3_rag_scope_max_tokens: int = 800
     m3_rag_single_strong_floor: float = 0.85
     m3_rag_single_strong_gap: float = 0.18
 
@@ -372,7 +374,12 @@ class Settings(BaseSettings):
             raise ValueError("M3 count limits must be between 1 and 100")
         return value
 
-    @field_validator("m3_context_token_budget", "m3_history_token_budget", "m3_llm_max_tokens")
+    @field_validator(
+        "m3_context_token_budget",
+        "m3_history_token_budget",
+        "m3_llm_max_tokens",
+        "m3_rag_scope_max_tokens",
+    )
     @classmethod
     def validate_m3_token_limits(cls, value: int) -> int:
         if not 100 <= value <= 100_000:

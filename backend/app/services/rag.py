@@ -22,6 +22,14 @@ from app.common.text import (
 from app.core.config import Settings
 from app.ingestion.embedding import EmbeddingError, EmbeddingProvider, create_embedding_provider
 from app.ingestion.models import EmbeddingInput
+from app.rag.answer_policy import (
+    DEFAULT_PRODUCT_SCOPE,
+    POLICY_VERSION,
+    AnswerStyle,
+    classify_answer_style,
+    normalize_scope_description,
+    resume_issue_query,
+)
 from app.rag.doc_router import (
     ACTION_CLARIFY,
     ACTION_DELIVER,
@@ -41,12 +49,13 @@ from app.rag.models import (
     Source,
     Turn,
 )
-from app.rag.presentation import ModelTextStream, clean_model_text
+from app.rag.presentation import DomainAssistTextStream, ModelTextStream, clean_model_text
 from app.rag.prompt import (
     build_chunk_qa_prompt_template,
     build_context,
     build_doc_qa_prompt_template,
     build_document_context,
+    build_domain_assist_prompt_template,
     build_routing_prompt_template,
     render_prompt,
 )
@@ -62,11 +71,14 @@ from app.rag.retrieval import apply_rerank, merge_expanded_candidates, reciproca
 from app.rag.routing import (
     UNCONFIRMED_MESSAGE,
     ChatResult,
+    ResponseType,
     build_assist_result,
     build_delivery_result,
     post_validate,
 )
-from app.rag.routing import ContentBlock as RoutingContentBlock
+from app.rag.routing import (
+    ContentBlock as RoutingContentBlock,
+)
 from app.rag.synonyms import bm25_expansion_terms
 from app.rag.welcome import build_suggestions
 
@@ -168,6 +180,19 @@ class RagService:
         self.llm_factory = llm_factory
         self.rerank_factory = rerank_factory
 
+    def _prompt_scope(
+        self,
+        prepared: PreparedRag,
+        product_name: str,
+        scope_description: str,
+    ) -> tuple[str, str]:
+        if self.settings.m3_rag_tech_assist_mode == "enabled":
+            return (
+                prepared.turn.knowledge_name or product_name,
+                prepared.turn.scope_description or scope_description or DEFAULT_PRODUCT_SCOPE,
+            )
+        return product_name, scope_description or DEFAULT_PRODUCT_SCOPE
+
     def _select_query_embedding_provider(self, turn: Turn) -> EmbeddingProvider:
         """Pick the query embedder that matches the active index's model.
 
@@ -225,9 +250,15 @@ class RagService:
             parent_trace_id=parent_trace_id,
             fallback_reason=fallback_reason,
         )
+        policy_question = normalized_question
+        issue_resumed = False
+        if self.settings.m3_rag_tech_assist_mode == "enabled":
+            policy_question, issue_resumed = resume_issue_query(
+                normalized_question, turn.chat_context
+            )
         input_guard_reason = (
             None
-            if turn.chat_context.get("pending_options")
+            if turn.chat_context.get("pending_options") or issue_resumed
             else _input_guard_reason(normalized_question)
         )
         if input_guard_reason is not None:
@@ -240,6 +271,8 @@ class RagService:
                 timings={"input_guard_ms": _elapsed_ms(started_at)},
                 started_at=started_at,
                 input_guard_reason=input_guard_reason,
+                policy_question=policy_question,
+                issue_resumed=issue_resumed,
             )
         # The timings dict is created here — not inside _prepare_retrieval —
         # so the turn-deadline handler below can merge the stage timings
@@ -252,14 +285,17 @@ class RagService:
         # than an unbounded wait, and fail_turn keeps the trace honest.
         try:
             async with asyncio.timeout(self.settings.m3_turn_deadline_seconds):
-                return await self._prepare_retrieval(
+                prepared = await self._prepare_retrieval(
                     turn=turn,
                     started_at=started_at,
-                    normalized_question=normalized_question,
+                    normalized_question=policy_question,
                     mode=mode,
                     retrieval_overrides=retrieval_overrides,
                     timings=timings,
                 )
+                prepared.policy_question = policy_question
+                prepared.issue_resumed = issue_resumed
+                return prepared
         except TimeoutError as exc:
             await self.repository.fail_turn(
                 turn,
@@ -1123,6 +1159,9 @@ class RagService:
             parent_trace_id=parent_trace_id,
             fallback_reason=fallback_reason,
         )
+        product_name, scope_description = self._prompt_scope(
+            prepared, product_name, scope_description
+        )
         turn = prepared.turn
         plan, plan_error = await self._safely_plan_chat_turn(
             prepared, question, product_name, scope_description
@@ -1143,7 +1182,11 @@ class RagService:
 
         if plan.kind == "DELIVER" or plan.fixed_answer is not None:
             async for frame in self._emit_final_chat_turn(
-                prepared, plan, usage={}, include_images=include_images
+                prepared,
+                plan,
+                usage={},
+                include_images=include_images,
+                question=question,
             ):
                 yield frame
             return
@@ -1160,7 +1203,9 @@ class RagService:
 
         provider: LlmProvider | None = None
         llm_started = time.perf_counter()
-        visible_text = ModelTextStream()
+        visible_text: ModelTextStream | DomainAssistTextStream = (
+            DomainAssistTextStream() if plan.kind == "DOMAIN_ASSIST" else ModelTextStream()
+        )
         try:
             provider = self.llm_factory(self.settings, turn.llm)
             prompt = plan.prompt
@@ -1192,13 +1237,21 @@ class RagService:
             raw_answer = "".join(prepared.answer_parts)
             result = self._finalize_chat_result(plan, raw_answer)
 
+            if isinstance(visible_text, DomainAssistTextStream) and not visible_text.streams_body:
+                if result.answer:
+                    yield sse_event("message", {"delta": result.answer})
+
             result = self._apply_image_preference(result, include_images=include_images)
 
             prepared.timings["llm_ms"] = _elapsed_ms(llm_started)
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
             usage = provider.usage
 
-            await self._apply_post_state(plan, turn, question)
+            context_patch, pending_after = self._completion_context_update(
+                prepared, plan, result, question
+            )
+            if self.settings.m3_rag_tech_assist_mode != "enabled":
+                await self._apply_post_state(plan, turn, question)
             await self.repository.complete_turn(
                 turn,
                 answer=result.answer,
@@ -1210,6 +1263,8 @@ class RagService:
                 doc_routing=plan.routing,
                 response_type=result.response_type.value,
                 answer_mode=result.answer_mode.value if result.answer_mode else None,
+                context_patch=context_patch,
+                pending_options_after=pending_after,
             )
 
             yield sse_event(
@@ -1326,6 +1381,9 @@ class RagService:
             parent_trace_id=parent_trace_id,
             fallback_reason=fallback_reason,
         )
+        product_name, scope_description = self._prompt_scope(
+            prepared, product_name, scope_description
+        )
         turn = prepared.turn
         plan, plan_error = await self._safely_plan_chat_turn(
             prepared, question, product_name, scope_description
@@ -1341,7 +1399,11 @@ class RagService:
             else:
                 result = self._result_for_fixed_plan(plan)
             result = self._apply_image_preference(result, include_images=include_images)
-            await self._apply_post_state(plan, turn, question)
+            context_patch, pending_after = self._completion_context_update(
+                prepared, plan, result, question
+            )
+            if self.settings.m3_rag_tech_assist_mode != "enabled":
+                await self._apply_post_state(plan, turn, question)
             await self.repository.complete_turn(
                 turn,
                 answer=result.answer,
@@ -1353,6 +1415,8 @@ class RagService:
                 doc_routing=plan.routing,
                 response_type=result.response_type.value,
                 answer_mode=result.answer_mode.value if result.answer_mode else None,
+                context_patch=context_patch,
+                pending_options_after=pending_after,
             )
             return self._chat_payload(
                 turn,
@@ -1391,7 +1455,11 @@ class RagService:
             prepared.timings["llm_ms"] = _elapsed_ms(llm_started)
             prepared.timings["total_ms"] = _elapsed_ms(prepared.started_at)
             usage = provider.usage
-            await self._apply_post_state(plan, turn, question)
+            context_patch, pending_after = self._completion_context_update(
+                prepared, plan, result, question
+            )
+            if self.settings.m3_rag_tech_assist_mode != "enabled":
+                await self._apply_post_state(plan, turn, question)
             await self.repository.complete_turn(
                 turn,
                 answer=result.answer,
@@ -1403,6 +1471,8 @@ class RagService:
                 doc_routing=plan.routing,
                 response_type=result.response_type.value,
                 answer_mode=result.answer_mode.value if result.answer_mode else None,
+                context_patch=context_patch,
+                pending_options_after=pending_after,
             )
             return self._chat_payload(
                 turn,
@@ -1462,12 +1532,37 @@ class RagService:
                     - (time.perf_counter() - prepared.started_at),
                 )
             ):
+                effective_question = prepared.policy_question or question.strip()
                 plan = await self._plan_chat_turn(
                     prepared=prepared,
-                    question=question.strip(),
+                    question=effective_question,
                     product_name=product_name,
                     scope_description=scope_description,
                 )
+            policy_question = effective_question
+            if plan.routing.get("resolved_from") == "CLARIFICATION_REPLY":
+                policy_question = str(prepared.turn.chat_context.get("pending_query") or "").strip()
+                policy_question = policy_question or effective_question
+            policy = classify_answer_style(policy_question)
+            if plan.routing.get("resolved_from") == "TITLE_MATCH":
+                policy = replace(
+                    policy,
+                    style=AnswerStyle.FULL_DOCUMENT,
+                    reason="EXPLICIT_DOCUMENT_SELECTION",
+                )
+            plan.routing["answer_policy"] = {
+                "version": POLICY_VERSION,
+                "mode": self.settings.m3_rag_tech_assist_mode,
+                "style": policy.style.value,
+                "reason": policy.reason,
+                "effective_query_source": (
+                    "RAG_ISSUE"
+                    if prepared.issue_resumed
+                    else "PENDING_QUERY"
+                    if policy_question != effective_question
+                    else "CURRENT_QUESTION"
+                ),
+            }
             plan.routing["generation"] = {
                 "kind": plan.kind,
                 "prompt_sha256": hashlib.sha256(plan.prompt.encode()).hexdigest()
@@ -1568,13 +1663,19 @@ class RagService:
                 )
                 else None
             ),
+            preserve_rag_issue=self.settings.m3_rag_tech_assist_mode == "enabled",
         )
+        preserved_context: dict[str, Any] = {}
+        if self.settings.m3_rag_tech_assist_mode == "enabled":
+            issue = turn.chat_context.get("rag_issue")
+            if isinstance(issue, dict):
+                preserved_context["rag_issue"] = issue
         prepared.turn = replace(
             turn,
             focus_document_id=document_id,
             focus_epoch=focus_epoch,
             context_version=turn.context_version + 1,
-            chat_context={},
+            chat_context=preserved_context,
         )
 
     async def _plan_chat_turn(
@@ -1672,6 +1773,33 @@ class RagService:
                 )
 
         async def selected_document(document_id: UUID, routing: dict[str, Any]) -> _ChatPlan:
+            policy_question = question
+            if routing.get("resolved_from") == "CLARIFICATION_REPLY":
+                policy_question = (
+                    str(turn.chat_context.get("pending_query") or "").strip() or question
+                )
+            policy = classify_answer_style(policy_question)
+            if self.settings.m3_rag_tech_assist_mode == "enabled":
+                force_delivery = routing.get("resolved_from") == "TITLE_MATCH"
+                if policy.style != AnswerStyle.FULL_DOCUMENT and not force_delivery:
+                    plan = await self._document_qa_plan(
+                        prepared=prepared,
+                        document_id=document_id,
+                        question=policy_question,
+                        product_name=product_name,
+                        scope_description=scope_description,
+                        routing=routing,
+                        clear_pending_after=had_pending,
+                    )
+                    if plan.kind in {"DOC_QA", "CHUNK_RAG"}:
+                        await self._focus_document(prepared, document_id)
+                    return plan
+                return await self._deliver_chat_document(
+                    prepared,
+                    document_id,
+                    routing,
+                    clear_pending_after=had_pending,
+                )
             fact_mode = self.settings.m3_rag_fact_qa_mode
             explanation_mode = self.settings.m3_rag_explanation_mode
             explanation_qa = False
@@ -1747,6 +1875,17 @@ class RagService:
         if rank_fallback:
             routing = decision.to_dict()
             routing["resolved_from"] = "RANK_FALLBACK_GUARD"
+            if self.settings.m3_rag_tech_assist_mode == "enabled" and normalize_scope_description(
+                turn.knowledge_description
+            ):
+                return self._domain_assist_plan(
+                    turn=turn,
+                    question=question,
+                    product_name=product_name,
+                    scope_description=scope_description,
+                    routing=routing,
+                    clear_pending_after=clear_pending_after,
+                )
             return _ChatPlan(
                 kind="NO_MATCH",
                 routing=routing,
@@ -1797,6 +1936,16 @@ class RagService:
                     return await selected_document(document_id, decision.to_dict())
 
         if decision.action == ACTION_STAY and turn.focus_document_id is not None:
+            if (
+                self.settings.m3_rag_tech_assist_mode == "enabled"
+                and classify_answer_style(question).style == AnswerStyle.FULL_DOCUMENT
+            ):
+                return await self._deliver_chat_document(
+                    prepared,
+                    turn.focus_document_id,
+                    decision.to_dict(),
+                    clear_pending_after=clear_pending_after,
+                )
             return await self._document_qa_plan(
                 prepared=prepared,
                 document_id=turn.focus_document_id,
@@ -1847,6 +1996,24 @@ class RagService:
         if catalog is None:
             catalog = await self.repository.list_kb_documents(turn.knowledge_id)
         routing = decision.to_dict()
+        if (
+            decision.action == ACTION_NO_MATCH
+            and self.settings.m3_rag_tech_assist_mode == "enabled"
+            and normalize_scope_description(turn.knowledge_description)
+        ):
+            return self._domain_assist_plan(
+                turn=turn,
+                question=question,
+                product_name=product_name,
+                scope_description=scope_description,
+                routing=routing,
+                clear_pending_after=clear_pending_after,
+            )
+        if self.settings.m3_rag_tech_assist_mode == "shadow":
+            routing["domain_assist"] = {
+                "mode": "shadow",
+                "eligible": bool(normalize_scope_description(turn.knowledge_description)),
+            }
         if not catalog:
             return _ChatPlan(
                 kind="NO_MATCH",
@@ -1881,6 +2048,36 @@ class RagService:
             routing=routing,
             clear_pending_after=clear_pending_after,
             fallback_suggestions=fallback_suggestions,
+        )
+
+    def _domain_assist_plan(
+        self,
+        *,
+        turn: Turn,
+        question: str,
+        product_name: str,
+        scope_description: str,
+        routing: dict[str, Any],
+        clear_pending_after: bool,
+    ) -> _ChatPlan:
+        routing["domain_assist"] = {
+            "mode": "enabled",
+            "scope_sha256": turn.scope_sha256,
+            "scope_updated_at": (
+                turn.knowledge_updated_at.isoformat() if turn.knowledge_updated_at else None
+            ),
+        }
+        prompt = self._render_bounded_prompt(
+            build_domain_assist_prompt_template(product_name, scope_description),
+            context="本轮未取得足以支持产品专有事实的可靠正文证据。",
+            question=question,
+            history=turn.history,
+        )
+        return _ChatPlan(
+            kind="DOMAIN_ASSIST",
+            prompt=prompt,
+            routing=routing,
+            clear_pending_after=clear_pending_after,
         )
 
     async def _scoped_document_candidates(
@@ -2101,6 +2298,7 @@ class RagService:
         *,
         usage: dict[str, Any],
         include_images: bool = True,
+        question: str = "",
     ) -> AsyncIterator[bytes]:
         turn = prepared.turn
         if plan.kind == "DELIVER" and plan.delivery is not None:
@@ -2128,7 +2326,11 @@ class RagService:
             for offset in range(0, len(answer_text), 24):
                 yield sse_event("message", {"delta": answer_text[offset : offset + 24]})
                 await asyncio.sleep(0)
-        await self._apply_post_state(plan, turn, "")
+        context_patch, pending_after = self._completion_context_update(
+            prepared, plan, result, question
+        )
+        if self.settings.m3_rag_tech_assist_mode != "enabled":
+            await self._apply_post_state(plan, turn, question)
         await self.repository.complete_turn(
             turn,
             answer=result.answer,
@@ -2140,6 +2342,8 @@ class RagService:
             doc_routing=plan.routing,
             response_type=result.response_type.value,
             answer_mode=result.answer_mode.value if result.answer_mode else None,
+            context_patch=context_patch,
+            pending_options_after=pending_after,
         )
         yield sse_event(
             "done",
@@ -2160,6 +2364,84 @@ class RagService:
                 "next_suggestions": self._next_suggestions(plan, result),
             },
         )
+
+    def _completion_context_update(
+        self,
+        prepared: PreparedRag,
+        plan: _ChatPlan,
+        result: ChatResult,
+        question: str,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]] | None]:
+        if self.settings.m3_rag_tech_assist_mode != "enabled":
+            return None, None
+        turn = prepared.turn
+        if plan.pending_after:
+            pending_options = [
+                {
+                    **option,
+                    "origin_focus_epoch": turn.focus_epoch,
+                    "origin_document_id": (
+                        str(turn.focus_document_id) if turn.focus_document_id is not None else None
+                    ),
+                }
+                for option in plan.pending_after
+            ]
+            plan.routing["rag_issue_state"] = {"action": "CLEAR", "reason": "DOC_PENDING"}
+            return (
+                {
+                    "pending_options": pending_options,
+                    "pending_query": question.strip(),
+                    "rag_issue": None,
+                },
+                pending_options,
+            )
+
+        if plan.kind == "DOMAIN_ASSIST" and result.response_type == ResponseType.UNCONFIRMED:
+            existing = turn.chat_context.get("rag_issue")
+            origin_id = turn.user_message_id
+            if prepared.issue_resumed and isinstance(existing, dict):
+                try:
+                    origin_id = UUID(str(existing["origin_user_message_id"]))
+                except (KeyError, TypeError, ValueError):
+                    origin_id = turn.user_message_id
+            origin_query = (prepared.policy_question or question.strip())[:1_200]
+            style = classify_answer_style(origin_query)
+            issue = {
+                "version": 1,
+                "strategy_version": POLICY_VERSION,
+                "origin_query": origin_query,
+                "origin_user_message_id": str(origin_id),
+                "answer_style": style.style.value,
+                "pending_condition": {
+                    "type": "TEXT",
+                    "question": result.answer[:500],
+                    "source_user_message_id": str(turn.user_message_id),
+                    "source_assistant_message_id": str(turn.assistant_message_id),
+                },
+            }
+            plan.routing["rag_issue_state"] = {
+                "action": "SET",
+                "origin_user_message_id": str(origin_id),
+                "source_assistant_message_id": str(turn.assistant_message_id),
+            }
+            return (
+                {"pending_options": None, "pending_query": None, "rag_issue": issue},
+                [],
+            )
+
+        if prepared.input_guard_reason is not None and turn.chat_context.get("rag_issue"):
+            return None, None
+        if (
+            turn.chat_context.get("rag_issue") is not None
+            or turn.chat_context.get("pending_options")
+            or plan.clear_pending_after
+        ):
+            plan.routing["rag_issue_state"] = {"action": "CLEAR", "reason": "TURN_COMPLETED"}
+            return (
+                {"pending_options": None, "pending_query": None, "rag_issue": None},
+                [],
+            )
+        return None, None
 
     async def _apply_post_state(self, plan: _ChatPlan, turn: Any, question: str) -> None:
         if plan.pending_after:
@@ -2193,6 +2475,13 @@ class RagService:
                 source_dicts,
                 True,
                 require_citations=plan.require_citations,
+            )
+        elif plan.kind == "DOMAIN_ASSIST":
+            result = post_validate(
+                raw_answer,
+                [],
+                False,
+                preserve_unconfirmed_without_evidence=True,
             )
         else:
             result = build_assist_result(raw_answer)

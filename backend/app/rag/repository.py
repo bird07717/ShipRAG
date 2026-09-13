@@ -16,6 +16,7 @@ from app.common.errors import ApiError
 from app.common.text import estimate_tokens
 from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
+from app.rag.answer_policy import build_scope_snapshot, normalize_scope_description
 from app.rag.model_providers import environment_api_key, supported_providers
 from app.rag.models import ModelSnapshot, RetrievalCandidate, RetrievalConfig, Turn
 
@@ -128,7 +129,8 @@ class RagRepository:
             kb_result = await connection.execute(
                 text(
                     """
-                    SELECT kb.status AS kb_status,
+                    SELECT kb.status AS kb_status, kb.name AS kb_name,
+                           kb.description AS kb_description, kb.updated_at AS kb_updated_at,
                            COALESCE(kb.rag_active_index_id, kb.active_index_id)
                                AS rag_active_index_id,
                            i.status AS index_status, i.kb_id AS index_kb_id,
@@ -159,6 +161,9 @@ class RagRepository:
             context_version = 0
             effective_index_id = UUID(str(kb["rag_active_index_id"]))
             embedding_model_name = str(kb["embedding_model_name"])
+            scope = build_scope_snapshot(
+                kb["kb_description"], max_tokens=self.settings.m3_rag_scope_max_tokens
+            )
             if conversation_id is None:
                 await connection.execute(
                     text(
@@ -233,6 +238,53 @@ class RagRepository:
                         text("UPDATE conversation SET rag_index_id = :index_id WHERE id = :id"),
                         {"index_id": effective_index_id, "id": conversation_id},
                     )
+
+                issue = chat_context.get("rag_issue")
+                if isinstance(issue, dict):
+                    try:
+                        origin_id = UUID(str(issue["origin_user_message_id"]))
+                        pending = issue["pending_condition"]
+                        source_user_id = UUID(str(pending["source_user_message_id"]))
+                        assistant_id = UUID(str(pending["source_assistant_message_id"]))
+                    except (KeyError, TypeError, ValueError):
+                        chat_context.pop("rag_issue", None)
+                    else:
+                        source_result = await connection.execute(
+                            text(
+                                """
+                                SELECT id, role, status, rag_user_message_id
+                                FROM message
+                                WHERE conversation_id = :conversation_id
+                                  AND id IN (:origin_id, :source_user_id, :assistant_id)
+                                """
+                            ),
+                            {
+                                "conversation_id": resolved_conversation_id,
+                                "origin_id": origin_id,
+                                "source_user_id": source_user_id,
+                                "assistant_id": assistant_id,
+                            },
+                        )
+                        source_rows = {
+                            UUID(str(row["id"])): row for row in source_result.mappings()
+                        }
+                        origin = source_rows.get(origin_id)
+                        source_user = source_rows.get(source_user_id)
+                        assistant = source_rows.get(assistant_id)
+                        valid_issue = (
+                            origin is not None
+                            and origin["role"] == "USER"
+                            and origin["status"] == "COMPLETED"
+                            and source_user is not None
+                            and source_user["role"] == "USER"
+                            and source_user["status"] == "COMPLETED"
+                            and assistant is not None
+                            and assistant["role"] == "ASSISTANT"
+                            and assistant["status"] == "COMPLETED"
+                            and assistant["rag_user_message_id"] == source_user_id
+                        )
+                        if not valid_issue:
+                            chat_context.pop("rag_issue", None)
 
             if reuse_messages:
                 if conversation_id is None:
@@ -403,6 +455,14 @@ class RagRepository:
                 "schema_version": 1,
                 "history": history_diagnostics,
                 "engine": "RAG",
+                "scope": {
+                    "source": "KNOWLEDGE_BASE_SNAPSHOT",
+                    "knowledge_updated_at": kb["kb_updated_at"].isoformat(),
+                    "sha256": scope.sha256,
+                    "chars": scope.chars,
+                    "tokens": scope.tokens,
+                    "truncated": scope.truncated,
+                },
                 "index": {
                     "id": str(effective_index_id),
                     "embedding_model_name": embedding_model_name,
@@ -584,6 +644,16 @@ class RagRepository:
             context_version=context_version,
             chat_context=chat_context,
             retrieval=retrieval,
+            knowledge_name=normalize_scope_description(str(kb["kb_name"])),
+            knowledge_description=(
+                str(kb["kb_description"]) if kb["kb_description"] is not None else None
+            ),
+            knowledge_updated_at=kb["kb_updated_at"],
+            scope_description=scope.description,
+            scope_sha256=scope.sha256,
+            scope_chars=scope.chars,
+            scope_tokens=scope.tokens,
+            scope_truncated=scope.truncated,
         )
 
     async def _focused_history(
@@ -1041,6 +1111,8 @@ class RagRepository:
         doc_routing: dict[str, Any] | None = None,
         response_type: str | None = None,
         answer_mode: str | None = None,
+        context_patch: dict[str, Any] | None = None,
+        pending_options_after: list[dict[str, Any]] | None = None,
     ) -> None:
         routing_patch = ""
         routing_params: dict[str, Any] = {}
@@ -1062,6 +1134,33 @@ class RagRepository:
             prompt_patch = ", prompt = :prompt"
             routing_params["prompt"] = prompt if self.settings.m3_trace_retain_prompt else None
         async with self.engine.begin() as connection:
+            if context_patch is not None:
+                context_result = await connection.execute(
+                    text(
+                        """
+                        UPDATE conversation
+                        SET chat_context = jsonb_strip_nulls(
+                                COALESCE(chat_context, '{}'::jsonb)
+                                || CAST(:context_patch AS jsonb)
+                            ),
+                            pending_switch_options = CAST(:pending_options AS jsonb),
+                            support_context_version = support_context_version + 1,
+                            updated_at = now()
+                        WHERE id = :conversation_id
+                          AND support_context_version = :expected_context_version
+                        """
+                    ),
+                    {
+                        "conversation_id": turn.conversation_id,
+                        "expected_context_version": turn.context_version,
+                        "context_patch": json.dumps(context_patch, ensure_ascii=False),
+                        "pending_options": json.dumps(
+                            pending_options_after or [], ensure_ascii=False
+                        ),
+                    },
+                )
+                if context_result.rowcount != 1:
+                    raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
             await connection.execute(
                 text(
                     """
@@ -1191,6 +1290,7 @@ class RagRepository:
         user_message_id: UUID | None = None,
         assistant_message_id: UUID | None = None,
         origin_query: str | None = None,
+        preserve_rag_issue: bool = False,
     ) -> int:
         """Promote a delivered document through the shared state CAS."""
         async with self.engine.begin() as connection:
@@ -1200,7 +1300,13 @@ class RagRepository:
                     UPDATE conversation
                     SET focus_document_id = :document_id,
                         focus_index_id = :index_id,
-                        chat_context = '{}'::jsonb,
+                        chat_context = CASE
+                            WHEN :preserve_rag_issue
+                            THEN jsonb_strip_nulls(jsonb_build_object(
+                                'rag_issue', chat_context->'rag_issue'
+                            ))
+                            ELSE '{}'::jsonb
+                        END,
                         pending_switch_options = '[]'::jsonb,
                         focus_epoch = CASE
                             WHEN focus_document_id IS DISTINCT FROM :document_id
@@ -1222,6 +1328,7 @@ class RagRepository:
                     "document_id": document_id,
                     "index_id": index_id,
                     "expected_context_version": expected_context_version,
+                    "preserve_rag_issue": preserve_rag_issue,
                 },
             )
             focus_epoch = result.scalar_one_or_none()

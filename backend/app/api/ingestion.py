@@ -21,6 +21,7 @@ from app.api.schemas import (
     IndexResponse,
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
+    KnowledgeBaseUpdate,
     TaskResponse,
     TaskSubmissionResponse,
 )
@@ -99,6 +100,23 @@ async def get_knowledge_base(
     repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
 ) -> dict[str, Any]:
     return await repository.get_knowledge_base(knowledge_id)
+
+
+@router.patch(
+    "/knowledge-bases/{knowledge_id}",
+    response_model=KnowledgeBaseResponse,
+    tags=["knowledge-bases"],
+)
+async def update_knowledge_base(
+    knowledge_id: UUID,
+    payload: KnowledgeBaseUpdate,
+    repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
+) -> dict[str, Any]:
+    return await repository.update_knowledge_base_description(
+        knowledge_id,
+        description=payload.description,
+        expected_updated_at=payload.expected_updated_at,
+    )
 
 
 @router.delete(

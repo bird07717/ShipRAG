@@ -1,9 +1,46 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_development_env_example_is_loadable_with_safe_rag_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "MODEL_SECRET_KEY_PREVIOUS",
+        "MODEL_SECRET_KEY_PREVIOUS_VERSION",
+        "M3_RAG_TECH_ASSIST_MODE",
+        "M3_RAG_SCOPE_MAX_TOKENS",
+        "M3_DOC_LOCK_BEST_FLOOR",
+        "M3_DOC_SINGLE_CLARIFY_BEST_FLOOR",
+        "M3_TURN_DEADLINE_SECONDS",
+        "M3_QUERY_REWRITE_TIMEOUT_SECONDS",
+        "M3_QUERY_EMBEDDING_TIMEOUT_SECONDS",
+        "M3_QUERY_EMBEDDING_RETRIES",
+        "M3_RERANK_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = Settings(_env_file=PROJECT_ROOT / ".env.example")
+
+    assert settings.model_secret_key_previous is None
+    assert settings.model_secret_key_previous_version is None
+    assert settings.m3_rag_tech_assist_mode == "off"
+    assert settings.m3_rag_scope_max_tokens == 800
+    assert settings.m3_doc_lock_best_floor == 0.70
+    assert settings.m3_doc_single_clarify_best_floor == 0.65
+    assert settings.m3_turn_deadline_seconds == 45.0
+    assert settings.m3_query_rewrite_timeout_seconds == 3.0
+    assert settings.m3_query_embedding_timeout_seconds == 10.0
+    assert settings.m3_query_embedding_retries == 1
+    assert settings.m3_rerank_timeout_seconds == 15.0
 
 
 def test_production_requires_service_token() -> None:
