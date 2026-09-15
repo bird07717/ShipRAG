@@ -4,10 +4,11 @@
 
 ## PDF 摄取与首行标题删除退役（2026-09-15，feat/PDF 分支本地已实施）
 
-- 已按 ADR-0020 新增 PDF 直接解析：`ingestion/parser_pdf.py`（pdfplumber 0.11.10，MIT）产出与 DOCX 相同的 TEXT/IMAGE 元素契约，页眉/页脚（跨页重复文本/页码/Logo 图片）在输出前剔除，区域内一次性内容保留；图片解码 DCT/Flate(SMask)/JPX，失败即中止构建；加密 PDF 上传即拒。上传按扩展名分发校验/对象键/MIME，DOCX 路径不变；`content_revision` 按格式分派（docx=`ooxml-vml-1`，pdf=`pdf-1`），REUSE 判定双路径（构建计划期 + 执行期）均按格式比较，不触发既有 DOCX 重解析。
+- 已按 ADR-0020 新增 PDF 直接解析：`ingestion/parser_pdf.py`（pdfplumber 0.11.10，MIT）产出与 DOCX 相同的 TEXT/IMAGE 元素契约，页眉/页脚（跨页重复文本/页码/Logo 图片）在输出前剔除，区域内一次性内容保留；图片解码 DCT/Flate(SMask)/JPX/**ICCBased（按 Alternate/N 解析，真实样本驱动）**，失败即中止构建；加密 PDF 上传即拒。上传按扩展名分发校验/对象键/MIME，DOCX 路径不变；`content_revision` 按格式分派（docx=`ooxml-vml-1`，pdf=`pdf-1`），REUSE 判定双路径（构建计划期 + 执行期）均按格式比较，不触发既有 DOCX 重解析。
 - ADR-0011 已废弃：`strip_leading_document_heading` 及 4 处调用（RAG 文档 Prompt、路由内容块、Chunk 标题去重、Support 交付）全部移除，交付按元素原文逐块输出；`_generation_candidates` 仅保留候选文档显示名归一化。`index_document.metadata` 的 `mammoth_warnings` 键泛化为 `parser_warnings`。前端上传入口支持 `.docx/.pdf`（accept、文案、按文件名显示 PDF/DOCX 徽标；DemoChat 来源图标改为中性 DOC）。
-- 完整门禁 `scripts/check.sh` 退出码 0：Ruff lint/format、Mypy（141 个源文件）、后端 1155 项测试（新增 `test_pdf_ingestion.py` 19 项 + REUSE 按格式用例）、摄取/RAG/管理三项 fake 冒烟及累计覆盖率 83% 通过；前端 22 个文件 161 项测试、lint、类型检查、覆盖率和生产构建通过，仅既有大包警告。数据库无迁移；本地依赖 PostgreSQL/Redis/MinIO 健康，无竞争 Worker。
-- 待执行：真实 PDF 样本候选索引构建与人工核验（元素顺序、图片数量、页眉剔除效果、检索质量）后才能激活业务索引；生产部署需同步 `pdfplumber` 依赖（`requirements.lock` 由部署流程重建）。管理台上传文案与徽标已支持 PDF。
+- 完整门禁 `scripts/check.sh` 退出码 0：Ruff lint/format、Mypy（141 个源文件）、后端 1155 项测试（含 `test_pdf_ingestion.py` 20 项 + REUSE 按格式用例）、摄取/RAG/管理三项 fake 冒烟及累计覆盖率 83% 通过；前端 22 个文件 161 项测试、lint、类型检查、覆盖率和生产构建通过，仅既有大包警告。数据库无迁移。
+- **真实样本验收已通过（2026-09-15，临时知识库隔离执行）**：VDR600 两份真实 PDF（ECDIS600 英文 5 页 9 图 / 中文 2 页 3 图）在仅含该两份文档的临时库完成真实模型全链路构建——INDEX_BUILD、DOCUMENT_PROFILE_GENERATE、RAG_DOCUMENT_CARD_GENERATE 三任务全部 SUCCEEDED；元素数与只读干跑完全一致（19/7 元素、16/6 分块）、阅读顺序与图文交错正确、`parser=pdfplumber-pdf`/`content_revision=pdf-1`、OCR 12/12 READY、卡片 2/2 READY（AUTO/PROCEDURE）；临时库已通过应用删除生命周期完整清理（含 MinIO 对象）。验收中发现智谱 Vision 瞬时失败 6/12（同尺寸图片跨文档成功可证为服务端抖动，按设计降级为 OCR 内容不阻塞构建）；两份 PDF 文档记录保留在 VDR600（STORED），等待遗留 DOCX 处置后随全库构建一起入库。
+- **VDR600 全库构建阻塞已量化（预先存在，与 PDF 改造无关）**：活动索引 v39（08-31）早于 content_revision 体系，46 条旧结果 0 条带版本标记，任何全库构建必然全部 REBUILD（约 11 分钟真实模型成本）；其中 **18/42 份遗留 DOCX 为浮动版式（LEGACY_FLOATING_TEXT_LAYOUT）被现行解析器阻断**（v40/v41 早已同样失败）。本次误触发产生的 v42/v43 构建产物、DRAFT release 及孤儿 MinIO 对象已全部按应用路径清理（活动索引 v39 未受影响，`rebuild_required=false`）；遗留 DOCX 处置方向（转 PDF 替换/隔离/修源）待用户决策，决策前不应触发 VDR600 构建。
 
 ## 开发阶段
 
