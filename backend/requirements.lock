@@ -30,6 +30,8 @@ cffi==2.1.1
     # via
     #   argon2-cffi-bindings
     #   cryptography
+charset-normalizer==3.5.1
+    # via pdfminer-six
 click==8.4.2
     # via
     #   pip-tools
@@ -42,7 +44,9 @@ coverage[toml]==7.15.4
 croniter==6.2.4
     # via rq
 cryptography==45.0.6
-    # via enterprise-rag-backend (pyproject.toml)
+    # via
+    #   enterprise-rag-backend (pyproject.toml)
+    #   pdfminer-six
 fastapi==0.116.1
     # via enterprise-rag-backend (pyproject.toml)
 greenlet==3.5.5
@@ -86,8 +90,14 @@ packaging==26.3
     #   wheel
 pathspec==1.1.1
     # via mypy
-pillow==12.3.0
+pdfminer-six==20260107
+    # via pdfplumber
+pdfplumber==0.11.10
     # via enterprise-rag-backend (pyproject.toml)
+pillow==12.3.0
+    # via
+    #   enterprise-rag-backend (pyproject.toml)
+    #   pdfplumber
 pip-tools==7.5.0
     # via enterprise-rag-backend (pyproject.toml)
 pluggy==1.6.0
@@ -108,6 +118,8 @@ pydantic-settings==2.10.1
     # via enterprise-rag-backend (pyproject.toml)
 pygments==2.20.0
     # via pytest
+pypdfium2==5.13.0
+    # via pdfplumber
 pyproject-hooks==1.2.0
     # via
     #   build

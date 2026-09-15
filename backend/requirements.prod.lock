@@ -28,6 +28,8 @@ cffi==2.1.1
     # via
     #   argon2-cffi-bindings
     #   cryptography
+charset-normalizer==3.5.1
+    # via pdfminer-six
 click==8.4.2
     # via
     #   rq
@@ -37,7 +39,9 @@ cobble==0.1.4
 croniter==6.2.4
     # via rq
 cryptography==45.0.6
-    # via enterprise-rag-backend (pyproject.toml)
+    # via
+    #   enterprise-rag-backend (pyproject.toml)
+    #   pdfminer-six
 fastapi==0.116.1
     # via enterprise-rag-backend (pyproject.toml)
 greenlet==3.5.5
@@ -66,8 +70,14 @@ markupsafe==3.0.3
     # via mako
 minio==7.2.16
     # via enterprise-rag-backend (pyproject.toml)
-pillow==12.3.0
+pdfminer-six==20260107
+    # via pdfplumber
+pdfplumber==0.11.10
     # via enterprise-rag-backend (pyproject.toml)
+pillow==12.3.0
+    # via
+    #   enterprise-rag-backend (pyproject.toml)
+    #   pdfplumber
 pycparser==3.0
     # via cffi
 pycryptodome==3.23.0
@@ -80,6 +90,8 @@ pydantic-core==2.46.4
     # via pydantic
 pydantic-settings==2.10.1
     # via enterprise-rag-backend (pyproject.toml)
+pypdfium2==5.13.0
+    # via pdfplumber
 python-dateutil==2.9.0.post0
     # via croniter
 python-docx==1.2.0
