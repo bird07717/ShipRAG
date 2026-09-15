@@ -35,6 +35,13 @@ RAG 首轮单强直达的本地离线实验见
 该文件已做 JSONL 和自动断言校验，尚未调用真实模型；其中标明 `data_dependency`
 的场景需相应源文档重制、上线后才能作为放行结果。
 
+双 LLM 语义编排 P0 的逐轮内部目标位于
+[`semantic-orchestration-expectations.jsonl`](semantic-orchestration-expectations.jsonl)，按同一用例 ID
+记录 `expected_strategy`、`allowed_document_keys`、`forbidden_document_keys` 和
+`allow_general_knowledge`。该文件是后续新旧链路对照的旁路期望，不是当前运行时配置；
+冻结哈希、小样本真实结果和复现边界见
+[`semantic-orchestration-p0-baseline.md`](semantic-orchestration-p0-baseline.md)。
+
 ## 运行
 
 ```bash
@@ -57,6 +64,12 @@ RAG 首轮单强直达的本地离线实验见
   --kb-id <online-ready-rag-knowledge-base-id> \
   --cases rag-acceptance/technical-assistant-cases.jsonl
 
+# 只复跑一个或多个失败用例；--case-id 可重复
+.venv/bin/python rag-acceptance/run_golden.py \
+  --api-mode assistant \
+  --cases rag-acceptance/technical-assistant-cases.jsonl \
+  --case-id <case-id> --case-id <case-id>
+
 # 模拟业务后台完整调用；请指定已上线、就绪且包含图片的测试知识库
 PYTHONPATH=backend .venv/bin/python rag-acceptance/check_assistant_contract.py --kb-id <uuid> --base-url http://127.0.0.1:8000
 
@@ -77,11 +90,14 @@ PYTHONPATH=backend .venv/bin/python rag-acceptance/check_assistant_contract.py -
 
 - 管理模式读取 `GOLDEN_TOKEN`，或回退读取根目录 `.env` 的 `SERVICE_TOKEN`。
 - Assistant 模式读取 `GOLDEN_ASSISTANT_TOKEN`，或回退读取根目录 `.env` 的
-  `ASSISTANT_SERVICE_TOKEN`。
+  `ASSISTANT_SERVICE_TOKEN`。V2 评测还以只读观察用途读取 `GOLDEN_TOKEN`/`SERVICE_TOKEN`
+  查询管理 Trace；该管理凭据不会发送到 Assistant 接口，也不会写入报告。
 
 Assistant 模式调用 `/api/v1/assistant/chat/stream`，为每轮请求提供
 `X-External-User-ID`、`X-Request-ID` 和 `Idempotency-Key`，解析 SSE 的
-`complete/error` 终态，使用公开的 `references` 与回答中《文档标题》进行命中判定；
+`complete/error` 终态。legacy 使用公开 `references` 与回答中的《文档标题》判定命中；
+V2 不要求公开引用，评测器使用同一轮内部 Trace 的 `used_document_ids` 验证实际证据文档，
+同时继续检查公开正文、图片和禁止内容；
 正文校验读取完整 `content`（包括表格），无内容块时才回退到 `answer`。
 目标知识库的管理策略必须为 `RAG_ONLY`；测试请求本身不能选择模型或回答模式。
 
@@ -118,7 +134,7 @@ Assistant 模式调用 `/api/v1/assistant/chat/stream`，为每轮请求提供
 - `response_types`、`content_must_all`、`content_must_groups`、`content_forbidden_any`——限定响应类型、全部必需内容、每组任选一项及禁止内容。
 - `min_images`、`min_tables`、`require_reference`、`document_ids`、`forbidden_document_ids`——检查交付结构和引用关联；管理响应有 `sources` 时也检查其与引用的文档一致性。
 - `answer_modes` 仅用于会公开该字段的管理/直入响应，Assistant 对外用例不得依赖内部模式；`require_no_reference` 确认通用工程回答没有冒充文档来源。
-- `require_disclaimer`、`disclaimer_must_all`——检查需要谨慎提示的回答已携带完整免责文本。
+- `require_disclaimer`、`disclaimer_must_all`——检查回答已携带要求的统一短提醒及关键措辞。
 
 规则断言不能替代完整语义评审。只命中标题、关键词或图片数量不代表整段回答全部正确；
 真实失败应结合公开响应与 Trace 人工核对，再决定修改源文档、检索、Prompt 或用例。

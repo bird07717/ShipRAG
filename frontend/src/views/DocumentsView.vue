@@ -8,6 +8,7 @@ import type {
   ProfileQualityStatus,
 } from "@/types/admin";
 import DocumentPreview from "@/components/DocumentPreview.vue";
+import RagDocumentCardEditor from "@/components/RagDocumentCardEditor.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import ListSkeleton from "@/components/ui/ListSkeleton.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
@@ -44,6 +45,74 @@ const supportState = computed(() => {
 const profileByDocument = computed(() =>
   Object.fromEntries((store.knowledgeProfileSummary?.profiles ?? []).map((item) => [item.document_id, item])),
 );
+
+const ragCardByDocument = computed(() =>
+  Object.fromEntries(store.ragDocumentCards.map((item) => [item.document_id, item])),
+);
+
+const ragCardTask = computed(() => {
+  const indexId = store.activeIndex?.id;
+  return indexId ? store.latestRagDocumentCardTasks[indexId] : undefined;
+});
+
+const ragCardTaskActive = computed(() =>
+  ["QUEUED", "RUNNING"].includes(ragCardTask.value?.status ?? ""),
+);
+
+const ragCardTaskCounts = computed(() => {
+  const metadata = ragCardTask.value?.metadata ?? {};
+  const generated = Number(metadata.generated_count ?? 0);
+  const failed = Number(metadata.failed_count ?? 0);
+  const total = Number(
+    metadata.selected_count
+      ?? metadata.document_count
+      ?? store.ragDocumentCardReadiness?.expected_count
+      ?? 0,
+  );
+  return {
+    generated: Number.isFinite(generated) ? generated : 0,
+    failed: Number.isFinite(failed) ? failed : 0,
+    total: Number.isFinite(total) ? total : 0,
+  };
+});
+
+const ragCardTaskProgressStatus = computed<"success" | "exception" | "warning" | undefined>(() => {
+  const task = ragCardTask.value;
+  if (!task) return undefined;
+  if (task.status === "FAILED") return "exception";
+  if (task.status === "CANCELLED") return "warning";
+  if (task.status === "SUCCEEDED" && ragCardTaskCounts.value.failed === 0) return "success";
+  if (task.status === "SUCCEEDED") return "warning";
+  return undefined;
+});
+
+const ragCardTaskLabel = computed(() => {
+  const task = ragCardTask.value;
+  if (!task) return "";
+  if (task.status === "QUEUED") return "等待生成";
+  if (task.status === "RUNNING") return "正在生成";
+  if (task.status === "FAILED") return "生成失败";
+  if (task.status === "CANCELLED") return "已停止";
+  return ragCardTaskCounts.value.failed > 0 ? "生成完成（含失败）" : "生成完成";
+});
+
+function ragCardLabel(documentId: string): string {
+  const card = ragCardByDocument.value[documentId];
+  if (!card) return "未生成";
+  if (card.generation_status === "FAILED") return "生成失败";
+  if (card.generation_status !== "READY") return "生成中";
+  if (card.review_status === "CONFIRMED") return "已确认";
+  if (card.review_status === "REJECTED") return "已拒绝";
+  return "待确认";
+}
+
+function ragCardTagType(documentId: string): "success" | "warning" | "danger" | "info" {
+  const card = ragCardByDocument.value[documentId];
+  if (!card) return "info";
+  if (card.generation_status === "FAILED" || card.review_status === "REJECTED") return "danger";
+  if (card.generation_status === "READY" && card.review_status === "CONFIRMED") return "success";
+  return "warning";
+}
 
 const profileLabels: Record<DocumentProfileStatus, string> = {
   NOT_GENERATED: "未生成", GENERATING: "生成中", PENDING_ONLINE: "待上线", ONLINE: "已上线",
@@ -134,8 +203,37 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
             :prefix-icon="Search"
           />
           <div class="spacer" />
+          <span v-if="store.ragDocumentCardReadiness" class="muted result-count">
+            RAG 理解：{{ store.ragDocumentCardReadiness.confirmed_count }}/{{ store.ragDocumentCardReadiness.expected_count }} 已确认
+          </span>
+          <el-button
+            :disabled="!store.activeIndex"
+            :loading="Boolean(store.actionLoading[`rag-document-card-generate:${store.activeIndex?.id ?? ''}`]) || ragCardTaskActive"
+            @click="store.generateRagDocumentCards()"
+          >
+            生成/补齐 RAG 理解
+          </el-button>
           <span class="muted result-count">{{ store.filteredDocuments.length }} 个文档</span>
         </div>
+      </div>
+
+      <div v-if="ragCardTask" class="rag-card-task-progress">
+        <div class="rag-card-task-summary">
+          <b>{{ ragCardTaskLabel }}</b>
+          <span class="muted">
+            {{ ragCardTask.stage }} · 成功 {{ ragCardTaskCounts.generated }} · 失败
+            {{ ragCardTaskCounts.failed }}<template v-if="ragCardTaskCounts.total">
+              · 共 {{ ragCardTaskCounts.total }} 份</template>
+          </span>
+        </div>
+        <el-progress
+          :percentage="ragCardTask.progress"
+          :status="ragCardTaskProgressStatus"
+          :stroke-width="8"
+        />
+        <small v-if="ragCardTask.error_message" class="rag-card-task-error">
+          {{ ragCardTask.error_message }}
+        </small>
       </div>
 
       <ListSkeleton v-if="store.loading && !store.documents.length" :columns="7" />
@@ -168,6 +266,13 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
           <template #default="scope">
             <el-tag :type="profileTagType(documentProfileStatus(scope.row.id))" size="small">
               {{ profileLabels[documentProfileStatus(scope.row.id)] }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="RAG 理解" width="120">
+          <template #default="scope">
+            <el-tag :type="ragCardTagType(scope.row.id)" size="small">
+              {{ ragCardLabel(scope.row.id) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -448,6 +553,9 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
               description="正在读取该文档的已发布 Profile 与候选草稿。"
             />
           </el-tab-pane>
+          <el-tab-pane label="RAG 文档理解">
+            <RagDocumentCardEditor />
+          </el-tab-pane>
         </el-tabs>
       </template>
     </el-drawer>
@@ -488,6 +596,29 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
 }
 .result-count {
   font-size: 12px;
+}
+
+.rag-card-task-progress {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+
+.rag-card-task-summary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 16px;
+  font-size: 12px;
+}
+
+.rag-card-task-error {
+  color: var(--danger);
+  overflow-wrap: anywhere;
 }
 
 .inspection-index {

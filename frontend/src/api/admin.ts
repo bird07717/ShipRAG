@@ -31,6 +31,10 @@ import type {
   RagConfigUpdatePayload,
   EngineRetrievalConfig,
   RagTrace,
+  RagDocumentCard,
+  RagDocumentCardList,
+  RagDocumentCardPayload,
+  RagDocumentCardReadiness,
   RuntimePolicy,
   RequestErrorLog,
   RequestErrorLogList,
@@ -127,6 +131,46 @@ export const adminApi = {
     ),
   listDocuments: (knowledgeId: string) =>
     apiRequest<DocumentItem[]>(`/knowledge-bases/${knowledgeId}/documents`),
+  listRagDocumentCards: (knowledgeId: string, indexId?: string) =>
+    apiRequest<RagDocumentCardList>(
+      `/knowledge-bases/${knowledgeId}/rag-document-cards${indexId ? `?index_id=${indexId}` : ""}`,
+    ),
+  getRagDocumentCardReadiness: (knowledgeId: string, indexId?: string) =>
+    apiRequest<RagDocumentCardReadiness>(
+      `/knowledge-bases/${knowledgeId}/rag-document-cards/readiness${indexId ? `?index_id=${indexId}` : ""}`,
+    ),
+  getRagDocumentCard: (knowledgeId: string, documentId: string, indexId?: string) =>
+    apiRequest<RagDocumentCard | null>(
+      `/knowledge-bases/${knowledgeId}/documents/${documentId}/rag-document-card${indexId ? `?index_id=${indexId}` : ""}`,
+    ),
+  generateRagDocumentCards: (
+    knowledgeId: string,
+    payload: { index_id?: string; document_id?: string; replace_confirmed?: boolean },
+  ) => apiRequest<TaskSubmission>(`/knowledge-bases/${knowledgeId}/rag-document-cards/generate`, {
+    method: "POST", body: JSON.stringify(payload),
+  }),
+  updateRagDocumentCard: (
+    knowledgeId: string, documentId: string, indexId: string,
+    expectedRevision: number, cardPayload: RagDocumentCardPayload,
+  ) => apiRequest<RagDocumentCard>(
+    `/knowledge-bases/${knowledgeId}/documents/${documentId}/rag-document-card`, {
+      method: "PUT",
+      body: JSON.stringify({
+        index_id: indexId, expected_revision: expectedRevision, card_payload: cardPayload,
+      }),
+    },
+  ),
+  reviewRagDocumentCard: (
+    knowledgeId: string, documentId: string, indexId: string,
+    expectedRevision: number, reviewStatus: "CONFIRMED" | "REJECTED",
+  ) => apiRequest<RagDocumentCard>(
+    `/knowledge-bases/${knowledgeId}/documents/${documentId}/rag-document-card/review`, {
+      method: "POST",
+      body: JSON.stringify({
+        index_id: indexId, expected_revision: expectedRevision, review_status: reviewStatus,
+      }),
+    },
+  ),
   renameDocument: (documentId: string, displayName: string) =>
     apiRequest<DocumentItem>(`/documents/${documentId}`, {
       method: "PATCH",

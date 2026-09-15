@@ -29,7 +29,8 @@ from app.rag.prompt import (
     render_prompt,
     validate_prompt_template,
 )
-from app.rag.repository import RagRepository
+from app.rag.repository import RagRepository, SearchQueryUnsupportedError
+from app.rag.rerank import FakeRerankProvider
 from app.releases.models import ProfileScope
 from app.services.rag import RagService, sse_event
 
@@ -247,6 +248,107 @@ async def test_zhipu_stream_passes_through_thinking_and_collects_usage() -> None
     assert provider.usage == {"prompt_tokens": 10, "completion_tokens": 4}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("thinking_type", "expected"),
+    [("enabled", True), ("disabled", False)],
+)
+async def test_dashscope_stream_uses_compatible_chat_and_optional_thinking(
+    thinking_type: str, expected: bool | None
+) -> None:
+    body = 'data: {"choices":[{"delta":{"content":"回答"},"finish_reason":"stop"}]}\n\n'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/compatible-mode/v1/chat/completions"
+        payload = json.loads(request.content)
+        assert payload.get("enable_thinking") is expected
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        dashscope_api_key=SecretStr("not-a-real-key"),
+    )
+    snapshot = ModelSnapshot(
+        "dashscope",
+        "qwen-plus",
+        {"thinking": {"type": thinking_type}, "max_tokens": 100, "temperature": 0},
+    )
+    async with httpx.AsyncClient(
+        base_url=settings.dashscope_base_url, transport=httpx.MockTransport(handler)
+    ) as client:
+        provider = ZhipuLlmProvider(settings, snapshot, client)
+        chunks = [chunk async for chunk in provider.stream("prompt")]
+
+    assert chunks == ["回答"]
+
+
+@pytest.mark.asyncio
+async def test_dashscope_structured_call_disables_thinking_and_uses_json_mode() -> None:
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        '{"core_subject":"PDC 升级","task":"升级","symptoms":[],'
+                        '"exclusions":[],"evidence":[]}'
+                    )
+                },
+                "finish_reason": "stop",
+            }
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["enable_thinking"] is False
+        assert payload["response_format"] == {"type": "json_object"}
+        return httpx.Response(200, json=body)
+
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        dashscope_api_key=SecretStr("not-a-real-key"),
+    )
+    snapshot = ModelSnapshot(
+        "dashscope",
+        "qwen3.8-flash",
+        {"thinking": {"type": "disabled"}},
+    )
+    async with httpx.AsyncClient(
+        base_url=settings.dashscope_base_url, transport=httpx.MockTransport(handler)
+    ) as client:
+        provider = ZhipuLlmProvider(settings, snapshot, client)
+        result = await provider.complete_structured(
+            "请以 JSON 输出",
+            system="仅输出 JSON",
+            schema=ProfileScope,
+            max_tokens=200,
+            temperature=0,
+        )
+
+    assert result.core_subject == "PDC 升级"
+
+
+def test_llm_http_error_detail_keeps_only_bounded_provider_fields() -> None:
+    response = httpx.Response(
+        400,
+        json={
+            "error": {
+                "code": "invalid_parameter",
+                "message": "参数不支持\n" + "x" * 500,
+                "request": "must-not-be-retained",
+            }
+        },
+    )
+
+    detail = ZhipuLlmProvider._http_error_detail(response)
+
+    assert detail.startswith("HTTP 400; code=invalid_parameter; message=参数不支持 ")
+    assert "request" not in detail
+    assert len(detail) < 320
+
+
 class _StreamRepository:
     def __init__(self) -> None:
         self.completed: dict[str, Any] | None = None
@@ -322,6 +424,41 @@ async def test_prepare_closes_embedding_retrieves_and_saves_prompt() -> None:
     assert repository.saved is not None
     assert repository.saved["fusion_candidates"][0].rank == 1
     assert closed
+
+
+@pytest.mark.asyncio
+async def test_v2_prepare_does_not_retain_legacy_chunk_prompt_in_trace() -> None:
+    repository = _PrepareRepository()
+    repository.turn = replace(
+        repository.turn,
+        chat_context={"rag_issue": {"version": 1, "origin_query": "旧链路中的 VAU 无图像问题"}},
+    )
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        m2_embedding_provider="fake",
+        m3_rag_pipeline_mode="v2",
+        m3_rag_tech_assist_mode="enabled",
+    )
+    service = RagService(
+        cast(RagRepository, repository),
+        settings,
+        embedding_factory=lambda _: FakeEmbeddingProvider(1024),
+    )
+
+    prepared = await service.prepare(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=None,
+        question="已经检查供电",
+        request_id="request-v2",
+    )
+
+    assert repository.question == "已经检查供电"
+    assert prepared.policy_question == "已经检查供电"
+    assert prepared.issue_resumed is False
+    assert "数据库默认端口为3306" in prepared.prompt
+    assert repository.saved is not None
+    assert repository.saved["prompt"] == ""
 
 
 @pytest.mark.asyncio
@@ -443,7 +580,7 @@ async def test_sse_stream_persists_unexpected_exception_detail() -> None:
 
 class _FailingEmbeddingProvider:
     provider = "failure"
-    model_name = "failure"
+    model_name = "embedding-model"
 
     async def embed(self, inputs: list[EmbeddingInput]) -> list[list[float]]:
         assert inputs
@@ -454,29 +591,63 @@ class _FailingEmbeddingProvider:
 
 
 @pytest.mark.asyncio
-async def test_prepare_marks_turn_failed_when_query_embedding_fails() -> None:
+async def test_prepare_degrades_to_lexical_retrieval_when_query_embedding_fails() -> None:
     repository = _PrepareRepository()
     service = RagService(
         cast(RagRepository, repository),
         Settings(_env_file=None, app_env="test"),
         embedding_factory=lambda settings: _FailingEmbeddingProvider(),
+        rerank_factory=lambda settings, snapshot: FakeRerankProvider(),
     )
 
-    with pytest.raises(ApiError) as error:
-        await service.prepare(
-            knowledge_id=repository.turn.knowledge_id,
-            conversation_id=None,
-            question="数据库端口是多少？",
-            request_id="request-2",
-        )
+    prepared = await service.prepare(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=None,
+        question="数据库端口是多少？",
+        request_id="request-2",
+    )
 
-    assert error.value.code == "UPSTREAM_UNAVAILABLE"
-    assert repository.failed is not None
-    assert repository.failed["code"] == "UPSTREAM_UNAVAILABLE"
-    assert repository.failed["stage"] == "query_embedding"
-    # upstream reason is preserved as detail instead of a blanket retryable
-    assert repository.failed["detail"] == "查询模型与 Active Index 的 Embedding 模型快照不一致"
-    assert "retryable" not in repository.failed
+    assert prepared.query_embedding == []
+    assert prepared.query_embedding_status == "DEGRADED"
+    assert prepared.selected_candidates
+    assert prepared.rerank_status == "PASSED"
+    assert repository.saved is not None
+    assert repository.saved["vector_candidates"] == []
+    assert repository.saved["embedding_result"] == {
+        "status": "DEGRADED",
+        "reason": "QUERY_EMBEDDING_UNAVAILABLE",
+        "vector_channel_used": False,
+        "lexical_channel_used": True,
+    }
+    assert repository.failed is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_degrades_unsupported_bm25_query_to_vector_channel() -> None:
+    repository = _PrepareRepository()
+
+    async def unsupported_bm25(**_kwargs: Any) -> list[RetrievalCandidate]:
+        raise SearchQueryUnsupportedError("PARADEDB_UNSUPPORTED_QUERY_SHAPE")
+
+    repository.bm25_search = unsupported_bm25  # type: ignore[method-assign]
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        embedding_factory=lambda settings: FakeEmbeddingProvider(1024),
+        rerank_factory=lambda settings, snapshot: FakeRerankProvider(),
+    )
+
+    prepared = await service.prepare(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=None,
+        question="检查 VAU/FFC600 的图像状态",
+        request_id="request-unsupported-bm25",
+    )
+
+    assert prepared.selected_candidates
+    assert prepared.timings["bm25_retrieval_degraded"] == ("PARADEDB_UNSUPPORTED_QUERY_SHAPE")
+    assert repository.saved is not None
+    assert repository.saved["bm25_candidates"] == []
 
 
 def test_sse_event_uses_utf8_json_frame() -> None:
@@ -598,6 +769,28 @@ async def test_complete_strips_thinking_on_always_thinking_model() -> None:
     assert result == "OK"
     assert "thinking" in calls[0]  # utility calls disable thinking by default
     assert "thinking" not in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_glm_53_flash_skips_known_unsupported_thinking_control() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    settings = Settings(_env_file=None, app_env="test", zhipu_api_key=SecretStr("not-a-real-key"))
+    snapshot = ModelSnapshot("zhipu", "glm-5.3-flash", {"thinking": {"type": "disabled"}})
+    async with httpx.AsyncClient(
+        base_url=settings.zhipu_base_url, transport=httpx.MockTransport(handler)
+    ) as client:
+        provider = ZhipuLlmProvider(settings, snapshot, client)
+        result = await provider.complete("prompt", system="s", max_tokens=8, temperature=0.1)
+
+    assert result == "OK"
+    assert len(calls) == 1
+    assert "thinking" not in calls[0]
 
 
 @pytest.mark.asyncio

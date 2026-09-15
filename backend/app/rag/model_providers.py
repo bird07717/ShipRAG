@@ -32,6 +32,12 @@ _CAPABILITIES: dict[str, dict[str, ProviderCapability]] = {
             "zhipu_api_key", "zhipu_base_url", supports_thinking=True, supports_json_mode=True
         ),
         "siliconflow": ProviderCapability("siliconflow_api_key", "siliconflow_base_url"),
+        "dashscope": ProviderCapability(
+            "dashscope_api_key",
+            "dashscope_base_url",
+            supports_thinking=True,
+            supports_json_mode=True,
+        ),
     },
     "EMBEDDING": {
         "zhipu": ProviderCapability("zhipu_api_key", "zhipu_base_url"),

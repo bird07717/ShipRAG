@@ -65,11 +65,12 @@ from app.rag.query_rewrite import (
     rewrite_query,
     should_rewrite,
 )
-from app.rag.repository import RagRepository
+from app.rag.repository import RagRepository, SearchQueryUnsupportedError
 from app.rag.rerank import RerankError, RerankProvider, create_rerank_provider
 from app.rag.retrieval import apply_rerank, merge_expanded_candidates, reciprocal_rank_fusion
 from app.rag.routing import (
     UNCONFIRMED_MESSAGE,
+    AnswerMode,
     ChatResult,
     ResponseType,
     build_assist_result,
@@ -80,6 +81,7 @@ from app.rag.routing import (
     ContentBlock as RoutingContentBlock,
 )
 from app.rag.synonyms import bm25_expansion_terms
+from app.rag.v2 import RagV2Pipeline
 from app.rag.welcome import build_suggestions
 
 EmbeddingFactory = Callable[[Settings], EmbeddingProvider]
@@ -93,6 +95,7 @@ _CITATION_PATTERN = re.compile(r"\[S([1-9][0-9]*)\]")
 # "帮我换一个问题：LRU怎么换") on the normal path.
 _META_ACK_PATTERN = re.compile(r"^(?:换一?个(?:问题|话题)|算了|先?不问了)[呀啊吧。！!，,\s]*$")
 _META_ACK_MESSAGE = "好的，请问您想了解什么？我将基于产品文档为您解答。"
+_LOW_INFORMATION_MESSAGE = "请补充具体的设备、故障现象或操作目标，我会继续协助排查。"
 _KEYBOARD_ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
 
 
@@ -119,6 +122,23 @@ def _elapsed_ms(started_at: float) -> int:
     return max(0, round((time.perf_counter() - started_at) * 1000))
 
 
+def _v2_selected_context_trace(
+    candidates: list[RetrievalCandidate],
+) -> list[dict[str, Any]]:
+    """Describe V2 prepared context without retaining text or display names."""
+
+    return [
+        {
+            "chunk_id": str(candidate.chunk_id),
+            "document_id": str(candidate.document_id),
+            "element_ids": [str(value) for value in candidate.element_ids],
+            "image_asset_ids": [str(value) for value in candidate.image_asset_ids],
+            "content_sha256": hashlib.sha256(candidate.content.encode("utf-8")).hexdigest(),
+        }
+        for candidate in candidates
+    ]
+
+
 def _unexpected_detail(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:500]
 
@@ -137,6 +157,10 @@ def _input_guard_reason(question: str) -> str | None:
         return "REPEATED_CHARACTER"
     if len(alphanumeric) >= 5 and any(alphanumeric in row for row in _KEYBOARD_ROWS):
         return "KEYBOARD_SEQUENCE"
+    if re.search(r"原样|逐字|打印|输出|复述", normalized) and re.search(
+        r"系统提示|提示词|prompt|知识库范围|内部规则|token|内部地址", normalized
+    ):
+        return "PROMPT_EXTRACTION"
     return None
 
 
@@ -155,6 +179,7 @@ class _ChatPlan:
     # Clickable retry questions for NO_MATCH routing turns: shown by the
     # frontend after the answer instead of leaving the user at a dead end.
     fallback_suggestions: list[str] = field(default_factory=list)
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 def sse_event(event: str, payload: dict[str, Any]) -> bytes:
@@ -180,13 +205,25 @@ class RagService:
         self.llm_factory = llm_factory
         self.rerank_factory = rerank_factory
 
+    def _uses_v2(self) -> bool:
+        return self.settings.effective_rag_pipeline_mode == "v2"
+
+    def _v2_pipeline(self) -> RagV2Pipeline:
+        return RagV2Pipeline(
+            self.repository,
+            self.settings,
+            llm_factory=self.llm_factory,
+            embedding_selector=self._select_query_embedding_provider,
+            rerank_factory=self.rerank_factory,
+        )
+
     def _prompt_scope(
         self,
         prepared: PreparedRag,
         product_name: str,
         scope_description: str,
     ) -> tuple[str, str]:
-        if self.settings.m3_rag_tech_assist_mode == "enabled":
+        if not self._uses_v2() and self.settings.m3_rag_tech_assist_mode == "enabled":
             return (
                 prepared.turn.knowledge_name or product_name,
                 prepared.turn.scope_description or scope_description or DEFAULT_PRODUCT_SCOPE,
@@ -252,13 +289,26 @@ class RagService:
         )
         policy_question = normalized_question
         issue_resumed = False
-        if self.settings.m3_rag_tech_assist_mode == "enabled":
+        if not self._uses_v2() and self.settings.m3_rag_tech_assist_mode == "enabled":
             policy_question, issue_resumed = resume_issue_query(
                 normalized_question, turn.chat_context
             )
+        if self._uses_v2() and self._match_meta_ack(normalized_question) is not None:
+            return PreparedRag(
+                turn=turn,
+                prompt="",
+                candidates=[],
+                selected_candidates=[],
+                sources=[],
+                timings={"input_guard_ms": _elapsed_ms(started_at)},
+                started_at=started_at,
+                input_guard_reason="META_ACK",
+                policy_question=policy_question,
+                issue_resumed=issue_resumed,
+            )
         input_guard_reason = (
             None
-            if turn.chat_context.get("pending_options") or issue_resumed
+            if not self._uses_v2() and (turn.chat_context.get("pending_options") or issue_resumed)
             else _input_guard_reason(normalized_question)
         )
         if input_guard_reason is not None:
@@ -333,19 +383,33 @@ class RagService:
         turn = replace(turn, retrieval=retrieval)
         provider: EmbeddingProvider | None = None
         rerank_provider: RerankProvider | None = None
+        embedding_provider_name = "unavailable"
+        embedding_model_name = turn.embedding_model_name
+        query_embedding_reason: str | None = None
         try:
             # Query-side embedding must match the model the active index was
             # built with.  Prefer the admin-managed DB snapshot when it
             # matches; fall back to env settings (legacy default, and the
             # safety net while a post-config-change rebuild is in flight).
-            provider = self._select_query_embedding_provider(turn)
-            if provider.provider != "fake" and provider.model_name != turn.embedding_model_name:
-                raise EmbeddingError("查询模型与 Active Index 的 Embedding 模型快照不一致")
+            try:
+                provider = self._select_query_embedding_provider(turn)
+                embedding_provider_name = provider.provider
+                embedding_model_name = provider.model_name
+                if provider.provider != "fake" and provider.model_name != turn.embedding_model_name:
+                    raise EmbeddingError("查询模型与 Active Index 的 Embedding 模型快照不一致")
+            except EmbeddingError:
+                # Vector retrieval is an independent recall channel.  Keep
+                # BM25 + rerank available when its provider/config is down;
+                # exact answers and document delivery still require a passed
+                # rerank later in the turn.
+                query_embedding_reason = "QUERY_EMBEDDING_UNAVAILABLE"
+                timings["query_embedding_degraded"] = True
 
             retrieval_query = normalized_question
             query_rewrite_record: dict[str, str] | None = None
             if (
                 mode == "CHAT"
+                and not self._uses_v2()
                 and self.settings.m3_query_rewrite_enabled
                 and should_rewrite(
                     normalized_question,
@@ -387,11 +451,13 @@ class RagService:
                             }
                 timings["query_rewrite_ms"] = _elapsed_ms(rewrite_started)
 
-            async def embed_query() -> list[list[float]]:
+            async def embed_query() -> list[list[float]] | None:
                 # Fast-fail below the turn deadline, with one retry:
                 # embedding is idempotent and cheap, so a transient upstream
                 # stall (observed 2026-09-01) is masked by the retry instead
                 # of eating the whole turn budget.
+                if provider is None or query_embedding_reason is not None:
+                    return None
                 attempts = 1 + max(0, self.settings.m3_query_embedding_retries)
                 for attempt in range(1, attempts + 1):
                     stage_started = time.perf_counter()
@@ -400,15 +466,15 @@ class RagService:
                             self.settings.m3_query_embedding_timeout_seconds
                         ):
                             result = await provider.embed([EmbeddingInput(retrieval_query)])
-                    except TimeoutError as exc:
+                    except TimeoutError:
                         timings["query_embedding_ms"] = _elapsed_ms(stage_started)
                         if attempt >= attempts:
                             timings["query_embedding_timeout"] = True
-                            limit = self.settings.m3_query_embedding_timeout_seconds
-                            raise EmbeddingError(
-                                f"查询向量生成超时（单次上限 {limit:.0f}s，共尝试 {attempts} 次）"
-                            ) from exc
+                            return None
                         continue
+                    except EmbeddingError:
+                        timings["query_embedding_ms"] = _elapsed_ms(stage_started)
+                        return None
                     timings["query_embedding_ms"] = _elapsed_ms(stage_started)
                     if attempt > 1:
                         timings["query_embedding_retries"] = attempt - 1
@@ -417,14 +483,18 @@ class RagService:
 
             async def retrieve_bm25() -> list[RetrievalCandidate]:
                 stage_started = time.perf_counter()
-                result = await self.repository.bm25_search(
-                    knowledge_id=turn.knowledge_id,
-                    index_id=turn.index_id,
-                    query=retrieval_query,
-                    limit=retrieval.bm25_top_k,
-                )
-                timings["bm25_retrieval_ms"] = _elapsed_ms(stage_started)
-                return result
+                try:
+                    return await self.repository.bm25_search(
+                        knowledge_id=turn.knowledge_id,
+                        index_id=turn.index_id,
+                        query=retrieval_query,
+                        limit=retrieval.bm25_top_k,
+                    )
+                except SearchQueryUnsupportedError:
+                    timings["bm25_retrieval_degraded"] = "PARADEDB_UNSUPPORTED_QUERY_SHAPE"
+                    return []
+                finally:
+                    timings["bm25_retrieval_ms"] = _elapsed_ms(stage_started)
 
             async def retrieve_expansions() -> list[RetrievalCandidate]:
                 # Domain synonyms widen recall for paraphrases ("如何检查"
@@ -438,19 +508,25 @@ class RagService:
                 terms = bm25_expansion_terms(retrieval_query)
                 batches: list[list[RetrievalCandidate]] = []
                 if terms:
-                    batches = list(
-                        await asyncio.gather(
-                            *(
-                                self.repository.bm25_search(
-                                    knowledge_id=turn.knowledge_id,
-                                    index_id=turn.index_id,
-                                    query=term,
-                                    limit=3,
-                                )
-                                for term in terms
+                    results = await asyncio.gather(
+                        *(
+                            self.repository.bm25_search(
+                                knowledge_id=turn.knowledge_id,
+                                index_id=turn.index_id,
+                                query=term,
+                                limit=3,
                             )
-                        )
+                            for term in terms
+                        ),
+                        return_exceptions=True,
                     )
+                    for result in results:
+                        if isinstance(result, SearchQueryUnsupportedError):
+                            timings["bm25_expansion_degraded"] = "PARADEDB_UNSUPPORTED_QUERY_SHAPE"
+                        elif isinstance(result, BaseException):
+                            raise result
+                        else:
+                            batches.append(result)
                 timings["bm25_expansion_ms"] = _elapsed_ms(stage_started)
                 return merge_expanded_candidates([], [c for b in batches for c in b])
 
@@ -459,14 +535,32 @@ class RagService:
                 retrieve_bm25(),
                 retrieve_expansions(),
             )
-            if len(embeddings) != 1 or len(embeddings[0]) != self.settings.embedding_dimension:
-                raise EmbeddingError("查询 Embedding 维度异常")
+            query_embedding: list[float] = []
+            if (
+                embeddings is not None
+                and len(embeddings) == 1
+                and len(embeddings[0]) == self.settings.embedding_dimension
+            ):
+                query_embedding = embeddings[0]
+            else:
+                query_embedding_reason = query_embedding_reason or (
+                    "QUERY_EMBEDDING_TIMEOUT"
+                    if timings.get("query_embedding_timeout")
+                    else "QUERY_EMBEDDING_INVALID"
+                    if embeddings is not None
+                    else "QUERY_EMBEDDING_UNAVAILABLE"
+                )
+                timings["query_embedding_degraded"] = True
             vector_started = time.perf_counter()
-            vector_candidates = await self.repository.vector_search(
-                knowledge_id=turn.knowledge_id,
-                index_id=turn.index_id,
-                embedding=embeddings[0],
-                limit=retrieval.vector_top_k,
+            vector_candidates = (
+                await self.repository.vector_search(
+                    knowledge_id=turn.knowledge_id,
+                    index_id=turn.index_id,
+                    embedding=query_embedding,
+                    limit=retrieval.vector_top_k,
+                )
+                if query_embedding
+                else []
             )
             timings["vector_retrieval_ms"] = _elapsed_ms(vector_started)
             fusion_started = time.perf_counter()
@@ -492,6 +586,7 @@ class RagService:
             title_recall_record: dict[str, Any] | None = None
             if (
                 self.settings.m3_rag_title_recall
+                and not self._uses_v2()
                 and not turn.history
                 and not turn.has_prior_messages
                 and turn.focus_document_id is None
@@ -598,16 +693,28 @@ class RagService:
             timings["prompt_ms"] = _elapsed_ms(prompt_started)
             await self.repository.save_prepared(
                 turn,
-                embedding_provider=provider.provider,
-                embedding_model=provider.model_name,
+                embedding_provider=embedding_provider_name,
+                embedding_model=embedding_model_name,
                 vector_candidates=vector_candidates,
                 bm25_candidates=bm25_candidates,
                 fusion_candidates=fusion_candidates,
                 rerank_candidates=reranked_candidates,
                 rerank_result=rerank_result,
-                selected_context=[source.public_dict() for source in sources],
-                prompt=prompt,
+                selected_context=(
+                    _v2_selected_context_trace(selected)
+                    if self._uses_v2()
+                    else [source.public_dict() for source in sources]
+                ),
+                # V2 builds its own full-document prompt after retrieval.  Do not
+                # retain the legacy chunk prompt (and its document text) in Trace.
+                prompt="" if self._uses_v2() else prompt,
                 timings=timings,
+                embedding_result={
+                    "status": "PASSED" if query_embedding else "DEGRADED",
+                    "reason": query_embedding_reason,
+                    "vector_channel_used": bool(query_embedding),
+                    "lexical_channel_used": True,
+                },
             )
             return PreparedRag(
                 turn=turn,
@@ -618,7 +725,9 @@ class RagService:
                 timings=timings,
                 started_at=started_at,
                 retrieval_query=retrieval_query,
-                query_embedding=embeddings[0],
+                query_embedding=query_embedding,
+                query_embedding_status="PASSED" if query_embedding else "DEGRADED",
+                query_embedding_reason=query_embedding_reason,
                 rerank_candidates=reranked_candidates,
                 rerank_status=str(rerank_result["status"]),
                 rerank_error_code=(
@@ -1017,6 +1126,21 @@ class RagService:
         return [candidate for _, block in sorted(blocks) for candidate in block]
 
     async def stream(self, prepared: PreparedRag) -> AsyncIterator[bytes]:
+        if self._uses_v2():
+            product_name, scope_description = self._prompt_scope(
+                prepared,
+                prepared.turn.knowledge_name,
+                prepared.turn.scope_description,
+            )
+            async for frame in self._chat_stream_v2(
+                prepared,
+                question=prepared.policy_question or prepared.retrieval_query,
+                product_name=product_name,
+                scope_description=scope_description,
+                include_images=True,
+            ):
+                yield frame
+            return
         turn = prepared.turn
         yield sse_event(
             "trace",
@@ -1162,6 +1286,16 @@ class RagService:
         product_name, scope_description = self._prompt_scope(
             prepared, product_name, scope_description
         )
+        if self._uses_v2():
+            async for frame in self._chat_stream_v2(
+                prepared,
+                question=question,
+                product_name=product_name,
+                scope_description=scope_description,
+                include_images=include_images,
+            ):
+                yield frame
+            return
         turn = prepared.turn
         plan, plan_error = await self._safely_plan_chat_turn(
             prepared, question, product_name, scope_description
@@ -1184,7 +1318,7 @@ class RagService:
             async for frame in self._emit_final_chat_turn(
                 prepared,
                 plan,
-                usage={},
+                usage=plan.usage,
                 include_images=include_images,
                 question=question,
             ):
@@ -1351,6 +1485,205 @@ class RagService:
             if provider is not None:
                 await provider.aclose()
 
+    async def _generate_v2(
+        self,
+        prepared: PreparedRag,
+        *,
+        question: str,
+        product_name: str,
+        scope_description: str,
+        include_images: bool,
+    ) -> dict[str, Any]:
+        turn = prepared.turn
+        try:
+            if prepared.input_guard_reason is not None:
+                if prepared.input_guard_reason == "META_ACK":
+                    result = build_assist_result(
+                        self._match_meta_ack(question) or _META_ACK_MESSAGE
+                    )
+                else:
+                    result = ChatResult(
+                        response_type=ResponseType.UNCONFIRMED,
+                        answer_mode=AnswerMode.UNCONFIRMED,
+                        answer=_LOW_INFORMATION_MESSAGE,
+                        content=[RoutingContentBlock(type="text", text=_LOW_INFORMATION_MESSAGE)],
+                        disclaimer=None,
+                        valid_sources=[],
+                        citation_result={"status": "NO_EVIDENCE", "pipeline": "V2"},
+                    )
+                usage: dict[str, Any] = {"pipeline": "V2", "llm_calls": 0}
+                prompt = None
+                next_suggestions: list[str] = []
+                v2_trace: dict[str, Any] = {
+                    "pipeline": "V2",
+                    "input_guard": prepared.input_guard_reason,
+                }
+                timings = dict(prepared.timings)
+            else:
+                try:
+                    async with asyncio.timeout(
+                        max(
+                            0.001,
+                            self.settings.m3_turn_deadline_seconds
+                            - (time.perf_counter() - prepared.started_at),
+                        )
+                    ):
+                        v2 = await self._v2_pipeline().run(
+                            prepared,
+                            question=question,
+                            product_name=product_name,
+                            scope_description=scope_description,
+                            include_images=include_images,
+                        )
+                except TimeoutError as exc:
+                    raise LlmError(
+                        "TURN_DEADLINE_EXCEEDED",
+                        SERVER_BUSY_MESSAGE,
+                        retryable=True,
+                    ) from exc
+                result = v2.result
+                usage = v2.usage
+                # V2 sends complete document context to the provider. Never
+                # persist that prompt in Trace, even when legacy prompt
+                # retention is enabled; hashes and IDs live in generation.
+                prompt = None
+                next_suggestions = v2.next_suggestions
+                v2_trace = v2.trace
+                timings = v2.timings
+
+            timings["total_ms"] = _elapsed_ms(prepared.started_at)
+            await self.repository.complete_turn(
+                turn,
+                answer=result.answer,
+                sources=[],
+                usage=usage,
+                citation_result=result.citation_result,
+                timings=timings,
+                prompt=prompt,
+                doc_routing={
+                    "resolved_from": "RAG_V2",
+                    "pipeline": "V2",
+                    "generation": v2_trace,
+                },
+                response_type=result.response_type.value,
+                answer_mode=result.answer_mode.value if result.answer_mode else None,
+            )
+            return self._chat_payload(
+                turn,
+                result,
+                [],
+                usage,
+                timings["total_ms"],
+                next_suggestions,
+            )
+        except asyncio.CancelledError:
+            timings = dict(prepared.timings)
+            timings["total_ms"] = _elapsed_ms(prepared.started_at)
+            task = asyncio.create_task(
+                self.repository.fail_turn(
+                    turn,
+                    status="CANCELLED",
+                    code="CLIENT_DISCONNECTED",
+                    message="客户端已断开",
+                    partial_answer="",
+                    timings=timings,
+                    stage="v2",
+                )
+            )
+            await asyncio.shield(task)
+            raise
+        except LlmError as exc:
+            timings = dict(prepared.timings)
+            timings["total_ms"] = _elapsed_ms(prepared.started_at)
+            await self.repository.fail_turn(
+                turn,
+                status="FAILED",
+                code=exc.code,
+                message=exc.public_message,
+                partial_answer="",
+                timings=timings,
+                stage="v2",
+                retryable=exc.retryable,
+                detail=getattr(exc, "detail", None),
+            )
+            raise ApiError(
+                exc.code,
+                SERVER_BUSY_MESSAGE,
+                504 if exc.retryable else 502,
+            ) from exc
+        except ApiError as exc:
+            timings = dict(prepared.timings)
+            timings["total_ms"] = _elapsed_ms(prepared.started_at)
+            await self.repository.fail_turn(
+                turn,
+                status="FAILED",
+                code=exc.code,
+                message=exc.message,
+                partial_answer="",
+                timings=timings,
+                stage="v2",
+                retryable=exc.status_code >= 500,
+            )
+            raise
+        except Exception as exc:
+            timings = dict(prepared.timings)
+            timings["total_ms"] = _elapsed_ms(prepared.started_at)
+            await self.repository.fail_turn(
+                turn,
+                status="FAILED",
+                code="INTERNAL_ERROR",
+                message="回答生成失败",
+                partial_answer="",
+                timings=timings,
+                stage="v2",
+                detail=_unexpected_detail(exc),
+            )
+            raise ApiError("INTERNAL_ERROR", SERVER_BUSY_MESSAGE, 500) from exc
+
+    async def _chat_stream_v2(
+        self,
+        prepared: PreparedRag,
+        *,
+        question: str,
+        product_name: str,
+        scope_description: str,
+        include_images: bool,
+    ) -> AsyncIterator[bytes]:
+        turn = prepared.turn
+        yield sse_event(
+            "trace",
+            {
+                "trace_id": str(turn.trace_id),
+                "conversation_id": str(turn.conversation_id),
+                "index_id": str(turn.index_id),
+            },
+        )
+        yield sse_event("source", {"sources": []})
+        try:
+            payload = await self._generate_v2(
+                prepared,
+                question=question,
+                product_name=product_name,
+                scope_description=scope_description,
+                include_images=include_images,
+            )
+        except ApiError as exc:
+            yield sse_event(
+                "error",
+                {
+                    "code": exc.code,
+                    "message": user_safe_chat_message(exc),
+                    "trace_id": str(turn.trace_id),
+                    "retryable": exc.status_code >= 500,
+                },
+            )
+            return
+        answer = str(payload.get("answer") or "")
+        for offset in range(0, len(answer), 24):
+            yield sse_event("message", {"delta": answer[offset : offset + 24]})
+            await asyncio.sleep(0)
+        yield sse_event("done", payload)
+
     async def generate(
         self,
         *,
@@ -1384,6 +1717,14 @@ class RagService:
         product_name, scope_description = self._prompt_scope(
             prepared, product_name, scope_description
         )
+        if self._uses_v2():
+            return await self._generate_v2(
+                prepared,
+                question=question,
+                product_name=product_name,
+                scope_description=scope_description,
+                include_images=include_images,
+            )
         turn = prepared.turn
         plan, plan_error = await self._safely_plan_chat_turn(
             prepared, question, product_name, scope_description
@@ -1408,7 +1749,7 @@ class RagService:
                 turn,
                 answer=result.answer,
                 sources=result.valid_sources,
-                usage={},
+                usage=plan.usage,
                 citation_result=result.citation_result,
                 timings=prepared.timings,
                 prompt=None,
@@ -1422,7 +1763,7 @@ class RagService:
                 turn,
                 result,
                 self._references_for_result(plan, result),
-                {},
+                plan.usage,
                 prepared.timings["total_ms"],
                 self._next_suggestions(plan, result),
             )
@@ -2509,6 +2850,24 @@ class RagService:
 
     @staticmethod
     def _result_for_fixed_plan(plan: _ChatPlan) -> ChatResult:
+        if plan.kind == "P3_ANSWER":
+            return post_validate(
+                plan.fixed_answer or "",
+                [source.public_dict() for source in plan.sources],
+                True,
+                require_citations=True,
+            )
+        if plan.kind == "P3_GENERAL":
+            return post_validate(plan.fixed_answer or "", [], False)
+        if plan.kind == "P3_CLARIFY":
+            return post_validate(
+                plan.fixed_answer or "",
+                [],
+                False,
+                preserve_unconfirmed_without_evidence=True,
+            )
+        if plan.kind == "P3_OUT_OF_SCOPE":
+            return post_validate(plan.fixed_answer or "", [], False)
         if plan.kind == "NO_MATCH":
             return post_validate(
                 "[MODE:UNCONFIRMED]\n" + (plan.fixed_answer or UNCONFIRMED_MESSAGE),

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from test_chat_doc_routing_flow import (
@@ -44,6 +46,55 @@ from app.rag.routing import (
 )
 def test_answer_style_policy(question: str, style: AnswerStyle) -> None:
     assert classify_answer_style(question).style == style
+
+
+def test_p0_semantic_expectations_cover_every_specialized_turn() -> None:
+    root = Path(__file__).resolve().parents[2] / "rag-acceptance"
+    cases = [
+        json.loads(line)
+        for line in (root / "technical-assistant-cases.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    semantic = [
+        json.loads(line)
+        for line in (root / "semantic-orchestration-expectations.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(cases) == len(semantic) == 50
+    assert len({case["id"] for case in cases}) == len(cases)
+    assert len({case["id"] for case in semantic}) == len(semantic)
+    assert {case["id"] for case in cases} == {case["id"] for case in semantic}
+
+    valid_strategies = {
+        "SHORT_ANSWER",
+        "DOCUMENT_DELIVERY",
+        "DOCUMENT_ASSISTED",
+        "GENERAL_TECH",
+        "CLARIFY",
+        "OUT_OF_SCOPE",
+    }
+    semantic_by_id = {case["id"]: case for case in semantic}
+    turn_count = 0
+    for case in cases:
+        source_turns = case.get("turns") or [case]
+        expected_turns = semantic_by_id[case["id"]]["turns"]
+        assert len(expected_turns) == len(source_turns)
+        for expected in expected_turns:
+            assert set(expected) == {
+                "expected_strategy",
+                "allowed_document_keys",
+                "forbidden_document_keys",
+                "allow_general_knowledge",
+            }
+            assert expected["expected_strategy"] in valid_strategies
+            assert all(isinstance(key, str) and key for key in expected["allowed_document_keys"])
+            assert all(isinstance(key, str) and key for key in expected["forbidden_document_keys"])
+            assert isinstance(expected["allow_general_knowledge"], bool)
+            assert not set(expected["allowed_document_keys"]).intersection(
+                expected["forbidden_document_keys"]
+            )
+            turn_count += 1
+    assert turn_count == 72
 
 
 def test_scope_snapshot_is_normalized_bounded_and_wrapped_as_data() -> None:

@@ -83,6 +83,35 @@ async def _submit_post_build_profile(
         )
 
 
+async def _submit_post_build_rag_cards(
+    settings: Settings,
+    resources: AppResources,
+    result: IndexBuildResult,
+    task_id: UUID,
+) -> None:
+    """Queue index-bound RAG cards without affecting build success."""
+    if result.followup_build is not None:
+        return
+    try:
+        from app.rag.document_card_repository import DocumentCardRepository
+        from app.rag.document_card_service import DocumentCardService
+
+        index = await IngestionRepository(resources.database, settings).get_index(result.index_id)
+        knowledge_id = UUID(str(index["kb_id"]))
+        submission = await DocumentCardService(
+            DocumentCardRepository(resources.database, settings), settings
+        ).request_generation(knowledge_id, index_id=result.index_id)
+        await TaskRecordRepository(resources.database).merge_metadata(
+            task_id,
+            {
+                "rag_document_card_task_id": str(submission["task_id"]),
+                "rag_document_card_task_type": str(submission["task_type"]),
+            },
+        )
+    except Exception:
+        logger.exception("Could not submit RAG document cards for index %s", result.index_id)
+
+
 async def _run_index_task(index_id: UUID, task_id: UUID) -> dict[str, int | str]:
     settings = get_settings()
     resources = AppResources.create(settings)
@@ -108,6 +137,7 @@ async def _run_index_task(index_id: UUID, task_id: UUID) -> dict[str, int | str]
             _enqueue_followup(settings, followup)
             raise
         await _submit_post_build_profile(settings, resources, result, task_id)
+        await _submit_post_build_rag_cards(settings, resources, result, task_id)
         _enqueue_followup(settings, result.followup_build)
         return {
             "index_id": str(result.index_id),

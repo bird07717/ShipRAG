@@ -156,6 +156,27 @@ class TestProviderKeyPrecedence:
         finally:
             asyncio.run(provider.aclose())
 
+    def test_dashscope_llm_uses_dashscope_fallback_key_and_endpoint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "")
+        settings = Settings(
+            _env_file=None,
+            app_env="test",
+            dashscope_api_key=SecretStr("sk-dashscope"),
+        )
+        snapshot = ModelSnapshot(provider="dashscope", model_name="qwen-plus", parameters={})
+        provider = ZhipuLlmProvider(settings, snapshot)
+        try:
+            assert provider.provider == "dashscope"
+            assert provider.client.headers["Authorization"] == "Bearer sk-dashscope"
+            assert (
+                str(provider.client.base_url)
+                == "https://dashscope.aliyuncs.com/compatible-mode/v1/"
+            )
+        finally:
+            asyncio.run(provider.aclose())
+
     def test_auto_without_key_allows_fake_only_in_test(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -245,11 +266,19 @@ class TestProviderKeyPrecedence:
 
 class TestProbeModel:
     @pytest.mark.parametrize("model_type", ["LLM", "EMBEDDING", "RERANK", "OCR", "VISION"])
-    def test_every_model_type_supports_both_configured_providers(self, model_type: str) -> None:
-        assert set(supported_providers(model_type)) == {"zhipu", "siliconflow"}
+    def test_provider_capabilities_are_scoped_by_model_type(self, model_type: str) -> None:
+        expected = (
+            {"zhipu", "siliconflow", "dashscope"}
+            if model_type == "LLM"
+            else {
+                "zhipu",
+                "siliconflow",
+            }
+        )
+        assert set(supported_providers(model_type)) == expected
 
-    @pytest.mark.parametrize("provider", ["zhipu", "siliconflow"])
-    async def test_llm_probe_accepts_both_providers(self, provider: str) -> None:
+    @pytest.mark.parametrize("provider", ["zhipu", "siliconflow", "dashscope"])
+    async def test_llm_probe_accepts_configured_providers(self, provider: str) -> None:
         from app.core.config import Settings
 
         settings = Settings(_env_file=None, app_env="test")

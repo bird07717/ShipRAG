@@ -21,6 +21,9 @@ import type {
   PromptTemplate,
   RagConfig,
   RagConfigUpdatePayload,
+  RagDocumentCard,
+  RagDocumentCardPayload,
+  RagDocumentCardReadiness,
   RagTrace,
   ReleaseRebaseResult,
   SystemInfo,
@@ -109,10 +112,14 @@ export const adminStore = reactive({
   chunks: [] as Array<Record<string, unknown>>,
   documentProfileContext: null as DocumentProfileContext | null,
   knowledgeProfileSummary: null as KnowledgeProfileSummary | null,
+  ragDocumentCards: [] as RagDocumentCard[],
+  ragDocumentCardReadiness: null as RagDocumentCardReadiness | null,
+  ragDocumentCard: null as RagDocumentCard | null,
   documentInspectionIndexId: "",
   latestIndexTasks: {} as Record<string, IndexTask | undefined>,
   latestProfileTasks: {} as Record<string, IndexTask | undefined>,
   latestDocumentProfileTasks: {} as Record<string, IndexTask | undefined>,
+  latestRagDocumentCardTasks: {} as Record<string, IndexTask | undefined>,
   releases: [] as KnowledgeRelease[],
   releaseDetails: {} as Record<string, KnowledgeRelease | undefined>,
   profileFeedback: [] as ProfileFeedback[],
@@ -303,20 +310,32 @@ export const adminStore = reactive({
       writeTrackedTasks(this.trackedTasks);
       const succeeded = task.status === "SUCCEEDED";
       const cancelled = task.status === "CANCELLED";
-      const message = succeeded
-        ? trackedTask.successMessage
-        : cancelled
-          ? "生成任务已停止；已完成文档的待上线属性保留，可继续编辑或重新生成"
-          : task.error_message || "后台任务执行失败，请在任务中心查看详情";
+      const generatedCount = Number(task.metadata.generated_count ?? 0);
+      const failedCount = Number(task.metadata.failed_count ?? 0);
+      const completedWithFailures = succeeded && Number.isFinite(failedCount) && failedCount > 0;
+      const message = completedWithFailures
+        ? `RAG 文档理解生成完成：成功 ${generatedCount} 份，失败 ${failedCount} 份；请查看失败文档后重试`
+        : succeeded
+          ? trackedTask.successMessage
+          : cancelled
+            ? "生成任务已停止；已完成文档的待上线属性保留，可继续编辑或重新生成"
+            : task.error_message || "后台任务执行失败，请在任务中心查看详情";
       this.notice = message;
       ElNotification({
-        title: cancelled ? "任务已停止" : succeeded ? "任务已完成" : "任务执行失败",
+        title: cancelled
+          ? "任务已停止"
+          : completedWithFailures
+            ? "任务部分失败"
+            : succeeded
+              ? "任务已完成"
+              : "任务执行失败",
         message,
-        type: cancelled ? "warning" : succeeded ? "success" : "error",
-        duration: succeeded || cancelled ? 5_000 : 0,
+        type: cancelled || completedWithFailures ? "warning" : succeeded ? "success" : "error",
+        duration: (succeeded && !completedWithFailures) || cancelled ? 5_000 : 0,
       });
       if (succeeded) {
         this.trackChainedProfileTask(task, trackedTask);
+        this.trackChainedRagCardTask(task, trackedTask);
       }
       if (trackedTask.taskType === "KNOWLEDGE_BASE_DELETE" && succeeded) {
         if (this.selectedKnowledgeId === trackedTask.knowledgeId) {
@@ -326,7 +345,10 @@ export const adminStore = reactive({
           this.documentDrawerOpen = false;
         }
         await this.loadKnowledgeBases();
-      } else if ((succeeded || cancelled) && trackedTask.knowledgeId === this.selectedKnowledgeId) {
+      } else if (
+        (succeeded || cancelled || task.status === "FAILED")
+        && trackedTask.knowledgeId === this.selectedKnowledgeId
+      ) {
         await this.refreshOperationalState();
         await this.loadKnowledgeProfiles();
         const releaseId = this.taskReleaseId(task, trackedTask);
@@ -371,6 +393,8 @@ export const adminStore = reactive({
       this.latestDocumentProfileTasks[task.kb_id] = indexTask;
     } else if (!indexId) {
       return;
+    } else if (task.task_type === "RAG_DOCUMENT_CARD_GENERATE") {
+      this.latestRagDocumentCardTasks[indexId] = indexTask;
     } else if (task.task_type.startsWith("PROFILE_")) {
       this.latestProfileTasks[indexId] = indexTask;
     } else if (task.task_type === "INDEX_BUILD") {
@@ -402,6 +426,19 @@ export const adminStore = reactive({
       successMessage: taskType === "DOCUMENT_PROFILE_GENERATE"
         ? "Profile 属性已生成，请前往 Profile Review 检查并上线"
         : "Profile 重建已完成，请前往 Profile Review 审核候选草稿",
+      knowledgeId: trackedTask.knowledgeId,
+    });
+    writeTrackedTasks(this.trackedTasks);
+  },
+
+  trackChainedRagCardTask(task: TaskRecord, trackedTask: TrackedTask): void {
+    const chainedId = task.metadata?.rag_document_card_task_id;
+    if (typeof chainedId !== "string" || !chainedId) return;
+    if (this.trackedTasks.some((item) => item.taskId === chainedId)) return;
+    this.trackedTasks.push({
+      taskId: chainedId,
+      taskType: "RAG_DOCUMENT_CARD_GENERATE",
+      successMessage: "RAG 文档理解卡片已生成，请在文档详情中检查并确认",
       knowledgeId: trackedTask.knowledgeId,
     });
     writeTrackedTasks(this.trackedTasks);
@@ -480,7 +517,11 @@ export const adminStore = reactive({
       this.latestIndexTasks = {};
       this.latestProfileTasks = {};
       this.latestDocumentProfileTasks = {};
+      this.latestRagDocumentCardTasks = {};
       this.knowledgeProfileSummary = null;
+      this.ragDocumentCards = [];
+      this.ragDocumentCardReadiness = null;
+      this.ragDocumentCard = null;
       return;
     }
     const knowledgeId = this.selectedKnowledgeId;
@@ -490,11 +531,20 @@ export const adminStore = reactive({
       adminApi.getKnowledgeProfiles(knowledgeId).catch(() => null),
     ]);
     if (this.selectedKnowledgeId !== knowledgeId) return;
+    const activeIndexId = this.knowledgeBases.find((item) => item.id === knowledgeId)
+      ?.rag_active_index_id
+      ?? this.knowledgeBases.find((item) => item.id === knowledgeId)?.active_index_id;
+    const cardList = activeIndexId
+      ? await adminApi.listRagDocumentCards(knowledgeId, activeIndexId).catch(() => null)
+      : null;
+    if (this.selectedKnowledgeId !== knowledgeId) return;
     this.documents = documents;
     this.indexes = indexes;
     this.releases = [];
     this.profileFeedback = [];
     this.knowledgeProfileSummary = profileSummary;
+    this.ragDocumentCards = cardList?.cards ?? [];
+    this.ragDocumentCardReadiness = cardList?.readiness ?? null;
     this.releaseDetails = {};
     await this.loadIndexTasks(indexes, knowledgeId);
   },
@@ -529,6 +579,7 @@ export const adminStore = reactive({
           index.id,
           tasks.find((task) => (task.task_type ?? "INDEX_BUILD") === "INDEX_BUILD"),
           tasks.find((task) => task.task_type?.startsWith("PROFILE_")),
+          tasks.find((task) => task.task_type === "RAG_DOCUMENT_CARD_GENERATE"),
         ] as const;
       }),
     );
@@ -537,6 +588,9 @@ export const adminStore = reactive({
     this.latestIndexTasks = Object.fromEntries(entries.map(([indexId, task]) => [indexId, task]));
     this.latestProfileTasks = Object.fromEntries(
       entries.map(([indexId, , profileTask]) => [indexId, profileTask]),
+    );
+    this.latestRagDocumentCardTasks = Object.fromEntries(
+      entries.map(([indexId, , , cardTask]) => [indexId, cardTask]),
     );
   },
 
@@ -571,6 +625,7 @@ export const adminStore = reactive({
     writeSelectedKnowledgeId(knowledgeId);
     this.selectedDocument = null;
     this.documentProfileContext = null;
+    this.ragDocumentCard = null;
     this.selectedTrace = null;
     await this.run(async () => {
       const [, traces] = await Promise.all([
@@ -704,6 +759,7 @@ export const adminStore = reactive({
       this.elements = [];
       this.chunks = [];
       this.documentProfileContext = null;
+      this.ragDocumentCard = null;
       return;
     }
     if (!indexId) {
@@ -714,7 +770,7 @@ export const adminStore = reactive({
       // Profile context is index-independent; elements/chunks follow the
       // selected inspection index. Stale responses for either are dropped
       // when the drawer moved on to another document meanwhile.
-      const [elementResult, chunkResult, profileContext] = await Promise.all([
+      const [elementResult, chunkResult, profileContext, documentCard] = await Promise.all([
         indexId
           ? adminApi.listElements(document.id, indexId)
           : Promise.resolve({ index_id: "", items: [] as Array<Record<string, unknown>> }),
@@ -722,6 +778,9 @@ export const adminStore = reactive({
           ? adminApi.listChunks(document.id, indexId)
           : Promise.resolve({ index_id: "", items: [] as Array<Record<string, unknown>> }),
         adminApi.getDocumentProfileContext(document.id),
+        indexId
+          ? adminApi.getRagDocumentCard(document.knowledge_id, document.id, indexId).catch(() => null)
+          : Promise.resolve(null),
       ]);
       if (this.selectedDocument?.id !== document.id) {
         return;
@@ -735,7 +794,67 @@ export const adminStore = reactive({
         this.chunks = chunkResult.items;
       }
       this.documentProfileContext = profileContext;
+      this.ragDocumentCard = documentCard;
     });
+  },
+
+  async generateRagDocumentCards(documentId?: string, replaceConfirmed = false): Promise<void> {
+    const knowledgeId = this.selectedKnowledgeId;
+    const indexId = documentId
+      ? this.documentInspectionIndexId || this.activeIndex?.id
+      : this.activeIndex?.id;
+    if (!knowledgeId || !indexId) return;
+    await this.runAction(`rag-document-card-generate:${documentId ?? indexId}`, async () => {
+      const submission = await adminApi.generateRagDocumentCards(knowledgeId, {
+        index_id: indexId, document_id: documentId, replace_confirmed: replaceConfirmed,
+      });
+      this.trackTask(submission, {
+        successMessage: "RAG 文档理解卡片已生成，请检查并确认", knowledgeId,
+      });
+      this.latestRagDocumentCardTasks[indexId] = {
+        id: submission.task_id, task_type: submission.task_type, status: submission.status,
+        stage: "QUEUED", progress: 0, attempt: 0, index_id: indexId,
+        error_code: null, error_message: null, metadata: {},
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      };
+      await this.hydrateTrackedTask(submission.task_id);
+    });
+    if (!this.error) this.notice = "RAG 文档理解生成任务已提交";
+  },
+
+  async saveRagDocumentCard(payload: RagDocumentCardPayload): Promise<void> {
+    const knowledgeId = this.selectedKnowledgeId;
+    const document = this.selectedDocument;
+    const card = this.ragDocumentCard;
+    if (!knowledgeId || !document || !card) return;
+    await this.runAction(`rag-document-card-save:${document.id}`, async () => {
+      this.ragDocumentCard = await adminApi.updateRagDocumentCard(
+        knowledgeId, document.id, card.index_id, card.revision, payload,
+      );
+      const index = this.ragDocumentCards.findIndex((item) => item.document_id === document.id);
+      if (index >= 0) this.ragDocumentCards[index] = this.ragDocumentCard;
+    });
+    if (!this.error) this.notice = "卡片已保存，请确认后用于后续上线检查";
+  },
+
+  async reviewRagDocumentCard(reviewStatus: "CONFIRMED" | "REJECTED"): Promise<void> {
+    const knowledgeId = this.selectedKnowledgeId;
+    const document = this.selectedDocument;
+    const card = this.ragDocumentCard;
+    if (!knowledgeId || !document || !card) return;
+    await this.runAction(`rag-document-card-review:${document.id}`, async () => {
+      this.ragDocumentCard = await adminApi.reviewRagDocumentCard(
+        knowledgeId, document.id, card.index_id, card.revision, reviewStatus,
+      );
+      const index = this.ragDocumentCards.findIndex((item) => item.document_id === document.id);
+      if (index >= 0) this.ragDocumentCards[index] = this.ragDocumentCard;
+      if (this.activeIndex?.id === card.index_id) {
+        this.ragDocumentCardReadiness = await adminApi.getRagDocumentCardReadiness(
+          knowledgeId, card.index_id,
+        );
+      }
+    });
+    if (!this.error) this.notice = reviewStatus === "CONFIRMED" ? "卡片已确认" : "卡片已拒绝";
   },
 
   goToCandidateReview(indexId: string): void {

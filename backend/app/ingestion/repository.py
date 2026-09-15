@@ -911,6 +911,13 @@ class IngestionRepository:
                 ),
                 {"document_id": document_id},
             )
+            # Cards are index-bound derived data.  A soft-deleted source must
+            # disappear from card review immediately even while older index
+            # snapshots remain available for existing conversation history.
+            await connection.execute(
+                text("DELETE FROM rag_document_card WHERE document_id = :document_id"),
+                {"document_id": document_id},
+            )
             build = (
                 await self._request_build_locked(
                     connection,

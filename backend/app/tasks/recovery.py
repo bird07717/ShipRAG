@@ -27,7 +27,10 @@ _FAILED_JOB_STATUSES = {
 
 # Maintenance task types reconciled at worker startup.  KNOWLEDGE_BASE_DELETE
 # is deliberately excluded: its side effects are not cooperative-cancel safe.
-_MAINTENANCE_TASK_TYPES = ("DOCUMENT_PROFILE_GENERATE",)
+_MAINTENANCE_TASK_TYPES = (
+    "DOCUMENT_PROFILE_GENERATE",
+    "RAG_DOCUMENT_CARD_GENERATE",
+)
 # A QUEUED task whose RQ job is missing may simply sit between the task INSERT
 # and the enqueue call; only reconcile once it is clearly stale.
 _QUEUED_GRACE_SECONDS = 600.0

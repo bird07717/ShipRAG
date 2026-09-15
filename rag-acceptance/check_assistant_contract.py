@@ -20,7 +20,8 @@ from run_golden import load_token
 
 PUBLIC = "/api/v1/assistant"
 CONTROL = re.compile(
-    r"\[(?:MODE:[A-Z_]+|IMG:S\d+|S\d+)\]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+    r"\[(?:MODE:[A-Z_]+|IMG:(?:S|I)?\d+|S\d+)\]"
+    r"|hidden_document_context|/api/v1/(?:admin|rag)|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
 )
 
 
@@ -161,14 +162,24 @@ class Check:
         complete = first[-1][1]
         conv = complete["conversation_id"]
         self.conversations.append(conv)
-        assert complete["response_type"] == "DOC_DELIVERED", complete["response_type"]
-        assert re.fullmatch(r"\*\*[^\n]+\*\*", complete["answer"].strip())
+        assert complete["response_type"] in {"ANSWERED", "DOC_DELIVERED"}, complete[
+            "response_type"
+        ]
+        assert complete["answer"].strip()
+        assert not CONTROL.search(complete["answer"])
+        if complete["response_type"] == "DOC_DELIVERED":
+            assert re.fullmatch(r"\*\*[^\n]+\*\*", complete["answer"].strip())
+            assert complete["references"]
+        else:
+            # Hidden-full-document V2 returns a generated answer and may omit
+            # public document references by contract.
+            assert isinstance(complete["references"], list)
         context = next(p for e, p in first if e == "context")
         assert context["conversation_id"] == conv
         assert context["assistant_message_id"] == complete["message_id"]
         assert context["trace_id"] == complete["trace_id"]
-        assert complete["content"] and complete["references"]
-        self.passed("SSE ordering/headers/IDs and full document presentation")
+        assert complete["content"]
+        self.passed("SSE ordering/headers/IDs and RAG answer presentation")
 
         images = [
             b["image_asset_id"] for b in complete["content"] if b["type"] == "image"

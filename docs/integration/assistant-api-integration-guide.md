@@ -415,7 +415,7 @@ GET {AI_BASE_URL}/api/v1/assistant/conversations/{conversation_id}/messages?limi
       "references": [],
       "clarification": null,
       "escalation": null,
-      "disclaimer": null,
+      "disclaimer": "本回答仅供参考，请结合现场情况和正式资料核验，必要时联系海兰信专业人员。",
       "error": null,
       "created_at": "2026-09-01T02:10:10Z",
       "updated_at": "2026-09-01T02:10:10Z"
@@ -471,7 +471,7 @@ Accept: text/event-stream
 | conversation_id | UUID/null | 否 | 新聊天省略或传 null，继续聊天传已有 ID |
 | question | string | 是 | 用户问题，1～4000 字符 |
 | choice_id | string/null | 否 | 澄清选项 ID，最长 100 字符 |
-| include_images | boolean | 否 | 是否返回回答相关图片，默认 true |
+| include_images | boolean | 否 | 是否返回回答相关图片，默认 true；false 不改变正文生成，引用仍可能为空 |
 
 请求中不能包含模型、Prompt、回答策略、执行链路或 Index 字段。
 
@@ -586,12 +586,12 @@ data: {"message_id":"627ac474-8860-45a2-9ee8-731159a03f67","text":"请先断开�
 
 ```text
 event: complete
-data: {"request_id":"req-1","conversation_id":"be55b152-2cfb-43a1-91f6-bd227bc9289b","message_id":"627ac474-8860-45a2-9ee8-731159a03f67","trace_id":"b31f8104-f378-4c12-9a96-e49143bc5947","response_type":"ANSWERED","answer":"请先断开设备电源。","content":[],"sections":[],"references":[],"next_suggestions":[],"created_at":"2026-09-01T02:10:10Z"}
+data: {"request_id":"req-1","conversation_id":"be55b152-2cfb-43a1-91f6-bd227bc9289b","message_id":"627ac474-8860-45a2-9ee8-731159a03f67","trace_id":"b31f8104-f378-4c12-9a96-e49143bc5947","response_type":"ANSWERED","answer":"请先断开设备电源。","content":[],"sections":[],"references":[],"disclaimer":"本回答仅供参考，请结合现场情况和正式资料核验，必要时联系海兰信专业人员。","next_suggestions":[],"created_at":"2026-09-01T02:10:10Z"}
 ```
 
 `complete.answer` 是完整且权威的最终文本。调用方必须使用它校正已经累计的 delta。
-普通 RAG 回答的 `content` 是相同内容的结构化版本：优先用它替换临时展示，空内容块时回退到 `answer`，避免同时追加两份重复正文。文档直达应先显示 `answer` 标题，再按顺序渲染 `content` 正文。
-回答可区分文档依据、分析与推断和通用建议；引用不为通用知识背书，`disclaimer` 应与回答一起显示。生成超时、上游截断或空回答以 `error` 收口，不能因已收到 delta 就按成功保存。
+普通 RAG 回答的 `content` 是相同内容的结构化版本：优先用它替换临时展示，空内容块时回退到 `answer`，避免同时追加两份重复正文。兼容文档交付类型出现时，应先显示 `answer`，再按顺序渲染 `content`；调用方不得假设完整流程问题一定返回文档交付类型。
+回答可区分文档依据、分析与推断和通用建议；引用不为通用知识背书，`disclaimer` 应与回答一起显示。当前 RAG 的有据回答、文档交付、专业分析和待确认响应统一使用上述一行短提醒，范围外响应不重复附加；字段仍可省略或为 `null`，调用方不能按其文案做业务分支。生成超时、上游截断或空回答以 `error` 收口，不能因已收到 delta 就按成功保存。
 `document`、`clarification`、`escalation` 和 `disclaimer` 等没有值的可选字段会被省略，
 调用方必须同时兼容“字段不存在”和 `null`，不能假设所有可选字段固定出现。
 
@@ -685,6 +685,8 @@ data: {"request_id":"req-1","conversation_id":"be55b152-2cfb-43a1-91f6-bd227bc92
 ```
 
 ### 17.2 references
+
+该数组允许为空。隐藏文档生成型 RAG 的正常结果可固定返回空数组，`document` 也可为 `null`；调用方不得因没有文档标题或引用而把回答判为失败，不得要求 `DOC_DELIVERED`，也不得依赖引用实现主业务流程。非空时仅用于来源展示，不提供原文下载能力。
 
 ```json
 {
@@ -820,7 +822,9 @@ GET {AI_BASE_URL}/api/v1/assistant/knowledge-bases/{knowledge_id}/image-assets/{
 
 `answer` 和文本 Content Block 使用 Markdown。
 
-文档直达时，`answer` 仅返回 `**《文档标题》**`，不附加“已找到”或“以下是文档内容”等引导语；`content` 从有效正文或操作步骤开始，按源文档首行必为标题的约定，平台无条件删除首条非空文本行，每份文档只删除一次，不比较显示名称。
+兼容文档交付类型中，`answer` 可能仅返回 `**《文档标题》**`，调用方按 Markdown 加粗后继续渲染 `content`。当前隐藏文档生成的 RAG 回答通常返回 `ANSWERED`：公开内容只包含模型组织后的答案和必要图片，不直接交付候选列表或完整原文；答案正文可按技术说明需要提及标题、文件名或设备内部编号。
+
+外部响应不会提供知识库文档总数、Prompt、候选分数、对象存储位置或管理地址。正文中的 D/S/I 形式字符串可能是正常技术编号，调用方无需识别或过滤。管理试问与 Assistant 在相同知识库、问题、会话历史和运行配置下使用同一回答生成链路；管理端额外诊断只存在于 Trace，不属于外部契约。`include_images` 的过滤结果在首次完成、历史分页和相同幂等请求重放中保持一致。
 
 Android/iOS 必须：
 

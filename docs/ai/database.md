@@ -2,7 +2,7 @@
 
 ## 类型与迁移
 
-数据库是 PostgreSQL，开发和生产编排使用 ParadeDB PostgreSQL 17 镜像，并要求 `vector` 与 `pg_search` 扩展。Alembic 配置在 `backend/alembic.ini`，迁移位于 `backend/alembic/versions/`；当前仓库可见的最新修订是 `0045_rag_history_pairs`。实际环境是否已升级到 head，必须通过 `alembic current` 或数据库检查确认。
+数据库是 PostgreSQL，开发和生产编排使用 ParadeDB PostgreSQL 17 镜像，并要求 `vector` 与 `pg_search` 扩展。Alembic 配置在 `backend/alembic.ini`，迁移位于 `backend/alembic/versions/`；当前仓库可见的最新修订是 `0046_rag_document_cards`。实际环境是否已升级到 head，必须通过 `alembic current` 或数据库检查确认。
 
 数据库访问使用 SQLAlchemy async/asyncpg，但业务 SQL 大多由 repository 层直接管理；迁移而不是本文是表结构和约束的权威来源。
 
@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | 模型与运行配置 | `model_config`、`model_config_history`、`rag_config`、`engine_retrieval_config`、`engine_runtime_policy`、`prompt_template` | 模型档案/加密密钥审计、全局及按引擎检索配置、知识库运行策略和 Prompt 版本。 |
 | 知识与索引 | `knowledge_base`、`knowledge_index`、`document_source`、`index_document` | 知识库拥有版本化索引与原始文档；索引记录构建状态，知识库指向活动索引。 |
-| 内容与检索 | `document_element`、`image_asset`、`document_chunk`、`chunk_element`、`document_parent_chunk`、`parent_chunk_element` | 文档解析为元素与图像，再关联到子/父分块；子分块带 1024 维向量和 `pg_search` 检索索引。 |
+| 内容与检索 | `document_element`、`image_asset`、`document_chunk`、`chunk_element`、`document_parent_chunk`、`parent_chunk_element`、`rag_document_card` | 文档解析为元素与图像，再关联到子/父分块；子分块和 RAG 文档卡片均有 1024 维向量及 `pg_search` 检索索引。 |
 | 异步与存储清理 | `task_record`、`idempotency_record`、`storage_cleanup_object` | 任务进度、管理操作幂等、异步对象删除补偿。 |
 | 会话与观测 | `conversation`、`message`、`rag_trace`、`request_error_log` | 会话、消息、问答 Trace、请求错误；Trace 还记录运行快照、来源和可选父 Trace。 |
 | Support/发布 | `document_problem_profile`、`support_idempotency`、`knowledge_release`、`problem_profile_draft`、`support_release_profile`、`document_profile`、`document_profile_match_term`、`profile_publish_event` | Support 问题画像、幂等和 Profile 草稿/审核/发布快照。 |
@@ -27,12 +27,14 @@
 - `knowledge_base.description` 继续作为 Assistant 可见的公开知识库说明和 RAG 专业范围，不新增列。管理更新以 `updated_at` 做乐观并发条件，在同一事务内返回更新后的完整知识库快照；空白由应用层归一化为 `null`。修改说明不创建 `task_record`，也不改变索引、Chunk 或向量。
 - `document_source` 的活跃文件哈希在同一知识库内唯一；其原始对象键、图像对象键也唯一。内容索引可随 `knowledge_index` 版本重建。
 - `document_chunk.embedding` 固定为 `vector(1024)`，使用 HNSW cosine 索引；BM25 通过 `pg_search` 索引支持混合检索。
+- `rag_document_card` 以 `(index_id, document_id)` 唯一并同时保存 `knowledge_id`，卡片 JSON、稳定路由文本、`vector(1024)`、内容指纹、生成/审核状态、模型/Prompt 快照和乐观并发 `revision`。知识库或索引删除会级联卡片；文档为软删除，应用事务先显式删除关联卡片。显示名称不复制为卡片事实，改名查询时立即可见且不重做卡片向量。
 - `conversation` 关联知识库，并可冻结 RAG/Support 索引或发布版本；`message` 有会话内顺序约束，`rag_trace` 关联会话/消息并支持回退父子链路。
-- `message.rag_user_message_id` 将新 RAG 助手消息显式关联到本轮用户消息，删除用户消息时置空；`rag_history_context` 仅保存历史选择所需的结构化元数据，目前用于文档切换确认的原问题桥接。迁移 `0045` 不猜测或回填旧内部消息；旧 Assistant 轮次可在读取时复用 `assistant_request.user_message_id`。`ix_message_rag_user` 和 `ix_assistant_request_message` 支持两种关联读取。
+- `message.rag_user_message_id` 将新 RAG 助手消息显式关联到本轮用户消息，删除用户消息时置空；旧 Assistant 轮次可在读取时复用 `assistant_request.user_message_id`。V2 只接受这两种显式关联且用户、助手及外部请求状态均完成的轮次，不猜测相邻消息；`rag_history_context` 仅供 legacy 文档切换确认桥接，V2 不读取。`ix_message_rag_user` 和 `ix_assistant_request_message` 支持两种关联读取。
 - `assistant_request` 的 `(external_user_id, knowledge_id, idempotency_key)` 唯一，同一非空 Conversation 只允许一条 `RUNNING` 记录；`replay_count >= 0`，终态重放会更新计数、`last_replayed_at` 和 `updated_at`。`support_idempotency` 仅记录 Support 内部重放，不作为 Assistant 门面指标。不要绕过这些约束手工重复执行对外写操作。
 - `assistant_request.conversation_id` 使用 `ON DELETE CASCADE`。未关联 Conversation 且为 `COMPLETED`、`FAILED` 或 `CANCELLED` 的记录由独立的部分索引支持按 `updated_at` 清理；保留期任务明确不删除 `RUNNING`。
 - 新 Assistant 失败/取消的公开错误同步保存到 `message.response_payload.error`，并写入显式空 `content`，避免读取旧内部成功块；该写入与请求终态收口同事务。失败关联 Trace 同步状态和错误，已终态请求不二次覆盖。历史消息优先读取错误快照，旧记录兼容 Trace，不新增列或迁移。
 - RAG 技术助手启用时，`conversation.chat_context.rag_issue` 保存原问题、回答形式、一个待确认条件及来源用户/助手消息 ID。读取必须校验来源消息同会话、角色、成功状态和 `rag_user_message_id` 配对；写入或清理与本轮 Message/RAG Trace 成功终态共用事务和 `support_context_version` CAS。失败、取消、并发冲突和幂等重放不创建第二份状态；Support 不消费该命名空间。
+- ADR-0019 的 V0～V2 已实施：V2 不恢复 `rag_issue`、不处理待选文档且回答完成不写 RAG 焦点；`begin_turn` 的 V2 分支只读取会话归属和冻结索引，不读取共享焦点或 `chat_context`，新消息兼容列 `focus_epoch` 固定写 `0`。`conversation.focus_document_id/focus_index_id/focus_epoch/chat_context/support_context_version` 与 `message.focus_epoch` 同时被 Support、Gateway 和清理逻辑使用，不能批量清空、修改既有迁移或直接删列。共享字段只有在 Support 独立迁移、数据核对、应用回滚验证和至少两个发布周期零旧列读取后才可评估删除；没有收益时允许保留兼容列。
 
 ## 数据流
 
@@ -43,6 +45,10 @@
 - RAG 质量优化没有新增迁移：`rag_trace.runtime_snapshot` 的 JSON 新增 `generation`，保存实际生成计划/提示词哈希/来源；已有 `retrieval` 改为记录本轮有效覆盖值。`selected_context` 继续表示准备阶段检索上下文，历史记录不回填。文档内二次检索同时在 SQL 限定知识库、索引、文档与有效源文件状态，再应用 Top K。
 - RAG 聚焦历史需要迁移 `0045`。本地开发库已在 2026-09-12 验证升级到 `0045 (head)`；生产状态仍须在目标服务器单独执行 `alembic current` 确认。该迁移不要求重建知识索引，也不改写历史回答或 Trace。
 - 本次知识库范围编辑、范围快照和 `rag_issue` 复用既有 `description`、`updated_at`、JSONB 与上下文版本字段，没有新增 Alembic 迁移；部署仍必须先执行当前仓库的 `upgrade head`，不能据此跳过既有 `0045`。
+- RAG 文档卡片需要迁移 `0046`。本地开发库已验证 `0046 -> 0045 -> 0046` 并回到 `0046 (head)`；迁移只创建结构和索引，不调用模型、不回填业务卡片。生产升级后必须显式生成/审核当前活动索引卡片，生产状态仍待目标服务器确认。
+- P2 语义编排没有新增迁移：配置快照与 Shadow 结果写入既有 `rag_trace.runtime_snapshot` JSONB。卡片向量/BM25 读取同时限定 `knowledge_id`、会话冻结 `index_id`、`index_document=READY`、`document_source=STORED`、当前卡片 Schema、`generation_status=READY` 且审核状态非 `REJECTED`；显示名称仍动态联接源文档。P2 不写 Support 表，也不把 Shadow 候选写成公开 `retrieval_result`。
+- RAG V2 的 V1～V5 计划不新增数据库结构，继续复用 `0046` 卡片、元素、图片、消息、Trace 和 Assistant 请求。若未来执行共享焦点字段清理，必须作为独立 V6 迁移任务，不得与 V2 首次开发切换同批执行。详见 [RAG V2 执行计划](../technical/rag-full-document-generation-v2-execution-plan.md)。
+- V2 实施时发现 unfocused 向量/BM25/Chunk ID 查询可能读取软删除文档；Repository 已统一增加 `document_source.status='STORED'` 条件。该修复不改表结构、不需迁移或重建索引，legacy 与 V2 同时受益。
 
 - 新字段、表、索引、枚举约束必须使用 Alembic 迁移，不直接修改线上 schema。
 - 更改嵌入维度、索引结构或保留策略会影响已有数据和任务，需要同时评估迁移、重建和回滚。

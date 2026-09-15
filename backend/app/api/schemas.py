@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.common.suggestions import validate_suggestions
+from app.rag.document_cards import DocumentCardPayload
 
 
 class KnowledgeBaseCreate(BaseModel):
@@ -99,6 +100,75 @@ class TaskSubmissionResponse(BaseModel):
     task_type: str
     status: Literal["QUEUED", "RUNNING"]
     replayed: bool = False
+
+
+class RagDocumentCardGenerateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    index_id: UUID | None = None
+    document_id: UUID | None = None
+    replace_confirmed: bool = False
+
+
+class RagDocumentCardUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    index_id: UUID
+    expected_revision: int = Field(ge=0)
+    card_payload: DocumentCardPayload
+
+
+class RagDocumentCardReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    index_id: UUID
+    expected_revision: int = Field(ge=0)
+    review_status: Literal["CONFIRMED", "REJECTED"]
+
+
+class RagDocumentCardResponse(BaseModel):
+    id: UUID
+    knowledge_id: UUID
+    index_id: UUID
+    index_version: int
+    document_id: UUID
+    document_name: str
+    schema_version: int
+    document_type: str | None
+    card_payload: DocumentCardPayload | None
+    generation_status: Literal["PENDING", "READY", "FAILED", "STALE"]
+    review_status: Literal["AUTO", "CONFIRMED", "REJECTED"]
+    revision: int
+    content_fingerprint: str | None
+    generator_snapshot: dict[str, Any]
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RagDocumentCardReadinessResponse(BaseModel):
+    knowledge_id: UUID
+    index_id: UUID
+    expected_count: int
+    ready_count: int
+    confirmed_count: int
+    auto_count: int
+    rejected_count: int
+    missing_count: int
+    failed_count: int
+    stale_count: int
+    shadow_ready: bool
+    ready: bool
+    blockers: list[str] = Field(default_factory=list)
+
+
+class RagDocumentCardListResponse(BaseModel):
+    knowledge_id: UUID
+    index_id: UUID
+    index_version: int
+    cards: list[RagDocumentCardResponse] = Field(default_factory=list)
+    readiness: RagDocumentCardReadinessResponse
 
 
 class PublishedProfileSummary(BaseModel):

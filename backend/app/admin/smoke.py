@@ -49,6 +49,10 @@ async def run() -> dict[str, Any]:
             "m4_ocr_provider": "fake",
             "m4_vision_provider": "fake",
             "m5_rerank_provider": "fake",
+            # This smoke verifies management publication and Trace plumbing.
+            # The generic fake provider has no structured V2 completions;
+            # V2 Playground dispatch is covered by its dedicated tests.
+            "m3_rag_pipeline_mode": "legacy",
         }
     )
     resources = AppResources.create(settings)

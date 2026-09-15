@@ -40,9 +40,20 @@ const TYPE_LABELS: Record<string, string> = {
 const EDITABLE_TYPES = new Set(["LLM", "RERANK", "OCR", "VISION", "EMBEDDING"]);
 
 const PROVIDER_DEFAULT_BASE_URLS: Readonly<Record<string, string>> = {
+  dashscope: "https://dashscope.aliyuncs.com/compatible-mode/v1/",
   siliconflow: "https://api.siliconflow.cn/v1/",
   zhipu: "https://open.bigmodel.cn/api/paas/v4/",
 };
+
+const PROVIDER_LABELS: Readonly<Record<string, string>> = {
+  dashscope: "千问（阿里云百炼 / DashScope）",
+  siliconflow: "硅基流动（SiliconFlow）",
+  zhipu: "智谱 AI（Zhipu）",
+};
+
+function providerLabel(provider: string): string {
+  return PROVIDER_LABELS[provider.trim().toLowerCase()] ?? provider;
+}
 
 const isBuildBoundType = computed(
   () =>
@@ -115,6 +126,9 @@ function defaultBaseUrlForProvider(provider: string): string | undefined {
 function handleProviderChange(provider: string): void {
   const nextBaseUrl = defaultBaseUrlForProvider(provider);
   if (nextBaseUrl) editForm.base_url = nextBaseUrl;
+  if (provider.trim().toLowerCase() === "dashscope") {
+    editForm.thinking_enabled = false;
+  }
 }
 
 function openEdit(model: ModelConfig): void {
@@ -404,7 +418,7 @@ async function saveEdit(): Promise<void> {
               <el-option
                 v-for="provider in availableProviders"
                 :key="provider"
-                :label="provider"
+                :label="providerLabel(provider)"
                 :value="provider"
               />
             </el-select>

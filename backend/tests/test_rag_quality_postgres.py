@@ -96,6 +96,14 @@ async def test_document_retrieval_filters_before_limit_and_isolates_kb_index_and
                 )
                 assert await repo.vector_search(**kwargs, embedding=vector) == []
                 assert await repo.bm25_search(**kwargs, query="scopeunique") == []
+                unfocused = {key: value for key, value in kwargs.items() if key != "document_id"}
+                for result in (
+                    await repo.vector_search(**unfocused, embedding=vector),
+                    await repo.bm25_search(**unfocused, query="scopeunique"),
+                ):
+                    assert result
+                    assert all(candidate.document_id != focus for candidate in result)
+                    assert result[0].document_id == other
             finally:
                 await tx.rollback()
     finally:

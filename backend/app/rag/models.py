@@ -114,6 +114,36 @@ class RetrievalCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class DocumentCardCandidate:
+    card_id: UUID
+    document_id: UUID
+    document: str
+    document_type: str
+    summary: str
+    tasks: list[str]
+    review_status: str
+    rank: int
+    distance: float | None = None
+    similarity: float | None = None
+    bm25_score: float | None = None
+
+    def trace_dict(self) -> dict[str, Any]:
+        return {
+            "card_id": str(self.card_id),
+            "document_id": str(self.document_id),
+            "document": self.document,
+            "document_type": self.document_type,
+            "summary": self.summary,
+            "tasks": self.tasks,
+            "review_status": self.review_status,
+            "rank": self.rank,
+            "distance": self.distance,
+            "similarity": self.similarity,
+            "bm25_score": self.bm25_score,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RerankDocument:
     text: str
     image_bytes: bytes | None = None
@@ -174,5 +204,12 @@ class PreparedRag:
     input_guard_reason: str | None = None
     retrieval_query: str = ""
     query_embedding: list[float] = field(default_factory=list)
+    query_embedding_status: str = "PASSED"
+    query_embedding_reason: str | None = None
     policy_question: str = ""
     issue_resumed: bool = False
+    # P2/P3 internal data. The persisted semantic record is privacy-reduced;
+    # the raw query plan stays request-local and is never serialized directly.
+    semantic_orchestration: dict[str, Any] | None = None
+    semantic_query_plan: dict[str, Any] = field(default_factory=dict)
+    response_plan_trace: dict[str, Any] | None = None

@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 from pydantic import SecretStr
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.common.errors import ApiError
@@ -17,8 +17,15 @@ from app.common.text import estimate_tokens
 from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
 from app.rag.answer_policy import build_scope_snapshot, normalize_scope_description
+from app.rag.document_cards import DOCUMENT_CARD_SCHEMA_VERSION
 from app.rag.model_providers import environment_api_key, supported_providers
-from app.rag.models import ModelSnapshot, RetrievalCandidate, RetrievalConfig, Turn
+from app.rag.models import (
+    DocumentCardCandidate,
+    ModelSnapshot,
+    RetrievalCandidate,
+    RetrievalConfig,
+    Turn,
+)
 
 # Converted documents ("conv") export the original file's highlighted text
 # regions as flat images: solid-colour strips (all <= 65px tall in this
@@ -26,6 +33,16 @@ from app.rag.models import ModelSnapshot, RetrievalCandidate, RetrievalConfig, T
 # garbage on a pure-colour rectangle, so they are dropped from delivery and
 # doc-QA context entirely instead of shown as colour blocks.
 _DECORATIVE_IMAGE_MAX_PX = 80
+
+
+class SearchQueryUnsupportedError(RuntimeError):
+    """A lexical query shape rejected by ParadeDB, safe to degrade per channel."""
+
+
+def _raise_normalized_search_error(exc: DBAPIError) -> None:
+    if "unsupported query shape" in str(exc).casefold():
+        raise SearchQueryUnsupportedError("PARADEDB_UNSUPPORTED_QUERY_SHAPE") from exc
+    raise exc
 
 
 def elements_from_rows(rows: Any) -> list[dict[str, Any]]:
@@ -161,6 +178,7 @@ class RagRepository:
             context_version = 0
             effective_index_id = UUID(str(kb["rag_active_index_id"]))
             embedding_model_name = str(kb["embedding_model_name"])
+            uses_v2 = self.settings.effective_rag_pipeline_mode == "v2"
             scope = build_scope_snapshot(
                 kb["kb_description"], max_tokens=self.settings.m3_rag_scope_max_tokens
             )
@@ -184,14 +202,17 @@ class RagRepository:
                     },
                 )
             else:
+                conversation_columns = (
+                    "knowledge_id, rag_index_id"
+                    if uses_v2
+                    else (
+                        "knowledge_id, focus_document_id, chat_context, rag_index_id, "
+                        "focus_epoch, support_context_version"
+                    )
+                )
                 conversation_result = await connection.execute(
                     text(
-                        """
-                        SELECT knowledge_id, focus_document_id, chat_context, rag_index_id,
-                               focus_epoch, support_context_version
-                        FROM conversation
-                        WHERE id = :id FOR UPDATE
-                        """
+                        f"SELECT {conversation_columns} FROM conversation WHERE id = :id FOR UPDATE"
                     ),
                     {"id": conversation_id},
                 )
@@ -200,16 +221,17 @@ class RagRepository:
                     raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
                 if conversation_row["knowledge_id"] != knowledge_id:
                     raise ApiError("CONVERSATION_KB_MISMATCH", "会话不属于指定知识库", 409)
-                focus_document_id = (
-                    UUID(str(conversation_row["focus_document_id"]))
-                    if conversation_row["focus_document_id"]
-                    else None
-                )
-                raw_context = conversation_row["chat_context"]
-                if isinstance(raw_context, dict):
-                    chat_context = dict(raw_context)
-                focus_epoch = int(conversation_row["focus_epoch"] or 0)
-                context_version = int(conversation_row["support_context_version"] or 0)
+                if not uses_v2:
+                    focus_document_id = (
+                        UUID(str(conversation_row["focus_document_id"]))
+                        if conversation_row["focus_document_id"]
+                        else None
+                    )
+                    raw_context = conversation_row["chat_context"]
+                    if isinstance(raw_context, dict):
+                        chat_context = dict(raw_context)
+                    focus_epoch = int(conversation_row["focus_epoch"] or 0)
+                    context_version = int(conversation_row["support_context_version"] or 0)
                 if conversation_row["rag_index_id"] is not None:
                     effective_index_id = UUID(str(conversation_row["rag_index_id"]))
                     frozen_result = await connection.execute(
@@ -313,35 +335,43 @@ class RagRepository:
                 ):
                     raise ApiError("FALLBACK_MESSAGE_CONFLICT", "降级消息状态不一致", 409)
 
-            history_result = await connection.execute(
-                text(
-                    """
-                    SELECT role, content FROM (
-                        SELECT role, content, sequence_no
-                        FROM message
-                        WHERE conversation_id = :conversation_id AND status = 'COMPLETED'
-                          AND (
-                              :reuse_messages = false
-                              OR id NOT IN (:user_message_id, :assistant_message_id)
-                          )
-                        ORDER BY sequence_no DESC
-                        LIMIT :history_limit
-                    ) recent
-                    ORDER BY sequence_no
-                    """
-                ),
-                {
-                    "conversation_id": resolved_conversation_id,
-                    "history_limit": self.settings.m3_history_max_messages,
-                    "reuse_messages": reuse_messages,
-                    "user_message_id": user_message_id,
-                    "assistant_message_id": assistant_message_id,
-                },
-            )
-            history_rows = [dict(row) for row in history_result.mappings()]
-            history = self._budget_history(history_rows)
-            history_diagnostics: dict[str, Any] = {"strategy": "legacy"}
-            if self.settings.m3_history_strategy == "focused":
+            history_rows: list[dict[str, Any]] = []
+            if uses_v2:
+                history, history_diagnostics = await self._v2_history(
+                    connection,
+                    resolved_conversation_id,
+                    assistant_message_id if reuse_messages else None,
+                )
+            else:
+                history_result = await connection.execute(
+                    text(
+                        """
+                        SELECT role, content FROM (
+                            SELECT role, content, sequence_no
+                            FROM message
+                            WHERE conversation_id = :conversation_id AND status = 'COMPLETED'
+                              AND (
+                                  :reuse_messages = false
+                                  OR id NOT IN (:user_message_id, :assistant_message_id)
+                              )
+                            ORDER BY sequence_no DESC
+                            LIMIT :history_limit
+                        ) recent
+                        ORDER BY sequence_no
+                        """
+                    ),
+                    {
+                        "conversation_id": resolved_conversation_id,
+                        "history_limit": self.settings.m3_history_max_messages,
+                        "reuse_messages": reuse_messages,
+                        "user_message_id": user_message_id,
+                        "assistant_message_id": assistant_message_id,
+                    },
+                )
+                history_rows = [dict(row) for row in history_result.mappings()]
+                history = self._budget_history(history_rows)
+                history_diagnostics = {"strategy": "legacy"}
+            if not uses_v2 and self.settings.m3_history_strategy == "focused":
                 history, history_diagnostics = await self._focused_history(
                     connection,
                     resolved_conversation_id,
@@ -561,7 +591,7 @@ class RagRepository:
                         "question": question,
                         "user_sequence": first_sequence,
                         "assistant_sequence": first_sequence + 1,
-                        "focus_epoch": focus_epoch,
+                        "focus_epoch": 0 if uses_v2 else focus_epoch,
                     },
                 )
             await connection.execute(
@@ -628,7 +658,7 @@ class RagRepository:
             ),
             history=history,
             history_diagnostics=history_diagnostics,
-            has_prior_messages=bool(history_rows),
+            has_prior_messages=bool(history) if uses_v2 else bool(history_rows),
             rerank=ModelSnapshot(
                 provider=str(rerank_row["provider"]),
                 model_name=str(rerank_row["model_name"]),
@@ -639,10 +669,10 @@ class RagRepository:
                 api_key=self._decrypt_api_key(dict(rerank_row)),
             ),
             embedding=embedding_snapshot,
-            focus_document_id=focus_document_id,
-            focus_epoch=focus_epoch,
-            context_version=context_version,
-            chat_context=chat_context,
+            focus_document_id=None if uses_v2 else focus_document_id,
+            focus_epoch=0 if uses_v2 else focus_epoch,
+            context_version=0 if uses_v2 else context_version,
+            chat_context={} if uses_v2 else chat_context,
             retrieval=retrieval,
             knowledge_name=normalize_scope_description(str(kb["kb_name"])),
             knowledge_description=(
@@ -714,6 +744,48 @@ class RagRepository:
             token_budget=self.settings.m3_history_token_budget,
         )
 
+    async def _v2_history(
+        self,
+        connection: Any,
+        conversation_id: UUID,
+        excluded_message_id: UUID | None = None,
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        from app.rag.v2.history import select_complete_round_history
+
+        result = await connection.execute(
+            text("""
+            SELECT a.id, a.content AS answer, COALESCE(ar.status, a.status) AS status,
+                   u.id AS user_id, u.content AS question, u.status AS user_status
+            FROM (
+                SELECT * FROM message
+                WHERE conversation_id = :conversation_id AND role = 'ASSISTANT'
+                  AND (CAST(:excluded AS uuid) IS NULL OR id != :excluded)
+                ORDER BY sequence_no DESC LIMIT :scan_limit
+            ) a
+            LEFT JOIN LATERAL (
+                SELECT user_message_id, status FROM assistant_request
+                WHERE assistant_message_id = a.id AND conversation_id = a.conversation_id
+                ORDER BY created_at DESC, id DESC LIMIT 1
+            ) ar ON true
+            LEFT JOIN message u
+              ON u.id = COALESCE(a.rag_user_message_id, ar.user_message_id)
+             AND u.conversation_id = a.conversation_id AND u.role = 'USER'
+             AND u.sequence_no < a.sequence_no
+            ORDER BY a.sequence_no DESC
+        """),
+            {
+                "conversation_id": conversation_id,
+                "excluded": excluded_message_id,
+                "scan_limit": max(20, self.settings.m3_history_max_messages * 4),
+            },
+        )
+        return select_complete_round_history(
+            [dict(row) for row in result.mappings()],
+            max_rounds=self.settings.m3_rag_history_max_rounds,
+            max_messages=self.settings.m3_history_max_messages,
+            token_budget=self.settings.m3_history_token_budget,
+        )
+
     def _budget_history(self, messages: list[dict[str, Any]]) -> list[dict[str, str]]:
         # Take-then-stop: oversized leading messages (usually the newest, e.g. a
         # very long assistant answer) are skipped, but once filling starts the
@@ -757,6 +829,45 @@ class RagRepository:
             )
             return {row["id"]: dict(row) for row in result.mappings()}
 
+    async def get_query_planner_focus(
+        self, *, knowledge_id: UUID, index_id: UUID, document_id: UUID | None
+    ) -> dict[str, Any] | None:
+        """Resolve only an in-scope, indexed focus title and optional ready card type."""
+        if document_id is None:
+            return None
+        async with self.engine.connect() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT d.display_name AS document_title, c.document_type
+                            FROM document_source d
+                            JOIN index_document idoc
+                              ON idoc.document_id = d.id AND idoc.index_id = :index_id
+                             AND idoc.status = 'READY'
+                            LEFT JOIN rag_document_card c
+                              ON c.knowledge_id = :knowledge_id AND c.index_id = :index_id
+                             AND c.document_id = d.id AND c.generation_status = 'READY'
+                             AND c.schema_version = :schema_version
+                             AND c.review_status <> 'REJECTED'
+                            WHERE d.id = :document_id AND d.kb_id = :knowledge_id
+                              AND d.status = 'STORED'
+                            """
+                        ),
+                        {
+                            "knowledge_id": knowledge_id,
+                            "index_id": index_id,
+                            "document_id": document_id,
+                            "schema_version": DOCUMENT_CARD_SCHEMA_VERSION,
+                        },
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return dict(row) if row is not None else None
+
     async def vector_search(
         self,
         *,
@@ -789,8 +900,8 @@ class RagRepository:
                     FROM document_chunk c
                     JOIN document_source d ON d.id = c.document_id
                     WHERE c.kb_id = :kb_id AND c.index_id = :index_id
-                      AND (CAST(:document_id AS uuid) IS NULL OR
-                           (c.document_id = :document_id AND d.status = 'STORED'))
+                      AND d.status = 'STORED'
+                      AND (CAST(:document_id AS uuid) IS NULL OR c.document_id = :document_id)
                     ORDER BY c.embedding <=> CAST(:embedding AS vector), c.id
                     LIMIT :limit
                     """
@@ -846,10 +957,11 @@ class RagRepository:
         limit: int,
         document_id: UUID | None = None,
     ) -> list[RetrievalCandidate]:
-        async with self.engine.connect() as connection:
-            result = await connection.execute(
-                text(
-                    """
+        try:
+            async with self.engine.connect() as connection:
+                result = await connection.execute(
+                    text(
+                        """
                     SELECT document_chunk.id, document_chunk.document_id,
                            d.display_name AS document, document_chunk.chunk_type,
                            document_chunk.sequence_no,
@@ -874,21 +986,24 @@ class RagRepository:
                     WHERE document_chunk.search_text ||| :query
                       AND document_chunk.kb_id = :kb_id
                       AND document_chunk.index_id = :index_id
+                      AND d.status = 'STORED'
                       AND (CAST(:document_id AS uuid) IS NULL OR
-                           (document_chunk.document_id = :document_id AND d.status = 'STORED'))
+                           document_chunk.document_id = :document_id)
                     ORDER BY pdb.score(document_chunk.id) DESC, document_chunk.id
                     LIMIT :limit
                     """
-                ),
-                {
-                    "query": query,
-                    "kb_id": knowledge_id,
-                    "index_id": index_id,
-                    "limit": limit,
-                    "document_id": document_id,
-                },
-            )
-            rows = list(result.mappings())
+                    ),
+                    {
+                        "query": query,
+                        "kb_id": knowledge_id,
+                        "index_id": index_id,
+                        "limit": limit,
+                        "document_id": document_id,
+                    },
+                )
+                rows = list(result.mappings())
+        except DBAPIError as exc:
+            _raise_normalized_search_error(exc)
         return [
             RetrievalCandidate(
                 chunk_id=UUID(str(row["id"])),
@@ -918,6 +1033,123 @@ class RagRepository:
             for rank, row in enumerate(rows, start=1)
         ]
 
+    async def document_card_vector_search(
+        self,
+        *,
+        knowledge_id: UUID,
+        index_id: UUID,
+        embedding: list[float],
+        limit: int,
+    ) -> list[DocumentCardCandidate]:
+        vector_literal = "[" + ",".join(format(value, ".9g") for value in embedding) + "]"
+        async with self.engine.connect() as connection:
+            rows = list(
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT c.id, c.document_id, d.display_name AS document,
+                                   c.document_type, c.card_payload, c.review_status,
+                                   c.routing_embedding <=> CAST(:embedding AS vector) AS distance
+                            FROM rag_document_card c
+                            JOIN document_source d ON d.id = c.document_id
+                            JOIN index_document idoc
+                              ON idoc.index_id = c.index_id AND idoc.document_id = c.document_id
+                            WHERE c.knowledge_id = :knowledge_id AND c.index_id = :index_id
+                              AND c.generation_status = 'READY'
+                              AND c.schema_version = :schema_version
+                              AND c.review_status <> 'REJECTED'
+                              AND c.routing_embedding IS NOT NULL
+                              AND d.kb_id = :knowledge_id AND d.status = 'STORED'
+                              AND idoc.status = 'READY'
+                            ORDER BY c.routing_embedding <=> CAST(:embedding AS vector), c.id
+                            LIMIT :limit
+                            """
+                        ),
+                        {
+                            "knowledge_id": knowledge_id,
+                            "index_id": index_id,
+                            "embedding": vector_literal,
+                            "schema_version": DOCUMENT_CARD_SCHEMA_VERSION,
+                            "limit": limit,
+                        },
+                    )
+                ).mappings()
+            )
+        return [self._document_card_candidate(dict(row), rank) for rank, row in enumerate(rows, 1)]
+
+    async def document_card_bm25_search(
+        self,
+        *,
+        knowledge_id: UUID,
+        index_id: UUID,
+        query: str,
+        limit: int,
+    ) -> list[DocumentCardCandidate]:
+        try:
+            async with self.engine.connect() as connection:
+                rows = list(
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                            SELECT rag_document_card.id, rag_document_card.document_id,
+                                   d.display_name AS document,
+                                   rag_document_card.document_type,
+                                   rag_document_card.card_payload,
+                                   rag_document_card.review_status,
+                                   pdb.score(rag_document_card.id) AS bm25_score
+                            FROM rag_document_card
+                            JOIN document_source d ON d.id = rag_document_card.document_id
+                            JOIN index_document idoc
+                              ON idoc.index_id = rag_document_card.index_id
+                             AND idoc.document_id = rag_document_card.document_id
+                            WHERE rag_document_card.routing_text ||| :query
+                              AND rag_document_card.knowledge_id = :knowledge_id
+                              AND rag_document_card.index_id = :index_id
+                              AND rag_document_card.generation_status = 'READY'
+                              AND rag_document_card.schema_version = :schema_version
+                              AND rag_document_card.review_status <> 'REJECTED'
+                              AND d.kb_id = :knowledge_id AND d.status = 'STORED'
+                              AND idoc.status = 'READY'
+                            ORDER BY pdb.score(rag_document_card.id) DESC,
+                                     rag_document_card.id
+                            LIMIT :limit
+                            """
+                            ),
+                            {
+                                "knowledge_id": knowledge_id,
+                                "index_id": index_id,
+                                "query": query,
+                                "schema_version": DOCUMENT_CARD_SCHEMA_VERSION,
+                                "limit": limit,
+                            },
+                        )
+                    ).mappings()
+                )
+        except DBAPIError as exc:
+            _raise_normalized_search_error(exc)
+        return [self._document_card_candidate(dict(row), rank) for rank, row in enumerate(rows, 1)]
+
+    @staticmethod
+    def _document_card_candidate(row: dict[str, Any], rank: int) -> DocumentCardCandidate:
+        payload = row.get("card_payload")
+        card = dict(payload) if isinstance(payload, dict) else {}
+        distance = float(row["distance"]) if row.get("distance") is not None else None
+        return DocumentCardCandidate(
+            card_id=UUID(str(row["id"])),
+            document_id=UUID(str(row["document_id"])),
+            document=str(row["document"]),
+            document_type=str(row["document_type"]),
+            summary=str(card.get("summary") or "")[:500],
+            tasks=[str(item)[:160] for item in card.get("tasks") or []][:12],
+            review_status=str(row["review_status"]),
+            rank=rank,
+            distance=distance,
+            similarity=(max(-1.0, min(1.0, 1.0 - distance)) if distance is not None else None),
+            bm25_score=(float(row["bm25_score"]) if row.get("bm25_score") is not None else None),
+        )
+
     async def get_chunks_by_ids(
         self, *, index_id: UUID, chunk_ids: list[UUID]
     ) -> list[RetrievalCandidate]:
@@ -943,7 +1175,8 @@ class RagRepository:
                            ) AS image_asset_ids
                     FROM document_chunk c
                     JOIN document_source d ON d.id = c.document_id
-                    WHERE c.index_id = :index_id AND c.id = ANY(CAST(:chunk_ids AS uuid[]))
+                    WHERE c.index_id = :index_id AND d.status = 'STORED'
+                      AND c.id = ANY(CAST(:chunk_ids AS uuid[]))
                     """
                 ),
                 {"index_id": index_id, "chunk_ids": chunk_ids},
@@ -1051,13 +1284,20 @@ class RagRepository:
         rerank_result: dict[str, Any],
         selected_context: list[dict[str, Any]],
         prompt: str,
-        timings: dict[str, int],
+        timings: dict[str, Any],
+        embedding_result: dict[str, Any] | None = None,
     ) -> None:
+        effective_embedding_result = embedding_result or {"status": "PASSED", "reason": None}
         retrieval_result = {
-            "mode": "HYBRID",
+            "mode": (
+                "HYBRID"
+                if effective_embedding_result.get("status") == "PASSED"
+                else "LEXICAL_FALLBACK"
+            ),
             "query_embedding_provider": embedding_provider,
             "query_embedding_model": embedding_model,
             "embedding_model": turn.embedding_model_name,
+            "query_embedding": effective_embedding_result,
             "vector_candidates": [item.trace_dict() for item in vector_candidates],
             "lexical_engine": "pg_search",
             "lexical_engine_version": "0.25.0",
@@ -1075,8 +1315,10 @@ class RagRepository:
                         selected_context = CAST(:context AS jsonb),
                         rerank_result = CAST(:rerank AS jsonb),
                         prompt = :prompt,
-                        runtime_snapshot = jsonb_set(COALESCE(runtime_snapshot, '{}'::jsonb),
-                            '{retrieval}', CAST(:effective_retrieval AS jsonb)),
+                        runtime_snapshot = jsonb_set(
+                            COALESCE(runtime_snapshot, '{}'::jsonb),
+                            '{retrieval}', CAST(:effective_retrieval AS jsonb)
+                        ),
                         latency = CAST(:latency AS jsonb)
                     WHERE trace_id = :trace_id AND status = 'RUNNING'
                     """
@@ -1179,7 +1421,8 @@ class RagRepository:
                 text(
                     """
                     UPDATE rag_trace SET answer = :answer, sources = CAST(:sources AS jsonb),
-                        model_usage = CAST(:usage AS jsonb), latency = CAST(:latency AS jsonb),
+                        model_usage = CAST(:usage AS jsonb),
+                        latency = COALESCE(latency, '{}'::jsonb) || CAST(:latency AS jsonb),
                         citation_result = CAST(:citation_result AS jsonb),
                         response_type = :response_type, answer_mode = :answer_mode,
                         status = 'COMPLETED', finished_at = now()
@@ -1249,7 +1492,8 @@ class RagRepository:
                 text(
                     """
                     UPDATE rag_trace SET answer = :answer, error = CAST(:error AS jsonb),
-                        latency = CAST(:latency AS jsonb), status = :status, finished_at = now()
+                        latency = COALESCE(latency, '{}'::jsonb) || CAST(:latency AS jsonb),
+                        status = :status, finished_at = now()
                     WHERE trace_id = :trace_id AND status = 'RUNNING'
                     """
                 ),

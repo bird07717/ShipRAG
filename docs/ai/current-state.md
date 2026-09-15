@@ -1,10 +1,51 @@
 # 当前项目状态
 
-> 本文记录当前有效状态，不是任务流水账。项目文档、本地代码与小样本真实模型验证更新至 2026-09-13；生产状态最近核对于 2026-09-11。
+> 本文记录当前有效状态，不是任务流水账。项目文档、本地代码与真实模型验证更新至 2026-09-15；生产状态最近核对于 2026-09-11。
 
 ## 开发阶段
 
 项目已有带 `v1.0.1` Git 标签的前后端与生产 Compose 交付形态，并已实现管理 API、对外 Assistant API、RAG/Support 双引擎、文档摄取、Profile 发布和验收脚本。生产镜像默认标签已统一为 `1.0.1`。
+
+## RAG 隐藏全文双 LLM V2（2026-09-15，V0～V4.1 本地已实施）
+
+- 已批准 [RAG 隐藏全文双 LLM V2 执行计划](../technical/rag-full-document-generation-v2-execution-plan.md) 和 ADR-0019。V2 每轮由 LLM 1 根据最近完整问答还原问题并辅助检索，Chunk/卡片聚合到文档后加载前 1～3 份完整有序元素作为隐藏上下文，LLM 2 统一生成答案和选择图片。
+- V2 淘汰 RAG 的首轮专用命中、单强/事实/解释分支、文档选择交互、公开原文交付、硬焦点停留与计划中的 `rag_case`。RAG 每轮重新检索；只保留普通完整轮次历史，不按 `focus_epoch` 过滤。
+- `backend/app/core/config.py` 已实现 `M3_RAG_PIPELINE_MODE=auto|legacy|v2` 和 V2 预算/时限；本地开发配置显式为 `v2`，生产示例及 Production Compose 显式为 `legacy`。V2 不因内部失败自动回退旧链路。
+- V1 已新增 `app/rag/v2/`：LLM 1 输出最小检索解释，原问题与补充查询做 Chunk/卡片文档级检索，前 1～3 份同库冻结索引文档的有序元素作为隐藏上下文交给 LLM 2，后端只公开最终答案和白名单图片。旧查询改写、首轮标题召回及原 P2/P3 Planner 在有效 V2 路径不执行。
+- V2 已新增非焦点完整轮次历史：只使用 `message.rag_user_message_id` 或 Assistant 请求留下的显式关联，且用户消息、助手消息和外部请求均须成功完成；失败、取消、运行中、无法配对和当前复用轮次不进入 Prompt。最近历史按完整轮次、消息数和 Token 预算裁剪，模型输入不携带消息 ID。
+- P1 已有的 42 份 VDR600 `READY/CONFIRMED` 文档卡片、冻结索引、混合检索、Rerank、完整元素/图片读取继续复用。原 P2 多查询和文档聚合按 V2 重构；原 P3 六策略和 P4 不再继续。
+- `conversation.focus_*`、`chat_context`、`support_context_version` 和 `message.focus_epoch` 仍服务 Support/Gateway。V2 `begin_turn` 不读取这些值作为 RAG 输入，返回空的兼容状态且新 V2 消息的 `focus_epoch=0`；数据库原值不清空、不改写。删列仍须等待 Support 独立迁移和至少两个发布周期零旧列读取。
+- V2 的 Assistant 正常结果为 `ANSWERED`，对外不展示完整原文、候选文档列表或文档总数，当前实现令 `references=[]`，只返回最终答案和白名单图片；必要的标题、文件名或产品内部编号可以作为技术正文出现。`include_images=false` 在持久化前过滤，Assistant 首次完成、历史和幂等重放使用同一终态快照。
+- V3 已修正管理试问仍走 legacy 流式生成的偏差；管理试问与 Assistant 在 V2 下共用同一生成终态。V4/V4.1 将最终文本检查收窄为 Prompt 标记、内部服务主机、无证据相对管理路径和对象存储字段，避免标题、filename、技术编号、产品私网 URL 与普通产品 API 误伤大部分回答；Assistant 公开白名单仍移除模型用量、候选分数、检索/重排诊断和 MinIO 位置。
+- V4.1 在多查询 Chunk/卡片 RRF 后复用现有 Rerank Provider 做文档级重排，再取前 3 份全文；排序异常保持 RRF 原顺序。IP、版本、带单位数值和端口只在 Trace 标注 `DOCUMENT/USER_PROVIDED/UNSUPPORTED`，不拦截、修复或改变公开答案。现有 Chunk 大小、向量/BM25 Top-K、全文文档上限 3 和 20,000 Token 上下文预算未调整。
+- V2 准备 Trace 的上下文只保留 Chunk/文档/元素/图片 ID 和 SHA-256，生成 Trace 另记隐藏全文上下文与公开答案 SHA-256；不保存 V2 完整 Prompt。全文和图片继续按知识库与冻结索引加载，图片外部读取已有跨库 404 PostgreSQL 用例。
+- 本地活动索引已只读核验 42/42 份文档卡片均为 `READY/CONFIRMED`。真实 Assistant 冒烟已覆盖 VAU 完整步骤、IP 短答、同会话无图排查、多文档综合和范围外收口；相同幂等键 46ms 重放且未重新生成。中途发现旧检索可返回已软删除文档，现已令向量、BM25 和按 ID 读取统一限定 `document_source.status='STORED'`。
+- 当前已完成 V0～V4.1。有效 V2 不再创建旧双 Planner Shadow 任务，也不写 `semantic_orchestration_config`、`semantic_orchestration` 或 `response_plan`；环境示例和 Production Compose 已移除相应失效变量，Settings 暂兼容告警一个阶段。V5 的旧代码物理删除尚未执行；旧实现仍用于显式 `legacy` 回滚，生产不能切换。
+- V0/V1 最终 `scripts/check.sh` 退出码 0：Ruff/Mypy、后端 1114 项测试、摄取/RAG/管理三项 fake 冒烟和累计覆盖率 83% 通过；前端 22 个文件 161 项测试、lint、类型检查、覆盖率和生产构建通过，仅有既有大包警告。通用 RAG fake smoke 固定在 legacy 以验证其 SSE 标记契约；V2 由专用测试和真实 Assistant 冒烟验证。本轮没有运行 Golden Set、并发测试或生产部署。
+- V2 历史收口最终 `scripts/check.sh` 退出码 0：Ruff/format、Mypy（140 个源文件）、后端 1123 项、三项 fake 冒烟及累计覆盖率 83% 通过；前端 22 个文件 161 项、lint、类型检查、覆盖率和生产构建通过，仅有既有大包警告。V2 历史单元与 PostgreSQL 定向用例 23 项通过；本轮未执行 Golden Set、真实模型、并发测试、生产部署、迁移或索引重建。
+- V3 聚焦回归 140 项通过、20 项在无 PostgreSQL 测试变量的定向命令中按设计跳过。完整门禁首次在受限沙箱内因同步 ASGI 线程调度卡住，沙箱外同一用例 0.14 秒通过；随后完整门禁发现管理 fake 冒烟会继承开发 V2、而通用 Fake LLM 无结构化完成值，现将该管理发布/Trace 冒烟显式固定为 legacy，V2 管理试问分派由专用结构化测试覆盖。
+- V3 最终 `scripts/check.sh` 退出码 0：Ruff/format、Mypy（140 个源文件）、后端 1134 项、三项 fake 冒烟及累计覆盖率 83% 通过；前端 22 个文件 161 项、lint、类型检查、覆盖率和生产构建通过，仅保留既有大包警告。本阶段未执行 Golden Set、真实模型、并发性能、生产部署、迁移或索引重建。
+- V4 的真实 50 题/72 轮 Golden 首轮为 44/50（88%），其中完整操作、条件、多轮排障和领域扩展 30/30；失败集中于噪声状态、Prompt 提取、混合范围外空答和一条“升级地址”的歧义表述。用通用输入边界、结构化空答和多文档约束修复，并将该歧义评测题明确为“网络 IP 地址”，没有增加产品编号/标题穷举；六个失败点定向复跑 6/6，但不表述为完整集 50/50。验收允许非关键模型波动，优先保证总体正确并避免特判影响多数回答。
+- V4 Assistant 契约八组全部通过；RAG/Assistant/Gateway/Support/PostgreSQL 聚焦回归 198 项通过。真实 1/3/5 并发全部成功，墙钟约 12.5/16.0/18.9 秒，5 并发单请求最大约 18.9 秒；所有检查的 V2 Trace 均无旧三类 Planner 键。两次连续 `scripts/check.sh` 均退出码 0：每次 Ruff/format、Mypy（140 个源文件）、后端 1130 项、三项 fake 冒烟、83% 覆盖率和前端 22 个文件 161 项、lint、类型检查、覆盖率、生产构建通过，仅有既有 Vite 大包警告。
+- V4.1 完整真实 Assistant Golden 为 49/50（98%，50 题/72 轮）：完整操作 8/8、条件边界 4/4、连续排障 8/8、领域扩展 10/10、范围边界 10/10、局部回答 9/10；p50 12.736 秒、p95 18.261 秒、最大 24.596 秒。唯一失败是“更换 PSU”后的模糊短追问把“修改船名”文档排首，3359 文档虽在候选中但未被采用；不增加产品标题、编号或问法特判。参数来源观测也明确不能替代候选与当前任务的语义一致性判断。
+- V4.1 最终 `scripts/check.sh` 退出码 0：Ruff/format、Mypy（140 个源文件）、后端 1139 项、三项 fake 冒烟和累计覆盖率 83% 通过；前端 22 个文件 161 项、覆盖率、lint、类型检查和生产构建通过，仅保留既有 Vite 大包警告。本轮未修改数据库结构、活动索引或生产配置，也未部署生产。
+
+## 已取代的 RAG P2/P3 实施记录（2026-09-14，代码仍在工作区）
+
+- 原 [RAG 文档智能与双 LLM 语义编排执行计划](../technical/rag-semantic-orchestration-execution-plan.md) 已被 V2 取代；下列内容保留为已完成代码、测试和 NO-GO 验收记录，不是继续执行 P4/P5 的依据。
+- 目标回答规则是“局部问题短答、任务级操作文档优先、故障问题文档辅助推理、无文档产品问题使用通用工程能力”；文档优先不等于命中即全文，已交付文档的后续追问不重复原文。连续排查计划把 `rag_issue` 扩展为带用户消息来源的 `rag_case`，模型假设不得写成确认事实。
+- 计划只在 RAG 范围内取代 ADR-0002 的在线仲裁限制并扩展 ADR-0017；Support 路由和 Profile 生命周期不变。P1 已加入 Alembic 结构、离线卡片生成/向量、活动索引回填任务和管理审核；P2 已交付 Query Planner、多查询 Chunk/文档卡片召回与 Trace；P3 已交付 Response Planner、候选白名单校验和六策略执行器。P4 结构化问题状态、P5 完整真实模型/工程师/性能验收和回滚演练仍未实施或完成。
+- P0 已完成：五套评测输入及 50 题 / 72 轮语义期望以 SHA-256 冻结，逐轮标注目标策略、允许/禁止文档和通用知识边界；2026-09-13 的本地真实小样本 5 题 / 6 轮保留为前置基线（自动 4/5，p50 10.294s，p95 35.681s）。就绪态 DemoChat/Assistant 使用相同简短欢迎语，不显示知识库名称、文档数或说明；RAG 非范围外的正常技术响应统一使用一行短提醒。Assistant 字段未变化，未执行新的 Golden Set 或生产操作。基线见 [`../../rag-acceptance/semantic-orchestration-p0-baseline.md`](../../rag-acceptance/semantic-orchestration-p0-baseline.md)。
+- P0 完整门禁退出码 0：Ruff lint/format（242 个 Python 文件）、Mypy（125 个源文件）、后端 1024 项测试、三项 fake 冒烟和累计覆盖率 83% 通过；前端 22 个文件 155 项测试、覆盖率、lint、type-check 和生产构建通过，仅保留既有大包警告。
+- P1 工程交付：迁移 `0046` 新增独立 `rag_document_card` 的 JSON、BM25/HNSW、内容指纹、生成/审核状态和 revision；`maintenance` 队列支持按冻结索引全量/单文档生成、单索引 single-flight、取消与孤儿恢复，索引构建后尽力提交且失败不回滚索引。管理端可查看覆盖、编辑、确认/拒绝和显式替换已确认卡片；文档软删除、索引/知识库 GC 与卡片一致清理。显示名称动态联接，Support Profile 不参与。
+- 本地数据库已实际完成 `0045 -> 0046`，并验证 downgrade/upgrade 后回到 `0046 (head)`。2026-09-14 首次 VDR600 真实回填因提示词未携带实际 Schema，模型输出 `troubleshooting_guide` 等语义正确别名而 42/42 失败；修复为显式 Schema、受限枚举归一化和离线结构重试，并修正批量任务误用外层卡片 revision 的关联错误。当前活动 Index v39 已重新只读复核：预期文档 42、`READY/CONFIRMED` 42，`AUTO/REJECTED/FAILED/STALE/MISSING` 均为 0，`shadow_ready=true` 且 `ready=true`；P1 数据与审核门槛完成。
+- P2 工程交付新增严格 `QueryPlanV1`、不可信历史/范围/焦点输入、精确型号/参数防编造校验、最多三条查询的归一化去重与来源追踪，以及同库/冻结索引/有效卡片与 Chunk 的向量、BM25、RRF 文档级融合。`shadow` 与旧检索并行启动并从公开路径分离，先记 `PENDING`、完成后独立合并 Trace；慢 Planner 不再消耗公开回答时限。补充 Embedding 失败时保留原问题候选并标记降级。4 个真实代表问题的 Planner 均通过且目标文档均为第一候选，但该结果不是完整 P2 Golden/并发验收。
+- P2 最终完整门禁通过：Ruff lint/format、Mypy（131 个源文件）、后端 1066 项测试、摄取/RAG/管理三项 fake 冒烟及累计覆盖率 83%；前端 22 个文件 160 项测试、覆盖率门禁、lint、type-check 和生产构建均通过，仅保留既有大包体积警告。另有 RAG/Assistant/Support 定向回归 164 项、真实 PostgreSQL 卡片/Trace/状态测试 41 项通过，生产 Compose 使用一次性占位 Assistant 凭据静默展开成功。本轮未执行 Golden Set、真实在线 Planner、并发性能、生产部署或业务索引修改；P2 质量/性能验收仍待后续明确授权。
+
+- P3 工程交付新增严格 `ResponsePlanV1`、最多三份文档的有界候选包、文档/Source/引用白名单和六种策略执行器。局部事实禁止全文交付，完整文档只允许已确认流程卡片且正文由后端读取，模型的预留状态补丁在 P3 被清空；响应规划诊断在旧路由或公开失败前独立写入 Trace。`shadow` 会在后台生成并记录 LLM 2 计划但不执行、不修改公开答案或焦点，`enabled` 才接管；Support 不读取卡片或两个 Planner。
+- 当前本地 `.env` 保持 `shadow`。真实 Shadow 局部 IP 请求的公开旧回答耗时 1.876 秒，后台 Query/Response Planner 分别约 6.466/9.683 秒且均 `PASSED`，LLM 2 计划为 `SHORT_ANSWER`，证明双 Planner 诊断不阻塞公开结果。对 `glm-5.3-flash` 的隔离 `enabled` 复测最终同会话 3/3 通过：局部 IP 问题为 `SHORT_ANSWER/PRODUCT_KNOWLEDGE`（24.343 秒），无图像追问为 `DOCUMENT_ASSISTED/PRODUCT_EXPLAINED`（47.425 秒），纠正意图为 `DOCUMENT_DELIVERY/DOC_DELIVERED`（51.805 秒）；三轮 Query/Response Planner 与语义检索 Trace 均为 `PASSED`。此前调试轮次出现过 Query/Response Planner 超时、结构化输出非法、Embedding 两次超时及旧路由兜底耗尽 90 秒，因此一次 3/3 不能替代稳定性与并发验收，暂不建议生产 `enabled`。
+- 最新完整门禁 `scripts/check.sh` 退出码 0：Ruff lint/format、Mypy（132 个源文件）、后端 1091 项测试、摄取/RAG/管理三项 fake 冒烟及累计覆盖率 83%；前端 22 个文件 160 项测试、覆盖率、lint/type-check 和生产构建均通过，仅保留既有大包体积警告。本轮没有执行 Golden Set、1/3/5 并发、生产部署或业务索引修改；P2/P3 的完整质量和性能放行仍属于 P5。
+- 2026-09-14 P5 前置验收（P2/P3 范围）已在本地隔离实例（127.0.0.1:18001，环境变量覆盖开关，用户实例未触碰）执行完毕：50 题/72 轮 `off/shadow/enabled` 三模式真实模型对照、1/3/5 并发和 off 回滚演练，共 249 轮、0 传输错误；评测输入哈希与 P0 冻结一致，模型为 `qwen3.7-flash`（DashScope）+ SiliconFlow Embedding/Rerank。公开结果：off 33/50（66.0%，p50 4.854s/p95 21.017s）、shadow 32/50（公开与 off 仅差 1 例非确定性）、enabled 31/50（62.0%，p50 7.199s/p95 16.194s）。enabled 确认结构性收益：标志性用例 `ta_full_007`（VAU 完整步骤）从旧路径错误 `UNCONFIRMED` 变为正确全文交付，local_answer 1/10→6/10、complete_operation 3/8→5/8、`DOC_DELIVERED` 12→20、`UNCONFIRMED` 16→4、p95 下降。但未达 16.4 硬门槛：错误文档全文交付 ≥4 轮（`ta_full_004` 问 FFC 交付 PDC 升级文档、`ta_domain_010` 通用问题交付 OPU 全文、`ta_condition_001/002` 歧义问题不澄清直接交付 3359 文档），通用回答泄漏文档引用 7 例，local_answer 60% 低于 90% 门槛，整体低于 off 基线——**结论 NO-GO，生产不得 enabled**。双 Planner 统计：Query Planner 通过 79.7%（shadow）/85.5%（enabled），降级全部为 `QUERY_PLAN_SEMANTIC_INVALID`；Response Planner 通过 88.4%/85.5%，降级为 `ValueError` 校验拒绝与结构非法；并发 27/27 成功；Response Planner 降级 9/27 经复核全部为 delivery 类问题确定性触发 `DOCUMENT_DELIVERY` 字段校验拒绝（与顺序金集同簇，非并发放大——short/assist 两类 18/18 全通过，含 5 并发），并发只影响延迟（p95 12.8→22.3s）；回滚演练确认切 `off` 后 6 条 Trace 均无 Planner 键、旧路径特征恢复。发现 `backend/app/rag/response_planner.py:394` 降级原因只记录 `ValueError` 类名而丢失具体校验信息的可观测性缺陷。完整数据见 [`../../rag-acceptance/semantic-orchestration-p5-preacceptance.md`](../../rag-acceptance/semantic-orchestration-p5-preacceptance.md)。
 
 ## 小体量 RAG 技术助手优化（2026-09-13，本地已实现、默认关闭）
 
@@ -77,6 +118,7 @@
 
 ## 正在进行的工作
 
+- 2026-09-14 管理台 LLM 配置已新增千问（阿里云百炼 / DashScope）Provider，支持默认 OpenAI 兼容地址、管理台加密 API Key 与环境变量兜底。模型配置仍在保存前执行真实连通性探测，保存后由每轮 Gateway 模型快照同时作用于 DemoChat 和 Assistant；Embedding、Rerank、OCR、Vision 未开放 DashScope，避免在未验证协议能力时扩大范围。
 - 生产服务器已完成源码、PostgreSQL 和 MinIO 数据迁移，并于 2026-09-10 同步到完成 Assistant 生产验收的版本；核验时服务器工作树与 `origin/main` 一致，生产 `.env` 权限为 `600`，迁移备份校验通过。
 - 生产 PostgreSQL 已位于 Alembic `0041 (head)`；此前核对共有 1 个知识库、64 条文档记录、2004 个分块和 1096 条图片记录，MinIO 有 70 个文档对象和 1232 个图片对象。活动索引状态为 `ACTIVE`。
 - PostgreSQL、Redis 和 MinIO 保持原数据卷持续运行；生产服务器于 2026-09-11 使用提交 `49c799a` 重建后端、前端和两个 Worker，相关容器健康，外部 `/health/ready` 返回 ready，Alembic 为 `0041 (head)`。
@@ -117,10 +159,11 @@
 
 ## 近期下一步
 
-1. 完成 UFW/`DOCKER-USER` 来源限制和临时凭据轮换。
-2. RAG 或生产配置变更前后，按 `rag-acceptance/README.md` 执行并记录黄金集对比。
-3. 部署本次知识库 Assistant 管理功能：升级至 `0043`、更新前后端，由管理员逐库维护并试问三条推荐问题后确认上线；外部接口结构不变，欢迎语继续使用通用文案。
-4. 将修正后的 Golden 用例同步到服务器并在相同生产环境复跑全量 Assistant Golden Set；确认全绿后建立新基线，并继续关注相对 Run 10 的延迟长尾回升。
-5. 下次生产更新执行 Alembic `0042` 并重建后端和维护 Worker，确认 Assistant 指标开始统计请求/重放，且维护队列只清理过期终态孤儿请求。
+1. 按 [RAG V2 执行计划](../technical/rag-full-document-generation-v2-execution-plan.md) 进入 V5：先拆分 Support 仍使用的共享能力，再按零引用顺序物理删除旧 RAG 首轮、焦点、待选文档、Query/Response Planner 和六策略实现；V4 已证明有效 V2 无旧 Planner 调用，但生产仍在 `legacy`，删除前需先明确新的生产回滚版本策略。
+2. 完成 UFW/`DOCKER-USER` 来源限制和临时凭据轮换。
+3. V5 每个删除批次继续运行相应 RAG/Support/Assistant 回归及全量门禁；不要以单条 Golden 的模型波动阻断整体收口，也不要用产品词、标题或编号硬编码换取一次全绿。错误参数、跨库资产和真实实现信息泄露仍须零容忍。
+4. 部署本次知识库 Assistant 管理功能：升级至 `0043`、更新前后端，由管理员逐库维护并试问三条推荐问题后确认上线；外部接口结构不变，欢迎语继续使用通用文案。
+5. 将修正后的 Golden 用例同步到服务器并在相同生产环境复跑全量 Assistant Golden Set；确认全绿后建立新基线，并继续关注相对 Run 10 的延迟长尾回升。
+6. 下次生产更新执行 Alembic `0042` 并重建后端和维护 Worker，确认 Assistant 指标开始统计请求/重放，且维护队列只清理过期终态孤儿请求。
 
 - 2026-09-11 文档交付标题去除规则已简化：RAG/Support 不再比较显示名称，统一只删除整份文档首条非空文本行，保留后续正文、图片与表格，不修改源文档或索引。相关后端 118 项测试、六个改动 Python 文件 Ruff lint/format 和三个改动源文件定向 Mypy 均通过；另只读加载本地 VDR600 的四份真实文档，核验交付时首行去除、剩余正文及共 14 张图片保留，输入对象未被修改。其中一份解析首行合并了标题和章节名，按当前规则会整行去除，详见 known-issues。本次未执行全量门禁或生产部署。新规则仅作用于新生成的交付响应，历史消息及幂等重放保持原快照。

@@ -18,6 +18,22 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
         "MODEL_SECRET_KEY_PREVIOUS_VERSION",
         "M3_RAG_TECH_ASSIST_MODE",
         "M3_RAG_SCOPE_MAX_TOKENS",
+        "M3_RAG_PIPELINE_MODE",
+        "M3_RAG_FULL_DOCUMENT_LIMIT",
+        "M3_RAG_FULL_CONTEXT_TOKEN_BUDGET",
+        "M3_RAG_ANSWER_MAX_TOKENS",
+        "M3_RAG_ANSWER_TIMEOUT_SECONDS",
+        "M3_RAG_HISTORY_MAX_ROUNDS",
+        "M3_RAG_TITLE_LEAK_REPAIR_ATTEMPTS",
+        "M3_RAG_SEMANTIC_ORCHESTRATION_MODE",
+        "M3_RAG_QUERY_PLANNER_MAX_TOKENS",
+        "M3_RAG_QUERY_PLANNER_TIMEOUT_SECONDS",
+        "M3_RAG_RESPONSE_PLANNER_MAX_TOKENS",
+        "M3_RAG_RESPONSE_PLANNER_TIMEOUT_SECONDS",
+        "M3_RAG_LEGACY_FALLBACK_RESERVE_SECONDS",
+        "M3_RAG_QUERY_VARIANT_LIMIT",
+        "M3_RAG_DOCUMENT_CARD_TOP_K",
+        "M3_RAG_RESPONSE_DOCUMENT_LIMIT",
         "M3_DOC_LOCK_BEST_FLOOR",
         "M3_DOC_SINGLE_CLARIFY_BEST_FLOOR",
         "M3_TURN_DEADLINE_SECONDS",
@@ -34,13 +50,54 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
     assert settings.model_secret_key_previous_version is None
     assert settings.m3_rag_tech_assist_mode == "off"
     assert settings.m3_rag_scope_max_tokens == 800
+    assert settings.m3_rag_pipeline_mode == "v2"
+    assert settings.effective_rag_pipeline_mode == "v2"
+    assert settings.m3_rag_full_document_limit == 3
+    assert settings.m3_rag_full_context_token_budget == 20_000
+    assert settings.m3_rag_answer_max_tokens == 4_096
+    assert settings.m3_rag_answer_timeout_seconds == 45.0
+    assert settings.m3_rag_history_max_rounds == 4
+    assert settings.m3_rag_title_leak_repair_attempts == 1
+    assert settings.m3_rag_semantic_orchestration_mode == "off"
+    assert settings.m3_rag_query_planner_max_tokens == 512
+    assert settings.m3_rag_query_planner_timeout_seconds == 15.0
+    assert settings.m3_rag_response_planner_max_tokens == 1200
+    assert settings.m3_rag_response_planner_timeout_seconds == 30.0
+    assert settings.m3_rag_legacy_fallback_reserve_seconds == 12.0
+    assert settings.m3_rag_query_variant_limit == 3
+    assert settings.m3_rag_document_card_top_k == 5
+    assert settings.m3_rag_response_document_limit == 3
     assert settings.m3_doc_lock_best_floor == 0.70
     assert settings.m3_doc_single_clarify_best_floor == 0.65
-    assert settings.m3_turn_deadline_seconds == 45.0
+    assert settings.m3_turn_deadline_seconds == 90.0
     assert settings.m3_query_rewrite_timeout_seconds == 3.0
     assert settings.m3_query_embedding_timeout_seconds == 10.0
     assert settings.m3_query_embedding_retries == 1
     assert settings.m3_rerank_timeout_seconds == 15.0
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("m3_rag_query_variant_limit", 0),
+        ("m3_rag_document_card_top_k", 21),
+        ("m3_rag_response_document_limit", 0),
+        ("m3_rag_query_planner_timeout_seconds", 0),
+        ("m3_rag_query_planner_max_tokens", 99),
+        ("m3_rag_response_planner_timeout_seconds", 61),
+        ("m3_rag_legacy_fallback_reserve_seconds", 121),
+        ("m3_rag_response_planner_max_tokens", 99),
+        ("m3_rag_full_document_limit", 0),
+        ("m3_rag_history_max_rounds", 21),
+        ("m3_rag_full_context_token_budget", 99),
+        ("m3_rag_answer_max_tokens", 100_001),
+        ("m3_rag_answer_timeout_seconds", 61),
+        ("m3_rag_title_leak_repair_attempts", 3),
+    ],
+)
+def test_semantic_orchestration_limits_are_bounded(name: str, value: int) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{name: value})
 
 
 def test_production_requires_service_token() -> None:
@@ -72,6 +129,45 @@ def test_production_accepts_a_strong_assistant_token_and_rotation_value() -> Non
     )
 
     assert settings.assistant_service_token is not None
+    assert settings.effective_rag_pipeline_mode == "legacy"
+
+
+def test_rag_v2_can_be_selected_explicitly_outside_development() -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        m3_rag_pipeline_mode="v2",
+    )
+
+    assert settings.effective_rag_pipeline_mode == "v2"
+
+
+def test_retired_dual_planner_settings_warn_for_one_compatibility_stage() -> None:
+    with pytest.warns(DeprecationWarning, match="Ignored retired RAG P2/P3 settings"):
+        settings = Settings(
+            _env_file=None,
+            app_env="test",
+            m3_rag_semantic_orchestration_mode="enabled",
+        )
+
+    assert settings.m3_rag_semantic_orchestration_mode == "enabled"
+
+
+def test_rag_pipeline_auto_is_v2_only_in_development() -> None:
+    assert Settings(_env_file=None, app_env="development").effective_rag_pipeline_mode == "v2"
+    assert Settings(_env_file=None, app_env="test").effective_rag_pipeline_mode == "legacy"
+
+
+def test_rag_v2_timeouts_must_leave_turn_completion_budget() -> None:
+    with pytest.raises(ValidationError, match="leave time inside the turn deadline"):
+        Settings(
+            _env_file=None,
+            app_env="test",
+            m3_rag_pipeline_mode="v2",
+            m3_turn_deadline_seconds=60,
+            m3_rag_query_planner_timeout_seconds=15,
+            m3_rag_answer_timeout_seconds=45,
+        )
 
 
 def test_production_rejects_duplicate_assistant_rotation_token() -> None:

@@ -18,6 +18,7 @@ from app.api.knowledge_assistant import router as knowledge_assistant_router
 from app.api.logs import router as logs_router
 from app.api.metrics import router as metrics_router
 from app.api.rag import router as rag_router
+from app.api.rag_document_cards import router as rag_document_cards_router
 from app.api.releases import router as releases_router
 from app.api.support import router as support_router
 from app.core.config import Settings
@@ -31,6 +32,7 @@ router.include_router(knowledge_assistant_router)
 router.include_router(logs_router)
 router.include_router(metrics_router)
 router.include_router(rag_router)
+router.include_router(rag_document_cards_router)
 router.include_router(releases_router)
 router.include_router(support_router)
 

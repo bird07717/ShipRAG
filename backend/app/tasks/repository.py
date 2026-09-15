@@ -110,6 +110,44 @@ class TaskRecordRepository:
         inserted = result.scalar_one_or_none()
         return UUID(str(inserted)) if inserted is not None else None
 
+    @staticmethod
+    async def create_rag_document_card_task_in_connection(
+        connection: AsyncConnection,
+        *,
+        kb_id: UUID,
+        index_id: UUID,
+        document_id: UUID | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> UUID | None:
+        """Create one observable card-generation task per frozen index."""
+        task_id = uuid4()
+        result = await connection.execute(
+            text(
+                """
+                INSERT INTO task_record (
+                    id, task_type, status, stage, progress, kb_id, index_id, document_id, metadata
+                ) VALUES (
+                    :id, 'RAG_DOCUMENT_CARD_GENERATE', 'QUEUED', 'QUEUED', 0,
+                    :kb_id, :index_id, :document_id, CAST(:metadata AS jsonb)
+                )
+                ON CONFLICT (index_id) WHERE (
+                    task_type = 'RAG_DOCUMENT_CARD_GENERATE'
+                    AND status IN ('QUEUED', 'RUNNING')
+                ) DO NOTHING
+                RETURNING id
+                """
+            ),
+            {
+                "id": task_id,
+                "kb_id": kb_id,
+                "index_id": index_id,
+                "document_id": document_id,
+                "metadata": json.dumps(metadata or {}, ensure_ascii=False),
+            },
+        )
+        inserted = result.scalar_one_or_none()
+        return UUID(str(inserted)) if inserted is not None else None
+
     async def merge_metadata(self, task_id: UUID, metadata: dict[str, Any]) -> None:
         async with self.engine.begin() as connection:
             await connection.execute(

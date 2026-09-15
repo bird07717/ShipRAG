@@ -253,6 +253,11 @@ async def run(
             # (gateway status, then trace/source/message/done); the runtime default routes /chat to
             # the technical-support workflow whose stream has no trace event.
             "chat_execution_mode": "legacy_rag",
+            # The generic smoke's fake provider emits the legacy streaming marker format.
+            # V2 uses two structured completions and is covered by its pipeline/Assistant tests
+            # plus the real-model V2 smoke; pinning this fixture prevents local .env mode changes
+            # from silently changing what this long-standing smoke validates.
+            "m3_rag_pipeline_mode": "legacy",
         }
     )
     resources = AppResources.create(settings)
@@ -348,6 +353,7 @@ async def run(
             "embedding_provider": embedding_provider,
             "llm_provider": llm_provider,
             "rerank_provider": rerank_provider,
+            "rag_pipeline_mode": settings.effective_rag_pipeline_mode,
             "vector_candidates": 1,
             "bm25_candidates": 1,
             "fusion_candidates": 1,

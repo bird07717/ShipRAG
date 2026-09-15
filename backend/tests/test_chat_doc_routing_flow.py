@@ -932,8 +932,9 @@ async def test_degraded_chunk_rag_keeps_general_answer_mode():
 
     assert result["response_type"] == "ANSWERED"
     assert result["answer_mode"] == "PRODUCT_GENERAL"
-    assert result["disclaimer"] is not None
-    assert "不代表" in result["disclaimer"]
+    assert result["disclaimer"] == (
+        "本回答仅供参考，请结合现场情况和正式资料核验，必要时联系海兰信专业人员。"
+    )
     assert repo.completed["sources"] == []
     assert repo.failed is None
 
@@ -1287,10 +1288,10 @@ async def test_query_embedding_timeout_retries_and_recovers():
 
 
 @pytest.mark.asyncio
-async def test_query_embedding_timeout_fails_fast_after_retries():
-    # When every attempt stalls the turn fails as UPSTREAM_UNAVAILABLE within
-    # the per-call budget (not the 45s turn deadline), with the timeout
-    # flagged in the trace timings.
+async def test_query_embedding_timeout_degrades_to_lexical_after_retries():
+    # Vector recall is independent from lexical recall. After the bounded
+    # retries time out, preparation stays available through BM25 and records
+    # the degraded channel instead of failing the whole turn.
     repo = _RoutingRepository(turn=_turn(), candidates=[])
     service = RagService(
         cast(RagRepository, repo),
@@ -1300,18 +1301,17 @@ async def test_query_embedding_timeout_fails_fast_after_retries():
         rerank_factory=lambda s, snap: FakeRerankProvider(),
     )
 
-    with pytest.raises(ApiError) as exc_info:
-        await service.prepare(
-            knowledge_id=repo.turn.knowledge_id,
-            conversation_id=None,
-            question="如何升级",
-            request_id="req-embed-timeout",
-        )
+    prepared = await service.prepare(
+        knowledge_id=repo.turn.knowledge_id,
+        conversation_id=None,
+        question="如何升级",
+        request_id="req-embed-timeout",
+    )
 
-    assert exc_info.value.code == "UPSTREAM_UNAVAILABLE"
-    assert repo.failed["stage"] == "query_embedding"
-    assert repo.failed["timings"]["query_embedding_timeout"] is True
-    assert "超时" in str(repo.failed["detail"])
+    assert prepared.query_embedding_status == "DEGRADED"
+    assert prepared.query_embedding_reason == "QUERY_EMBEDDING_TIMEOUT"
+    assert prepared.timings["query_embedding_timeout"] is True
+    assert repo.failed is None
 
 
 @pytest.mark.asyncio

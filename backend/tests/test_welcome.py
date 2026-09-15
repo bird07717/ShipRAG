@@ -28,17 +28,19 @@ def test_welcome_ready_with_catalog() -> None:
         ],
     )
     assert payload["knowledge_base"]["ready"] is True
-    assert "VDR 产品知识库" in payload["message"]
-    assert "2 份文档" in payload["message"]
+    assert payload["message"] == build_assistant_welcome(ready=True, suggestions=[])["message"]
+    assert "VDR 产品知识库" not in payload["message"]
+    assert "2 份文档" not in payload["message"]
     assert payload["suggestions"] == ["如何U盘升级PDC？", "FFC 如何检查接线盒？"]
 
 
-def test_welcome_includes_description_when_present() -> None:
+def test_welcome_never_exposes_description_when_present() -> None:
     payload = build_welcome(
         _kb(description="覆盖VDR设备的安装、维护与故障排查资料"),
         [{"document_id": "a", "title": "手册"}],
     )
-    assert "覆盖VDR设备的安装、维护与故障排查资料" in payload["message"]
+    assert "覆盖VDR设备的安装、维护与故障排查资料" not in payload["message"]
+    assert "文档" not in payload["message"]
 
 
 def test_assistant_welcome_uses_only_configured_questions() -> None:

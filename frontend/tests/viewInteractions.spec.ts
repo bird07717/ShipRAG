@@ -4,7 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
-import type { DocumentProfileContext, KnowledgeRelease, ProfileDraft } from "@/types/admin";
+import type {
+  DocumentProfileContext,
+  KnowledgeRelease,
+  ProfileDraft,
+  RagDocumentCard,
+} from "@/types/admin";
 import AdminStudio from "@/components/AdminStudio.vue";
 
 const kb = {
@@ -147,6 +152,7 @@ const model = {
   model_name: "qwen",
   enabled: true,
   api_key_configured: true,
+  supported_providers: ["zhipu", "siliconflow", "dashscope"],
   parameters: { temperature: 0.2 },
 };
 
@@ -350,6 +356,33 @@ const documentProfileSummary = {
   ],
 };
 
+const ragDocumentCard: RagDocumentCard = {
+  id: "card-1", knowledge_id: "kb-1", index_id: "idx-1", index_version: 3,
+  document_id: "doc-1", document_name: "操作手册", schema_version: 1,
+  document_type: "PROCEDURE",
+  card_payload: {
+    document_type: "PROCEDURE", summary: "配置 VAU 网络图像的完整操作",
+    components: ["VAU"], tasks: ["配置 VAU 图像"],
+    applicable_questions: ["如何配置 VAU 图像"], prerequisites: ["电脑与设备网络可用"],
+    key_topics: ["电脑 IP", "图像通道"], exclusions: ["线缆故障排查"],
+    has_procedure: true, has_images: true,
+  },
+  generation_status: "READY", review_status: "AUTO", revision: 1,
+  content_fingerprint: "a".repeat(64), generator_snapshot: { provider: "fake" },
+  error_code: null, error_message: null,
+  created_at: "2026-08-17T00:00:00Z", updated_at: "2026-08-17T00:00:00Z",
+};
+
+const ragDocumentCardList = {
+  knowledge_id: "kb-1", index_id: "idx-1", index_version: 3, cards: [ragDocumentCard],
+  readiness: {
+    knowledge_id: "kb-1", index_id: "idx-1", expected_count: 1, ready_count: 1,
+    confirmed_count: 0, auto_count: 1, rejected_count: 0, missing_count: 0,
+    failed_count: 0, stale_count: 0, shadow_ready: true, ready: false,
+    blockers: ["待人工确认 1 份"],
+  },
+};
+
 function stubApi() {
   vi.spyOn(adminApi, "listKnowledgeBases").mockResolvedValue([kb]);
   vi.spyOn(adminApi, "listDocuments").mockResolvedValue([doc]);
@@ -401,6 +434,17 @@ function stubApi() {
   });
   vi.spyOn(adminApi, "getDocumentProfileContext").mockResolvedValue(profileContext);
   vi.spyOn(adminApi, "getKnowledgeProfiles").mockResolvedValue(documentProfileSummary);
+  vi.spyOn(adminApi, "listRagDocumentCards").mockResolvedValue(ragDocumentCardList);
+  vi.spyOn(adminApi, "getRagDocumentCard").mockResolvedValue(ragDocumentCard);
+  vi.spyOn(adminApi, "getRagDocumentCardReadiness").mockResolvedValue(ragDocumentCardList.readiness);
+  vi.spyOn(adminApi, "reviewRagDocumentCard").mockResolvedValue({
+    ...ragDocumentCard, review_status: "CONFIRMED", revision: 2,
+  });
+  vi.spyOn(adminApi, "updateRagDocumentCard").mockResolvedValue({ ...ragDocumentCard, revision: 2 });
+  vi.spyOn(adminApi, "generateRagDocumentCards").mockResolvedValue({
+    task_id: "task-card", task_type: "RAG_DOCUMENT_CARD_GENERATE",
+    status: "QUEUED", replayed: false,
+  });
   vi.spyOn(adminApi, "checkKnowledgeProfiles").mockResolvedValue({
     valid: true, publishable: true, pending_count: 1, errors: [], warnings: [],
   });
@@ -436,6 +480,7 @@ describe("view interactions", () => {
     sessionStorage.setItem("rag_service_token", "test-service-token");
     adminStore.serviceToken = "test-service-token";
     adminStore.credentialRejected = false;
+    adminStore.latestRagDocumentCardTasks = {};
     stubApi();
   });
 
@@ -453,6 +498,10 @@ describe("view interactions", () => {
     adminStore.documentDrawerOpen = false;
     adminStore.selectedDocument = null;
     adminStore.documentProfileContext = null;
+    adminStore.ragDocumentCard = null;
+    adminStore.ragDocumentCards = [];
+    adminStore.ragDocumentCardReadiness = null;
+    adminStore.latestRagDocumentCardTasks = {};
     adminStore.requestedIndexDetailId = "";
     adminStore.requestedView = "";
     adminStore.requestedViewQuery = "";
@@ -495,6 +544,37 @@ describe("view interactions", () => {
     adminStore.documentSearch = "";
   });
 
+  it("documents: displays live RAG card generation progress and counts", async () => {
+    vi.mocked(adminApi.listIndexTasks).mockImplementation(async (indexId) =>
+      indexId === "idx-1"
+        ? [{
+            id: "task-card-running",
+            task_type: "RAG_DOCUMENT_CARD_GENERATE",
+            status: "RUNNING",
+            stage: "GENERATING_CARDS",
+            progress: 46,
+            attempt: 1,
+            index_id: "idx-1",
+            error_code: null,
+            error_message: null,
+            metadata: { generated_count: 8, failed_count: 2, selected_count: 42 },
+            created_at: "2026-09-13T00:00:00Z",
+            updated_at: "2026-09-13T00:00:03Z",
+          }]
+        : [],
+    );
+
+    const wrapper = await mountView("documents");
+    await flushPromises();
+
+    const progress = wrapper.get(".rag-card-task-progress");
+    expect(progress.text()).toContain("正在生成");
+    expect(progress.text()).toContain("46%");
+    expect(progress.text()).toContain("成功 8");
+    expect(progress.text()).toContain("失败 2");
+    expect(progress.text()).toContain("共 42 份");
+  });
+
   it("documents: Profile & Alias tab separates published profile from candidate draft", async () => {
     const wrapper = await mountView("documents");
     await wrapper.get(".el-table__row").trigger("click");
@@ -525,6 +605,26 @@ describe("view interactions", () => {
     expect(adminStore.requestedIndexDetailId).toBe("idx-2");
     expect(adminStore.requestedView).toBe("support-review");
     expect(adminStore.documentDrawerOpen).toBe(false);
+  });
+
+  it("documents: edits and confirms an index-bound RAG document card", async () => {
+    const wrapper = await mountView("documents");
+    await wrapper.get(".el-table__row").trigger("click");
+    await flushPromises();
+    expect(adminApi.getRagDocumentCard).toHaveBeenCalledWith("kb-1", "doc-1", "idx-1");
+    await wrapper.findAll(".el-tabs__item")
+      .find((tab) => tab.text().includes("RAG 文档理解"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll("textarea").some((field) =>
+      field.element.value.includes("配置 VAU 网络图像的完整操作"),
+    )).toBe(true);
+    const confirm = wrapper.findAll("button").find((button) => button.text().trim() === "确认");
+    expect(confirm).toBeTruthy();
+    await confirm!.trigger("click");
+    await flushPromises();
+    expect(adminApi.reviewRagDocumentCard).toHaveBeenCalledWith(
+      "kb-1", "doc-1", "idx-1", 1, "CONFIRMED",
+    );
   });
 
   it("support review: manages document attributes in one workspace", async () => {
@@ -797,6 +897,28 @@ describe("view interactions", () => {
     await ragTab!.trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("RAG only 检索配置");
+  });
+
+  it("configuration: offers DashScope and applies its default endpoint", async () => {
+    const wrapper = await mountView("configuration");
+    await wrapper.get('button[aria-label="编辑模型配置"]').trigger("click");
+    await flushPromises();
+
+    await wrapper.get(".el-select").trigger("click");
+    await flushPromises();
+    const dashscopeOption = Array.from(document.body.querySelectorAll(".el-select-dropdown__item"))
+      .find((item) => item.textContent?.includes("千问"));
+    expect(dashscopeOption).toBeDefined();
+    (dashscopeOption as HTMLElement).click();
+    await flushPromises();
+
+    const inputs = wrapper.findAll("input");
+    expect(
+      inputs.some(
+        (input) =>
+          input.element.value === "https://dashscope.aliyuncs.com/compatible-mode/v1/",
+      ),
+    ).toBe(true);
   });
 
   it("configuration: opens service credentials and clears the credential", async () => {

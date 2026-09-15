@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
-from typing import Any, Protocol, TypeVar
+from typing import Any, ClassVar, Protocol, TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -167,6 +168,10 @@ class ZhipuLlmProvider:
     # Utility calls cap their growth here: reasoning budget retries double a
     # few times, but a prompt that needs more than this is a prompt problem.
     _THINKING_MAX_TOKENS_CEILING = 16_384
+    # Confirmed by the provider's HTTP 400/1210 response: this model always
+    # reasons and rejects both enabled/disabled thinking controls. Avoid one
+    # guaranteed failed round trip for every request-scoped provider.
+    _ALWAYS_THINKING_MODELS: ClassVar[set[str]] = {"glm-5.3-flash"}
 
     def __init__(
         self,
@@ -192,7 +197,7 @@ class ZhipuLlmProvider:
         # Set after the upstream rejects a thinking-control payload with
         # "该模型始终思考" (HTTP 400, code 1210).  Always-thinking models
         # (e.g. GLM-5.3-Flash) must not receive a thinking key at all.
-        self._thinking_unsupported = False
+        self._thinking_unsupported = self.model_name.casefold() in self._ALWAYS_THINKING_MODELS
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
             # DB model_config.base_url wins (admin-adjustable per turn);
@@ -213,6 +218,24 @@ class ZhipuLlmProvider:
         return '"1210"' in body or "不支持关闭思考" in body or "始终思考" in body
 
     @staticmethod
+    def _http_error_detail(response: httpx.Response) -> str:
+        """Keep a bounded provider code/message without retaining request data."""
+        parts = [f"HTTP {response.status_code}"]
+        try:
+            body = response.json()
+        except (ValueError, TypeError):
+            return parts[0]
+        error = body.get("error") if isinstance(body, dict) else None
+        payload = error if isinstance(error, dict) else body if isinstance(body, dict) else {}
+        for key, label in (("code", "code"), ("message", "message")):
+            value = payload.get(key)
+            if isinstance(value, str | int | float):
+                clean = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value)).strip()[:240]
+                if clean:
+                    parts.append(f"{label}={clean}")
+        return "; ".join(parts)
+
+    @staticmethod
     async def _stream_thinking_rejection(response: httpx.Response) -> bool:
         """Inspect a streaming 400 only after consuming its response body.
 
@@ -230,6 +253,14 @@ class ZhipuLlmProvider:
         if self.provider == "zhipu":
             payload["thinking"] = thinking
         elif self.provider == "siliconflow":
+            payload["enable_thinking"] = thinking.get("type") == "enabled"
+        elif self.provider == "dashscope":
+            # Current Qwen 3.5+ hybrid models default to thinking.  Omitting
+            # the vendor extension therefore ignored an administrator's
+            # explicit disabled setting and made short structured planner
+            # calls spend tens of seconds reasoning.  Send the boolean in
+            # both directions; thinking-only models must be configured as
+            # enabled instead of silently overriding their capability.
             payload["enable_thinking"] = thinking.get("type") == "enabled"
 
     def _payload(self, prompt: str) -> dict[str, Any]:
@@ -312,14 +343,14 @@ class ZhipuLlmProvider:
                         "UPSTREAM_UNAVAILABLE",
                         "模型服务暂时不可用",
                         retryable=True,
-                        detail=f"HTTP {response.status_code}",
+                        detail=self._http_error_detail(response),
                     )
                 if response.is_error:
                     raise LlmError(
                         "UPSTREAM_UNAVAILABLE",
                         "模型服务请求失败",
                         retryable=False,
-                        detail=f"HTTP {response.status_code}",
+                        detail=self._http_error_detail(response),
                     )
                 data = response.json()
                 if isinstance(data.get("usage"), dict):

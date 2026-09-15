@@ -76,6 +76,13 @@ async def _run_maintenance_task(task_id: UUID) -> dict[str, Any]:
                 result = await DocumentProfileService(
                     DocumentProfileRepository(resources.database), settings
                 ).execute_generation_task(task, records)
+            elif task_type == "RAG_DOCUMENT_CARD_GENERATE":
+                from app.rag.document_card_repository import DocumentCardRepository
+                from app.rag.document_card_service import DocumentCardService
+
+                result = await DocumentCardService(
+                    DocumentCardRepository(resources.database, settings), settings
+                ).execute_generation_task(task, records)
             else:
                 raise ApiError("TASK_TYPE_NOT_SUPPORTED", f"不支持的后台任务类型：{task_type}", 409)
         except Exception as exc:

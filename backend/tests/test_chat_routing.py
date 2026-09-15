@@ -8,10 +8,13 @@ from uuid import uuid4
 from app.rag.routing import (
     OUT_OF_SCOPE_MESSAGE,
     PRODUCT_GENERAL_DISCLAIMER,
+    TECHNICAL_DISCLAIMER,
     UNCONFIRMED_MESSAGE,
     AnswerMode,
     ContentBlock,
     ResponseType,
+    build_assist_result,
+    build_delivery_result,
     post_validate,
 )
 
@@ -51,7 +54,7 @@ def test_product_knowledge_with_citations_and_images() -> None:
 
     assert result.response_type == ResponseType.ANSWERED
     assert result.answer_mode == AnswerMode.PRODUCT_KNOWLEDGE
-    assert result.disclaimer is None
+    assert result.disclaimer == TECHNICAL_DISCLAIMER
     assert len(result.valid_sources) == 1
     # text block + 2 image blocks
     blocks = result.content
@@ -85,6 +88,34 @@ def test_product_general_strips_citations_and_adds_disclaimer() -> None:
     assert "[S1]" not in result.answer
     # Only text blocks, no images
     assert all(b.type == "text" for b in result.content)
+
+
+def test_every_normal_technical_result_uses_the_same_short_disclaimer() -> None:
+    sources = _sources(1)
+    knowledge = post_validate(
+        "[MODE:PRODUCT_KNOWLEDGE]\n设备端口是3306。[S1]", sources, has_evidence=True
+    )
+    explained = post_validate(
+        "[MODE:PRODUCT_EXPLAINED]\n端口用于通信。[S1]", sources, has_evidence=True
+    )
+    unconfirmed = post_validate(
+        "[MODE:UNCONFIRMED]\n请确认设备型号？",
+        [],
+        has_evidence=False,
+        preserve_unconfirmed_without_evidence=True,
+    )
+
+    assert knowledge.disclaimer == TECHNICAL_DISCLAIMER
+    assert explained.disclaimer == TECHNICAL_DISCLAIMER
+    assert unconfirmed.disclaimer == TECHNICAL_DISCLAIMER
+    assert build_assist_result("请说明具体问题。").disclaimer == TECHNICAL_DISCLAIMER
+    delivery = build_delivery_result(
+        summary="**《操作文档》**",
+        blocks=[ContentBlock(type="text", text="第一步")],
+        document={"source_id": "S1"},
+    )
+    assert delivery.disclaimer == TECHNICAL_DISCLAIMER
+    assert post_validate("[MODE:OUT_OF_SCOPE]\n写一首诗", [], has_evidence=False).disclaimer is None
 
 
 def test_out_of_scope_returns_fixed_message() -> None:

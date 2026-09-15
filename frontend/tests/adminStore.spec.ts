@@ -126,6 +126,8 @@ describe("adminStore", () => {
     adminStore.knowledgeBases = [];
     adminStore.indexes = [];
     adminStore.latestIndexTasks = {};
+    adminStore.latestRagDocumentCardTasks = {};
+    adminStore.documentInspectionIndexId = "";
     adminStore.selectedKnowledgeId = "";
     adminStore.notice = "";
     adminStore.error = "";
@@ -307,6 +309,66 @@ describe("adminStore", () => {
 
     expect(adminStore.trackedTasks).toEqual([]);
     expect(adminStore.notice).toBe("Profile 重建已完成");
+  });
+
+  it("warns when a RAG card batch only partially succeeds", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.trackTask(
+      {
+        task_id: "task-card-partial",
+        task_type: "RAG_DOCUMENT_CARD_GENERATE",
+        status: "QUEUED",
+        replayed: false,
+      },
+      { successMessage: "RAG 文档理解已生成", knowledgeId: kb.id },
+    );
+    vi.spyOn(adminApi, "getTask").mockResolvedValue({
+      id: "task-card-partial",
+      task_type: "RAG_DOCUMENT_CARD_GENERATE",
+      status: "SUCCEEDED",
+      stage: "COMPLETED",
+      progress: 100,
+      attempt: 1,
+      kb_id: kb.id,
+      index_id: "idx-1",
+      document_id: null,
+      error_code: null,
+      error_message: null,
+      metadata: { generated_count: 7, failed_count: 2, selected_count: 9 },
+      created_at: "2026-09-13T00:00:00Z",
+      started_at: "2026-09-13T00:00:01Z",
+      finished_at: "2026-09-13T00:00:05Z",
+      updated_at: "2026-09-13T00:00:05Z",
+    });
+
+    await adminStore.pollTrackedTasks();
+
+    expect(adminStore.notice).toContain("成功 7 份，失败 2 份");
+    expect(adminStore.trackedTasks).toEqual([]);
+  });
+
+  it("uses the active index for a full RAG card backfill", async () => {
+    adminStore.knowledgeBases = [kb];
+    adminStore.indexes = [index];
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.documentInspectionIndexId = "idx-candidate";
+    const generate = vi.spyOn(adminApi, "generateRagDocumentCards").mockResolvedValue({
+      task_id: "task-card",
+      task_type: "RAG_DOCUMENT_CARD_GENERATE",
+      status: "QUEUED",
+      replayed: false,
+    });
+    vi.spyOn(adminApi, "getTask").mockRejectedValue(new Error("eventual consistency"));
+
+    await adminStore.generateRagDocumentCards();
+
+    expect(generate).toHaveBeenCalledWith(kb.id, {
+      index_id: "idx-1",
+      document_id: undefined,
+      replace_confirmed: false,
+    });
+    expect(adminStore.latestRagDocumentCardTasks["idx-1"]?.status).toBe("QUEUED");
   });
 
   it("synchronizes a running Profile task into the review progress state", async () => {

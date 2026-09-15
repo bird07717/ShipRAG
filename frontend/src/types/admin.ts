@@ -83,6 +83,71 @@ export interface DocumentDeleteResult {
   build_request: BuildRequestResult;
 }
 
+export type RagDocumentCardType =
+  | "PROCEDURE"
+  | "REFERENCE"
+  | "TROUBLESHOOTING"
+  | "OVERVIEW"
+  | "MIXED";
+
+export interface RagDocumentCardPayload {
+  document_type: RagDocumentCardType;
+  summary: string;
+  components: string[];
+  tasks: string[];
+  applicable_questions: string[];
+  prerequisites: string[];
+  key_topics: string[];
+  exclusions: string[];
+  has_procedure: boolean;
+  has_images: boolean;
+}
+
+export interface RagDocumentCard {
+  id: string;
+  knowledge_id: string;
+  index_id: string;
+  index_version: number;
+  document_id: string;
+  document_name: string;
+  schema_version: number;
+  document_type: RagDocumentCardType | null;
+  card_payload: RagDocumentCardPayload | null;
+  generation_status: "PENDING" | "READY" | "FAILED" | "STALE";
+  review_status: "AUTO" | "CONFIRMED" | "REJECTED";
+  revision: number;
+  content_fingerprint: string | null;
+  generator_snapshot: Record<string, unknown>;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RagDocumentCardReadiness {
+  knowledge_id: string;
+  index_id: string;
+  expected_count: number;
+  ready_count: number;
+  confirmed_count: number;
+  auto_count: number;
+  rejected_count: number;
+  missing_count: number;
+  failed_count: number;
+  stale_count: number;
+  shadow_ready: boolean;
+  ready: boolean;
+  blockers: string[];
+}
+
+export interface RagDocumentCardList {
+  knowledge_id: string;
+  index_id: string;
+  index_version: number;
+  cards: RagDocumentCard[];
+  readiness: RagDocumentCardReadiness;
+}
+
 export interface KnowledgeIndex {
   id: string;
   kb_id: string;

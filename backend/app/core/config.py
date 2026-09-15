@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
@@ -57,8 +58,10 @@ class Settings(BaseSettings):
 
     siliconflow_api_key: SecretStr | None = None
     zhipu_api_key: SecretStr | None = None
+    dashscope_api_key: SecretStr | None = None
     siliconflow_base_url: str = "https://api.siliconflow.cn/v1/"
     zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4/"
+    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1/"
     m0_target_embedding_dimension: int = 1024
     m0_provider_timeout_seconds: float = 90.0
 
@@ -74,7 +77,7 @@ class Settings(BaseSettings):
     m2_chunk_overlap_paragraphs: int = 1
     m2_parent_chunk_max_chars: int = 8_000
 
-    m3_llm_provider: Literal["auto", "zhipu", "fake"] = "auto"
+    m3_llm_provider: Literal["auto", "zhipu", "siliconflow", "dashscope", "fake"] = "auto"
     m3_vector_top_k: int = 10
     m3_context_max_chunks: int = 8
     m3_context_token_budget: int = 6_000
@@ -84,11 +87,20 @@ class Settings(BaseSettings):
     m3_question_max_chars: int = 4_000
     m3_prompt_max_chars: int = 60_000
     m3_prompt_token_budget: int = 30_000
-    m3_turn_deadline_seconds: float = 45.0
+    m3_turn_deadline_seconds: float = 90.0
     m3_llm_max_tokens: int = 2_048
     m3_llm_temperature: float = 0.1
     m3_trace_retain_prompt: bool = True
     m3_provider_timeout_seconds: float = 120.0
+    # RAG V2 is the development default. Deployed environments stay on the
+    # legacy route unless their operator explicitly opts in.
+    m3_rag_pipeline_mode: Literal["auto", "legacy", "v2"] = "auto"
+    m3_rag_full_document_limit: int = 3
+    m3_rag_full_context_token_budget: int = 20_000
+    m3_rag_answer_max_tokens: int = 4_096
+    m3_rag_answer_timeout_seconds: float = 45.0
+    m3_rag_history_max_rounds: int = 4
+    m3_rag_title_leak_repair_attempts: int = 1
 
     # Document Profile generation (Profile Review page). One short structured
     # draft call per document. Keep concurrency low so a
@@ -139,6 +151,18 @@ class Settings(BaseSettings):
     m3_rag_explanation_mode: Literal["off", "shadow", "enabled"] = "enabled"
     m3_rag_tech_assist_mode: Literal["off", "shadow", "enabled"] = "off"
     m3_rag_scope_max_tokens: int = 800
+    # V4 retired the legacy P2/P3 dual-planner runtime. These fields remain for
+    # one compatibility stage so stale deployments fail softly and emit a
+    # deprecation warning; they do not change RAG behavior.
+    m3_rag_semantic_orchestration_mode: Literal["off", "shadow", "enabled"] = "off"
+    m3_rag_query_planner_max_tokens: int = 512
+    m3_rag_query_planner_timeout_seconds: float = 15.0
+    m3_rag_response_planner_max_tokens: int = 1_200
+    m3_rag_response_planner_timeout_seconds: float = 30.0
+    m3_rag_legacy_fallback_reserve_seconds: float = 12.0
+    m3_rag_query_variant_limit: int = 3
+    m3_rag_document_card_top_k: int = 5
+    m3_rag_response_document_limit: int = 3
     m3_rag_single_strong_floor: float = 0.85
     m3_rag_single_strong_gap: float = 0.18
 
@@ -379,11 +403,28 @@ class Settings(BaseSettings):
         "m3_history_token_budget",
         "m3_llm_max_tokens",
         "m3_rag_scope_max_tokens",
+        "m3_rag_query_planner_max_tokens",
+        "m3_rag_response_planner_max_tokens",
+        "m3_rag_full_context_token_budget",
+        "m3_rag_answer_max_tokens",
     )
     @classmethod
     def validate_m3_token_limits(cls, value: int) -> int:
         if not 100 <= value <= 100_000:
             raise ValueError("M3 token limits must be between 100 and 100000")
+        return value
+
+    @field_validator(
+        "m3_rag_query_variant_limit",
+        "m3_rag_document_card_top_k",
+        "m3_rag_response_document_limit",
+        "m3_rag_full_document_limit",
+        "m3_rag_history_max_rounds",
+    )
+    @classmethod
+    def validate_semantic_orchestration_counts(cls, value: int) -> int:
+        if not 1 <= value <= 20:
+            raise ValueError("RAG semantic orchestration counts must be between 1 and 20")
         return value
 
     @field_validator("m3_question_max_chars", "m3_prompt_max_chars")
@@ -493,11 +534,24 @@ class Settings(BaseSettings):
             raise ValueError("M3 query rewrite token limit must be between 16 and 1024")
         return value
 
-    @field_validator("m3_query_embedding_timeout_seconds", "m3_rerank_timeout_seconds")
+    @field_validator(
+        "m3_query_embedding_timeout_seconds",
+        "m3_rerank_timeout_seconds",
+        "m3_rag_query_planner_timeout_seconds",
+        "m3_rag_response_planner_timeout_seconds",
+        "m3_rag_answer_timeout_seconds",
+    )
     @classmethod
     def validate_upstream_call_timeouts(cls, value: float) -> float:
         if not 0.1 <= value <= 60.0:
             raise ValueError("M3 upstream call timeouts must be between 0.1 and 60 seconds")
+        return value
+
+    @field_validator("m3_rag_legacy_fallback_reserve_seconds")
+    @classmethod
+    def validate_legacy_fallback_reserve(cls, value: float) -> float:
+        if not 0.5 <= value <= 120.0:
+            raise ValueError("RAG legacy fallback reserve must be between 0.5 and 120 seconds")
         return value
 
     @field_validator("m3_query_embedding_retries")
@@ -505,6 +559,13 @@ class Settings(BaseSettings):
     def validate_query_embedding_retries(cls, value: int) -> int:
         if not 0 <= value <= 3:
             raise ValueError("M3 query embedding retries must be between 0 and 3")
+        return value
+
+    @field_validator("m3_rag_title_leak_repair_attempts")
+    @classmethod
+    def validate_title_leak_repair_attempts(cls, value: int) -> int:
+        if not 0 <= value <= 2:
+            raise ValueError("RAG V2 title leak repair attempts must be between 0 and 2")
         return value
 
     @field_validator("m3_query_rewrite_timeout_seconds")
@@ -568,7 +629,7 @@ class Settings(BaseSettings):
             raise ValueError("M5 provider timeout must be between 5 and 600 seconds")
         return value
 
-    @field_validator("siliconflow_base_url", "zhipu_base_url")
+    @field_validator("siliconflow_base_url", "zhipu_base_url", "dashscope_base_url")
     @classmethod
     def validate_provider_base_url(cls, value: str) -> str:
         if not value.startswith("https://") or not value.endswith("/"):
@@ -577,6 +638,27 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_security(self) -> Self:
+        retired_rag_fields = {
+            "m3_rag_semantic_orchestration_mode",
+            "m3_rag_response_planner_max_tokens",
+            "m3_rag_response_planner_timeout_seconds",
+            "m3_rag_legacy_fallback_reserve_seconds",
+            "m3_rag_response_document_limit",
+        }
+        configured_retired_fields = sorted(retired_rag_fields & self.model_fields_set)
+        if configured_retired_fields:
+            warnings.warn(
+                "Ignored retired RAG P2/P3 settings: " + ", ".join(configured_retired_fields),
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if self.effective_rag_pipeline_mode == "v2" and (
+            self.m3_rag_query_planner_timeout_seconds + self.m3_rag_answer_timeout_seconds
+            >= self.m3_turn_deadline_seconds
+        ):
+            raise ValueError(
+                "RAG V2 query and answer timeouts must leave time inside the turn deadline"
+            )
         if self.app_env == "production" and not self.service_token:
             raise ValueError("SERVICE_TOKEN is required in production")
         if self.app_env == "production":
@@ -650,6 +732,12 @@ class Settings(BaseSettings):
     @staticmethod
     def has_secret(value: SecretStr | None) -> bool:
         return value is not None and bool(value.get_secret_value().strip())
+
+    @property
+    def effective_rag_pipeline_mode(self) -> Literal["legacy", "v2"]:
+        if self.m3_rag_pipeline_mode != "auto":
+            return self.m3_rag_pipeline_mode
+        return "v2" if self.app_env == "development" else "legacy"
 
 
 @lru_cache(maxsize=1)

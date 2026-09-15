@@ -86,6 +86,34 @@ def test_assistant_public_references_are_evaluated_without_admin_catalog() -> No
     assert problems == []
 
 
+def test_v2_hidden_trace_evidence_replaces_delivery_contract_assertions() -> None:
+    runner = _runner()
+    expected = runner.v2_expected(
+        {
+            "response_types": ["DOC_DELIVERED", "DOCUMENT_DELIVERED"],
+            "document_keys": ["VAU图像"],
+            "require_reference": True,
+        }
+    )
+    is_v2, hits, problems = runner.v2_trace_hits(
+        {
+            "runtime_snapshot": {
+                "generation": {
+                    "pipeline": "V2",
+                    "answer": {"used_document_ids": ["document-1"]},
+                }
+            }
+        },
+        {"document-1": "故障解决文档5—如何配VAU图像"},
+    )
+
+    assert expected["response_types"] == ["ANSWERED"]
+    assert "require_reference" not in expected
+    assert is_v2 is True
+    assert hits == {"故障解决文档5—如何配VAU图像"}
+    assert problems == []
+
+
 @pytest.mark.parametrize(
     "answer",
     [

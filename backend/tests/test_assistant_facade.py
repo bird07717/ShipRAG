@@ -467,6 +467,8 @@ def test_public_payload_removes_internal_resource_urls_recursively() -> None:
                 }
             ],
             "document": {"id": uuid4(), "download_url": "/api/v1/documents/secret/content"},
+            "model_usage": {"tokens": 99},
+            "selected_context": [{"candidate_score": 0.99}],
         },
         "request-1",
     )
@@ -476,7 +478,12 @@ def test_public_payload_removes_internal_resource_urls_recursively() -> None:
     assert payload["content"][0]["image_asset_id"]
     assert payload["references"][0]["document_id"]
     assert "download_url" not in payload["document"]
+    assert "model_usage" not in payload
+    assert "selected_context" not in payload
     assert public_payload({"url": "https://example.invalid"}) == {}
+    assert public_payload(
+        {"metadata": {"rerank_score": 0.9, "score": 0.8, "filename": "secret.docx", "width": 100}}
+    ) == {"metadata": {"width": 100}}
 
 
 def test_external_request_rejects_internal_engine_selection() -> None:

@@ -17,6 +17,8 @@ bash scripts/bootstrap.sh
 
 关键配置类别：应用与 CORS、PostgreSQL、Redis/RQ、MinIO、模型提供者、嵌入/检索阈值、保留期、模型密钥加密，以及生产的 `SERVICE_TOKEN` 和 `ASSISTANT_SERVICE_TOKEN`。`ASSISTANT_REQUEST_RETENTION_DAYS` 默认 7，控制未关联 Conversation 的 Assistant 终态请求保留期，设为 0 禁用清理；维护 Worker 启动时清理一次并注册每日任务，永不由该任务删除 `RUNNING`。生产示例为 `.env.production.example`；Production Compose 对必要密码、服务凭据和 `MODEL_SECRET_KEY` 使用必填变量。恢复已有数据库时必须沿用能解密其中模型凭据的密钥及版本，不能生成新值替代。
 
+千问 LLM 可直接在管理台模型配置中选择 `dashscope`，填写模型名称、Base URL 和 API Key；默认 Base URL 为 `https://dashscope.aliyuncs.com/compatible-mode/v1/`。数据库加密密钥优先，也可用 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL` 作为环境兜底。不同地域或业务空间的 Base URL 与 API Key 必须匹配；生产推荐按阿里云百炼实际业务空间配置专属域名。
+
 staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐式使用 fake。`auto` 必须能从对应环境变量或可解密的 `model_config` 快照取得有效凭据；否则相关摄取/问答请求明确失败。部署校验还要确认在线查询模型与 Active Index 的 Embedding 模型一致，不能只确认服务进程已启动。
 
 ## 本地启动
@@ -75,6 +77,8 @@ RAG 正文质量用例：`.venv/bin/python rag-acceptance/run_golden.py --api-mo
 | RAG 回归 | `.venv/bin/python rag-acceptance/run_golden.py` | 真实 HTTP/模型回归；需要可用服务、知识库及安全配置。 |
 | Support 回归 | `cd backend && ../.venv/bin/pytest -q -o addopts='' tests/test_support_evaluation.py` | `support-acceptance` 说明中定义的开发回归。 |
 | 生产门禁 | `bash scripts/check-m7.sh` | 常规检查、依赖审计、production compose 校验、生产 smoke 与发布验收。 |
+
+本地执行 `scripts/check.sh` 时，常驻 Honcho `index_build` Worker 可能抢走摄取冒烟刚提交的临时任务，形成非确定性失败。稳定复验应先停止开发 Worker，或把门禁指向确认空闲的隔离 Redis/队列；若发生“索引存在未完成文档”，先保留失败记录并单独复跑摄取冒烟，再执行一次完整门禁，不能只凭单项复跑宣称全量通过。
 | Assistant 遗留请求恢复 | `cd backend && ../.venv/bin/python -m app.assistant.recovery --stale-hours 24` | 默认只预览；停写并完成数据库备份后追加 `--apply`，事务同步修复请求、消息和 Trace。 |
 
 以上命令是从仓库脚本/配置读取的“可执行入口”，不代表本次已运行或必然成功；任务报告必须单独说明实际运行的命令和结果。
@@ -122,5 +126,29 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 长文档原文交付不再受 `M3_DOC_DELIVERY_MAX_TOKENS` 限制，旧变量仅为启动兼容保留，不必提高数值；模型上下文和生成超时仍使用原配置。完整交付会增大 SSE 单个 `complete` 事件、消息快照和历史页体积；业务后台应按 SSE 空行边界组装完整事件，不能按网络分块解析 JSON，可降低历史消息页 `limit`。没有新增接口、下载入口、迁移或索引重建要求；需要以新请求验证，旧截断的历史快照不重新生成。
 
 定向命令：`cd backend && ../.venv/bin/pytest -q -o addopts='' tests/test_assistant_content_consistency.py tests/test_assistant_content_postgres.py tests/test_assistant_facade.py tests/test_gateway.py tests/test_chat_doc_routing_flow.py`。数据库用例复用隔离测试数据并清理临时知识库，不能将数据库不可达而跳过的结果当作通过。
+
+## RAG 文档卡片部署与验证（0046）
+
+先执行 `cd backend && ../.venv/bin/alembic upgrade head`，再用 `../.venv/bin/alembic current` 确认为 `0046 (head)`；生产 Compose 仍由一次性 `migrate` 服务完成同一升级。迁移本身不调用模型、不回填数据。升级后在管理台“文档”页点击“生成/补齐 RAG 理解”，页面按 3 秒轮询显示 `RAG_DOCUMENT_CARD_GENERATE` 的进度、成功/失败/总数和终态错误；等待任务结束，再逐份进入“RAG 文档理解”检查并确认。整批 0 成功视为任务失败，部分失败保留已成功卡片并明确警告；再次全量补齐只选择缺失/失败/过期项。已确认卡片重新生成需要明确确认，成功后重新变成待确认；失败时保留原已确认卡片。
+
+定向自动化：`cd backend && ../.venv/bin/pytest --no-cov -q tests/test_rag_document_cards.py tests/test_rag_document_cards_postgres.py tests/test_maintenance_jobs.py tests/test_task_recovery.py`；前端：`cd frontend && npx vitest run tests/admin-api.spec.ts tests/viewInteractions.spec.ts`。PostgreSQL 用例必须实际执行，跳过不算通过。默认 `off` 时在线 RAG 不读取卡片；P2 Shadow 明确开启后可读取卡片生成内部对照，但不会改变回答。不要把“卡片已生成”或“Shadow 有候选”表述为新编排已经对外生效。
+
+## 已退出的 RAG P2/P3 双 Planner 配置
+
+V4 已停止旧 P2/P3 `shadow/enabled` 运行时、后台任务及 `semantic_orchestration_config`、`semantic_orchestration`、`response_plan` Trace 写入。环境示例和 Production Compose 已删除 `M3_RAG_SEMANTIC_ORCHESTRATION_MODE`、Response Planner、legacy fallback reserve 与 response document limit；Settings 仅为旧部署环境兼容一个阶段，读取这些变量时发出弃用告警且不改变回答。`M3_RAG_QUERY_PLANNER_MAX_TOKENS`、`M3_RAG_QUERY_PLANNER_TIMEOUT_SECONDS`、`M3_RAG_QUERY_VARIANT_LIMIT` 和 `M3_RAG_DOCUMENT_CARD_TOP_K` 已由 V2 Query Interpreter/文档检索复用，不属于失效配置。
+
+旧 P2/P3 代码仍可由显式 `M3_RAG_PIPELINE_MODE=legacy` 回滚路径间接使用，物理删除属于 V5。历史 Trace 继续只读兼容，不应把旧 `shadow/enabled` 变量重新加回环境文件。原 GLM/P2/P3 时限只作为历史性能记录，不再作为当前 V2 配置建议。
+
+## RAG V2 配置（V0～V4.1 本地已生效）
+
+`M3_RAG_PIPELINE_MODE=auto|legacy|v2` 已实现：`auto` 只在 `APP_ENV=development` 解析为 `v2`，staging/production 解析为 `legacy`。`.env.example` 和当前本地开发配置显式使用 `v2`；`.env.production.example` 与 Production Compose 显式默认 `legacy`。修改模式后必须重启 API 进程；V2 不需要数据库迁移或重建现有索引。
+
+V2 当前配置包括 `M3_RAG_FULL_DOCUMENT_LIMIT`、`M3_RAG_FULL_CONTEXT_TOKEN_BUDGET`、`M3_RAG_ANSWER_MAX_TOKENS`、`M3_RAG_ANSWER_TIMEOUT_SECONDS`、`M3_RAG_HISTORY_MAX_ROUNDS` 和 `M3_RAG_TITLE_LEAK_REPAIR_ATTEMPTS`。最后一项是兼容名称，当前限制 Prompt/管理地址或证据白名单违规后的最多修复次数，不再拦截普通文档标题、文件名或 D/S/I 技术编号；V5 可在清理旧配置时统一改名。最小 Query Interpreter 继续复用 `M3_RAG_QUERY_PLANNER_MAX_TOKENS`、`M3_RAG_QUERY_PLANNER_TIMEOUT_SECONDS` 与 `M3_RAG_QUERY_VARIANT_LIMIT`。有效 V2 下，Query 与 Answer 两段超时之和必须小于 `M3_TURN_DEADLINE_SECONDS`；开发示例总时限为 90 秒。
+
+V4.1 文档级排序复用现有 Rerank Provider、`M3_RERANK_TIMEOUT_SECONDS` 和模型快照，不增加环境变量或第三次 LLM。候选池内部最多取 `max(M3_RAG_FULL_DOCUMENT_LIMIT, M3_RAG_DOCUMENT_CARD_TOP_K)` 份用于排序，最终全文上限仍由 `M3_RAG_FULL_DOCUMENT_LIMIT=3` 控制。当前未调整 Chunk、向量/BM25 Top-K、卡片 Top-K 或 20,000 Token 全文预算；后续只有在多轮 Trace 显示稳定的召回或上下文问题时才单变量调整。
+
+首轮、单强、事实、解释、技术助手、焦点历史、旧文档路由阈值和 Query Rewrite 配置仍为 `legacy` 回滚兼容；有效 V2 已停止调用旧语义 Planner、Query Rewrite、首轮标题召回和焦点历史选择。V2 历史只受 `M3_RAG_HISTORY_MAX_ROUNDS`、`M3_HISTORY_MAX_MESSAGES` 与 `M3_HISTORY_TOKEN_BUDGET` 约束。V4 已完成运行时退出和验收，V5 才物理删除旧变量与旧代码。生产在另行批准前保持 `legacy`；本次实现不授权服务器启用 V2。
+
+`python -m app.rag.smoke --embedding-provider fake --llm-provider fake` 是既有通用 RAG SSE/检索 smoke，内部显式固定 `legacy`，不受本地 `.env` 的 V2 模式影响。V2 的自动验证当前由 `tests/test_rag_v2_pipeline.py`、Assistant 契约/边界测试及真实开发 Assistant 冒烟承担；不要把通用 fake smoke 通过单独解释为 V2 质量通过。
 
 人工验收：在同一已上线测试库用新幂等键分别发送 `include_images=true/false`，检查 `complete.content` 的正文、表格、来源和图片块；再加载历史消息，并用原请求体和原 Key 重放，对照三个结果。分别覆盖 RAG、Support 直接交付和 Support 回退 RAG。关闭图片不应改变文档命中，历史与重放均不得返回管理 `url`/`download_url`。该修复本身仅需更新后端，无新增迁移或索引重建要求；同批其他功能的迁移要求仍按对应说明执行。

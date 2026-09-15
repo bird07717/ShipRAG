@@ -148,7 +148,9 @@ def test_mixed_explanation_keeps_document_evidence_but_not_general_citations():
     assert result.answer_mode == AnswerMode.PRODUCT_EXPLAINED
     assert [s["source_id"] for s in result.valid_sources] == ["S1"]
     assert "通用建议" in result.answer and "贴标签" in result.answer
-    assert "文档引用仅支持" in result.disclaimer
+    assert result.disclaimer == (
+        "本回答仅供参考，请结合现场情况和正式资料核验，必要时联系海兰信专业人员。"
+    )
     assert all(b.type == "text" for b in result.content)
 
 

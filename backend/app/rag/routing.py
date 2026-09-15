@@ -23,16 +23,11 @@ class ResponseType(str, Enum):
     DOC_DELIVERED = "DOC_DELIVERED"
 
 
-PRODUCT_GENERAL_DISCLAIMER = (
-    "本回答基于现有信息和通用工程经验，仅供技术排查参考，不构成海兰信正式技术结论。"
-    "通用经验不代表当前产品型号的具体参数或官方操作要求。"
-    "涉及设备参数、接线、升级或拆装时，请结合现场条件和正式资料核验，"
-    "必要时联系海兰信专业人员。"
-)
-PRODUCT_EXPLAINED_DISCLAIMER = (
-    "分析与推断基于已说明的依据和条件；通用建议不代表本产品的操作或验收要求，"
-    "文档引用仅支持有文档依据的内容。"
-)
+TECHNICAL_DISCLAIMER = "本回答仅供参考，请结合现场情况和正式资料核验，必要时联系海兰信专业人员。"
+# Compatibility names remain importable while all successful technical
+# response modes intentionally share one concise public reminder.
+PRODUCT_GENERAL_DISCLAIMER = TECHNICAL_DISCLAIMER
+PRODUCT_EXPLAINED_DISCLAIMER = TECHNICAL_DISCLAIMER
 
 OUT_OF_SCOPE_MESSAGE = (
     "我只能回答与本产品、产品使用及相关原理有关的问题。请换一个与产品相关的问题。"
@@ -159,14 +154,14 @@ def build_assist_result(answer: str) -> ChatResult:
     Routing answers (clarification, catalog guidance, switch offers) carry no
     citations and no mode tag; they are surfaced verbatim.
     """
-    answer, general_advice = separate_general_advice(answer)
+    answer, _ = separate_general_advice(answer)
     answer = clean_model_text(answer)
     return ChatResult(
         response_type=ResponseType.ANSWERED,
         answer_mode=None,
         answer=answer,
         content=[ContentBlock(type="text", text=answer)],
-        disclaimer=PRODUCT_GENERAL_DISCLAIMER if general_advice else None,
+        disclaimer=TECHNICAL_DISCLAIMER,
         valid_sources=[],
         citation_result={
             "citation_missing": False,
@@ -187,7 +182,7 @@ def build_delivery_result(
         answer_mode=None,
         answer=summary,
         content=blocks or [ContentBlock(type="text", text=summary)],
-        disclaimer=None,
+        disclaimer=TECHNICAL_DISCLAIMER,
         valid_sources=[document],
         citation_result={
             "citation_missing": False,
@@ -265,10 +260,8 @@ def post_validate(
         answer = _CITATION_PATTERN.sub("", answer).strip()
         valid_sources = []
         cited_ids = []
-    elif mode == AnswerMode.PRODUCT_GENERAL:
-        disclaimer = PRODUCT_GENERAL_DISCLAIMER
-    elif mode == AnswerMode.PRODUCT_EXPLAINED:
-        disclaimer = PRODUCT_EXPLAINED_DISCLAIMER
+    if mode != AnswerMode.OUT_OF_SCOPE:
+        disclaimer = TECHNICAL_DISCLAIMER
 
     if mode in (AnswerMode.OUT_OF_SCOPE, AnswerMode.UNCONFIRMED) and not valid_sources:
         content = [ContentBlock(type="text", text=clean_model_text(answer))]

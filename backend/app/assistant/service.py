@@ -25,6 +25,28 @@ _RETRYABLE_ERROR_CODES = frozenset(
         "UPSTREAM_UNAVAILABLE",
     }
 )
+_INTERNAL_PUBLIC_KEYS = frozenset(
+    {
+        "download_url",
+        "url",
+        "prompt",
+        "runtime_snapshot",
+        "selected_context",
+        "retrieval_result",
+        "rerank_result",
+        "model_usage",
+        "candidate_score",
+        "score",
+        "rerank_score",
+        "rrf_score",
+        "bm25_score",
+        "similarity",
+        "distance",
+        "minio_bucket",
+        "minio_object_key",
+        "filename",
+    }
+)
 
 
 def sse(event: str, payload: dict[str, Any]) -> bytes:
@@ -63,7 +85,7 @@ def public_payload(value: Any) -> Any:
         return {
             key: public_payload(item)
             for key, item in value.items()
-            if key not in {"download_url", "url"}
+            if not isinstance(key, str) or key.casefold() not in _INTERNAL_PUBLIC_KEYS
         }
     return value
 

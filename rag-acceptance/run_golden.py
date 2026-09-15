@@ -185,6 +185,68 @@ def evaluate_answer(expected: dict[str, Any], answer: str) -> list[str]:
     return problems
 
 
+def v2_expected(expected: dict[str, Any]) -> dict[str, Any]:
+    """Translate legacy public-delivery assertions to V2 hidden evidence semantics."""
+
+    adapted = dict(expected)
+    response_types = list(adapted.get("response_types") or [])
+    if any(item in {"DOC_DELIVERED", "DOCUMENT_DELIVERED"} for item in response_types):
+        adapted["response_types"] = list(
+            dict.fromkeys(
+                "ANSWERED" if item in {"DOC_DELIVERED", "DOCUMENT_DELIVERED"} else item
+                for item in response_types
+            )
+        )
+    adapted.pop("require_reference", None)
+    return adapted
+
+
+def v2_trace_hits(
+    trace: dict[str, Any], catalog_by_id: dict[str, str]
+) -> tuple[bool, set[str], list[str]]:
+    generation = (trace.get("runtime_snapshot") or {}).get("generation") or {}
+    if generation.get("pipeline") != "V2":
+        return False, set(), []
+    answer = generation.get("answer") or {}
+    ids = [str(item) for item in answer.get("used_document_ids") or []]
+    missing = [item for item in ids if item not in catalog_by_id]
+    problems = [f"V2 Trace 使用了目录外文档 ID: {item}" for item in missing]
+    return (
+        True,
+        {catalog_by_id[item] for item in ids if item in catalog_by_id},
+        problems,
+    )
+
+
+async def observe_trace(
+    client: httpx.AsyncClient,
+    *,
+    base_url: str,
+    token: str,
+    request_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    headers = {"Authorization": f"Bearer {token}"}
+    summaries = await client.get(
+        f"{base_url}/api/v1/traces",
+        params={"request_id": request_id, "limit": 5},
+        headers=headers,
+        timeout=30.0,
+    )
+    if summaries.status_code != 200:
+        return None, f"Trace 列表不可用: HTTP {summaries.status_code}"
+    items = [item for item in summaries.json() if item.get("request_id") == request_id]
+    if len(items) != 1:
+        return None, f"Trace 数量异常: request_id={request_id} count={len(items)}"
+    detail = await client.get(
+        f"{base_url}/api/v1/traces/{items[0]['trace_id']}",
+        headers=headers,
+        timeout=30.0,
+    )
+    if detail.status_code != 200:
+        return None, f"Trace 详情不可用: HTTP {detail.status_code}"
+    return detail.json(), None
+
+
 def percentile(values: list[float], ratio: float) -> float:
     if not values:
         return 0.0
@@ -287,6 +349,12 @@ async def main() -> int:
         help="Assistant 模式使用的稳定测试用户标识；默认按本次运行生成",
     )
     parser.add_argument("--cases", default=str(ROOT / "rag-acceptance" / "cases.jsonl"))
+    parser.add_argument(
+        "--case-id",
+        action="append",
+        dest="case_ids",
+        help="只运行指定用例；可重复传入，默认运行用例文件中的全部内容",
+    )
     parser.add_argument("--out-dir", default=str(ROOT / "rag-acceptance" / "reports"))
     args = parser.parse_args()
 
@@ -296,6 +364,14 @@ async def main() -> int:
         for line in Path(args.cases).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+    if args.case_ids:
+        selected_ids = set(args.case_ids)
+        cases = [case for case in cases if case.get("id") in selected_ids]
+        missing_ids = selected_ids - {str(case.get("id")) for case in cases}
+        if missing_ids:
+            raise SystemExit(
+                "未找到指定 Golden 用例: " + ", ".join(sorted(missing_ids))
+            )
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
     external_user_id = args.external_user_id or f"golden-assistant-{run_id}"
@@ -329,9 +405,40 @@ async def main() -> int:
             if not bool(selected.get("ready")):
                 print(f"Assistant 目标知识库未就绪: {args.kb_id}")
                 return 2
-            catalog_norm: dict[str, str] = {}
+            observer_token = _env_value("GOLDEN_TOKEN", "SERVICE_TOKEN")
+            if not observer_token:
+                print(
+                    "V2 Assistant Golden 需要 GOLDEN_TOKEN 或 SERVICE_TOKEN 读取内部 Trace"
+                )
+                return 2
+            docs_resp = await client.get(
+                f"{args.base_url}/api/v1/knowledge-bases/{args.kb_id}/documents",
+                headers={"Authorization": f"Bearer {observer_token}"},
+                timeout=30.0,
+            )
+            if docs_resp.status_code != 200:
+                print(f"Golden 内部文档目录不可用: HTTP {docs_resp.status_code}")
+                return 2
+            docs_payload = docs_resp.json()
+            docs = (
+                docs_payload
+                if isinstance(docs_payload, list)
+                else docs_payload.get("items", [])
+            )
+            catalog_by_id = {
+                str(item["id"]): str(
+                    item.get("display_name") or item.get("filename") or ""
+                )
+                for item in docs
+                if item.get("id")
+            }
+            catalog_norm: dict[str, str] = {
+                title: normalize(title) for title in catalog_by_id.values() if title
+            }
             print(f"Assistant 知识库: {selected.get('name')} ({args.kb_id})")
         else:
+            observer_token = None
+            catalog_by_id: dict[str, str] = {}
             docs_resp = await client.get(
                 f"{args.base_url}/api/v1/knowledge-bases/{args.kb_id}/documents",
                 params={"page_size": 200},
@@ -395,17 +502,39 @@ async def main() -> int:
                     payload.get("conversation_id") or conversation_id or ""
                 )
                 expected = turn["expected"]
-                hits = extract_hits(
+                public_hits = extract_hits(
                     payload,
                     catalog_norm,
                     include_mentions=expected.get("tolerance") != "NONE",
                     include_suggestions=bool(expected.get("allow_suggested_documents")),
                 )
-                passed, problems = evaluate(turn["expected"], hits)
+                hits = public_hits
+                evidence_mode = "PUBLIC"
+                observation_problems: list[str] = []
+                if args.api_mode == "assistant" and observer_token:
+                    trace, observation_error = await observe_trace(
+                        client,
+                        base_url=args.base_url,
+                        token=observer_token,
+                        request_id=request_id,
+                    )
+                    if observation_error:
+                        observation_problems.append(observation_error)
+                    elif trace is not None:
+                        is_v2, hidden_hits, trace_problems = v2_trace_hits(
+                            trace, catalog_by_id
+                        )
+                        if is_v2:
+                            expected = v2_expected(expected)
+                            hits = hidden_hits
+                            evidence_mode = "V2_TRACE"
+                            observation_problems.extend(trace_problems)
+                passed, problems = evaluate(expected, hits)
                 problems = list(problems)
-                problems += evaluate_answer(turn["expected"], response_text(payload))
-                problems += evaluate_content(turn["expected"], payload)
-                max_latency = turn["expected"].get("max_latency_ms")
+                problems += observation_problems
+                problems += evaluate_answer(expected, response_text(payload))
+                problems += evaluate_content(expected, payload)
+                max_latency = expected.get("max_latency_ms")
                 if max_latency is not None and latency_ms > int(max_latency):
                     problems.append(f"延迟超限 {latency_ms}ms > {max_latency}ms")
                 passed = not problems
@@ -416,6 +545,7 @@ async def main() -> int:
                         "answer_mode": payload.get("answer_mode"),
                         "latency_ms": latency_ms,
                         "hits": sorted(hits),
+                        "evidence_mode": evidence_mode,
                         "passed": passed,
                         "problems": problems,
                         "answer_snippet": str(payload.get("answer") or "")[:180],

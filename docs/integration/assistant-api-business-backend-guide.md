@@ -100,17 +100,21 @@ HTTP 错误字段：
 | `ANSWERED` | 已生成正常回答。 | 优先按 `content` 渲染富文本，空内容块时使用 `answer`；避免重复展示相同正文。 |
 | `UNCONFIRMED` | 当前条件不足以确认；回答可能只追问一个关键条件。 | 展示回答；用户补充条件时必须沿用同一 `conversation_id`。 |
 | `OUT_OF_SCOPE` | 问题不在服务范围内。 | 展示范围提示。 |
-| `DOC_DELIVERED` / `DOCUMENT_DELIVERED` | 已匹配并交付文档内容。 | `answer` 展示加粗文档标题，随后按顺序展示 `content`；不提供原文下载入口。 |
+| `DOC_DELIVERED` / `DOCUMENT_DELIVERED` | 兼容部分运行策略的文档内容交付。 | 按 `answer` 和 `content` 渲染；不得要求所有知识库或所有 RAG 回答返回该类型。 |
 | `CLARIFICATION_REQUIRED` | 需要用户进一步选择或补充。 | 根据 `clarification` 构建交互。 |
 | `ESCALATION_REQUIRED` | 建议转人工或升级处理。 | 根据 `escalation` 进入业务侧流程。 |
 | 其他值 | 后续扩展类型。 | 按普通文本回答兼容，不直接报错。 |
 
-- `document` 和 `references` 中的文档 ID、标题仅用于内容归属与来源展示，不得据此拼接原文下载地址；Assistant API 不提供原文下载能力。
-- `answer` 和文本内容块使用 Markdown；其中 `**《文档标题》**` 表示需要加粗展示的文档标题。
-- 文档直达时，`answer` 仅为 `**《文档标题》**`，不包含“已找到”或“以下是文档内容”等引导语；`content` 从有效正文或操作步骤开始，按源文档首行必为标题的约定，平台无条件删除首条非空文本行，每份文档只删除一次，不比较显示名称。
+- `document` 和 `references` 可能为空；非空时其中的文档 ID、标题仅用于内容归属与来源展示，不得据此拼接原文下载地址。Assistant API 不提供原文下载能力，调用方不得把“无引用”判定为回答失败。
+- 隐藏文档生成型 RAG 的正常结果通常为 `ANSWERED`、`UNCONFIRMED` 或 `OUT_OF_SCOPE`，`document=null` 且 `references=[]` 均是合法成功响应。调用方不得以是否命中文档、是否出现 `DOC_DELIVERED` 或是否存在来源字段判断成功。
+- `answer` 和文本内容块使用 Markdown。兼容文档交付响应中，`**《文档标题》**` 表示需要加粗展示的文档标题；普通 `ANSWERED` 不保证返回标题。
+- 兼容文档交付响应中，`answer` 可仅为 `**《文档标题》**`，`content` 承载正文；当前隐藏文档生成的 RAG 回答只返回组织后的答案和必要图片，不直接交付候选列表或完整原文。回答正文仍可能因技术说明需要提及文档标题、文件名或设备内部编号。
 - 普通 RAG 回答的 `answer` 是最终文本，`content` 是同一回答的结构化版本；收到 `complete` 后替换临时展示，选择富文本或纯文本渲染，避免将两份相同正文依次追加。文档直达除外：标题 `answer` 与正文 `content` 需依次展示。
-- 回答可包含明确标注的文档依据、分析与推断、通用建议；`references` 仅支持有文档依据的部分，`disclaimer` 应在回答附近保留。模型内部模式/引用标记不会作为新生成回答的可见文本输出。
+- 回答可包含明确标注的文档依据、分析与推断、通用建议；`references` 仅支持有文档依据的部分，`disclaimer` 应在回答附近保留。当前 RAG 的有据回答、文档交付、专业分析和待确认响应统一返回短提醒“本回答仅供参考，请结合现场情况和正式资料核验，必要时联系海兰信专业人员。”；范围外响应不重复附加。该字段仍按可选字段兼容，不能据文案做业务分支。模型内部模式/引用标记不会作为新生成回答的可见文本输出。
 - 无可靠文档正文时，服务可在当前知识库的公开专业范围内返回通用工程分析。这类回答不返回文档引用或图片，并携带 `disclaimer`；调用方不得因 `references=[]` 将其判为失败。
+- 外部响应不会提供知识库文档总数、模型 Prompt、候选文档分数、对象存储位置或管理地址。业务后台只能使用公开字段；正文中出现的 D/S/I 形式字符串可能是正常技术编号，不能据此判断为内部信息。排障时以 `request_id`/`trace_id` 联系平台管理员，不得要求扩展返回内部诊断。
+- 管理试问和 Assistant 在相同知识库、问题、会话历史及运行配置下使用同一回答生成链路；管理端可另外查看 Trace，外部 Assistant 契约不会因此增加诊断字段。
+- `include_images=false` 时，本轮首次完成、保存后的历史分页和相同幂等请求重放都不返回图片块；`true` 时也只能使用 `content[].image_asset_id` 读取当前知识库授权图片。
 - 流式问答在服务接受请求前发生的鉴权、参数、会话归属、知识库/索引可用性、幂等或并发错误，以 HTTP 4xx/5xx JSON 返回；接受请求后的生成错误，以 SSE `error` 事件返回。
 - `cursor`、`before` 均为不透明游标，只能原样回传，不得拆解、拼接或自行生成。
 
@@ -128,7 +132,7 @@ HTTP 错误字段：
 7. 后续追问：携带同一 conversation_id，并为每次新提问生成新的 Idempotency-Key
    - 若上一轮为 `UNCONFIRMED` 且询问了关键条件，用户的条件回复也按此步发送，不新建会话
 8. 页面恢复或历史查询：调用会话列表、会话详情和历史消息接口
-9. 展示引用信息与图片：文档标题用于来源展示；根据 image_asset_id 由业务后台代理图片
+9. 展示可选引用与图片：引用非空时按来源展示；根据 image_asset_id 由业务后台代理图片
 ```
 
 ### 4.2 流式问答状态处理
@@ -160,17 +164,17 @@ HTTP 错误字段：
 | 2 | 接口 2：知识库列表 | 当前用户身份 | 已上线知识库的 `knowledge_id`、`ready` | 欢迎语、问答和图片读取 | 必调 |
 | 3 | 接口 3：欢迎语 | 接口 2 的 `knowledge_id` | `message`、`suggestions` | 页面展示或快捷提问 | 可选 |
 | 4 | 接口 7：首次问答 | `knowledge_id`、新 `Idempotency-Key` | `conversation_id`、最终回答 | 建立会话映射并继续追问 | 必调 |
-| 5 | 接口 7：继续问答 | 已保存的 `conversation_id`、新 `Idempotency-Key` | 新消息、文档引用和图片 ID | 更新当前对话 | 按需重复调用 |
+| 5 | 接口 7：继续问答 | 已保存的 `conversation_id`、新 `Idempotency-Key` | 新消息、可选引用和图片 ID | 更新当前对话 | 按需重复调用 |
 | 6 | 接口 4：会话列表 | `knowledge_id` | `conversation_id`、`next_cursor` | 选择历史会话、继续分页 | 有历史页面时调用 |
 | 7 | 接口 5：会话详情 | 接口 4 或接口 7 的 `conversation_id` | 会话元数据 | 校验和展示会话 | 可选 |
-| 8 | 接口 6：历史消息 | `conversation_id` | 消息、`next_before`、文档引用和图片 ID | 恢复对话、继续分页或读取图片 | 有历史页面时调用 |
+| 8 | 接口 6：历史消息 | `conversation_id` | 消息、`next_before`、可选引用和图片 ID | 恢复对话、继续分页或读取图片 | 有历史页面时调用 |
 | 9 | 接口 8：读取回答图片 | 回答或历史消息中的 `image_asset_id` | 图片二进制 | 由业务后台代理给前端 | 有图片时调用 |
 
 关键传递关系：
 
 - `knowledge_id` 只能来自接口 2，后续传给接口 3、7、8。
 - `conversation_id` 来自接口 7 的 `context`/`complete` 或接口 4，后续传给接口 5、6、7。
-- `document_id` 来自 `complete.references[].document_id`、`complete.document.id` 或历史消息中的对应字段，仅用于来源关联和展示，不传给资源接口。
+- `document_id` 仅在 `references` 或 `document` 非空时存在，只用于来源关联和展示，不传给资源接口；业务流程不能依赖其必然出现。
 - `image_asset_id` 来自 `complete.content` 或历史消息的 `content_blocks`，传给接口 8。
 - `next_cursor` 只回传给接口 4；`next_before` 只回传给接口 6。
 - `Idempotency-Key` 由业务后台生成，不来自其他接口；一次用户主动发送对应一个 Key。
@@ -563,7 +567,7 @@ curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/conversations/b23a568e-5d20-42f3
       ],
       "clarification": null,
       "escalation": null,
-      "disclaimer": null,
+      "disclaimer": "本回答仅供参考，请结合现场情况和正式资料核验，必要时联系海兰信专业人员。",
       "error": null,
       "created_at": "2026-09-08T02:00:10Z",
       "updated_at": "2026-09-08T02:00:10Z"
@@ -594,7 +598,7 @@ curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/conversations/b23a568e-5d20-42f3
 | `items[].references` | object[] | 是 | 回答引用列表，常用字段为 `document_id`、`title`。 | 展示来源标题；不提供原文下载操作。 |
 | `items[].clarification` | object/null | 否 | 需要用户补充信息时的结构化内容。 | 根据内容生成补充提问交互。 |
 | `items[].escalation` | object/null | 否 | 建议转人工或升级处理的信息。 | 交给业务侧人工流程。 |
-| `items[].disclaimer` | string/null | 否 | 回答附加提示。 | 在回答附近展示。 |
+| `items[].disclaimer` | string/null | 否 | 回答附加提示；当前 RAG 正常技术响应统一使用一行短提醒。 | 非空时在回答附近展示；保持对省略或 `null` 的兼容。 |
 | `items[].error` | object/null | 否 | 失败或取消消息的错误信息。 | 非空时显示失败状态，不把不完整内容当作成功答案。 |
 | `items[].error.code` | string | 条件必有 | 机器可读错误码。 | 用于业务分支和日志。 |
 | `items[].error.message` | string | 条件必有 | 用户可读错误说明。 | 可展示给用户。 |
@@ -622,7 +626,7 @@ Content-Type: application/json
 
 接口名称：流式问答
 
-接口用途：提交用户问题，并通过 SSE 持续返回回答、引用和资源信息。
+接口用途：提交用户问题，并通过 SSE 持续返回回答及可选的引用、图片资源信息。
 
 method：`POST`
 
@@ -649,7 +653,7 @@ Body：
 | `conversation_id` | UUID string / null | 否 | 首次问答省略或传 `null`，追问传服务返回的会话 ID。 |
 | `question` | string | 是 | 本次新增问题，长度 1～4000；不要拼接完整历史。 |
 | `choice_id` | string / null | 否 | 用户选择建议选项时回传，长度 1～100。 |
-| `include_images` | boolean | 否 | 是否在本轮回答中返回结构化图片块，默认 `true`；`false` 不返回图片块，但保留正文、表格和文档来源，不表示关闭图片理解。 |
+| `include_images` | boolean | 否 | 是否在本轮回答中返回结构化图片块，默认 `true`；`false` 不返回图片块，但不改变正文生成，也不表示关闭图片理解。`references` 仍可能为空。 |
 
 请求示例：
 
@@ -689,7 +693,7 @@ event: delta
 data: {"message_id":"f115de3b-30dd-462b-b07f-e88ae102a289","text":"如下……"}
 
 event: complete
-data: {"request_id":"916752f2-5256-46d3-a186-e62417e3f23a","conversation_id":"b23a568e-5d20-42f3-87e6-d7019b992c70","message_id":"f115de3b-30dd-462b-b07f-e88ae102a289","trace_id":"0a377fb1-a80f-43a6-85ee-189de51d15f9","response_type":"ANSWERED","answer":"办理流程如下……","content":[{"type":"text","text":"办理流程如下……"},{"type":"image","image_asset_id":"5b594127-f6b8-41b0-8bd8-5df90f47ff26"}],"sections":[],"references":[{"document_id":"79271b06-cf5e-4c6c-aea9-c8b48f803543","title":"船舶证书办理指南"}],"next_suggestions":[],"created_at":"2026-09-08T02:00:10Z"}
+data: {"request_id":"916752f2-5256-46d3-a186-e62417e3f23a","conversation_id":"b23a568e-5d20-42f3-87e6-d7019b992c70","message_id":"f115de3b-30dd-462b-b07f-e88ae102a289","trace_id":"0a377fb1-a80f-43a6-85ee-189de51d15f9","response_type":"ANSWERED","answer":"办理流程如下……","content":[{"type":"text","text":"办理流程如下……"},{"type":"image","image_asset_id":"5b594127-f6b8-41b0-8bd8-5df90f47ff26"}],"sections":[],"references":[{"document_id":"79271b06-cf5e-4c6c-aea9-c8b48f803543","title":"船舶证书办理指南"}],"disclaimer":"本回答仅供参考，请结合现场情况和正式资料核验，必要时联系海兰信专业人员。","next_suggestions":[],"created_at":"2026-09-08T02:00:10Z"}
 
 ```
 
@@ -737,7 +741,7 @@ SSE 事件关系：
 | `message_id` | UUID string | 是 | 最终 Assistant 消息 ID。 | 按 ID 幂等保存最终回答。 |
 | `trace_id` | UUID string/null | 否 | 本轮追踪 ID。 | 故障反馈时提供。 |
 | `response_type` | string/null | 否 | 回答类型。 | 选择展示组件；未知值按普通文本处理。 |
-| `answer` | string | 是 | 完整最终回答；文档直达时仅为 Markdown 加粗的文档标题。 | 覆盖由 `delta` 拼接的临时文本；文档直达后继续按顺序渲染 `content`。 |
+| `answer` | string | 是 | 完整最终回答；兼容文档交付类型时可能仅为 Markdown 加粗的文档标题。 | 覆盖由 `delta` 拼接的临时文本；再按 `response_type` 和 `content` 渲染。 |
 | `content` | object[] | 是 | 结构化内容块，常见类型为 `text`、`table`、`image`。 | 按数组顺序和 `type` 渲染。 |
 | `content[].type` | string | 条件必有 | 内容块类型。 | `text/table` 展示文本，`image` 加载图片；未知类型忽略。 |
 | `content[].text` | string/null | 否 | 文本或表格内容。 | 存在时原样展示。 |
@@ -745,12 +749,12 @@ SSE 事件关系：
 | `content[].source_id` | string/null | 否 | 内容块对应的引用标识。 | 可用于关联引用，不用于拼接下载地址。 |
 | `sections` | object[] | 是 | 分段回答结构，可能为空。 | 支持时分段展示，否则使用 `answer`。 |
 | `document` | object/null | 否 | 单文档交付信息，常用字段为 `id`、`title`。 | 展示文档归属；不得使用 `id` 拼接下载地址。 |
-| `references` | object[] | 是 | 回答引用列表。 | 展示来源，不提供原文下载操作。 |
+| `references` | object[] | 是 | 回答引用列表，允许为空；普通 RAG 回答当前可固定为空。 | 非空时展示来源；为空时正常展示答案，不提供原文下载操作。 |
 | `references[].document_id` | UUID string | 条件必有 | 被引用文档 ID。 | 用于业务侧来源关联，不传给资源接口。 |
 | `references[].title` | string | 否 | 被引用文档标题。 | 作为普通文本展示；回答正文中的 `**《标题》**` 按 Markdown 加粗。 |
 | `clarification` | object/null | 否 | 需要用户补充信息时的内容。 | 转换为补充提问交互。 |
 | `escalation` | object/null | 否 | 转人工或升级处理信息。 | 对接业务侧人工流程。 |
-| `disclaimer` | string/null | 否 | 附加提示。 | 在回答附近展示。 |
+| `disclaimer` | string/null | 否 | 附加提示；当前 RAG 正常技术响应统一使用一行短提醒。 | 非空时在回答附近展示；保持对省略或 `null` 的兼容。 |
 | `next_suggestions` | string[] | 是 | 下一步建议问题，可能为空。 | 可渲染为快捷提问。 |
 | `created_at` | datetime string | 是 | 服务端生成终态的时间。 | 记录并按业务时区展示。 |
 
@@ -797,8 +801,8 @@ data: {"code":"TURN_DEADLINE_EXCEEDED","message":"服务繁忙，请稍后重试
 - 同一会话同一时刻只允许一个问答请求。首次问答尚未取得 `conversation_id` 时，业务后台应按自己的稳定聊天窗口标识串行化请求。
 - 幂等重放可能直接返回 `accepted → complete` 或 `accepted → error`，调用方不得假定一定会收到 `delta`。
 - 失败重放保留原错误的 `retryable`、已有标识与 `partial_content`，不会重新生成回答；若保存了原 `request_id`，重放错误仍使用该标识，本次 HTTP 标识以响应头和 `accepted` 为准。明确失败后重新发起仍须使用新 Key。
-- 文档直达通过 `complete.content` 返回当前索引已解析的全部正文、表格和图片引用（关闭图片时不含图片），去除开头重复标题，不因文档较长省略尾部步骤。`answer` 仅为标题，不能代替正文；这不等于还原 DOCX 页面排版，也不承诺普通生成式问答复述整份文档。
-- 局部问题可返回 `ANSWERED` 而不交付整篇文档；明确索要全文或完整流程时才优先返回 `DOC_DELIVERED`。调用方只按 `response_type`、`content` 和 `references` 渲染，不根据问题关键词自行预判展示形式。
+- `DOC_DELIVERED`/`DOCUMENT_DELIVERED` 仅是兼容类型：出现时按 `answer` 和 `content` 顺序渲染；调用方不得假设明确索要完整流程就一定收到该类型。当前 RAG 可读取内部文档后直接返回 `ANSWERED`，公开 `content` 只包含组织后的答案和必要图片，不包含候选完整原文。
+- 局部问题和完整流程都可能返回 `ANSWERED`；调用方只按实际 `response_type`、`content` 和 `references` 渲染，不根据问题关键词预判展示形式，也不依赖文档标题或来源必然出现。
 - 若 `UNCONFIRMED` 正文要求补充一个条件，下一轮应沿用同一 `conversation_id`；换设备、换故障或改问新任务时则直接发送完整新问题，不要伪造条件选项。
 - 长文档可能产生较大的单个 SSE 事件；须收到事件结束空行后再解析 JSON，不能把 TCP/HTTP 数据块当作完整事件。图片仍按 ID 独立读取，不把图片二进制嵌入回答。
 - 客户端断开后，业务后台应取消对上游 SSE 的读取，避免无效连接继续占用资源。

@@ -18,6 +18,15 @@ async def load(r, epoch=0, **kwargs):
         return await repo._focused_history(conn, r.conv, epoch, **kwargs)
 
 
+async def load_v2(r, **kwargs):
+    repo = RagRepository(
+        r.engine,
+        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+    )
+    async with r.engine.connect() as conn:
+        return await repo._v2_history(conn, r.conv, **kwargs)
+
+
 async def test_explicit_pair_and_legacy_assistant_link_survive_public_snapshot_changes(
     records,  # noqa: F811
 ):
@@ -42,6 +51,124 @@ async def test_explicit_pair_and_legacy_assistant_link_survive_public_snapshot_c
             {"id": r.trace},
         )
     assert (await load(r))[0] == history
+
+
+async def test_v2_history_uses_explicit_complete_pairs_and_ignores_focus_epochs(
+    records,  # noqa: F811
+):
+    async with records.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE message SET rag_user_message_id=:user_id, focus_epoch=41 "
+                "WHERE id=:assistant_id"
+            ),
+            {"user_id": records.messages[0], "assistant_id": records.messages[1]},
+        )
+        await conn.execute(
+            text("UPDATE message SET focus_epoch=99 WHERE id=:user_id"),
+            {"user_id": records.messages[0]},
+        )
+
+    history, diagnostics = await load_v2(records)
+
+    assert history == [
+        {"role": "USER", "content": "设备如何开机"},
+        {"role": "ASSISTANT", "content": "按电源键"},
+        {"role": "USER", "content": "下一步怎么操作"},
+        {"role": "ASSISTANT", "content": "**《原文档》**"},
+    ]
+    assert diagnostics["strategy"] == "v2_complete_rounds"
+    assert diagnostics["selected_message_ids"] == [str(item) for item in records.messages]
+    assert all("message_id" not in item for item in history)
+
+
+async def test_v2_begin_turn_does_not_load_or_write_legacy_focus_context(
+    records,  # noqa: F811
+):
+    index_id = await _insert_active_index(records.engine, records.kb)
+    async with records.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE conversation SET focus_document_id=:document_id, focus_epoch=17, "
+                "chat_context=CAST(:context AS jsonb), support_context_version=8 "
+                "WHERE id=:conversation_id"
+            ),
+            {
+                "document_id": records.document,
+                "conversation_id": records.conv,
+                "context": '{"rag_issue":{"origin_query":"旧问题"},"pending_options":[1]}',
+            },
+        )
+
+    repo = RagRepository(
+        records.engine,
+        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+    )
+    turn = await repo.begin_turn(
+        knowledge_id=records.kb,
+        conversation_id=records.conv,
+        question="现在换一个话题",
+        request_id="v2-focus-isolation",
+    )
+
+    assert turn.index_id == index_id
+    assert turn.focus_document_id is None
+    assert turn.focus_epoch == 0
+    assert turn.context_version == 0
+    assert turn.chat_context == {}
+    assert turn.history == [
+        {"role": "USER", "content": "下一步怎么操作"},
+        {"role": "ASSISTANT", "content": "**《原文档》**"},
+    ]
+    assert turn.history_diagnostics["strategy"] == "v2_complete_rounds"
+
+    async with records.engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT role, focus_epoch FROM message "
+                    "WHERE id IN (:user_id, :assistant_id) ORDER BY sequence_no"
+                ),
+                {
+                    "user_id": turn.user_message_id,
+                    "assistant_id": turn.assistant_message_id,
+                },
+            )
+        ).all()
+        stored_context = (
+            await conn.execute(
+                text(
+                    "SELECT focus_epoch, chat_context, support_context_version "
+                    "FROM conversation WHERE id=:conversation_id"
+                ),
+                {"conversation_id": records.conv},
+            )
+        ).one()
+
+    assert rows == [("USER", 0), ("ASSISTANT", 0)]
+    assert stored_context.focus_epoch == 17
+    assert stored_context.chat_context["rag_issue"]["origin_query"] == "旧问题"
+    assert stored_context.support_context_version == 8
+
+
+@pytest.mark.parametrize("status", ["FAILED", "CANCELLED", "RUNNING"])
+async def test_v2_history_respects_external_request_terminal_state(
+    records,  # noqa: F811
+    status,
+):
+    async with records.engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE assistant_request SET status=:status WHERE id=:request_id"),
+            {"status": status, "request_id": records.request},
+        )
+
+    history, diagnostics = await load_v2(records)
+
+    assert history == []
+    assert diagnostics["excluded"] == [
+        {"message_id": str(records.messages[3]), "reason": "INCOMPLETE_ROUND"},
+        {"message_id": str(records.messages[1]), "reason": "UNLINKED_LEGACY"},
+    ]
 
 
 async def test_unlinked_internal_history_is_not_guessed_from_adjacency(
@@ -121,6 +248,66 @@ async def test_new_rag_turn_persists_pair_and_does_not_repeat_current_question(
     ]
     assert second.has_prior_messages is True
     assert all("我只是做假设" not in h["content"] for h in second.history)
+
+
+async def test_v4_prepared_trace_omits_retired_planner_snapshots(
+    records,  # noqa: F811
+) -> None:
+    await _insert_active_index(records.engine, records.kb)
+    repo = RagRepository(records.engine, Settings(_env_file=None, app_env="test"))
+    turn = await repo.begin_turn(
+        knowledge_id=records.kb,
+        conversation_id=None,
+        question="如何配置 VAU 图像",
+        request_id="v4-trace",
+    )
+    await repo.save_prepared(
+        turn,
+        embedding_provider="fake",
+        embedding_model="fake",
+        vector_candidates=[],
+        bm25_candidates=[],
+        fusion_candidates=[],
+        rerank_candidates=[],
+        rerank_result={"status": "SKIPPED"},
+        selected_context=[],
+        prompt="V2 不保留全文 Prompt",
+        timings={"prepare_turn_ms": 10},
+    )
+    await repo.complete_turn(
+        turn,
+        answer="公开回答",
+        sources=[],
+        usage={},
+        citation_result={},
+        timings={"prepare_turn_ms": 10, "total_ms": 20},
+        doc_routing={"pipeline": "V2", "generation": {"status": "PASSED"}},
+    )
+
+    async with records.engine.connect() as connection:
+        row = (
+            (
+                await connection.execute(
+                    text(
+                        """
+                    SELECT runtime_snapshot, retrieval_result, status, latency
+                    FROM rag_trace WHERE trace_id=:trace_id
+                    """
+                    ),
+                    {"trace_id": turn.trace_id},
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+    assert "semantic_orchestration_config" not in row["runtime_snapshot"]
+    assert "semantic_orchestration" not in row["runtime_snapshot"]
+    assert "response_plan" not in row["runtime_snapshot"]
+    assert row["runtime_snapshot"]["generation"] == {"status": "PASSED"}
+    assert row["retrieval_result"]["mode"] == "HYBRID"
+    assert row["status"] == "COMPLETED"
+    assert row["latency"]["total_ms"] == 20
 
 
 async def test_rag_issue_is_loaded_only_when_its_message_pair_is_valid(

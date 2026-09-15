@@ -41,7 +41,6 @@ def build_suggestions(catalog: list[dict[str, Any]]) -> list[str]:
 def build_welcome(kb: dict[str, Any], catalog: list[dict[str, Any]]) -> dict[str, Any]:
     """Build the welcome payload for a knowledge base."""
     name = str(kb.get("name", "")).strip() or "知识库"
-    description = str(kb.get("description") or "").strip()
     enabled = str(kb.get("status", "")) == "ENABLED"
     ready = enabled and bool(kb.get("active_index_id")) and bool(catalog)
 
@@ -70,16 +69,9 @@ def build_welcome(kb: dict[str, Any], catalog: list[dict[str, Any]]) -> dict[str
             "suggestions": [],
         }
 
-    message = f"你好！我是「{name}」知识库的文档助手，当前已收录 {len(catalog)} 份文档。"
-    if description:
-        message += f"\n{description}"
-    message += (
-        "\n你可以直接描述故障现象或操作目标（例如：如何升级、如何更换部件），"
-        "我会为你定位相关文档，并基于文档内容解答；也可以点击下方的问题开始。"
-    )
     return {
         "knowledge_base": {"id": str(kb["id"]), "name": name, "ready": True},
-        "message": message,
+        "message": _ASSISTANT_WELCOME_MESSAGE,
         "suggestions": build_suggestions(catalog),
     }
 

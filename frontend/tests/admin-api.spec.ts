@@ -99,6 +99,37 @@ describe("admin API", () => {
     expect(new Headers(request.headers).get("Content-Type")).toBe("application/json");
   });
 
+  it("uses the management-only RAG document-card contract with revisions", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    vi.stubGlobal("fetch", fetchMock);
+    const card = {
+      document_type: "PROCEDURE" as const, summary: "配置 VAU 图像",
+      components: ["VAU"], tasks: ["配置图像"], applicable_questions: ["如何配置 VAU 图像"],
+      prerequisites: [], key_topics: ["网络"], exclusions: [],
+      has_procedure: true, has_images: true,
+    };
+    await adminApi.listRagDocumentCards("kb-1", "idx-1");
+    await adminApi.getRagDocumentCardReadiness("kb-1", "idx-1");
+    await adminApi.getRagDocumentCard("kb-1", "doc-1", "idx-1");
+    await adminApi.generateRagDocumentCards("kb-1", {
+      index_id: "idx-1", document_id: "doc-1", replace_confirmed: true,
+    });
+    await adminApi.updateRagDocumentCard("kb-1", "doc-1", "idx-1", 3, card);
+    await adminApi.reviewRagDocumentCard("kb-1", "doc-1", "idx-1", 4, "CONFIRMED");
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "/api/v1/knowledge-bases/kb-1/rag-document-cards?index_id=idx-1",
+      "/api/v1/knowledge-bases/kb-1/rag-document-cards/readiness?index_id=idx-1",
+      "/api/v1/knowledge-bases/kb-1/documents/doc-1/rag-document-card?index_id=idx-1",
+      "/api/v1/knowledge-bases/kb-1/rag-document-cards/generate",
+      "/api/v1/knowledge-bases/kb-1/documents/doc-1/rag-document-card",
+      "/api/v1/knowledge-bases/kb-1/documents/doc-1/rag-document-card/review",
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[4]?.[1].body))).toEqual({
+      index_id: "idx-1", expected_revision: 3, card_payload: card,
+    });
+  });
+
   it("exposes every M6 management operation", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
     vi.stubGlobal("fetch", fetchMock);

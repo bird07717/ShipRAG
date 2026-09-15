@@ -508,11 +508,14 @@ async def cancel_task(
     Cancellation is a database state transition: the worker polls
     task_record.status between documents and stops scheduling new work, so
     in-flight documents finish and the task settles as CANCELLED.  Only
-    DOCUMENT_PROFILE_GENERATE supports this today; other task types keep
+    bounded per-document generators support this today; other task types keep
     running and would misreport their real outcome.
     """
     task = await repository.get_task(task_id)
-    if task["task_type"] != "DOCUMENT_PROFILE_GENERATE":
+    if task["task_type"] not in {
+        "DOCUMENT_PROFILE_GENERATE",
+        "RAG_DOCUMENT_CARD_GENERATE",
+    }:
         raise ApiError("TASK_NOT_CANCELLABLE", "该任务类型暂不支持取消", 409)
     status = str(task["status"])
     if status == "CANCELLED":

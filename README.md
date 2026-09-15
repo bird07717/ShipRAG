@@ -81,6 +81,8 @@ bash scripts/check-m7.sh
 | 对外 Assistant API 完整契约 | [assistant-api-integration-guide.md](docs/integration/assistant-api-integration-guide.md) |
 | 业务后台对接实施指南 | [assistant-api-business-backend-guide.md](docs/integration/assistant-api-business-backend-guide.md) |
 | 小体量 RAG 技术助手优化执行方案（本地已实现，默认关闭） | [rag-technical-assistant-optimization-plan.md](docs/technical/rag-technical-assistant-optimization-plan.md) |
+| RAG 隐藏全文双 LLM V2 执行计划（V0/V1 本地已完成；生产保持 legacy） | [rag-full-document-generation-v2-execution-plan.md](docs/technical/rag-full-document-generation-v2-execution-plan.md) |
+| 已被 V2 取代的 RAG 语义编排历史计划 | [rag-semantic-orchestration-execution-plan.md](docs/technical/rag-semantic-orchestration-execution-plan.md) |
 | 运维与 RAG 回归 | [ops-runbook.md](docs/ops-runbook.md)、[rag-acceptance/README.md](rag-acceptance/README.md) |
 
 ## 协作约定
