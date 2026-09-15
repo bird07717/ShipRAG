@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     m0_target_embedding_dimension: int = 1024
     m0_provider_timeout_seconds: float = 90.0
 
-    m2_embedding_provider: Literal["auto", "siliconflow", "fake"] = "auto"
+    m2_embedding_provider: Literal["auto", "siliconflow", "dashscope", "fake"] = "auto"
     m2_embedding_batch_size: int = 8
     m2_docx_max_bytes: int = 52_428_800
     m2_docx_max_entries: int = 2_000
@@ -95,6 +95,8 @@ class Settings(BaseSettings):
     m3_rag_full_context_token_budget: int = 20_000
     m3_rag_answer_max_tokens: int = 4_096
     m3_rag_answer_timeout_seconds: float = 45.0
+    m3_rag_answer_thinking_enabled: bool = False
+    m3_rag_answer_thinking_budget: int = 2_048
     m3_rag_history_max_rounds: int = 4
     m3_rag_answer_repair_attempts: int = 1
 
@@ -151,15 +153,15 @@ class Settings(BaseSettings):
     m3_query_embedding_retries: int = 1
     m3_rerank_timeout_seconds: float = 15.0
 
-    m4_ocr_provider: Literal["auto", "siliconflow", "fake", "disabled"] = "auto"
-    m4_vision_provider: Literal["auto", "zhipu", "fake", "disabled"] = "auto"
+    m4_ocr_provider: Literal["auto", "siliconflow", "dashscope", "fake", "disabled"] = "auto"
+    m4_vision_provider: Literal["auto", "zhipu", "dashscope", "fake", "disabled"] = "auto"
     m4_image_concurrency: int = 8
     m4_ocr_max_tokens: int = 4_096
     m4_vision_max_tokens: int = 1_024
     m4_max_output_chars: int = 20_000
     m4_provider_timeout_seconds: float = 120.0
 
-    m5_rerank_provider: Literal["auto", "siliconflow", "fake"] = "auto"
+    m5_rerank_provider: Literal["auto", "siliconflow", "dashscope", "fake"] = "auto"
     m5_bm25_top_k: int = 10
     m5_fusion_top_k: int = 20
     m5_rerank_top_n: int = 10
@@ -432,6 +434,7 @@ class Settings(BaseSettings):
         "m3_rag_query_interpreter_max_tokens",
         "m3_rag_full_context_token_budget",
         "m3_rag_answer_max_tokens",
+        "m3_rag_answer_thinking_budget",
     )
     @classmethod
     def validate_m3_token_limits(cls, value: int) -> int:

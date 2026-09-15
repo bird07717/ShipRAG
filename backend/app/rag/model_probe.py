@@ -16,6 +16,7 @@ from pydantic import SecretStr
 from app.core.config import Settings
 from app.m0.fixtures import image_data_url
 from app.rag.model_providers import (
+    dashscope_rerank_base_url,
     environment_api_key,
     environment_base_url,
     is_supported_provider,
@@ -61,6 +62,13 @@ def _payload_for(
             "max_tokens": 1,
         }
     if model_type == "RERANK":
+        if provider == "dashscope":
+            # Native /api/v1 text-rerank surface: nested input/parameters.
+            return {
+                "model": model_name,
+                "input": {"query": "ping", "documents": ["ping"]},
+                "parameters": {"return_documents": False, "top_n": 1},
+            }
         return {
             "model": model_name,
             "query": "ping",
@@ -85,10 +93,12 @@ def _payload_for(
     return None
 
 
-def _endpoint_for(model_type: str) -> str:
+def _endpoint_for(model_type: str, provider: str) -> str:
     if model_type in {"LLM", "OCR", "VISION"}:
         return "chat/completions"
     if model_type == "RERANK":
+        if provider == "dashscope":
+            return "services/rerank/text-rerank/text-rerank"
         return "rerank"
     return "embeddings"
 
@@ -146,7 +156,12 @@ async def probe_model(
     if payload is None:
         result["detail"] = "探测请求构造失败"
         return result
-    url = effective_base_url.rstrip("/") + "/" + _endpoint_for(model_type)
+    request_root = effective_base_url
+    if model_type == "RERANK" and provider == "dashscope":
+        # The admin console stores the compatible-mode URL; text-rerank is
+        # only served from the native /api/v1 surface.
+        request_root = dashscope_rerank_base_url(effective_base_url)
+    url = request_root.rstrip("/") + "/" + _endpoint_for(model_type, provider)
 
     owns_client = client is None
     probe_client = client or httpx.AsyncClient(

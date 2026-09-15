@@ -89,6 +89,8 @@ class LlmProvider(Protocol):
         max_tokens: int,
         temperature: float,
         timeout_seconds: float | None = None,
+        thinking: bool = False,
+        thinking_budget: int | None = None,
     ) -> str: ...
 
     async def complete_structured(
@@ -100,6 +102,8 @@ class LlmProvider(Protocol):
         max_tokens: int,
         temperature: float,
         timeout_seconds: float | None = None,
+        thinking: bool = False,
+        thinking_budget: int | None = None,
     ) -> StructuredModel: ...
 
     async def aclose(self) -> None: ...
@@ -127,8 +131,10 @@ class FakeLlmProvider:
         max_tokens: int,
         temperature: float,
         timeout_seconds: float | None = None,
+        thinking: bool = False,
+        thinking_budget: int | None = None,
     ) -> str:
-        del prompt, system, max_tokens, temperature, timeout_seconds
+        del prompt, system, max_tokens, temperature, timeout_seconds, thinking, thinking_budget
         if not self.completions:
             raise LlmError("UPSTREAM_UNAVAILABLE", "Fake complete 未配置", retryable=False)
         return self.completions.pop(0)
@@ -142,6 +148,8 @@ class FakeLlmProvider:
         max_tokens: int,
         temperature: float,
         timeout_seconds: float | None = None,
+        thinking: bool = False,
+        thinking_budget: int | None = None,
     ) -> StructuredModel:
         if not self.completions and schema.__name__ in {"QueryInterpretation", "GeneratedAnswer"}:
             try:
@@ -185,6 +193,8 @@ class FakeLlmProvider:
             max_tokens=max_tokens,
             temperature=temperature,
             timeout_seconds=timeout_seconds,
+            thinking=thinking,
+            thinking_budget=thinking_budget,
         )
 
     async def aclose(self) -> None:
@@ -226,6 +236,7 @@ class ZhipuLlmProvider:
         self.model_name = snapshot.model_name
         self.parameters = snapshot.parameters
         self.settings = settings
+        self._supports_thinking = capability.supports_thinking
         self._supports_json_mode = capability.supports_json_mode
         self.usage: dict[str, Any] = {}
         # Set after the upstream rejects a thinking-control payload with
@@ -323,6 +334,8 @@ class ZhipuLlmProvider:
         max_tokens: int,
         temperature: float,
         timeout_seconds: float | None = None,
+        thinking: bool = False,
+        thinking_budget: int | None = None,
     ) -> str:
         return await self._complete_response(
             prompt,
@@ -330,6 +343,8 @@ class ZhipuLlmProvider:
             max_tokens=max_tokens,
             temperature=temperature,
             timeout_seconds=timeout_seconds,
+            thinking=thinking,
+            thinking_budget=thinking_budget,
         )
 
     async def _complete_response(
@@ -341,6 +356,8 @@ class ZhipuLlmProvider:
         temperature: float,
         timeout_seconds: float | None,
         response_format: dict[str, str] | None = None,
+        thinking: bool = False,
+        thinking_budget: int | None = None,
     ) -> str:
         payload = {
             "model": self.model_name,
@@ -353,11 +370,20 @@ class ZhipuLlmProvider:
             "temperature": temperature,
         }
         if not self._thinking_unsupported:
-            # complete() serves short utility calls (e.g. query rewriting);
-            # reasoning would only burn the token and latency budgets.
-            # Always-thinking models reject the key with HTTP 400/1210; the
-            # retry below strips it once and remembers for this provider.
-            self._apply_thinking(payload, {"type": "disabled"})
+            # Structured utility calls default to disabled; the V2 Answer
+            # Generator explicitly opts in. Always-thinking models reject the
+            # key with HTTP 400/1210, so the retry below strips it once.
+            self._apply_thinking(
+                payload,
+                {"type": "enabled" if thinking and self._supports_thinking else "disabled"},
+            )
+            if (
+                thinking
+                and self._supports_thinking
+                and self.provider == "dashscope"
+                and thinking_budget is not None
+            ):
+                payload["thinking_budget"] = thinking_budget
         if response_format is not None:
             payload["response_format"] = response_format
         request_timeout = httpx.Timeout(timeout_seconds) if timeout_seconds is not None else None
@@ -403,9 +429,17 @@ class ZhipuLlmProvider:
                     choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
                 )
                 has_reasoning = isinstance(message, dict) and bool(message.get("reasoning_content"))
+                if finish_reason == "length" and has_reasoning and thinking:
+                    raise LlmError(
+                        "UPSTREAM_PROTOCOL_ERROR",
+                        "模型思考超出回答预算",
+                        retryable=True,
+                        detail="reasoning_budget_exhausted",
+                    )
                 if (
                     finish_reason == "length"
                     and has_reasoning
+                    and not thinking
                     and effective_max_tokens < self._THINKING_MAX_TOKENS_CEILING
                 ):
                     effective_max_tokens = min(
@@ -523,6 +557,8 @@ class ZhipuLlmProvider:
         max_tokens: int,
         temperature: float,
         timeout_seconds: float | None = None,
+        thinking: bool = False,
+        thinking_budget: int | None = None,
     ) -> StructuredModel:
         # GLM supports JSON mode.  Without it, a long focused-document prompt
         # can occasionally produce prose or a Markdown fence even after the
@@ -530,13 +566,24 @@ class ZhipuLlmProvider:
         # needlessly failed.
         current_prompt = prompt
         for attempt in range(2):
+            # DashScope documents that JSON mode and Qwen thinking are not a
+            # stable combination. Keep the schema instructions in the prompt
+            # and validate locally instead of sending response_format. Calls
+            # with thinking disabled retain provider-enforced JSON mode.
+            response_format = (
+                {"type": "json_object"}
+                if self._supports_json_mode and not (thinking and self.provider == "dashscope")
+                else None
+            )
             raw = await self._complete_response(
                 current_prompt,
                 system=system,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 timeout_seconds=timeout_seconds,
-                response_format={"type": "json_object"} if self._supports_json_mode else None,
+                response_format=response_format,
+                thinking=thinking,
+                thinking_budget=thinking_budget,
             )
             self.usage["structured_attempts"] = attempt + 1
             try:
@@ -569,6 +616,8 @@ async def _complete_structured(
     max_tokens: int,
     temperature: float,
     timeout_seconds: float | None,
+    thinking: bool = False,
+    thinking_budget: int | None = None,
 ) -> StructuredModel:
     """Collect and validate JSON, allowing one repair request only."""
     current_prompt = prompt
@@ -579,6 +628,8 @@ async def _complete_structured(
             max_tokens=max_tokens,
             temperature=temperature,
             timeout_seconds=timeout_seconds,
+            thinking=thinking,
+            thinking_budget=thinking_budget,
         )
         # Keep lightweight operational metadata alongside provider usage so
         # Support traces can distinguish a first-pass structured completion

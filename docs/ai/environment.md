@@ -17,7 +17,7 @@ bash scripts/bootstrap.sh
 
 关键配置类别：应用与 CORS、PostgreSQL、Redis/RQ、MinIO、模型提供者、嵌入/检索阈值、保留期、模型密钥加密，以及生产的 `SERVICE_TOKEN` 和 `ASSISTANT_SERVICE_TOKEN`。`ASSISTANT_REQUEST_RETENTION_DAYS` 默认 7，控制未关联 Conversation 的 Assistant 终态请求保留期，设为 0 禁用清理；维护 Worker 启动时清理一次并注册每日任务，永不由该任务删除 `RUNNING`。`ASSISTANT_REQUEST_STALE_SECONDS` 默认 600，维护 Worker 启动时及每 15 分钟把超过该窗口仍 `RUNNING` 的 Assistant 请求收敛为失败（须大于轮次时限，0 禁用）。`CHAT_TURN_CONCURRENCY_LIMIT` 默认 64（0 禁用）与 `CHAT_TURN_WAIT_SECONDS` 默认 2.0 组成每进程问答轮次准入闸门，超限时快速返回 503 `SERVICE_BUSY`；生产 Compose 另支持可选 `BACKEND_LIMIT_CONCURRENCY`（uvicorn 每进程连接上限，不设置则不限制）。生产示例为 `.env.production.example`；Production Compose 对必要密码、服务凭据和 `MODEL_SECRET_KEY` 使用必填变量。恢复已有数据库时必须沿用能解密其中模型凭据的密钥及版本，不能生成新值替代。
 
-千问 LLM 可直接在管理台模型配置中选择 `dashscope`，填写模型名称、Base URL 和 API Key；默认 Base URL 为 `https://dashscope.aliyuncs.com/compatible-mode/v1/`。数据库加密密钥优先，也可用 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL` 作为环境兜底。不同地域或业务空间的 Base URL 与 API Key 必须匹配；生产推荐按阿里云百炼实际业务空间配置专属域名。
+千问（阿里云百炼 / DashScope）可在管理台模型配置中用于全部五类模型（LLM、Embedding、Rerank、OCR、Vision），填写模型名称、Base URL 和 API Key；默认 Base URL 为 `https://dashscope.aliyuncs.com/compatible-mode/v1/`。数据库加密密钥优先，也可用 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL` 作为环境兜底。不同地域或业务空间的 Base URL 与 API Key 必须匹配；生产推荐按阿里云百炼实际业务空间配置专属域名。Rerank 不在兼容地址上提供服务：后端会把保存的 compatible-mode 地址自动映射到原生 `/api/v1` 根并调用 `services/rerank/text-rerank/text-rerank`（模型如 `gte-rerank`/`gte-rerank-v2`）；Embedding 走兼容 `/embeddings`（模型如 `text-embedding-v3/v4`，仅文本、必须输出 1024 维，单请求批量上限 10 条，`M2_EMBEDDING_BATCH_SIZE` 默认 8 已在限内、调大需保持 ≤10）；OCR/Vision 使用 qwen-vl 系列模型的兼容 `chat/completions` 多模态调用。`M2_EMBEDDING_PROVIDER`、`M4_OCR_PROVIDER`、`M4_VISION_PROVIDER`、`M5_RERANK_PROVIDER` 均接受 `dashscope` 显式值。
 
 staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐式使用 fake。`auto` 必须能从对应环境变量或可解密的 `model_config` 快照取得有效凭据；否则相关摄取/问答请求明确失败。部署校验还要确认在线查询模型与 Active Index 的 Embedding 模型一致，不能只确认服务进程已启动。
 
@@ -31,6 +31,8 @@ staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐�
 | `M3_RAG_FULL_CONTEXT_TOKEN_BUDGET` | `20000` | 隐藏完整文档上下文的估算 Token 上限。 |
 | `M3_RAG_ANSWER_MAX_TOKENS` | `4096` | LLM 2 最大输出 Token。 |
 | `M3_RAG_ANSWER_TIMEOUT_SECONDS` | `45.0` | LLM 2 单次回答时限。 |
+| `M3_RAG_ANSWER_THINKING_ENABLED` | `false` | 可选地为 RAG V2 的 LLM 2 和其修复调用请求内部思考；上线默认关闭，LLM 1 与其他结构化任务始终默认关闭。 |
+| `M3_RAG_ANSWER_THINKING_BUDGET` | `2048` | 启用时 DashScope/Qwen 的最大内部思考 Token；关闭时不生效，与 `M3_RAG_ANSWER_MAX_TOKENS` 的最终回答预算分离。其他 Provider 当前不发送该扩展字段。 |
 | `M3_RAG_HISTORY_MAX_ROUNDS` | `4` | 最近完整问答轮次上限。 |
 | `M3_RAG_ANSWER_REPAIR_ATTEMPTS` | `1` | 结构、证据白名单或真实实现信息违规后的最多修复次数。 |
 | `M3_RAG_SCOPE_MAX_TOKENS` | `800` | 每轮知识库名称/公开范围说明的 Prompt 快照估算 Token 上限；只截断运行时副本，不改数据库说明。 |

@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from app.core.config import Settings
 from app.rag.llm import (
+    LlmError,
     ZhipuLlmProvider,
     _validate_structured_json,
 )
@@ -150,6 +151,61 @@ async def test_dashscope_structured_call_disables_thinking_and_uses_json_mode() 
         )
 
     assert result.core_subject == "PDC 升级"
+
+
+@pytest.mark.asyncio
+async def test_dashscope_structured_call_can_enable_bounded_thinking_without_json_mode() -> None:
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "reasoning_content": "internal reasoning must not be returned",
+                    "content": (
+                        '{"core_subject":"VAU 图像配置","task":"配置","symptoms":[],'
+                        '"exclusions":[],"evidence":[]}'
+                    ),
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 80},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["enable_thinking"] is True
+        assert payload["thinking_budget"] == 2_048
+        assert payload["max_tokens"] == 4_096
+        assert "response_format" not in payload
+        return httpx.Response(200, json=body)
+
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        dashscope_api_key=SecretStr("not-a-real-key"),
+    )
+    snapshot = ModelSnapshot("dashscope", "qwen3.7-flash", {"thinking": {"type": "disabled"}})
+    async with httpx.AsyncClient(
+        base_url=settings.dashscope_base_url, transport=httpx.MockTransport(handler)
+    ) as client:
+        provider = ZhipuLlmProvider(settings, snapshot, client)
+        result = await provider.complete_structured(
+            "请以 JSON 输出",
+            system="仅输出 JSON",
+            schema=ProfileScope,
+            max_tokens=4_096,
+            temperature=0.1,
+            timeout_seconds=45,
+            thinking=True,
+            thinking_budget=2_048,
+        )
+
+    assert result.core_subject == "VAU 图像配置"
+    assert provider.usage == {
+        "prompt_tokens": 100,
+        "completion_tokens": 80,
+        "structured_attempts": 1,
+    }
 
 
 def test_llm_http_error_detail_keeps_only_bounded_provider_fields() -> None:
@@ -305,6 +361,49 @@ async def test_complete_grows_token_budget_when_reasoning_exhausts_it() -> None:
     assert result == "OK"
     assert calls[0] == 1_024
     assert calls[1] == 4_096  # budget grew 4x after reasoning exhausted it
+
+
+@pytest.mark.asyncio
+async def test_explicit_thinking_does_not_expand_answer_budget() -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(int(payload["max_tokens"]))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": "", "reasoning_content": "thinking..."},
+                    }
+                ]
+            },
+        )
+
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        dashscope_api_key=SecretStr("not-a-real-key"),
+    )
+    snapshot = ModelSnapshot("dashscope", "qwen3.7-flash", {})
+    async with httpx.AsyncClient(
+        base_url=settings.dashscope_base_url, transport=httpx.MockTransport(handler)
+    ) as client:
+        provider = ZhipuLlmProvider(settings, snapshot, client)
+        with pytest.raises(LlmError, match="模型思考超出回答预算") as error:
+            await provider.complete(
+                "prompt",
+                system="s",
+                max_tokens=4_096,
+                temperature=0.1,
+                thinking=True,
+            )
+
+    assert error.value.retryable is True
+    assert error.value.detail == "reasoning_budget_exhausted"
+    assert calls == [4_096]
 
 
 def test_elements_from_rows_drops_decorative_image_strips() -> None:

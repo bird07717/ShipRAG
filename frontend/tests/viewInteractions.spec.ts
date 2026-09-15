@@ -906,8 +906,43 @@ describe("view interactions", () => {
 
     await wrapper.get(".el-select").trigger("click");
     await flushPromises();
+    // Element Plus teleports dropdowns to body; earlier dialogs may leave
+    // detached copies behind, so always click the last rendered match.
     const dashscopeOption = Array.from(document.body.querySelectorAll(".el-select-dropdown__item"))
-      .find((item) => item.textContent?.includes("千问"));
+      .filter((item) => item.textContent?.includes("千问"))
+      .pop();
+    expect(dashscopeOption).toBeDefined();
+    (dashscopeOption as HTMLElement).click();
+    await flushPromises();
+
+    const inputs = wrapper.findAll("input");
+    expect(
+      inputs.some(
+        (input) =>
+          input.element.value === "https://dashscope.aliyuncs.com/compatible-mode/v1/",
+      ),
+    ).toBe(true);
+  });
+
+  it("configuration: non-LLM model types also offer DashScope", async () => {
+    const rerankModel = {
+      ...model,
+      id: "m-2",
+      name: "main-rerank",
+      model_type: "RERANK",
+      provider: "siliconflow",
+      model_name: "Qwen/Qwen3-VL-Reranker-8B",
+    };
+    vi.mocked(adminApi.listModels).mockResolvedValue([rerankModel]);
+    const wrapper = await mountView("configuration");
+    await wrapper.get('button[aria-label="编辑模型配置"]').trigger("click");
+    await flushPromises();
+
+    await wrapper.get(".el-select").trigger("click");
+    await flushPromises();
+    const dashscopeOption = Array.from(document.body.querySelectorAll(".el-select-dropdown__item"))
+      .filter((item) => item.textContent?.includes("千问"))
+      .pop();
     expect(dashscopeOption).toBeDefined();
     (dashscopeOption as HTMLElement).click();
     await flushPromises();

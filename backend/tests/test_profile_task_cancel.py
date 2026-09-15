@@ -248,8 +248,10 @@ class _ScriptedProvider:
         max_tokens: int,
         temperature: float,
         timeout_seconds: float | None = None,
+        thinking: bool = False,
+        thinking_budget: int | None = None,
     ) -> Any:
-        del prompt, system, max_tokens, temperature, timeout_seconds
+        del prompt, system, max_tokens, temperature, timeout_seconds, thinking, thinking_budget
         self.calls += 1
         if self.errors:
             raise self.errors.pop(0)

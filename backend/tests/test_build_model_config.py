@@ -152,6 +152,6 @@ class TestBuildModelConfigModule:
         from app.rag.model_providers import supported_providers
 
         assert all(
-            set(supported_providers(model_type)) == {"zhipu", "siliconflow"}
+            set(supported_providers(model_type)) == {"zhipu", "siliconflow", "dashscope"}
             for model_type in BUILD_MODEL_TYPES
         )

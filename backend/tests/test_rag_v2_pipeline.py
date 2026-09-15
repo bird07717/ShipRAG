@@ -328,6 +328,8 @@ async def test_v2_generates_from_hidden_full_document_and_maps_image() -> None:
     assert "prompt" not in repository.completed
     assert repository.completed["doc_routing"]["pipeline"] == "V2"
     answer_trace = repository.completed["doc_routing"]["generation"]["answer"]
+    assert answer_trace["thinking_requested"] is False
+    assert answer_trace["thinking_budget"] == 2_048
     assert answer_trace["unsupported_parameter_count"] == 0
     assert answer_trace["parameter_observations"] == [
         {
@@ -760,6 +762,72 @@ def test_v2_grouped_image_markers_are_structured_without_public_aliases() -> Non
         ("image", "asset-2"),
         ("text", None),
     ]
+
+
+def test_v2_moves_period_before_following_image_blocks() -> None:
+    context = DocumentContext(
+        prompt_context="",
+        document_keys=("D1",),
+        image_bindings=(
+            ImageBinding("I1", "D1", "asset-1"),
+            ImageBinding("I2", "D1", "asset-2"),
+        ),
+        title_aliases=(),
+        document_ids=(str(DOC_ID),),
+        estimated_tokens=0,
+        context_mode="FULL_DOCUMENT",
+    )
+    result = validate_generated_answer(
+        GeneratedAnswer(
+            response_kind="ANSWER",
+            basis="DOCUMENT",
+            answer="检查接线 [IMG:I1][IMG:I2]。然后复位。",
+            used_document_keys=["D1"],
+            used_image_keys=["I1", "I2"],
+        ),
+        context=context,
+        include_images=True,
+    )
+
+    assert result.answer == "检查接线。然后复位。"
+    assert [(block.type, block.text, block.image_asset_id) for block in result.content] == [
+        ("text", "检查接线。", None),
+        ("image", None, "asset-1"),
+        ("image", None, "asset-2"),
+        ("text", "然后复位。", None),
+    ]
+
+
+def test_v2_does_not_append_declared_but_unpositioned_images() -> None:
+    context = DocumentContext(
+        prompt_context="",
+        document_keys=("D1",),
+        image_bindings=(
+            ImageBinding("I1", "D1", "asset-1"),
+            ImageBinding("I2", "D1", "asset-2"),
+        ),
+        title_aliases=(),
+        document_ids=(str(DOC_ID),),
+        estimated_tokens=0,
+        context_mode="FULL_DOCUMENT",
+    )
+    result = validate_generated_answer(
+        GeneratedAnswer(
+            response_kind="ANSWER",
+            basis="DOCUMENT",
+            answer="电脑 IP 是 172.16.8.175。[IMG:I1]",
+            used_document_keys=["D1"],
+            used_image_keys=["I1", "I2"],
+        ),
+        context=context,
+        include_images=True,
+    )
+
+    assert [(block.type, block.image_asset_id) for block in result.content] == [
+        ("text", None),
+        ("image", "asset-1"),
+    ]
+    assert result.citation_result["image_count"] == 1
 
 
 def test_v2_malformed_or_undeclared_image_markers_never_reach_public_text() -> None:

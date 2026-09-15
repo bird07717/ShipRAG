@@ -34,7 +34,7 @@
 
 `adminStore` 是模块级 `reactive` 单例，跨视图保持选中的知识库、文档、索引、Trace、模型和任务状态；选择的知识库 ID 使用 `localStorage`，跟踪任务使用 `sessionStorage`。`engineRoutingStore` 管理知识库运行策略；`ragAdminStore` 服务于 RAG 配置界面。
 
-配置页的 LLM Provider 可选择智谱、硅基流动或千问（阿里云百炼 / DashScope）。选择 DashScope 会填入北京地域共享 OpenAI 兼容地址；管理员仍可按业务空间或地域修改 Base URL。模型身份或密钥变更必须先通过后端连通性探测，保存后从下一轮管理 DemoChat 和 Assistant 请求共同生效；DashScope 不出现在其他模型类型的 Provider 列表中。
+配置页的 LLM Provider 可选择智谱、硅基流动或千问（阿里云百炼 / DashScope）。选择 DashScope 会填入北京地域共享 OpenAI 兼容地址；管理员仍可按业务空间或地域修改 Base URL。模型身份或密钥变更必须先通过后端连通性探测，保存后从下一轮管理 DemoChat 和 Assistant 请求共同生效。2026-09-15 起 Embedding、Rerank、OCR、Vision 的编辑对话框同样提供 DashScope 选项（列表由后端 `supported_providers` 返回），Embedding 身份变更仍走全量重建确认。
 
 知识库文档页可通过管理 API 修改文档显示名称；成功后就地更新列表和已打开的文档详情，不提交索引构建。原始文件名仍只读保留，用于管理员识别源文件。
 

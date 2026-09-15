@@ -21,6 +21,11 @@ from app.rag.v2.document_context import DocumentContext
 
 _IMAGE_MARKER_PATTERN = re.compile(r"\[IMG:([^\]\r\n]{1,100})\]", re.IGNORECASE)
 _IMAGE_KEY_PATTERN = re.compile(r"(?i)(?<![A-Z0-9])I[1-9][0-9]*(?![A-Z0-9])")
+_IMAGE_RUN_TRAILING_PERIOD_PATTERN = re.compile(
+    r"(?P<before>[ \t]*)(?P<markers>(?:\[IMG:[^\]\r\n]{1,100}\][ \t]*)+)"
+    r"(?P<period>[。.!！？?])",
+    re.IGNORECASE,
+)
 _ABSOLUTE_URL_PATTERN = re.compile(r"(?i)https?://[^\s)\]}>]+")
 _MANAGEMENT_PATH_PATTERN = re.compile(
     r"(?i)/(?:api/v1/)?(?:admin|management)(?=$|[/\s?#.,;:，。；：！、])"
@@ -216,6 +221,10 @@ def _content_blocks(
     used_images: tuple[str, ...],
     include_images: bool,
 ) -> tuple[str, list[ContentBlock]]:
+    answer = _IMAGE_RUN_TRAILING_PERIOD_PATTERN.sub(
+        lambda match: f"{match.group('period')}{match.group('markers').rstrip()}",
+        answer,
+    )
     image_map = {binding.key: binding.asset_id for binding in context.image_bindings}
     blocks: list[ContentBlock] = []
     last_end = 0
@@ -234,10 +243,6 @@ def _content_blocks(
     if tail:
         blocks.append(ContentBlock(type="text", text=tail))
     public_answer = clean_model_text(_IMAGE_MARKER_PATTERN.sub("", answer))
-    if include_images:
-        for key in used_images:
-            if key in image_map and key not in emitted:
-                blocks.append(ContentBlock(type="image", image_asset_id=image_map[key]))
     if not blocks and public_answer:
         blocks.append(ContentBlock(type="text", text=public_answer))
     return public_answer, blocks
@@ -313,6 +318,6 @@ def validate_generated_answer(
             "status": "NOT_PUBLIC",
             "pipeline": "V2",
             "document_count": len(used_documents),
-            "image_count": len(used_images) if include_images else 0,
+            "image_count": sum(block.type == "image" for block in blocks),
         },
     )

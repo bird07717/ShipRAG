@@ -24,6 +24,8 @@ class _CapturingFakeLlmProvider(FakeLlmProvider):
         max_tokens: int,
         temperature: float,
         timeout_seconds: float | None = None,
+        thinking: bool = False,
+        thinking_budget: int | None = None,
     ) -> str:
         self.prompt = prompt
         return await super().complete(
@@ -32,6 +34,8 @@ class _CapturingFakeLlmProvider(FakeLlmProvider):
             max_tokens=max_tokens,
             temperature=temperature,
             timeout_seconds=timeout_seconds,
+            thinking=thinking,
+            thinking_budget=thinking_budget,
         )
 
 
@@ -146,6 +150,10 @@ def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> 
     payload = json.loads(prompt)
     assert payload["conversation_relation"] == "CORRECTION"
     assert payload["active_task"] == "检查 PDC"
+    assert "answer_depth" not in payload
+    assert "最小充分回答" in prompt
+    assert "即使用户没有说“完整、详细、全部”" in prompt
+    assert "不要因为上下文提供了图片就全部使用" in prompt
 
 
 @pytest.mark.asyncio
@@ -173,6 +181,8 @@ async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up(
     )
 
     prompt = json.loads(provider.prompt)
+    assert "answer_depth" not in prompt["output_example"]
+    assert any("不决定回答篇幅" in rule for rule in prompt["rules"])
     assert prompt["immediate_previous_round"] == {
         "user_request": "请完整展示更换 PSU 电源板的步骤",
         "assistant_answer_untrusted": "需要拆下 3359 核心板及底板。",
@@ -181,6 +191,7 @@ async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up(
     assert outcome.interpretation.active_task == "更换 VDR600 PSU 电源板并拆装 3359 核心板"
     trace = outcome.trace_dict()
     assert trace["relation"] == "FOLLOW_UP"
+    assert "answer_depth" not in trace
     assert trace["active_task_chars"] == len(outcome.interpretation.active_task)
     assert trace["active_task_sha256"]
     assert outcome.interpretation.active_task not in json.dumps(trace, ensure_ascii=False)

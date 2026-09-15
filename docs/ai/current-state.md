@@ -2,6 +2,14 @@
 
 > 本文记录当前有效状态，不是任务流水账。项目文档、本地代码与真实模型验证更新至 2026-09-15；生产状态最近核对于 2026-09-11。
 
+## 千问扩展为全模型类型 Provider（2026-09-15，本地已实施，未部署）
+
+- 管理台模型配置中，千问（阿里云百炼 / DashScope）不再仅限 LLM：`model_providers.py` 的能力注册表为 EMBEDDING、RERANK、OCR、VISION 增加了 `dashscope`，前端 Provider 下拉由后端 `supported_providers` 驱动，自动跟随，无需前端代码改动。
+- Embedding、OCR、Vision 复用既有 OpenAI 兼容实现（`/embeddings` 与多模态 `chat/completions`，qwen-vl 默认不思考，不发送 thinking 控制）；Rerank 新增 `DashScopeRerankProvider`（`app/rag/rerank.py`），请求 DashScope 原生 `/api/v1/services/rerank/text-rerank/text-rerank` 端点，payload 为嵌套 `input`/`parameters` 结构并解析 `output.results`；`dashscope_rerank_base_url()` 把管理台保存的 compatible-mode 地址映射到 `/api/v1` 根（业务空间/国际站域名仅替换路径前缀）。
+- `model_probe.py` 的连通性探测对 DashScope Rerank 使用同一原生端点与嵌套 payload；`M2_EMBEDDING_PROVIDER`、`M4_OCR_PROVIDER`、`M4_VISION_PROVIDER`、`M5_RERANK_PROVIDER` 的 Literal 均新增 `dashscope` 显式值（默认仍 `auto`，现有部署不受影响）。
+- 验证：后端定向测试 `tests/test_model_secrets.py`（含 DashScope rerank 原生端点/payload/解析/URL 映射、embedding/vision 兼容端点、probe 三类新用例）、`tests/test_build_model_config.py`、`tests/test_m4_multimodal.py`、`tests/test_m5_retrieval.py`、`tests/test_config.py`、`tests/test_m3_rag.py`、`tests/test_api.py`、`tests/test_admin_config.py`、`tests/test_rag_v2_pipeline.py`、`tests/test_m2_ingestion.py` 全部通过；Ruff lint/format 与 Mypy 定向检查通过；前端 `tests/viewInteractions.spec.ts` 19 项（含新增"非 LLM 模型也提供千问选项"用例）、`npm run lint`、`npm run type-check` 通过。未执行真实 DashScope 嵌入/重排/OCR/Vision 端到端调用（协议按官方文档与公开实现交叉核对：兼容模式 `dimensions` 参数、原生 rerank 嵌套结构），未运行完整 `scripts/check.sh`，无数据库迁移。
+- 待确认：真实百炼账号下 gte-rerank-v2 与 text-embedding-v4 的实测连通性和批量/速率限制；生产部署后建议先用"测试连接"探测再启用。
+
 ## 并发加固：RUNNING 自动恢复、轮次准入闸门与运行指标（2026-09-15，本地已实施，未部署）
 
 - 崩溃 API 进程遗留的 `RUNNING` Assistant 请求不再只靠手动命令：`app/tasks/assistant_recovery.py` 让维护 Worker 启动时及每 15 分钟将超过 `ASSISTANT_REQUEST_STALE_SECONDS`（默认 600，校验器强制大于轮次时限——Support 优先已冻结、RAG 轮次被时限包络，见 ADR-0021；0 禁用）的 RUNNING 请求及关联消息/Trace 用与 `app.assistant.recovery` 相同的 `FOR UPDATE SKIP LOCKED` 单语句收口为失败；Redis 哨兵键防多 Worker 重复注册周期链，`with_scheduler` 条件已包含该链。恢复任务与维护队列共享串行 Worker，长维护任务可能推迟恢复（见 known-issues）。
@@ -36,6 +44,8 @@
 - V4.1 在多查询 Chunk/卡片 RRF 后复用现有 Rerank Provider 做文档级重排，再取前 3 份全文；排序异常保持 RRF 原顺序。IP、版本、带单位数值和端口只在 Trace 标注 `DOCUMENT/USER_PROVIDED/UNSUPPORTED`，不拦截、修复或改变公开答案。现有 Chunk 大小、向量/BM25 Top-K、全文文档上限 3 和 20,000 Token 上下文预算未调整。
 - V4.2 让 LLM 1 显式区分新任务、追问和纠正，并从最近完整轮次的用户请求提取当前任务；追问任务锚点同时进入召回、文档级 Rerank 和 LLM 2，换题不携带旧锚点。有效 V2 的 `prepare()` 只冻结轮次和参数，不再运行 legacy Embedding/BM25/向量检索或混入其候选；本轮所有去重查询只批量 Embedding 一次。
 - V2 准备 Trace 的上下文只保留 Chunk/文档/元素/图片 ID 和 SHA-256，生成 Trace 另记隐藏全文上下文与公开答案 SHA-256；不保存 V2 完整 Prompt。全文和图片继续按知识库与冻结索引加载，图片外部读取已有跨库 404 PostgreSQL 用例。
+- V2 图片公开组装已统一“完整句子及句末标点在前、关联图片在后”：LLM 2 Prompt 明确要求标点写在 `[IMG:...]` 前，若模型仍输出 `文字[IMG:I1]。` 或连续多图后置标点，后端会在生成公开 `content` 前确定性调整为 `文字。` 后接原序图片，不增加模型调用、不改图片白名单和 Assistant 字段。
+- V2 已撤销 LLM 1 的 `SHORT/FOCUSED/COMPLETE` 回答深度分类：LLM 1 只负责问题还原、任务继承和检索辅助，LLM 2 结合当前问题、历史及完整候选文档自行生成“最小充分回答”。单一事实短答，普通操作即使未显式说“完整”也应覆盖完成任务所需步骤，局部追问不重复整套流程，排查和解释按其真实信息需求组织。LLM 1 始终默认关闭思考；LLM 2 及一次合规修复的有界思考能力保留，但上线默认关闭。开启实验使用 DashScope/Qwen 2048 Token 独立思考预算，推理正文不进入答案或 Trace，思考模式下不强制 JSON Mode 而由本地 Schema 校验。图片只在正文明确放置有效 `[IMG:...]` 标记时公开，未定位图片不追加到末尾，实际图片计数与公开块一致。开启思考后的真实 Assistant 定向 4 个用例/6 轮全部通过，但耗时约 22～37 秒；此前关闭思考的完整 Golden 为 49/50、p50 11.542 秒，两组并非同题 A/B，尚不能证明思考带来稳定质量增益，因此默认恢复为关闭。报告为 `baseline-20260915-155214.json`、`baseline-20260915-155525.json` 和 `baseline-20260915-140516.json`；未在本次默认值调整后运行完整 Golden。该调整无接口字段或数据库迁移。
 - 本地活动索引已只读核验 42/42 份文档卡片均为 `READY/CONFIRMED`。真实 Assistant 冒烟已覆盖 VAU 完整步骤、IP 短答、同会话无图排查、多文档综合和范围外收口；相同幂等键 46ms 重放且未重新生成。中途发现旧检索可返回已软删除文档，现已令向量、BM25 和按 ID 读取统一限定 `document_source.status='STORED'`。
 - 当前已完成 V0～V5。`RagService` 只准备冻结轮次并进入 `_generate_v2()`；运行时 Prompt 只展示 Query Interpreter 与 Answer Generator。数据库 Active Prompt 不再是 RAG 就绪条件，旧数据库 Prompt 和 Trace 结构仅保留管理/历史读取兼容。Support 文档路由策略已移至 `app.support.document_routing_policy` 并冻结，RAG 不导入；共享焦点列和历史迁移因 Support 仍使用而保留。
 - V5 最终 `scripts/check.sh` 退出码 0：Ruff、格式、Mypy（139 个源文件）、后端 778 项、摄取/RAG V2/管理三项 fake smoke、后端累计覆盖率 81%、前端 lint/类型检查、22 个文件 161 项、覆盖率 91.36% 和生产构建全部通过；仅保留既有 Vite 大包警告。Production Compose 用占位凭据完成 `config --quiet`。
@@ -144,7 +154,7 @@
 ## 正在进行的工作
 
 - 2026-09-15 已完成 RAG V4.2 本地收口：Query Interpreter 增加 `NEW_TASK/FOLLOW_UP/CORRECTION` 和脱敏任务锚点，短追问任务同时进入召回、文档级 Rerank 与 LLM 2；有效 V2 的 `prepare()` 不再运行 legacy Embedding/BM25/向量检索或混入其候选，本轮查询只批量 Embedding 一次。真实 Trace 确认追问存在 `CONTEXT_ANCHOR`、换题没有该锚点，且耗时字段不再出现旧预检索阶段。技术助手 Golden 仍为 49/50（98%，50 题/72 轮），原 PSU 端口失败已通过；新唯一失败为 LRU 更换追问虽召回正确更换/升级文档，但模型只采用升级文档并遗漏“配置/导入”断言。p50 12.068s、p95 18.180s、max 24.179s。没有新增配置、迁移、索引重建或生产切换。
-- 2026-09-14 管理台 LLM 配置已新增千问（阿里云百炼 / DashScope）Provider，支持默认 OpenAI 兼容地址、管理台加密 API Key 与环境变量兜底。模型配置仍在保存前执行真实连通性探测，保存后由每轮 Gateway 模型快照同时作用于 DemoChat 和 Assistant；Embedding、Rerank、OCR、Vision 未开放 DashScope，避免在未验证协议能力时扩大范围。
+- 2026-09-14 管理台 LLM 配置已新增千问（阿里云百炼 / DashScope）Provider，支持默认 OpenAI 兼容地址、管理台加密 API Key 与环境变量兜底。模型配置仍在保存前执行真实连通性探测，保存后由每轮 Gateway 模型快照同时作用于 DemoChat 和 Assistant；Embedding、Rerank、OCR、Vision 当时未开放 DashScope——该限制已于 2026-09-15 解除（见顶部记录）。
 - 生产服务器已完成源码、PostgreSQL 和 MinIO 数据迁移，并于 2026-09-10 同步到完成 Assistant 生产验收的版本；核验时服务器工作树与 `origin/main` 一致，生产 `.env` 权限为 `600`，迁移备份校验通过。
 - 生产 PostgreSQL 已位于 Alembic `0041 (head)`；此前核对共有 1 个知识库、64 条文档记录、2004 个分块和 1096 条图片记录，MinIO 有 70 个文档对象和 1232 个图片对象。活动索引状态为 `ACTIVE`。
 - PostgreSQL、Redis 和 MinIO 保持原数据卷持续运行；生产服务器于 2026-09-11 使用提交 `49c799a` 重建后端、前端和两个 Worker，相关容器健康，外部 `/health/ready` 返回 ready，Alembic 为 `0041 (head)`。

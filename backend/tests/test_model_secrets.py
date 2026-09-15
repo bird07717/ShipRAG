@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 from typing import Any
 from uuid import uuid4
@@ -16,12 +17,22 @@ from pydantic import SecretStr
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
-from app.ingestion.embedding import EmbeddingError, create_embedding_provider
+from app.ingestion.embedding import (
+    EmbeddingError,
+    SiliconFlowEmbeddingProvider,
+    create_embedding_provider,
+)
+from app.ingestion.image_understanding import create_vision_provider
 from app.rag.llm import FakeLlmProvider, LlmError, ZhipuLlmProvider, create_llm_provider
 from app.rag.model_probe import probe_model
 from app.rag.model_providers import supported_providers
-from app.rag.models import ModelSnapshot
-from app.rag.rerank import RerankError, SiliconFlowRerankProvider, create_rerank_provider
+from app.rag.models import ModelSnapshot, RerankDocument
+from app.rag.rerank import (
+    DashScopeRerankProvider,
+    RerankError,
+    SiliconFlowRerankProvider,
+    create_rerank_provider,
+)
 
 
 def _raw_key() -> bytes:
@@ -228,6 +239,179 @@ class TestProviderKeyPrecedence:
         finally:
             asyncio.run(provider.aclose())
 
+    def test_dashscope_rerank_uses_native_api_root_and_fallback_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.core.config import Settings
+
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "")
+        settings = Settings(
+            _env_file=None,
+            app_env="test",
+            dashscope_api_key=SecretStr("sk-dashscope"),
+        )
+        provider = create_rerank_provider(
+            settings,
+            ModelSnapshot(provider="dashscope", model_name="gte-rerank-v2", parameters={}),
+        )
+        assert isinstance(provider, DashScopeRerankProvider)
+        try:
+            assert provider.provider == "dashscope"
+            assert provider.client.headers["Authorization"] == "Bearer sk-dashscope"
+            assert str(provider.client.base_url) == "https://dashscope.aliyuncs.com/api/v1/"
+        finally:
+            asyncio.run(provider.aclose())
+
+    def test_dashscope_rerank_maps_compatible_mode_and_custom_roots(self) -> None:
+        from app.rag.model_providers import dashscope_rerank_base_url
+
+        assert (
+            dashscope_rerank_base_url("https://dashscope.aliyuncs.com/compatible-mode/v1/")
+            == "https://dashscope.aliyuncs.com/api/v1/"
+        )
+        assert (
+            dashscope_rerank_base_url(
+                "https://dashscope-bp1234.example.aliyuncs.com/compatible-mode/v1"
+            )
+            == "https://dashscope-bp1234.example.aliyuncs.com/api/v1/"
+        )
+        assert (
+            dashscope_rerank_base_url("https://dashscope.aliyuncs.com/api/v1")
+            == "https://dashscope.aliyuncs.com/api/v1/"
+        )
+        assert (
+            dashscope_rerank_base_url("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/")
+            == "https://dashscope-intl.aliyuncs.com/api/v1/"
+        )
+
+    def test_dashscope_rerank_sends_native_payload_and_parses_results(self) -> None:
+        from app.core.config import Settings
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/services/rerank/text-rerank/text-rerank"
+            payload = json.loads(request.content)
+            assert payload["model"] == "gte-rerank-v2"
+            assert payload["input"] == {
+                "query": "数据库默认端口",
+                "documents": ["默认端口为3306", "这是一段无关文字"],
+            }
+            assert payload["parameters"] == {"return_documents": False, "top_n": 1}
+            return httpx.Response(
+                200,
+                json={
+                    "output": {"results": [{"index": 0, "relevance_score": 0.98}]},
+                    "usage": {"total_tokens": 12},
+                    "request_id": "req-1",
+                },
+            )
+
+        settings = Settings(
+            _env_file=None,
+            app_env="test",
+            dashscope_api_key=SecretStr("sk-dashscope"),
+        )
+        snapshot = ModelSnapshot(provider="dashscope", model_name="gte-rerank-v2", parameters={})
+        provider = DashScopeRerankProvider(
+            settings,
+            snapshot,
+            httpx.AsyncClient(
+                base_url="https://dashscope.aliyuncs.com/api/v1/",
+                transport=httpx.MockTransport(handler),
+            ),
+        )
+        outcome = asyncio.run(
+            provider.rerank(
+                "数据库默认端口",
+                [
+                    RerankDocument("默认端口为3306"),
+                    RerankDocument("这是一段无关文字"),
+                ],
+                1,
+            )
+        )
+        assert outcome.provider == "dashscope"
+        assert outcome.model_name == "gte-rerank-v2"
+        assert [(item.index, item.score) for item in outcome.items] == [(0, pytest.approx(0.98))]
+        assert outcome.usage == {"total_tokens": 12}
+
+    def test_dashscope_rerank_rejects_malformed_output(self) -> None:
+        from app.core.config import Settings
+
+        settings = Settings(
+            _env_file=None,
+            app_env="test",
+            dashscope_api_key=SecretStr("sk-dashscope"),
+        )
+        snapshot = ModelSnapshot(provider="dashscope", model_name="gte-rerank-v2", parameters={})
+        provider = DashScopeRerankProvider(
+            settings,
+            snapshot,
+            httpx.AsyncClient(
+                base_url="https://dashscope.aliyuncs.com/api/v1/",
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, json={"unexpected": True})
+                ),
+            ),
+        )
+        with pytest.raises(RerankError, match="返回格式异常"):
+            asyncio.run(provider.rerank("q", [RerankDocument("a")], 1))
+
+    def test_dashscope_embedding_uses_compatible_endpoint_and_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.core.config import Settings
+
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "")
+        settings = Settings(
+            _env_file=None,
+            app_env="test",
+            m2_embedding_provider="auto",
+            dashscope_api_key=SecretStr("sk-dashscope"),
+        )
+        provider = create_embedding_provider(
+            settings,
+            ModelSnapshot(provider="dashscope", model_name="text-embedding-v4", parameters={}),
+        )
+        assert isinstance(provider, SiliconFlowEmbeddingProvider)
+        try:
+            assert provider.provider == "dashscope"
+            assert provider.client.headers["Authorization"] == "Bearer sk-dashscope"
+            assert (
+                str(provider.client.base_url)
+                == "https://dashscope.aliyuncs.com/compatible-mode/v1/"
+            )
+        finally:
+            asyncio.run(provider.aclose())
+
+    def test_dashscope_vision_uses_compatible_endpoint_and_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.core.config import Settings
+        from app.ingestion.image_understanding import OpenAiCompatibleImageProvider
+
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "")
+        settings = Settings(
+            _env_file=None,
+            app_env="test",
+            m4_vision_provider="auto",
+            dashscope_api_key=SecretStr("sk-dashscope"),
+        )
+        provider = create_vision_provider(
+            settings,
+            ModelSnapshot(provider="dashscope", model_name="qwen-vl-max", parameters={}),
+        )
+        assert isinstance(provider, OpenAiCompatibleImageProvider)
+        assert provider.provider == "dashscope"
+        assert provider.model_name == "qwen-vl-max"
+        try:
+            assert provider.client.headers["Authorization"] == "Bearer sk-dashscope"
+            assert (
+                str(provider.client.base_url)
+                == "https://dashscope.aliyuncs.com/compatible-mode/v1/"
+            )
+        finally:
+            asyncio.run(provider.aclose())
+
     def test_deployed_auto_embedding_without_secret_fails_closed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -267,14 +451,7 @@ class TestProviderKeyPrecedence:
 class TestProbeModel:
     @pytest.mark.parametrize("model_type", ["LLM", "EMBEDDING", "RERANK", "OCR", "VISION"])
     def test_provider_capabilities_are_scoped_by_model_type(self, model_type: str) -> None:
-        expected = (
-            {"zhipu", "siliconflow", "dashscope"}
-            if model_type == "LLM"
-            else {
-                "zhipu",
-                "siliconflow",
-            }
-        )
+        expected = {"zhipu", "siliconflow", "dashscope"}
         assert set(supported_providers(model_type)) == expected
 
     @pytest.mark.parametrize("provider", ["zhipu", "siliconflow", "dashscope"])
@@ -291,6 +468,59 @@ class TestProbeModel:
             provider=provider,
             model_name="test-model",
             base_url="https://example.test/v1/",
+            api_key=SecretStr("sk-test"),
+            client=httpx.AsyncClient(transport=transport),
+        )
+        assert result["ok"] is True
+
+    async def test_dashscope_rerank_probe_uses_native_endpoint(self) -> None:
+        from app.core.config import Settings
+
+        settings = Settings(_env_file=None, app_env="test")
+        captured: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["payload"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={"output": {"results": [{"index": 0, "relevance_score": 0.9}]}},
+            )
+
+        result = await probe_model(
+            settings,
+            model_type="RERANK",
+            provider="dashscope",
+            model_name="gte-rerank-v2",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1/",
+            api_key=SecretStr("sk-test"),
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        assert result["ok"] is True
+        assert captured["url"].endswith("/api/v1/services/rerank/text-rerank/text-rerank")
+        assert captured["payload"]["input"] == {"query": "ping", "documents": ["ping"]}
+        assert captured["payload"]["parameters"] == {"return_documents": False, "top_n": 1}
+
+    @pytest.mark.parametrize("model_type", ["EMBEDDING", "OCR", "VISION"])
+    async def test_dashscope_probe_accepts_compatible_mode_types(self, model_type: str) -> None:
+        from app.core.config import Settings
+
+        settings = Settings(_env_file=None, app_env="test")
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}}],
+                    "data": [{"embedding": [0.1] * 1024}],
+                },
+            )
+        )
+        result = await probe_model(
+            settings,
+            model_type=model_type,
+            provider="dashscope",
+            model_name="test-model",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1/",
             api_key=SecretStr("sk-test"),
             client=httpx.AsyncClient(transport=transport),
         )

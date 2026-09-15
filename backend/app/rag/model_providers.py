@@ -42,20 +42,47 @@ _CAPABILITIES: dict[str, dict[str, ProviderCapability]] = {
     "EMBEDDING": {
         "zhipu": ProviderCapability("zhipu_api_key", "zhipu_base_url"),
         "siliconflow": ProviderCapability("siliconflow_api_key", "siliconflow_base_url"),
+        # OpenAI-compatible /embeddings surface (text-embedding-v3/v4);
+        # text-only, the shared dimensions contract applies.
+        "dashscope": ProviderCapability("dashscope_api_key", "dashscope_base_url"),
     },
     "RERANK": {
         "zhipu": ProviderCapability("zhipu_api_key", "zhipu_base_url"),
         "siliconflow": ProviderCapability("siliconflow_api_key", "siliconflow_base_url"),
+        # Served from the native /api/v1 text-rerank surface, not from
+        # compatible-mode; see dashscope_rerank_base_url().
+        "dashscope": ProviderCapability("dashscope_api_key", "dashscope_base_url"),
     },
     "OCR": {
         "zhipu": ProviderCapability("zhipu_api_key", "zhipu_base_url", supports_thinking=True),
         "siliconflow": ProviderCapability("siliconflow_api_key", "siliconflow_base_url"),
+        # qwen-vl models via the OpenAI-compatible chat/completions surface;
+        # compatible-mode multimodal calls default to no thinking.
+        "dashscope": ProviderCapability("dashscope_api_key", "dashscope_base_url"),
     },
     "VISION": {
         "zhipu": ProviderCapability("zhipu_api_key", "zhipu_base_url", supports_thinking=True),
         "siliconflow": ProviderCapability("siliconflow_api_key", "siliconflow_base_url"),
+        "dashscope": ProviderCapability("dashscope_api_key", "dashscope_base_url"),
     },
 }
+
+
+def dashscope_rerank_base_url(base_url: str) -> str:
+    """Map a DashScope OpenAI-compatible base URL onto the native rerank root.
+
+    The admin console stores one DashScope base URL per model row
+    (compatible-mode by default), but text-rerank is only served from the
+    native ``/api/v1`` surface.  Business-space endpoints keep the same
+    host, so only the path prefix changes.  The returned root always ends
+    with ``/`` so httpx relative-path joins behave like the other
+    providers; a base URL that already points at the native API root only
+    gets its trailing slash normalized.
+    """
+    normalized = base_url.rstrip("/")
+    if "/compatible-mode" in normalized:
+        return normalized.rsplit("/compatible-mode", 1)[0] + "/api/v1/"
+    return normalized + "/"
 
 
 def normalize_provider(provider: str) -> str:

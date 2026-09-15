@@ -178,6 +178,8 @@ class RagV2Pipeline:
                 prompt=prompt,
                 max_tokens=self.settings.m3_rag_answer_max_tokens,
                 timeout_seconds=self.settings.m3_rag_answer_timeout_seconds,
+                thinking_enabled=self.settings.m3_rag_answer_thinking_enabled,
+                thinking_budget=self.settings.m3_rag_answer_thinking_budget,
             )
             generated = normalize_evidence_bindings(generated, context)
             violations = [
@@ -200,6 +202,8 @@ class RagV2Pipeline:
                     },
                     max_tokens=self.settings.m3_rag_answer_max_tokens,
                     timeout_seconds=self.settings.m3_rag_answer_timeout_seconds,
+                    thinking_enabled=self.settings.m3_rag_answer_thinking_enabled,
+                    thinking_budget=self.settings.m3_rag_answer_thinking_budget,
                 )
                 generated = normalize_evidence_bindings(generated, context)
                 violations = [
@@ -263,6 +267,8 @@ class RagV2Pipeline:
                 "retrieval": retrieval_trace,
                 "context": context_trace,
                 "answer": {
+                    "thinking_requested": self.settings.m3_rag_answer_thinking_enabled,
+                    "thinking_budget": self.settings.m3_rag_answer_thinking_budget,
                     "response_kind": generated.response_kind,
                     "basis": generated.basis,
                     "used_document_count": len(generated.used_document_keys),

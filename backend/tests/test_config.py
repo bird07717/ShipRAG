@@ -21,6 +21,8 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
         "M3_RAG_FULL_CONTEXT_TOKEN_BUDGET",
         "M3_RAG_ANSWER_MAX_TOKENS",
         "M3_RAG_ANSWER_TIMEOUT_SECONDS",
+        "M3_RAG_ANSWER_THINKING_ENABLED",
+        "M3_RAG_ANSWER_THINKING_BUDGET",
         "M3_RAG_HISTORY_MAX_ROUNDS",
         "M3_RAG_ANSWER_REPAIR_ATTEMPTS",
         "M3_RAG_QUERY_INTERPRETER_MAX_TOKENS",
@@ -45,6 +47,8 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
     assert settings.m3_rag_full_context_token_budget == 20_000
     assert settings.m3_rag_answer_max_tokens == 4_096
     assert settings.m3_rag_answer_timeout_seconds == 45.0
+    assert settings.m3_rag_answer_thinking_enabled is False
+    assert settings.m3_rag_answer_thinking_budget == 2_048
     assert settings.m3_rag_history_max_rounds == 4
     assert settings.m3_rag_answer_repair_attempts == 1
     assert settings.m3_rag_query_interpreter_max_tokens == 512
@@ -70,6 +74,7 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
         ("m3_rag_history_max_rounds", 21),
         ("m3_rag_full_context_token_budget", 99),
         ("m3_rag_answer_max_tokens", 100_001),
+        ("m3_rag_answer_thinking_budget", 99),
         ("m3_rag_answer_timeout_seconds", 61),
         ("m3_rag_answer_repair_attempts", 3),
     ],
