@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ class QueryInterpretation(BaseModel):
     search_queries: list[str] = Field(default_factory=list, max_length=3)
     key_constraints: list[str] = Field(default_factory=list, max_length=8)
     scope: Literal["IN_SCOPE", "OUT_OF_SCOPE", "UNCERTAIN"] = "UNCERTAIN"
+    relation: Literal["NEW_TASK", "FOLLOW_UP", "CORRECTION"] = "NEW_TASK"
+    active_task: str | None = Field(default=None, max_length=1_000)
 
     @field_validator("resolved_question")
     @classmethod
@@ -36,6 +39,14 @@ class QueryInterpretation(BaseModel):
                 result.append(cleaned)
         return result
 
+    @field_validator("active_task")
+    @classmethod
+    def clean_active_task(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = " ".join(value.split())
+        return cleaned or None
+
 
 @dataclass(frozen=True, slots=True)
 class QueryInterpretationOutcome:
@@ -45,6 +56,7 @@ class QueryInterpretationOutcome:
     reason: str | None = None
 
     def trace_dict(self) -> dict[str, object]:
+        active_task = self.interpretation.active_task or ""
         return {
             "status": self.status,
             "reason": self.reason,
@@ -53,6 +65,11 @@ class QueryInterpretationOutcome:
             "resolved_question_chars": len(self.interpretation.resolved_question),
             "search_query_count": len(self.interpretation.search_queries),
             "constraint_count": len(self.interpretation.key_constraints),
+            "relation": self.interpretation.relation,
+            "active_task_chars": len(active_task),
+            "active_task_sha256": (
+                hashlib.sha256(active_task.encode("utf-8")).hexdigest() if active_task else None
+            ),
         }
 
 
@@ -67,6 +84,31 @@ def fallback_interpretation(question: str) -> QueryInterpretation:
 
 def _history_window(history: list[dict[str, str]], max_rounds: int) -> list[dict[str, str]]:
     return history[-(max_rounds * 2) :]
+
+
+def _immediate_previous_round(
+    history: list[dict[str, str]], max_rounds: int
+) -> dict[str, str] | None:
+    window = _history_window(history, max_rounds)
+    for index in range(len(window) - 2, -1, -1):
+        item = window[index]
+        if item.get("role") != "USER" or not item.get("content", "").strip():
+            continue
+        assistant = next(
+            (
+                candidate
+                for candidate in window[index + 1 :]
+                if candidate.get("role") == "ASSISTANT" and candidate.get("content", "").strip()
+            ),
+            None,
+        )
+        if assistant is None:
+            continue
+        return {
+            "user_request": item["content"],
+            "assistant_answer_untrusted": assistant["content"],
+        }
+    return None
 
 
 async def interpret_query(
@@ -86,6 +128,7 @@ async def interpret_query(
         {
             "current_question": question,
             "recent_completed_history": _history_window(history, max_rounds),
+            "immediate_previous_round": _immediate_previous_round(history, max_rounds),
             "knowledge_base": {
                 "name": knowledge_name,
                 "scope": scope_description,
@@ -96,17 +139,32 @@ async def interpret_query(
                 "search_queries": ["VAU 图像配置 电脑网络参数"],
                 "key_constraints": ["电脑网卡参数"],
                 "scope": "IN_SCOPE",
+                "relation": "FOLLOW_UP",
+                "active_task": "配置 VAU 图像",
             },
             "rules": [
                 "把当前问题还原为可独立检索的问题，不决定回答长短或回答形式。",
                 "历史助手回答只用于理解指代，不得当作产品事实。",
-                "短追问省略设备或任务时，继承最近一轮明确的设备和操作目标；新问题明确给出其他设备时不得继承。",
+                (
+                    "先判断 relation：独立新任务为 NEW_TASK，承接上一轮为 FOLLOW_UP，"
+                    "纠正上一轮对象或条件为 CORRECTION。"
+                ),
+                (
+                    "短追问省略设备或任务时，必须从 immediate_previous_round.user_request "
+                    "继承最近的设备、部件和操作目标；不得从历史助手回答新增任务事实。"
+                ),
+                (
+                    "FOLLOW_UP/CORRECTION 应输出简短 active_task，并让 resolved_question "
+                    "同时包含该任务和当前所问属性；新问题明确给出其他设备或操作时必须 "
+                    "NEW_TASK，不得继承。"
+                ),
                 "必须保留当前所问属性的技术含义，不得把地址、目录、路径或参数互相替换。",
                 f"search_queries 最多 {variant_limit} 条，只补充有助召回的同义表达。",
                 "每条补充查询都应包含已还原的设备或部件名称，避免检索到其他设备的相似操作。",
                 "原始问题由服务器强制参与检索，不需要重复堆砌。",
                 "只有明显与知识库产品无关时才输出 OUT_OF_SCOPE。",
                 "scope 只能是 IN_SCOPE、OUT_OF_SCOPE 或 UNCERTAIN。",
+                "relation 只能是 NEW_TASK、FOLLOW_UP 或 CORRECTION。",
                 "只返回符合 Schema 的 JSON。",
             ],
         },

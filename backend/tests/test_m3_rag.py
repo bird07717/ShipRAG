@@ -427,7 +427,7 @@ async def test_prepare_closes_embedding_retrieves_and_saves_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_v2_prepare_does_not_retain_legacy_chunk_prompt_in_trace() -> None:
+async def test_v2_prepare_defers_all_retrieval_to_v2_pipeline() -> None:
     repository = _PrepareRepository()
     repository.turn = replace(
         repository.turn,
@@ -443,7 +443,9 @@ async def test_v2_prepare_does_not_retain_legacy_chunk_prompt_in_trace() -> None
     service = RagService(
         cast(RagRepository, repository),
         settings,
-        embedding_factory=lambda _: FakeEmbeddingProvider(1024),
+        embedding_factory=lambda _: (_ for _ in ()).throw(
+            AssertionError("V2 prepare must not construct an embedding provider")
+        ),
     )
 
     prepared = await service.prepare(
@@ -456,9 +458,15 @@ async def test_v2_prepare_does_not_retain_legacy_chunk_prompt_in_trace() -> None
     assert repository.question == "已经检查供电"
     assert prepared.policy_question == "已经检查供电"
     assert prepared.issue_resumed is False
-    assert "数据库默认端口为3306" in prepared.prompt
-    assert repository.saved is not None
-    assert repository.saved["prompt"] == ""
+    assert prepared.prompt == ""
+    assert prepared.candidates == []
+    assert prepared.selected_candidates == []
+    assert prepared.rerank_candidates == []
+    assert prepared.query_embedding == []
+    assert prepared.query_embedding_status == "DEFERRED"
+    assert prepared.query_embedding_reason == "V2_OWNS_RETRIEVAL"
+    assert prepared.timings["v2_prepare_only"] is True
+    assert repository.saved is None
 
 
 @pytest.mark.asyncio
@@ -623,7 +631,7 @@ async def test_prepare_degrades_to_lexical_retrieval_when_query_embedding_fails(
 
 
 @pytest.mark.asyncio
-async def test_prepare_degrades_unsupported_bm25_query_to_vector_channel() -> None:
+async def test_v2_prepare_does_not_run_unsupported_bm25_query() -> None:
     repository = _PrepareRepository()
 
     async def unsupported_bm25(**_kwargs: Any) -> list[RetrievalCandidate]:
@@ -633,8 +641,12 @@ async def test_prepare_degrades_unsupported_bm25_query_to_vector_channel() -> No
     service = RagService(
         cast(RagRepository, repository),
         Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
-        embedding_factory=lambda settings: FakeEmbeddingProvider(1024),
-        rerank_factory=lambda settings, snapshot: FakeRerankProvider(),
+        embedding_factory=lambda _: (_ for _ in ()).throw(
+            AssertionError("V2 prepare must not construct an embedding provider")
+        ),
+        rerank_factory=lambda _settings, _snapshot: (_ for _ in ()).throw(
+            AssertionError("V2 prepare must not construct a rerank provider")
+        ),
     )
 
     prepared = await service.prepare(
@@ -644,10 +656,9 @@ async def test_prepare_degrades_unsupported_bm25_query_to_vector_channel() -> No
         request_id="request-unsupported-bm25",
     )
 
-    assert prepared.selected_candidates
-    assert prepared.timings["bm25_retrieval_degraded"] == ("PARADEDB_UNSUPPORTED_QUERY_SHAPE")
-    assert repository.saved is not None
-    assert repository.saved["bm25_candidates"] == []
+    assert prepared.selected_candidates == []
+    assert "bm25_retrieval_degraded" not in prepared.timings
+    assert repository.saved is None
 
 
 def test_sse_event_uses_utf8_json_frame() -> None:

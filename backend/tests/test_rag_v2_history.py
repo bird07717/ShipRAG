@@ -1,9 +1,38 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
+from app.rag.llm import FakeLlmProvider
 from app.rag.v2.answer_generator import build_answer_prompt
 from app.rag.v2.document_context import DocumentContext
 from app.rag.v2.history import select_complete_round_history
-from app.rag.v2.query_interpreter import QueryInterpretation
+from app.rag.v2.query_interpreter import QueryInterpretation, interpret_query
+
+
+class _CapturingFakeLlmProvider(FakeLlmProvider):
+    def __init__(self, completion: str) -> None:
+        super().__init__(completions=[completion])
+        self.prompt = ""
+
+    async def complete(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        self.prompt = prompt
+        return await super().complete(
+            prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 def _round(
@@ -90,6 +119,8 @@ def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> 
             resolved_question="PDC 怎么检查",
             search_queries=["PDC 检查"],
             scope="IN_SCOPE",
+            relation="CORRECTION",
+            active_task="检查 PDC",
         ),
         context=DocumentContext(
             prompt_context="",
@@ -109,3 +140,44 @@ def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> 
     assert "旧回答中的参数可能是错的" in prompt
     assert "历史助手回答只用于理解指代" in prompt
     assert "都不是产品事实证据" in prompt
+    payload = json.loads(prompt)
+    assert payload["conversation_relation"] == "CORRECTION"
+    assert payload["active_task"] == "检查 PDC"
+
+
+@pytest.mark.asyncio
+async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up() -> None:
+    provider = _CapturingFakeLlmProvider(
+        '{"resolved_question":"更换 VDR600 PSU 电源板并拆装 3359 核心板时使用哪个端口",'
+        '"search_queries":["PSU 3359 操作端口"],"key_constraints":["PSU 更换操作"],'
+        '"scope":"IN_SCOPE","relation":"FOLLOW_UP",'
+        '"active_task":"更换 VDR600 PSU 电源板并拆装 3359 核心板"}'
+    )
+
+    outcome = await interpret_query(
+        provider,
+        question="操作时使用哪个端口？",
+        history=[
+            {"role": "USER", "content": "请完整展示更换 PSU 电源板的步骤"},
+            {"role": "ASSISTANT", "content": "需要拆下 3359 核心板及底板。"},
+        ],
+        knowledge_name="VDR600",
+        scope_description="VDR600 技术支持",
+        max_rounds=4,
+        variant_limit=3,
+        max_tokens=512,
+        timeout_seconds=5,
+    )
+
+    prompt = json.loads(provider.prompt)
+    assert prompt["immediate_previous_round"] == {
+        "user_request": "请完整展示更换 PSU 电源板的步骤",
+        "assistant_answer_untrusted": "需要拆下 3359 核心板及底板。",
+    }
+    assert outcome.interpretation.relation == "FOLLOW_UP"
+    assert outcome.interpretation.active_task == "更换 VDR600 PSU 电源板并拆装 3359 核心板"
+    trace = outcome.trace_dict()
+    assert trace["relation"] == "FOLLOW_UP"
+    assert trace["active_task_chars"] == len(outcome.interpretation.active_task)
+    assert trace["active_task_sha256"]
+    assert outcome.interpretation.active_task not in json.dumps(trace, ensure_ascii=False)

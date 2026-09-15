@@ -310,6 +310,67 @@ async def test_v4_prepared_trace_omits_retired_planner_snapshots(
     assert row["latency"]["total_ms"] == 20
 
 
+async def test_v2_progress_persists_only_hashed_context_and_effective_retrieval(
+    records,  # noqa: F811
+) -> None:
+    await _insert_active_index(records.engine, records.kb)
+    repo = RagRepository(
+        records.engine,
+        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+    )
+    turn = await repo.begin_turn(
+        knowledge_id=records.kb,
+        conversation_id=None,
+        question="操作时使用哪个端口？",
+        request_id="v2-progress",
+    )
+    generation = {
+        "pipeline": "V2",
+        "status": "ANSWER_PENDING",
+        "query_interpreter": {
+            "relation": "FOLLOW_UP",
+            "active_task_sha256": "a" * 64,
+        },
+        "retrieval": {"query_count": 3},
+        "context": {"document_count": 1, "content_sha256": "b" * 64},
+    }
+    selected_context = [
+        {
+            "document_key": "D1",
+            "document_id": str(records.document),
+            "content_sha256": "c" * 64,
+        }
+    ]
+
+    await repo.save_v2_progress(
+        turn,
+        generation=generation,
+        selected_context=selected_context,
+        timings={"v2_document_context_ms": 12},
+    )
+
+    async with records.engine.connect() as connection:
+        row = (
+            (
+                await connection.execute(
+                    text(
+                        "SELECT retrieval_result, selected_context, runtime_snapshot, latency "
+                        "FROM rag_trace WHERE trace_id=:trace_id"
+                    ),
+                    {"trace_id": turn.trace_id},
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+    assert row["retrieval_result"]["doc_routing"]["generation"] == generation
+    assert row["selected_context"] == selected_context
+    assert row["runtime_snapshot"]["retrieval"]["vector_top_k"] == turn.retrieval.vector_top_k
+    assert row["latency"] == {"v2_document_context_ms": 12}
+    assert "操作时使用哪个端口" not in str(row)
+
+
 async def test_rag_issue_is_loaded_only_when_its_message_pair_is_valid(
     records,  # noqa: F811
 ) -> None:

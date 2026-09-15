@@ -10,7 +10,7 @@ from typing import Literal
 from app.rag.models import DocumentCardCandidate, RetrievalCandidate
 from app.rag.query_planner import QueryPlanOutcome
 
-QuerySource = Literal["ORIGINAL", "STANDALONE", "PLANNER"]
+QuerySource = Literal["ORIGINAL", "STANDALONE", "CONTEXT_ANCHOR", "PLANNER"]
 
 
 def _query_key(value: str) -> str:

@@ -139,13 +139,15 @@ V4 已停止旧 P2/P3 `shadow/enabled` 运行时、后台任务及 `semantic_orc
 
 旧 P2/P3 代码仍可由显式 `M3_RAG_PIPELINE_MODE=legacy` 回滚路径间接使用，物理删除属于 V5。历史 Trace 继续只读兼容，不应把旧 `shadow/enabled` 变量重新加回环境文件。原 GLM/P2/P3 时限只作为历史性能记录，不再作为当前 V2 配置建议。
 
-## RAG V2 配置（V0～V4.1 本地已生效）
+## RAG V2 配置（V0～V4.2 本地已生效）
 
 `M3_RAG_PIPELINE_MODE=auto|legacy|v2` 已实现：`auto` 只在 `APP_ENV=development` 解析为 `v2`，staging/production 解析为 `legacy`。`.env.example` 和当前本地开发配置显式使用 `v2`；`.env.production.example` 与 Production Compose 显式默认 `legacy`。修改模式后必须重启 API 进程；V2 不需要数据库迁移或重建现有索引。
 
 V2 当前配置包括 `M3_RAG_FULL_DOCUMENT_LIMIT`、`M3_RAG_FULL_CONTEXT_TOKEN_BUDGET`、`M3_RAG_ANSWER_MAX_TOKENS`、`M3_RAG_ANSWER_TIMEOUT_SECONDS`、`M3_RAG_HISTORY_MAX_ROUNDS` 和 `M3_RAG_TITLE_LEAK_REPAIR_ATTEMPTS`。最后一项是兼容名称，当前限制 Prompt/管理地址或证据白名单违规后的最多修复次数，不再拦截普通文档标题、文件名或 D/S/I 技术编号；V5 可在清理旧配置时统一改名。最小 Query Interpreter 继续复用 `M3_RAG_QUERY_PLANNER_MAX_TOKENS`、`M3_RAG_QUERY_PLANNER_TIMEOUT_SECONDS` 与 `M3_RAG_QUERY_VARIANT_LIMIT`。有效 V2 下，Query 与 Answer 两段超时之和必须小于 `M3_TURN_DEADLINE_SECONDS`；开发示例总时限为 90 秒。
 
 V4.1 文档级排序复用现有 Rerank Provider、`M3_RERANK_TIMEOUT_SECONDS` 和模型快照，不增加环境变量或第三次 LLM。候选池内部最多取 `max(M3_RAG_FULL_DOCUMENT_LIMIT, M3_RAG_DOCUMENT_CARD_TOP_K)` 份用于排序，最终全文上限仍由 `M3_RAG_FULL_DOCUMENT_LIMIT=3` 控制。当前未调整 Chunk、向量/BM25 Top-K、卡片 Top-K 或 20,000 Token 全文预算；后续只有在多轮 Trace 显示稳定的召回或上下文问题时才单变量调整。
+
+V4.2 没有新增配置。有效 V2 的 `prepare()` 只冻结轮次和覆盖参数，查询解释完成后将去重后的原问题、独立问题、可选任务锚点和补充查询合并为一次批量 Embedding，再执行一次文档级 Rerank；不再先跑 legacy 检索后把候选二次混入。短追问由 LLM 1 输出 `FOLLOW_UP/CORRECTION + active_task`，任务锚点参与召回和排序；新任务不加入该锚点。修改后无需迁移或索引重建，只需重启 API 进程并使用新会话/新幂等键验证。
 
 首轮、单强、事实、解释、技术助手、焦点历史、旧文档路由阈值和 Query Rewrite 配置仍为 `legacy` 回滚兼容；有效 V2 已停止调用旧语义 Planner、Query Rewrite、首轮标题召回和焦点历史选择。V2 历史只受 `M3_RAG_HISTORY_MAX_ROUNDS`、`M3_HISTORY_MAX_MESSAGES` 与 `M3_HISTORY_TOKEN_BUDGET` 约束。V4 已完成运行时退出和验收，V5 才物理删除旧变量与旧代码。生产在另行批准前保持 `legacy`；本次实现不授权服务器启用 V2。
 

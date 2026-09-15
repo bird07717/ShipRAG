@@ -13,7 +13,6 @@ from app.ingestion.models import EmbeddingInput
 from app.rag.models import (
     DocumentCardCandidate,
     ModelSnapshot,
-    PreparedRag,
     RerankDocument,
     RetrievalCandidate,
     Turn,
@@ -68,9 +67,13 @@ def _document_rerank_text(
 def _rerank_query(question: str, interpretation: QueryInterpretation) -> str:
     resolved = interpretation.resolved_question.strip()
     original = question.strip()
-    if not resolved or _query_key(resolved) == _query_key(original):
-        return original
-    return f"{resolved}\n用户原始问题：{original}"
+    lines: list[str] = []
+    if interpretation.active_task:
+        lines.append(f"当前任务：{interpretation.active_task}")
+    if resolved and _query_key(resolved) != _query_key(original):
+        lines.append(f"独立问题：{resolved}")
+    lines.append(f"用户当前问题：{original}")
+    return "\n".join(lines)
 
 
 def _query_key(value: str) -> str:
@@ -83,8 +86,15 @@ def _queries(question: str, interpretation: QueryInterpretation) -> list[Semanti
     entries: list[tuple[str, QuerySource]] = [
         (question, "ORIGINAL"),
         (interpretation.resolved_question, "STANDALONE"),
-        *((item, "PLANNER") for item in interpretation.search_queries),
     ]
+    if interpretation.relation in {"FOLLOW_UP", "CORRECTION"} and interpretation.active_task:
+        entries.append(
+            (
+                f"{interpretation.active_task}；当前追问：{question}",
+                "CONTEXT_ANCHOR",
+            )
+        )
+    entries.extend((item, "PLANNER") for item in interpretation.search_queries)
     for text, source in entries:
         cleaned = " ".join(text.split())
         key = _query_key(cleaned)
@@ -100,7 +110,6 @@ async def retrieve_documents(
     *,
     settings: Settings,
     turn: Turn,
-    prepared: PreparedRag,
     question: str,
     interpretation: QueryInterpretation,
     embedding_selector: EmbeddingSelector,
@@ -283,20 +292,11 @@ async def retrieve_documents(
             )
         )
 
-    # The original retrieval is an independent, already-reranked safety net.
-    # It is appended, never allowed to replace the original-query candidates.
-    for candidate in prepared.rerank_candidates or prepared.selected_candidates:
-        if candidate.document_id in seen_documents:
-            continue
-        seen_documents.add(candidate.document_id)
-        candidates.append(DocumentCandidate(candidate.document_id, 0.0, (candidate.chunk_id,)))
-        if len(candidates) >= settings.m3_rag_full_document_limit:
-            break
-
     candidates = candidates[: settings.m3_rag_full_document_limit]
     return candidates, {
         "query_count": len(queries),
         "query_hashes": [hashlib.sha256(item.text.encode()).hexdigest() for item in queries],
+        "queries": [item.trace_dict() for item in queries],
         "candidate_document_ids": [str(item.document_id) for item in candidates],
         "candidate_count": len(candidates),
         "degradations": list(dict.fromkeys(degradations)),

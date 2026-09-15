@@ -105,7 +105,6 @@ class RagV2Pipeline:
             self.repository,
             settings=self.settings,
             turn=turn,
-            prepared=prepared,
             question=question,
             interpretation=query_outcome.interpretation,
             embedding_selector=self.embedding_selector,
@@ -127,6 +126,39 @@ class RagV2Pipeline:
             ),
         )
         timings["v2_document_context_ms"] = round((time.perf_counter() - context_started) * 1000)
+        query_trace = query_outcome.trace_dict()
+        context_trace = {
+            "document_ids": list(context.document_ids),
+            "document_count": len(context.document_ids),
+            "image_count": len(context.image_bindings),
+            "estimated_tokens": context.estimated_tokens,
+            "mode": context.context_mode,
+            "content_sha256": hashlib.sha256(context.prompt_context.encode("utf-8")).hexdigest(),
+        }
+        selected_context_trace = [
+            {
+                "document_key": document_key,
+                "document_id": document_id,
+                "content_sha256": hashlib.sha256(document_text.encode("utf-8")).hexdigest(),
+            }
+            for (document_key, document_text), document_id in zip(
+                context.document_evidence,
+                context.document_ids,
+                strict=True,
+            )
+        ]
+        await self.repository.save_v2_progress(
+            turn,
+            generation={
+                "pipeline": "V2",
+                "status": "ANSWER_PENDING",
+                "query_interpreter": query_trace,
+                "retrieval": retrieval_trace,
+                "context": context_trace,
+            },
+            selected_context=selected_context_trace,
+            timings=timings,
+        )
         prompt = build_answer_prompt(
             question=question,
             history=turn.history,
@@ -229,18 +261,9 @@ class RagV2Pipeline:
             usage={"pipeline": "V2", "query_interpreter": query_usage, "answer": answer_usage},
             trace={
                 "pipeline": "V2",
-                "query_interpreter": query_outcome.trace_dict(),
+                "query_interpreter": query_trace,
                 "retrieval": retrieval_trace,
-                "context": {
-                    "document_ids": list(context.document_ids),
-                    "document_count": len(context.document_ids),
-                    "image_count": len(context.image_bindings),
-                    "estimated_tokens": context.estimated_tokens,
-                    "mode": context.context_mode,
-                    "content_sha256": hashlib.sha256(
-                        context.prompt_context.encode("utf-8")
-                    ).hexdigest(),
-                },
+                "context": context_trace,
                 "answer": {
                     "response_kind": generated.response_kind,
                     "basis": generated.basis,

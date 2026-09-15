@@ -1340,6 +1340,48 @@ class RagRepository:
                 },
             )
 
+    async def save_v2_progress(
+        self,
+        turn: Turn,
+        *,
+        generation: dict[str, Any],
+        selected_context: list[dict[str, Any]],
+        timings: dict[str, Any],
+    ) -> None:
+        """Persist privacy-reduced V2 retrieval/context before answer generation."""
+
+        doc_routing = {
+            "resolved_from": "RAG_V2",
+            "pipeline": "V2",
+            "generation": generation,
+        }
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE rag_trace
+                    SET retrieval_result = jsonb_set(
+                            COALESCE(retrieval_result, '{}'::jsonb),
+                            '{doc_routing}', CAST(:doc_routing AS jsonb)
+                        ),
+                        selected_context = CAST(:context AS jsonb),
+                        runtime_snapshot = jsonb_set(
+                            COALESCE(runtime_snapshot, '{}'::jsonb),
+                            '{retrieval}', CAST(:effective_retrieval AS jsonb)
+                        ),
+                        latency = CAST(:latency AS jsonb)
+                    WHERE trace_id = :trace_id AND status = 'RUNNING'
+                    """
+                ),
+                {
+                    "trace_id": turn.trace_id,
+                    "doc_routing": json.dumps(doc_routing, ensure_ascii=False),
+                    "context": json.dumps(selected_context, ensure_ascii=False),
+                    "effective_retrieval": json.dumps(asdict(turn.retrieval)),
+                    "latency": json.dumps(timings),
+                },
+            )
+
     async def complete_turn(
         self,
         turn: Turn,

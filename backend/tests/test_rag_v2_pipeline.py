@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -11,6 +11,7 @@ import pytest
 
 from app.core.config import Settings
 from app.ingestion.embedding import FakeEmbeddingProvider
+from app.ingestion.models import EmbeddingInput
 from app.rag.llm import FakeLlmProvider
 from app.rag.models import (
     DocumentCardCandidate,
@@ -32,7 +33,7 @@ from app.rag.v2.validation import (
     parameter_observations,
     public_leaks,
 )
-from app.services.rag import RagService, _v2_selected_context_trace
+from app.services.rag import RagService
 
 DOC_ID = UUID("7777ff1b-efe0-4a12-a1dc-9bdf3532042b")
 IMAGE_ID = UUID("8888ff1b-efe0-4a12-a1dc-9bdf3532042b")
@@ -77,8 +78,10 @@ def _turn() -> Turn:
 class _Repository:
     def __init__(self, candidate: RetrievalCandidate) -> None:
         self.candidate = candidate
+        self.turn: Turn = _turn()
         self.completed: dict[str, Any] | None = None
         self.failed: dict[str, Any] | None = None
+        self.v2_progress: dict[str, Any] | None = None
 
     async def begin_turn(self, **_kwargs: Any) -> Turn:
         return self.turn
@@ -145,6 +148,22 @@ class _Repository:
         assert turn == self.turn
         self.failed = kwargs
 
+    async def save_v2_progress(self, turn: Turn, **kwargs: Any) -> None:
+        assert turn == self.turn
+        self.v2_progress = kwargs
+
+
+class _CountingEmbeddingProvider(FakeEmbeddingProvider):
+    def __init__(self, dimension: int) -> None:
+        super().__init__(dimension)
+        self.calls = 0
+        self.batch_sizes: list[int] = []
+
+    async def embed(self, inputs: Sequence[EmbeddingInput]) -> list[list[float]]:
+        self.calls += 1
+        self.batch_sizes.append(len(inputs))
+        return await super().embed(inputs)
+
 
 class _UnsupportedLexicalRepository(_Repository):
     async def bm25_search(self, **_kwargs: Any) -> list[RetrievalCandidate]:
@@ -172,6 +191,17 @@ class _ReverseRerankProvider:
 class _FailingRerankProvider(_ReverseRerankProvider):
     async def rerank(self, _query: str, _documents: Any, _top_n: int) -> RerankOutcome:
         raise RerankError("UPSTREAM_TIMEOUT", "timeout", degradable=True)
+
+
+class _CapturingRerankProvider(_ReverseRerankProvider):
+    def __init__(self) -> None:
+        self.query = ""
+        self.calls = 0
+
+    async def rerank(self, query: str, documents: Any, top_n: int) -> RerankOutcome:
+        self.query = query
+        self.calls += 1
+        return await super().rerank(query, documents, top_n)
 
 
 class _MultiDocumentRepository(_Repository):
@@ -206,6 +236,48 @@ class _MultiDocumentRepository(_Repository):
 
     async def document_card_vector_search(self, **_kwargs: Any) -> list[DocumentCardCandidate]:
         return self._cards()
+
+
+@pytest.mark.asyncio
+async def test_v2_generate_uses_two_llms_and_one_batched_embedding_request() -> None:
+    candidate = _candidate()
+    repository = _Repository(candidate)
+    repository.turn = _turn()
+    embedding = _CountingEmbeddingProvider(1024)
+    completions = [
+        '{"resolved_question":"如何配置 VAU 图像","search_queries":["VAU 图像配置"],'
+        '"key_constraints":[],"scope":"IN_SCOPE","relation":"NEW_TASK",'
+        '"active_task":"配置 VAU 图像"}',
+        '{"response_kind":"ANSWER","basis":"DOCUMENT","answer":"先设置电脑网络参数。",'
+        '"used_document_keys":["D1"],"used_image_keys":[],"next_suggestions":[]}',
+    ]
+    llm_calls = 0
+
+    def llm_factory(_settings: Settings, _snapshot: ModelSnapshot) -> FakeLlmProvider:
+        nonlocal llm_calls
+        llm_calls += 1
+        return FakeLlmProvider(completions=[completions.pop(0)])
+
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        embedding_factory=lambda _settings: embedding,
+        llm_factory=llm_factory,
+    )
+
+    payload = await service.generate(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=repository.turn.conversation_id,
+        question="请给出配置 VAU 图像的完整步骤",
+        request_id="v2-single-retrieval",
+    )
+
+    assert payload["response_type"] == "ANSWERED"
+    assert llm_calls == 2
+    assert embedding.calls == 1
+    assert embedding.batch_sizes == [3]
+    assert repository.v2_progress is not None
+    assert repository.v2_progress["generation"]["retrieval"]["query_count"] == 3
 
 
 @pytest.mark.asyncio
@@ -272,6 +344,14 @@ async def test_v2_generates_from_hidden_full_document_and_maps_image() -> None:
             "user_provided": False,
         }
     ]
+    assert repository.v2_progress is not None
+    assert repository.v2_progress["generation"]["status"] == "ANSWER_PENDING"
+    selected_context = repository.v2_progress["selected_context"]
+    assert selected_context[0]["document_key"] == "D1"
+    assert selected_context[0]["document_id"] == str(DOC_ID)
+    assert len(selected_context[0]["content_sha256"]) == 64
+    assert candidate.content not in json.dumps(selected_context, ensure_ascii=False)
+    assert candidate.document not in json.dumps(selected_context, ensure_ascii=False)
     assert repository.failed is None
 
 
@@ -654,20 +734,6 @@ async def test_v2_document_context_rejects_cross_knowledge_document() -> None:
         )
 
 
-def test_v2_prepared_trace_uses_ids_and_hashes_without_document_text() -> None:
-    candidate = _candidate()
-
-    trace = _v2_selected_context_trace([candidate])
-    serialized = json.dumps(trace, ensure_ascii=False)
-
-    assert (
-        trace[0]["content_sha256"] == hashlib.sha256(candidate.content.encode("utf-8")).hexdigest()
-    )
-    assert trace[0]["document_id"] == str(candidate.document_id)
-    assert candidate.content not in serialized
-    assert candidate.document not in serialized
-
-
 @pytest.mark.parametrize(
     "answer",
     [
@@ -784,22 +850,11 @@ async def test_v2_document_level_rerank_reorders_and_degrades_safely(
     )
     repository = _MultiDocumentRepository([first, second])
     repository.turn = _turn()
-    prepared = PreparedRag(
-        turn=repository.turn,
-        prompt="",
-        candidates=[first, second],
-        selected_candidates=[first, second],
-        sources=[],
-        timings={},
-        started_at=time.perf_counter(),
-        rerank_candidates=[first, second],
-    )
 
     candidates, trace = await retrieve_documents(
         repository,
         settings=Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
         turn=repository.turn,
-        prepared=prepared,
         question="检查设备",
         interpretation=QueryInterpretation(
             resolved_question="检查设备",
@@ -814,6 +869,42 @@ async def test_v2_document_level_rerank_reorders_and_degrades_safely(
     expected_id = second_id if expected_first == "second" else first_id
     assert candidates[0].document_id == expected_id
     assert trace["document_rerank"]["status"] == expected_status
+
+
+@pytest.mark.asyncio
+async def test_v2_follow_up_task_anchor_reaches_search_and_document_rerank() -> None:
+    first = replace(_candidate(), chunk_id=uuid4(), document_id=uuid4(), document="修改船名")
+    second = replace(
+        _candidate(),
+        chunk_id=uuid4(),
+        document_id=uuid4(),
+        document="更换 PSU 电源板",
+    )
+    repository = _MultiDocumentRepository([first, second])
+    repository.turn = _turn()
+    provider = _CapturingRerankProvider()
+
+    _, trace = await retrieve_documents(
+        repository,
+        settings=Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        turn=repository.turn,
+        question="操作时使用哪个端口？",
+        interpretation=QueryInterpretation(
+            resolved_question="更换 PSU 电源板并拆装 3359 核心板时使用哪个端口",
+            search_queries=["PSU 3359 操作端口"],
+            key_constraints=["PSU 更换操作"],
+            scope="IN_SCOPE",
+            relation="FOLLOW_UP",
+            active_task="更换 PSU 电源板并拆装 3359 核心板",
+        ),
+        embedding_selector=lambda _turn: FakeEmbeddingProvider(1024),
+        rerank_factory=lambda _settings, _snapshot: provider,
+    )
+
+    assert provider.calls == 1
+    assert "当前任务：更换 PSU 电源板并拆装 3359 核心板" in provider.query
+    assert "用户当前问题：操作时使用哪个端口？" in provider.query
+    assert any(item["sources"] == ["CONTEXT_ANCHOR"] for item in trace["queries"])
 
 
 def test_v2_valid_image_evidence_implies_its_owning_document() -> None:

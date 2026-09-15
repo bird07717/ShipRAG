@@ -121,23 +121,6 @@ def _elapsed_ms(started_at: float) -> int:
     return max(0, round((time.perf_counter() - started_at) * 1000))
 
 
-def _v2_selected_context_trace(
-    candidates: list[RetrievalCandidate],
-) -> list[dict[str, Any]]:
-    """Describe V2 prepared context without retaining text or display names."""
-
-    return [
-        {
-            "chunk_id": str(candidate.chunk_id),
-            "document_id": str(candidate.document_id),
-            "element_ids": [str(value) for value in candidate.element_ids],
-            "image_asset_ids": [str(value) for value in candidate.image_asset_ids],
-            "content_sha256": hashlib.sha256(candidate.content.encode("utf-8")).hexdigest(),
-        }
-        for candidate in candidates
-    ]
-
-
 def _unexpected_detail(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:500]
 
@@ -328,6 +311,26 @@ class RagService:
         # accumulated before the hang into the failure record (which stage
         # stalled is the key post-mortem fact).
         timings: dict[str, Any] = {"prepare_turn_ms": _elapsed_ms(started_at)}
+        if self._uses_v2():
+            retrieval = (
+                replace(turn.retrieval, **retrieval_overrides)
+                if retrieval_overrides
+                else turn.retrieval
+            )
+            return PreparedRag(
+                turn=replace(turn, retrieval=retrieval),
+                prompt="",
+                candidates=[],
+                selected_candidates=[],
+                sources=[],
+                timings={**timings, "v2_prepare_only": True},
+                started_at=started_at,
+                policy_question=policy_question,
+                issue_resumed=False,
+                rerank_status="SKIPPED",
+                query_embedding_status="DEFERRED",
+                query_embedding_reason="V2_OWNS_RETRIEVAL",
+            )
         # One overall interactive deadline per turn: a hung upstream
         # (embedding / rerank / LLM) must never hold a chat request for the
         # provider-level 90-120s timeouts. Bounded failure is better UX
@@ -408,7 +411,6 @@ class RagService:
             query_rewrite_record: dict[str, str] | None = None
             if (
                 mode == "CHAT"
-                and not self._uses_v2()
                 and self.settings.m3_query_rewrite_enabled
                 and should_rewrite(
                     normalized_question,
@@ -585,7 +587,6 @@ class RagService:
             title_recall_record: dict[str, Any] | None = None
             if (
                 self.settings.m3_rag_title_recall
-                and not self._uses_v2()
                 and not turn.history
                 and not turn.has_prior_messages
                 and turn.focus_document_id is None
@@ -699,14 +700,8 @@ class RagService:
                 fusion_candidates=fusion_candidates,
                 rerank_candidates=reranked_candidates,
                 rerank_result=rerank_result,
-                selected_context=(
-                    _v2_selected_context_trace(selected)
-                    if self._uses_v2()
-                    else [source.public_dict() for source in sources]
-                ),
-                # V2 builds its own full-document prompt after retrieval.  Do not
-                # retain the legacy chunk prompt (and its document text) in Trace.
-                prompt="" if self._uses_v2() else prompt,
+                selected_context=[source.public_dict() for source in sources],
+                prompt=prompt,
                 timings=timings,
                 embedding_result={
                     "status": "PASSED" if query_embedding else "DEGRADED",
