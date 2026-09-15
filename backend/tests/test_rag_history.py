@@ -147,7 +147,7 @@ def test_legacy_strategy_does_not_mutate_history_for_budget():
 
 
 @pytest.mark.parametrize("first", ["旧标题\n步骤一", "旧标题", " \n旧标题\n步骤一"])
-def test_document_prompt_uses_display_name_without_touching_later_body(first):
+def test_document_prompt_uses_display_name_and_keeps_body_verbatim(first):
     doc = {
         "document_id": str(DOC_A),
         "title": "管理新名称",
@@ -160,7 +160,7 @@ def test_document_prompt_uses_display_name_without_touching_later_body(first):
     before = deepcopy(doc)
     prompt, _ = build_document_context(doc)
     assert "当前文档显示名称：管理新名称" in prompt
-    assert "\n旧标题\n" not in prompt
+    assert "旧标题" in prompt
     assert "表格正文" in prompt and "正文提及旧标题" in prompt
     assert doc == before
 
@@ -176,7 +176,7 @@ def test_document_prompt_preserves_ambiguous_oversized_first_line():
     assert merged_body in prompt
 
 
-async def test_chunk_heading_removal_requires_element_identity_and_exact_prefix():
+async def test_generation_candidates_relabel_display_name_without_editing_content():
     rag = _service(_RoutingRepository(turn=_turn(), candidates=[]), _RecordingLlmProvider([]))
     element = uuid4()
     doc = {
@@ -188,7 +188,7 @@ async def test_chunk_heading_removal_requires_element_identity_and_exact_prefix(
     unrelated = replace(_candidate(DOC_A, 2), content="旧标题\n普通正文")
     mismatch = replace(first, content="普通章节\n正文")
     result = await rag._generation_candidates(_turn(), [first, unrelated, mismatch], document=doc)
-    assert [c.content for c in result] == ["步骤一", "旧标题\n普通正文", "普通章节\n正文"]
+    assert [c.content for c in result] == ["旧标题\n步骤一", "旧标题\n普通正文", "普通章节\n正文"]
     assert all(c.document == "新名称" for c in result)
     assert first.content == "旧标题\n步骤一"
     prompt, sources = build_context(result)

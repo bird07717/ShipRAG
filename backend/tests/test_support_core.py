@@ -206,7 +206,7 @@ def test_document_delivery_keeps_order_and_optionally_suppresses_images() -> Non
     assert hidden_images == []
 
 
-def test_document_delivery_removes_leading_heading_without_matching_title() -> None:
+def test_document_delivery_keeps_leading_heading_without_matching_title() -> None:
     document = FocusedDocument(
         id=uuid4(),
         title="如何配VAU图像",
@@ -223,15 +223,21 @@ def test_document_delivery_removes_leading_heading_without_matching_title() -> N
     assert content == [
         {
             "type": "text",
+            "sequence_no": 1,
+            "text": "与当前显示名称完全不同的旧标题",
+            "source_id": str(document.blocks[0].element_id),
+        },
+        {
+            "type": "text",
             "sequence_no": 2,
             "text": "第一步：打开VAU配置界面。",
             "source_id": str(document.blocks[1].element_id),
-        }
+        },
     ]
 
 
 @pytest.mark.parametrize("include_images", [True, False])
-def test_document_delivery_strips_heading_once_and_preserves_other_elements(include_images) -> None:
+def test_document_delivery_preserves_elements_verbatim(include_images) -> None:
     document = _document()
     document.blocks = [
         DocumentContentBlock(uuid4(), 1, "text", " \n"),
@@ -245,7 +251,7 @@ def test_document_delivery_strips_heading_once_and_preserves_other_elements(incl
 
     assert [item["text"] for item in content if item["type"] != "image"] == [
         "表头\n表格正文",
-        "第一步",
+        "旧标题\n第一步",
         "旧标题\n第二步",
     ]
     assert [item["sequence_no"] for item in content] == (

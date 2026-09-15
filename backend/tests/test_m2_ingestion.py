@@ -17,7 +17,6 @@ from app.common.errors import ApiError
 from app.common.text import (
     emphasize_document_title_mentions,
     markdown_document_title,
-    strip_leading_document_heading,
 )
 from app.core.config import Settings
 from app.ingestion.chunker import build_chunks, build_parent_chunks
@@ -716,22 +715,6 @@ def test_markdown_document_title_is_bold_and_escapes_untrusted_markup() -> None:
         )
         == "请查看 **《升级手册》**，已有 **《升级手册》** 不重复处理。"
     )
-
-
-@pytest.mark.parametrize(
-    ("content", "expected"),
-    [
-        ("与显示名完全不同的旧标题\n第一步：打开配置界面。", "第一步：打开配置界面。"),
-        ("仅有标题", ""),
-        ("\n  \r\n标题\r\n第一步\r\n第二步", "第一步\r\n第二步"),
-        ("标题\n标题\n正文", "标题\n正文"),
-        ("标题\n\n  正文缩进\n", "\n  正文缩进\n"),
-        ("  \n", "  \n"),
-        ("", ""),
-    ],
-)
-def test_strip_leading_document_heading_removes_exactly_one_line(content, expected) -> None:
-    assert strip_leading_document_heading(content) == expected
 
 
 @pytest.mark.asyncio

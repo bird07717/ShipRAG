@@ -5,7 +5,6 @@ from typing import Any
 from uuid import UUID
 
 from app.common.errors import ApiError
-from app.common.text import strip_leading_document_heading
 from app.rag.answer_policy import escape_prompt_data
 from app.rag.models import RetrievalCandidate, Source
 
@@ -531,22 +530,13 @@ def build_document_context(document: dict[str, Any]) -> tuple[str, list[Source]]
     has_content = False
     document_id = UUID(str(document["document_id"]))
     title = str(document.get("title", ""))
-    heading_pending = True
     for element in document.get("elements", []):
         element_type = element.get("element_type")
         if element_type in ("TEXT", "TABLE"):
-            if element.get("content"):
-                content = str(element["content"])
-                if element_type == "TEXT" and content.strip() and heading_pending:
-                    heading_pending = False
-                    first_line = next(line.strip() for line in content.splitlines() if line.strip())
-                    # An abnormally long first line may be merged body text.
-                    # Preserve ambiguous content instead of silently deleting evidence.
-                    if len(first_line) <= 300:
-                        content = strip_leading_document_heading(content)
-                if content.strip():
-                    parts.append(content)
-                    has_content = True
+            content = str(element.get("content") or "")
+            if content.strip():
+                parts.append(content)
+                has_content = True
             continue
         if element_type == "IMAGE":
             asset_id = element.get("image_asset_id")

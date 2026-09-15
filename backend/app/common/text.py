@@ -68,19 +68,6 @@ def markdown_document_title(title: str) -> str:
     return f"**《{escaped}》**"
 
 
-def strip_leading_document_heading(content: str) -> str:
-    """Drop the first nonblank text line: source documents start with a title.
-
-    Call once on the document's first nonblank TEXT element, at delivery time.
-    Keep subsequent lines verbatim; never compare with the display name.
-    """
-    lines = content.splitlines(keepends=True)
-    first_index = next((index for index, line in enumerate(lines) if line.strip()), None)
-    if first_index is None:
-        return content
-    return "".join(lines[first_index + 1 :])
-
-
 def _emphasized_title_replacement(match: re.Match[str], *, source: str, rendered: str) -> str:
     before = source[match.start() - 1] if match.start() else ""
     after = source[match.end()] if match.end() < len(source) else ""

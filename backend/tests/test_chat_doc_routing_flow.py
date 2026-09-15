@@ -286,7 +286,7 @@ async def test_aligning_clear_winner_delivers_document_without_llm():
 
 
 @pytest.mark.asyncio
-async def test_document_delivery_removes_leading_heading_without_matching_title() -> None:
+async def test_document_delivery_keeps_leading_heading_without_matching_title() -> None:
     title = "如何配VAU图像"
     document = {
         "document_id": str(DOC_A),
@@ -325,11 +325,14 @@ async def test_document_delivery_removes_leading_heading_without_matching_title(
     )
 
     assert result["answer"] == "**《如何配VAU图像》**"
-    assert result["content"] == [{"type": "text", "text": "第一步：打开VAU配置界面。"}]
+    assert result["content"] == [
+        {"type": "text", "text": "与当前显示名称完全不同的旧标题"},
+        {"type": "text", "text": "第一步：打开VAU配置界面。"},
+    ]
 
 
 @pytest.mark.asyncio
-async def test_document_delivery_strips_heading_once_and_preserves_other_elements():
+async def test_document_delivery_preserves_elements_verbatim():
     image_id = uuid4()
     document = {
         "document_id": str(DOC_A),
@@ -359,7 +362,7 @@ async def test_document_delivery_strips_heading_once_and_preserves_other_element
     assert [block["type"] for block in result["content"]] == ["table", "image", "text", "text"]
     assert [block["text"] for block in result["content"] if block["type"] in {"text", "table"}] == [
         "表头\n表格正文",
-        "第一步",
+        "旧标题\n第一步",
         "旧标题\n第二步",
     ]
     assert result["content"][1]["image_asset_id"] == str(image_id)
@@ -648,7 +651,7 @@ async def test_delivery_preserves_large_document():
 
     assert result["response_type"] == "DOC_DELIVERED"
     texts = [b for b in result["content"] if b["type"] == "text"]
-    assert [b["text"] for b in texts] == ["长段落" * 10000]
+    assert [b["text"] for b in texts] == [TITLE_A + "\n" + "长段落" * 10000]
     assert result["references"][0]["download_url"]
 
 

@@ -265,10 +265,13 @@ async def test_long_delivery_complete_saved_history_replay_and_sync_agree(engine
     live = terminal([f async for f in facade.stream(**kwargs)], "complete")
     assert live["response_type"] == "DOC_DELIVERED"
     expected = (
-        ["text", "image", "table", "text", "image"] if include_images else ["text", "table", "text"]
+        ["text", "text", "image", "table", "text", "image"]
+        if include_images
+        else ["text", "text", "table", "text"]
     )
     assert [b["type"] for b in live["content"]] == expected
-    assert live["content"][0]["text"] == document["elements"][1]["content"]
+    assert live["content"][0]["text"] == document["elements"][0]["content"]
+    assert live["content"][1]["text"] == document["elements"][1]["content"]
     assert any(b.get("text") == document["elements"][-2]["content"] for b in live["content"])
     assert live["answer"] == "**《新显示名称》**"
     assert facade_repo.completed["response"] == live
@@ -311,7 +314,8 @@ def test_support_original_delivery_keeps_long_body_table_and_last_images(include
         ],
     )
     content, images = deliver_document(focused, include_images=include_images)
-    assert content[0]["text"] == doc["elements"][1]["content"]
+    assert content[0]["text"] == doc["elements"][0]["content"]
+    assert content[1]["text"] == doc["elements"][1]["content"]
     assert any(b.get("text") == doc["elements"][-2]["content"] for b in content)
     assert len(images) == (2 if include_images else 0)
     assert any(b["type"] == "table" for b in content)

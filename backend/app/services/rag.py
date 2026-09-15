@@ -17,7 +17,6 @@ from app.common.text import (
     emphasize_document_title_mentions,
     estimate_tokens,
     markdown_document_title,
-    strip_leading_document_heading,
 )
 from app.core.config import Settings
 from app.ingestion.embedding import EmbeddingError, EmbeddingProvider, create_embedding_provider
@@ -924,19 +923,11 @@ class RagService:
         *,
         document: dict[str, Any] | None = None,
     ) -> list[RetrievalCandidate]:
+        # Normalize candidate document labels to the latest display name; the
+        # delivered candidate content is never edited here.
         headings: dict[UUID, dict[str, Any]] = {}
         if document is not None:
-            for element in document.get("elements", []):
-                if (
-                    element.get("element_type") == "TEXT"
-                    and str(element.get("content") or "").strip()
-                ):
-                    headings[UUID(str(document["document_id"]))] = {
-                        "title": document["title"],
-                        "element_id": element.get("element_id"),
-                        "content": element["content"],
-                    }
-                    break
+            headings[UUID(str(document["document_id"]))] = {"title": document["title"]}
         elif candidates:
             loader = getattr(self.repository, "get_generation_headings", None)
             if loader is not None:
@@ -951,21 +942,7 @@ class RagService:
             if not meta:
                 result.append(candidate)
                 continue
-            content = candidate.content
-            section_prefix = "章节：" + " > ".join(candidate.section_path) + "\n"
-            prefix = section_prefix if content.startswith(section_prefix) else ""
-            body = content[len(prefix) :]
-            heading = next(
-                (line.strip() for line in str(meta["content"]).splitlines() if line.strip()), ""
-            )
-            if (
-                meta.get("element_id") in candidate.element_ids
-                and heading
-                and len(heading) <= 300
-                and (body.lstrip() == heading or body.lstrip().startswith(heading + "\n"))
-            ):
-                content = prefix + strip_leading_document_heading(body)
-            result.append(replace(candidate, content=content, document=str(meta["title"])))
+            result.append(replace(candidate, document=str(meta["title"])))
         return result
 
     def _fit_context_prompt(
@@ -2570,7 +2547,6 @@ class RagService:
         document_title = str(document["title"])
         blocks: list[RoutingContentBlock] = []
         image_asset_ids: list[str] = []
-        heading_pending = True
         for element in document.get("elements", []):
             if element.get("element_type") == "IMAGE":
                 asset_id = element.get("image_asset_id")
@@ -2592,11 +2568,6 @@ class RagService:
             if element.get("element_type") == "TEXT":
                 if not content.strip():
                     continue
-                if heading_pending:
-                    heading_pending = False
-                    content = strip_leading_document_heading(content)
-                    if not content.strip():
-                        continue
             blocks.append(
                 RoutingContentBlock(
                     type="table" if element.get("element_type") == "TABLE" else "text",
