@@ -81,6 +81,24 @@ def build_pdf(pages: list[PageSpec]) -> bytes:
             zlib.compress(raw),
         ),
     )
+    # ICCBased colour space with an explicit RGB Alternate and N=3, the form
+    # real Word/exported PDFs use; the parser must decode samples as RGB.
+    icc_raw = bytes([90, 40, 160]) * (32 * 32)
+    add(
+        12,
+        stream_object(
+            b"/N 3 /Alternate /DeviceRGB",
+            icc_raw,
+        ),
+    )
+    add(
+        13,
+        stream_object(
+            b"/Type /XObject /Subtype /Image /Width 32 /Height 32"
+            b" /ColorSpace [/ICCBased 12 0 R] /BitsPerComponent 8 /Filter /FlateDecode",
+            zlib.compress(icc_raw),
+        ),
+    )
     add(3, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
 
     page_ids = list(range(100, 100 + len(pages)))
@@ -104,7 +122,7 @@ def build_pdf(pages: list[PageSpec]) -> bytes:
         ops.append(b"ET")
         xobjects: list[bytes] = []
         for image in page.get("images", []):
-            reference = 10 if image["kind"] == "jpeg" else 11
+            reference = {"jpeg": 10, "raw": 11, "icc": 13}[image["kind"]]
             xobjects.append(f"/Im{reference} {reference} 0 R".encode())
             ops.append(
                 f"q {image['w']} 0 0 {image['h']} {image['x']} {image['y']} cm "
@@ -283,6 +301,24 @@ def test_parse_pdf_keeps_one_off_lines_inside_header_band() -> None:
     texts = [element.content for element in parsed.elements if element.element_type == "TEXT"]
     assert "Important warning near the top" in texts
     assert "Company Manual V2" not in texts
+
+
+def test_parse_pdf_decodes_iccbased_raster_via_alternate_space() -> None:
+    # Real Word/exported PDFs wrap RGB samples in an ICCBased space; the
+    # parser must resolve N=3 / Alternate=DeviceRGB instead of failing.
+    pages = [
+        {
+            "lines": [{"text": "Body text with an ICC photo.", "y": 700, "size": 12}],
+            "images": [{"kind": "icc", "x": 100, "y": 300, "w": 200, "h": 160}],
+        }
+    ]
+    parsed = parse_pdf(build_pdf(pages), max_pages=50)
+    images = [element for element in parsed.elements if element.element_type == "IMAGE"]
+    assert len(images) == 1
+    assert images[0].image_mime_type == "image/png"
+    assert images[0].image_bytes.startswith(b"\x89PNG")
+    assert images[0].metadata["image_width"] == 32
+    assert images[0].metadata["image_height"] == 32
 
 
 def test_parse_pdf_removes_repeated_logo_but_keeps_body_photo() -> None:

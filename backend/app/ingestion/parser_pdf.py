@@ -79,9 +79,22 @@ def _pdf_name(value: Any) -> str:
 
 
 def _colorspace_mode(colorspace: Any) -> str:
-    """Map a PDF colour space onto a PIL raw mode."""
+    """Map a PDF colour space onto a PIL raw mode.
+
+    ICCBased streams are common in Word/exported PDFs; their stream dict
+    carries the component count (N) and an explicit Alternate space, so the
+    samples can still be decoded as plain RGB/Gray/CMYK rasters. pdfplumber
+    may hand over the space wrapped in nested lists.
+    """
     entry = colorspace
-    if isinstance(entry, list | tuple) and entry:
+    icc_stream: PDFStream | None = None
+    while isinstance(entry, list | tuple) and entry:
+        if (
+            len(entry) >= 2
+            and isinstance(entry[1], PDFStream)
+            and _pdf_name(entry[0]) == "ICCBased"
+        ):
+            icc_stream = entry[1]
         entry = entry[0]
     name = _pdf_name(entry)
     if name in {"DeviceRGB", "RGB", "CalRGB", "Lab"}:
@@ -91,6 +104,21 @@ def _colorspace_mode(colorspace: Any) -> str:
     if name in {"DeviceCMYK", "CMYK"}:
         return "CMYK"
     if name == "ICCBased":
+        if icc_stream is not None:
+            alternate = _pdf_name(icc_stream.get_any(("Alternate",)))
+            if alternate in {"DeviceRGB", "RGB", "CalRGB"}:
+                return "RGB"
+            if alternate in {"DeviceGray", "G", "CalGray"}:
+                return "L"
+            if alternate in {"DeviceCMYK", "CMYK"}:
+                return "CMYK"
+            components = icc_stream.get_any(("N",))
+            if components == 3:
+                return "RGB"
+            if components == 1:
+                return "L"
+            if components == 4:
+                return "CMYK"
         raise PdfParseError("PDF_IMAGE_DECODE_FAILED: ICCBased 颜色分量无法确定")
     raise PdfParseError(f"PDF_IMAGE_DECODE_FAILED: 不支持的图片颜色空间 {name or '未知'}")
 
