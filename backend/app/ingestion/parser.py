@@ -316,4 +316,4 @@ def parse_docx(data: bytes) -> ParsedDocument:
         mammoth_warnings.append("IMAGE_DOMINANT_DOCUMENT: 正文稀疏，需核验图片文字及阅读顺序")
     for sequence_no, element in enumerate(elements, start=1):
         element.metadata["source_sequence_no"] = sequence_no
-    return ParsedDocument(elements=elements, mammoth_warnings=mammoth_warnings)
+    return ParsedDocument(elements=elements, parser_warnings=mammoth_warnings)

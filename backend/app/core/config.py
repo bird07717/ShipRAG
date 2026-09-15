@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     m2_docx_max_uncompressed_bytes: int = 209_715_200
     m2_docx_max_entry_bytes: int = 52_428_800
     m2_docx_max_compression_ratio: float = 100.0
+    m2_pdf_max_bytes: int = 104_857_600
+    m2_pdf_max_pages: int = 200
     m2_chunk_target_chars: int = 1_200
     m2_chunk_max_chars: int = 2_000
     m2_chunk_overlap_paragraphs: int = 1

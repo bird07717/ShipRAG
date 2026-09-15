@@ -518,7 +518,7 @@ onMounted(async () => {
                   :key="docRef.document_id"
                   class="ref-item"
                 >
-                  <span class="ref-icon">DOCX</span>
+                  <span class="ref-icon">DOC</span>
                   <div class="ref-meta">
                     <b>{{ docRef.title }}</b>
                     <small v-if="refSection(docRef)">{{ refSection(docRef) }}</small>

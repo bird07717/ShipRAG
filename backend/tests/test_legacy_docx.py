@@ -56,7 +56,7 @@ def test_vml_preserves_occurrences_and_avoids_alternative_duplication(alternate)
         for e in parsed.elements
         if e.element_type == "IMAGE"
     )
-    assert "IMAGE_DOMINANT_DOCUMENT" in parsed.mammoth_warnings[-1]
+    assert "IMAGE_DOMINANT_DOCUMENT" in parsed.parser_warnings[-1]
 
 
 def test_vml_broken_relationship_fails_instead_of_omitting_image():
@@ -132,7 +132,7 @@ async def test_queued_reuse_falls_back_to_parse_when_revision_or_hash_no_longer_
     from unittest.mock import AsyncMock, Mock
     from uuid import uuid4
 
-    from app.ingestion.models import CONTENT_REVISION
+    from app.ingestion.models import DOCX_MIME_TYPE, content_revision_for_mime
     from app.ingestion.pipeline import IndexPipeline
 
     result = Mock()
@@ -155,6 +155,7 @@ async def test_queued_reuse_falls_back_to_parse_when_revision_or_hash_no_longer_
         "document_id": uuid4(),
         "kb_id": uuid4(),
         "filename": "legacy.docx",
+        "mime_type": DOCX_MIME_TYPE,
         "source_hash": "original-source-hash",
     }
     index, task, previous = {"id": uuid4()}, uuid4(), uuid4()
@@ -163,6 +164,51 @@ async def test_queued_reuse_falls_back_to_parse_when_revision_or_hash_no_longer_
     assert "status = 'READY'" in str(query)
     assert "source_hash = :source_hash" in str(query)
     assert "metadata->>'content_revision' = :content_revision" in str(query)
-    assert parameters["content_revision"] == CONTENT_REVISION
+    assert parameters["content_revision"] == content_revision_for_mime(DOCX_MIME_TYPE)
     assert parameters["source_hash"] == document["source_hash"]
+    pipeline._process_document.assert_awaited_once_with(index, document, task, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_queued_reuse_uses_pdf_revision_for_pdf_documents():
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from uuid import uuid4
+
+    from app.ingestion.models import (
+        CONTENT_REVISION_DOCX,
+        CONTENT_REVISION_PDF,
+        PDF_MIME_TYPE,
+    )
+    from app.ingestion.pipeline import IndexPipeline
+
+    result = Mock()
+    result.scalar_one_or_none.return_value = None
+    connection = SimpleNamespace(execute=AsyncMock(return_value=result))
+
+    class Engine:
+        @asynccontextmanager
+        async def connect(self):
+            yield connection
+
+    pipeline = object.__new__(IndexPipeline)
+    pipeline.engine = Engine()
+    pipeline.model_sources = {}
+    pipeline._update_task = AsyncMock()
+    pipeline._update_document_status = AsyncMock()
+    pipeline._process_document = AsyncMock()
+    document = {
+        "index_document_id": uuid4(),
+        "document_id": uuid4(),
+        "kb_id": uuid4(),
+        "filename": "manual.pdf",
+        "mime_type": PDF_MIME_TYPE,
+        "source_hash": "pdf-source-hash",
+    }
+    index, task, previous = {"id": uuid4()}, uuid4(), uuid4()
+    await pipeline._reuse_document(index, document, previous, task, 1, 1)
+    query, parameters = connection.execute.call_args.args
+    assert parameters["content_revision"] == CONTENT_REVISION_PDF
+    assert parameters["content_revision"] != CONTENT_REVISION_DOCX
     pipeline._process_document.assert_awaited_once_with(index, document, task, 1, 1)

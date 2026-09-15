@@ -183,7 +183,7 @@ def test_docx_validation_and_parser_preserve_order(tmp_path) -> None:
     assert "port" in parsed.elements[2].content
     assert parsed.elements[4].image_bytes
     assert parsed.elements[4].image_mime_type == "image/png"
-    assert parsed.mammoth_warnings == []
+    assert parsed.parser_warnings == []
 
 
 @pytest.mark.parametrize(

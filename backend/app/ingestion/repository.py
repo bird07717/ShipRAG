@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.common.errors import ApiError
 from app.core.config import Settings
-from app.ingestion.models import CONTENT_REVISION
+from app.ingestion.models import content_revision_for_mime
 from app.tasks.repository import TaskRecordRepository
 
 
@@ -648,6 +648,7 @@ class IngestionRepository:
         object_key: str,
         file_hash: str,
         file_size: int,
+        mime_type: str,
         request_build: bool,
         idempotency_key: str,
         request_hash: str,
@@ -737,8 +738,7 @@ class IngestionRepository:
                         file_hash, file_size, mime_type
                     ) VALUES (
                         :id, :kb_id, :filename, :display_name, :bucket, :object_key,
-                        :file_hash, :file_size,
-                        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                        :file_hash, :file_size, :mime_type
                     ) RETURNING *
                     """
                 ),
@@ -751,6 +751,7 @@ class IngestionRepository:
                     "object_key": object_key,
                     "file_hash": file_hash,
                     "file_size": file_size,
+                    "mime_type": mime_type,
                 },
             )
             document = dict(document_result.mappings().one())
@@ -1090,7 +1091,7 @@ class IngestionRepository:
         documents_result = await connection.execute(
             text(
                 """
-                SELECT id, file_hash FROM document_source
+                SELECT id, file_hash, mime_type FROM document_source
                 WHERE kb_id = :kb_id AND status = 'STORED'
                 ORDER BY created_at, id
                 """
@@ -1120,22 +1121,34 @@ class IngestionRepository:
             )
             prev_model_name = prev_model_result.scalar_one_or_none()
             if prev_model_name == model["model_name"]:
+                # Reuse is gated per format: a stored document only reuses a
+                # previous parse result when its parser revision for that
+                # format still matches. Bumping the PDF revision must never
+                # force DOCX documents into a full re-parse (and re-embed).
                 prev_docs_result = await connection.execute(
                     text(
                         """
-                        SELECT document_id, source_hash FROM index_document
+                        SELECT document_id, source_hash,
+                               metadata->>'content_revision' AS content_revision
+                        FROM index_document
                         WHERE index_id = :index_id AND status = 'READY'
-                          AND metadata->>'content_revision' = :content_revision
                         """
                     ),
-                    {"index_id": prev_index_id, "content_revision": CONTENT_REVISION},
+                    {"index_id": prev_index_id},
                 )
-                prev_hashes = {
-                    row["document_id"]: row["source_hash"] for row in prev_docs_result.mappings()
+                prev_docs = {
+                    row["document_id"]: (row["source_hash"], row["content_revision"])
+                    for row in prev_docs_result.mappings()
                 }
                 for document in documents:
                     doc_id = document["id"]
-                    if doc_id in prev_hashes and prev_hashes[doc_id] == document["file_hash"]:
+                    expected_revision = content_revision_for_mime(document["mime_type"])
+                    previous = prev_docs.get(doc_id)
+                    if (
+                        previous is not None
+                        and previous[0] == document["file_hash"]
+                        and previous[1] == expected_revision
+                    ):
                         build_modes[doc_id] = "REUSE"
                     else:
                         build_modes[doc_id] = "REBUILD"

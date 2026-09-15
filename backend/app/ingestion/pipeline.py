@@ -27,9 +27,17 @@ from app.ingestion.image_understanding import (
     create_vision_provider,
 )
 from app.ingestion.legacy_text import restore_legacy_text
-from app.ingestion.models import CONTENT_REVISION, EmbeddingInput, ParsedElement
+from app.ingestion.models import (
+    PDF_MIME_TYPE,
+    EmbeddingInput,
+    ParsedElement,
+    content_revision_for_mime,
+)
 from app.ingestion.parser import parse_docx
+from app.ingestion.parser_pdf import PDF_PARSER_NAME, parse_pdf
 from app.ingestion.repository import BuildReference, IngestionRepository
+
+DOCX_PARSER_NAME = "mammoth+ooxml"
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +129,7 @@ class IndexPipeline:
                     """
                     SELECT idoc.id AS index_document_id, idoc.index_id, idoc.document_id,
                            idoc.source_hash, idoc.metadata, d.kb_id, d.minio_bucket,
-                           d.minio_object_key, d.filename
+                           d.minio_object_key, d.filename, d.mime_type
                     FROM index_document idoc
                     JOIN document_source d ON d.id = idoc.document_id
                     WHERE idoc.index_id = :index_id
@@ -170,12 +178,18 @@ class IndexPipeline:
         data = await self._download_object(document["minio_bucket"], document["minio_object_key"])
         if hashlib.sha256(data).hexdigest() != document["source_hash"]:
             raise ValueError("源文档哈希与索引快照不一致")
-        parsed = await asyncio.to_thread(parse_docx, data)
-        parsed.elements = await restore_legacy_text(
-            parsed.elements,
-            self.ocr_provider,
-            concurrency=self.settings.m4_image_concurrency,
-        )
+        is_pdf = document.get("mime_type") == PDF_MIME_TYPE
+        if is_pdf:
+            parsed = await asyncio.to_thread(
+                parse_pdf, data, max_pages=self.settings.m2_pdf_max_pages
+            )
+        else:
+            parsed = await asyncio.to_thread(parse_docx, data)
+            parsed.elements = await restore_legacy_text(
+                parsed.elements,
+                self.ocr_provider,
+                concurrency=self.settings.m4_image_concurrency,
+            )
 
         image_count = sum(element.element_type == "IMAGE" for element in parsed.elements)
         await self._update_task(
@@ -253,7 +267,7 @@ class IndexPipeline:
             chunks=chunks,
             parents=parents,
             vectors=vectors,
-            mammoth_warnings=parsed.mammoth_warnings,
+            parser_warnings=parsed.parser_warnings,
         )
         completed_progress = min(95, round(position / total * 90))
         await self._update_task(
@@ -289,7 +303,7 @@ class IndexPipeline:
         await self._update_task(task_id, "RUNNING", "PARSING", progress, metadata=task_metadata)
         await self._update_document_status(index_document_id, "PARSING", started=True)
 
-        # 查询上一版索引中同一文档的 index_document_id
+        # 查询上一版索引中同一文档的 index_document_id（按格式匹配解析版本）
         async with self.engine.connect() as connection:
             result = await connection.execute(
                 text(
@@ -304,7 +318,7 @@ class IndexPipeline:
                     "index_id": prev_index_id,
                     "document_id": document_id,
                     "source_hash": document["source_hash"],
-                    "content_revision": CONTENT_REVISION,
+                    "content_revision": content_revision_for_mime(document.get("mime_type")),
                 },
             )
             old_index_document_id = result.scalar_one_or_none()
@@ -519,7 +533,9 @@ class IndexPipeline:
                         {
                             "build_mode": "REUSE",
                             "reused_from": str(old_index_document_id),
-                            "content_revision": CONTENT_REVISION,
+                            "content_revision": content_revision_for_mime(
+                                document.get("mime_type")
+                            ),
                         }
                     ),
                 },
@@ -686,7 +702,7 @@ class IndexPipeline:
         chunks: list[Any],
         parents: list[Any],
         vectors: list[list[float]],
-        mammoth_warnings: list[str],
+        parser_warnings: list[str],
     ) -> None:
         index_id = UUID(str(index["id"]))
         index_document_id = UUID(str(document["index_document_id"]))
@@ -956,9 +972,15 @@ class IndexPipeline:
                     "id": index_document_id,
                     "metadata": json.dumps(
                         {
-                            "parser": "mammoth+ooxml",
-                            "content_revision": CONTENT_REVISION,
-                            "mammoth_warnings": mammoth_warnings,
+                            "parser": (
+                                PDF_PARSER_NAME
+                                if document.get("mime_type") == PDF_MIME_TYPE
+                                else DOCX_PARSER_NAME
+                            ),
+                            "content_revision": content_revision_for_mime(
+                                document.get("mime_type")
+                            ),
+                            "parser_warnings": parser_warnings,
                             "element_count": len(elements),
                             "chunk_count": len(chunks),
                             "parent_chunk_count": len(parents),

@@ -245,7 +245,9 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         <el-table-column label="文件" min-width="260">
           <template #default="scope">
             <div class="file-cell">
-              <span class="file-type-badge">DOCX</span>
+              <span class="file-type-badge">{{
+                scope.row.filename?.toLowerCase().endsWith(".pdf") ? "PDF" : "DOCX"
+              }}</span>
               <div class="cell-primary">
                 <b>{{ scope.row.display_name }}</b>
                 <small class="mono">{{ scope.row.filename }}</small>
@@ -326,7 +328,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
       <div class="form-section">
         <h4>选择文件</h4>
         <p class="desc">
-          当前知识库：{{ store.selectedKnowledge?.name ?? "未选择" }}。仅支持 .docx
+          当前知识库：{{ store.selectedKnowledge?.name ?? "未选择" }}。仅支持 .docx / .pdf
           文件。上传后系统会自动构建 RAG 候选索引，构建完成后需明确切换；Support Profile 草稿将在 Profile Review 中单独审核发布。
         </p>
         <button type="button" class="upload-dropzone" @click="openPicker">
@@ -336,14 +338,14 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
             <small>{{ formatSize(pendingFile.size) }} · 点击重新选择</small>
           </template>
           <template v-else>
-            <b>点击选择 .docx 文件</b>
+            <b>点击选择 .docx / .pdf 文件</b>
             <small>单文件上传；完全相同的文件会被拒绝，修订文件将作为新的候选文档</small>
           </template>
         </button>
         <input
           ref="fileInput"
           type="file"
-          accept=".docx"
+          accept=".docx,.pdf"
           class="hidden-input"
           @change="pickFile"
         />

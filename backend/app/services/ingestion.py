@@ -16,8 +16,16 @@ from app.common.assets import reject_control_characters
 from app.common.errors import ApiError
 from app.common.text import repair_utf8_mojibake
 from app.core.config import Settings
+from app.ingestion.models import DOCX_MIME_TYPE, PDF_MIME_TYPE
 from app.ingestion.repository import BuildReference, DocumentCreateResult, IngestionRepository
-from app.ingestion.validation import DocxLimits, DocxValidationError, validate_docx_package
+from app.ingestion.validation import (
+    DocxLimits,
+    DocxValidationError,
+    PdfLimits,
+    PdfValidationError,
+    validate_docx_package,
+    validate_pdf_document,
+)
 from app.tasks.ingestion import enqueue_index_build
 from app.tasks.maintenance import enqueue_maintenance_task
 from app.tasks.repository import TaskRecordRepository
@@ -50,30 +58,56 @@ class IngestionService:
         raw_filename = upload.filename or ""
         filename = repair_utf8_mojibake(PurePath(raw_filename).name)
         if not filename:
-            raise ApiError("VALIDATION_ERROR", "必须提供 Word 文件名", 422)
+            raise ApiError("VALIDATION_ERROR", "必须提供文档文件名", 422)
         reject_control_characters(filename, field_name="文件名")
+
+        lowered = filename.lower()
+        if lowered.endswith(".docx"):
+            is_pdf = False
+            max_bytes = self.settings.m2_docx_max_bytes
+            size_error = "DOCX 文件超过大小限制"
+        elif lowered.endswith(".pdf"):
+            is_pdf = True
+            max_bytes = self.settings.m2_pdf_max_bytes
+            size_error = "PDF 文件超过大小限制"
+        else:
+            raise ApiError("VALIDATION_ERROR", "仅支持 .docx 或 .pdf 文件", 422)
 
         hasher = hashlib.sha256()
         size = 0
         with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as staged:
             while chunk := await upload.read(1024 * 1024):
                 size += len(chunk)
-                if size > self.settings.m2_docx_max_bytes:
-                    raise ApiError("VALIDATION_ERROR", "DOCX 文件超过大小限制", 422)
+                if size > max_bytes:
+                    raise ApiError("VALIDATION_ERROR", size_error, 422)
                 hasher.update(chunk)
                 staged.write(chunk)
             file_hash = hasher.hexdigest()
-            limits = DocxLimits(
-                max_bytes=self.settings.m2_docx_max_bytes,
-                max_entries=self.settings.m2_docx_max_entries,
-                max_uncompressed_bytes=self.settings.m2_docx_max_uncompressed_bytes,
-                max_entry_bytes=self.settings.m2_docx_max_entry_bytes,
-                max_compression_ratio=self.settings.m2_docx_max_compression_ratio,
-            )
-            try:
-                validate_docx_package(staged, filename, size, limits)
-            except DocxValidationError as exc:
-                raise ApiError("VALIDATION_ERROR", str(exc), 422) from exc
+            if is_pdf:
+                try:
+                    validate_pdf_document(
+                        staged,
+                        filename,
+                        size,
+                        PdfLimits(
+                            max_bytes=self.settings.m2_pdf_max_bytes,
+                            max_pages=self.settings.m2_pdf_max_pages,
+                        ),
+                    )
+                except PdfValidationError as exc:
+                    raise ApiError("VALIDATION_ERROR", str(exc), 422) from exc
+            else:
+                limits = DocxLimits(
+                    max_bytes=self.settings.m2_docx_max_bytes,
+                    max_entries=self.settings.m2_docx_max_entries,
+                    max_uncompressed_bytes=self.settings.m2_docx_max_uncompressed_bytes,
+                    max_entry_bytes=self.settings.m2_docx_max_entry_bytes,
+                    max_compression_ratio=self.settings.m2_docx_max_compression_ratio,
+                )
+                try:
+                    validate_docx_package(staged, filename, size, limits)
+                except DocxValidationError as exc:
+                    raise ApiError("VALIDATION_ERROR", str(exc), 422) from exc
 
             normalized_display_name = repair_utf8_mojibake(
                 (display_name or PurePath(filename).stem).strip()
@@ -118,7 +152,10 @@ class IngestionService:
                 return replay
 
             document_id = uuid4()
-            object_key = f"knowledge-bases/{knowledge_id}/documents/{document_id}/source.docx"
+            extension = "pdf" if is_pdf else "docx"
+            object_key = (
+                f"knowledge-bases/{knowledge_id}/documents/{document_id}/source.{extension}"
+            )
             staged.seek(0)
             await asyncio.to_thread(
                 self.minio.put_object,
@@ -126,9 +163,7 @@ class IngestionService:
                 object_key,
                 staged,
                 size,
-                content_type=(
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                ),
+                content_type=(PDF_MIME_TYPE if is_pdf else DOCX_MIME_TYPE),
             )
             created = False
             try:
@@ -140,6 +175,7 @@ class IngestionService:
                     object_key=object_key,
                     file_hash=file_hash,
                     file_size=size,
+                    mime_type=(PDF_MIME_TYPE if is_pdf else DOCX_MIME_TYPE),
                     request_build=request_build,
                     idempotency_key=idempotency_key,
                     request_hash=request_hash,

@@ -5,7 +5,22 @@ from typing import Any, Literal
 
 ElementType = Literal["TEXT", "TABLE", "IMAGE"]
 ChunkType = Literal["TEXT", "TABLE", "IMAGE", "MIXED"]
-CONTENT_REVISION = "ooxml-vml-1"
+
+DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PDF_MIME_TYPE = "application/pdf"
+CONTENT_REVISION_DOCX = "ooxml-vml-1"
+CONTENT_REVISION_PDF = "pdf-1"
+
+
+def content_revision_for_mime(mime_type: str | None) -> str:
+    """Return the parser revision a document of this format must carry to be reusable.
+
+    The revision is per format: bumping the PDF parser never forces stored DOCX
+    documents into a costly re-parse, and vice versa.
+    """
+    if mime_type == PDF_MIME_TYPE:
+        return CONTENT_REVISION_PDF
+    return CONTENT_REVISION_DOCX
 
 
 @dataclass(slots=True)
@@ -21,7 +36,7 @@ class ParsedElement:
 @dataclass(slots=True)
 class ParsedDocument:
     elements: list[ParsedElement]
-    mammoth_warnings: list[str]
+    parser_warnings: list[str]
 
 
 @dataclass(slots=True)
