@@ -27,8 +27,8 @@ Vue 管理台 / 业务后端
 | 管理台 | `frontend/src/` | 知识库、文档、索引、配置、链路与问答测试的单页管理界面。 |
 | HTTP 应用 | `backend/app/main.py`、`api/` | 生命周期管理、CORS、统一错误体、健康检查、管理与 Assistant 路由。 |
 | Gateway | `backend/app/gateway/` | 按知识库运行策略选择 RAG 或 Support；管理 Support→RAG 回退、Trace 关联和 SSE 状态事件。 |
-| RAG | `backend/app/rag/`、`services/rag.py` | 查询改写、混合检索、重排、文档路由、Prompt/LLM 生成、会话和 Trace 持久化。 |
-| Support | `backend/app/support/`、`document_profiles/` | Profile 驱动的技术支持、聚焦文档工作流、风险/证据校验、文档交付与幂等。 |
+| RAG | `backend/app/rag/v2/`、`services/rag.py` | 两阶段 LLM、混合检索、文档级重排、隐藏全文上下文、答案/图片校验、会话和 Trace 持久化。 |
+| Support | `backend/app/support/`、`document_profiles/` | 已冻结的兼容链路；保留 Profile、聚焦工作流、风险/证据校验、文档交付与幂等，不参与当前 RAG 运行。 |
 | 文档摄取 | `backend/app/ingestion/` | DOCX/PDF 安全校验、解析、图片理解、分块、嵌入及索引版本构建。 |
 | 发布 | `backend/app/releases/` | Support Profile 草稿审核、发布、回滚与与 RAG 索引分离的生命周期。 |
 | Worker | `backend/app/worker.py`、`tasks/` | RQ 消费、索引构建、维护、回收、孤儿任务恢复和保留期清理。 |
@@ -47,7 +47,7 @@ Vue 管理台 / 业务后端
 
 1. `/api/v1/chat*` 或 `/api/v1/assistant/chat/stream` 接收请求；后者使用独立服务凭据并要求 `X-External-User-ID`。
 2. 对外 Assistant 先检查知识库独立的 `assistant_online` 发布状态、知识库/会话归属及当前策略完整就绪态；未上线知识库不进入对外列表，也不能通过已知资源 ID 绕过。随后 Gateway 读取知识库的 `engine_runtime_policy` 和会话模式：`RAG_ONLY` 直入 RAG；`SUPPORT_WITH_RAG_FALLBACK` 先入 Support。
-3. RAG 按 `M3_RAG_PIPELINE_MODE` 分派。开发 V2 的准备阶段只冻结轮次和运行参数，不执行 legacy 检索；LLM 1 根据当前问题和最近完整轮次判断新任务、追问或纠正，还原独立问题，短追问会把从上一轮用户请求提取的任务锚点同时送入召回与文档级排序。所有查询一次批量 Embedding 后，以冻结索引的 Chunk/文档卡片聚合文档；RRF 候选经现有 Rerank Provider 做一次文档级排序，将前 1～3 份完整有序元素作为隐藏上下文交给 LLM 2 生成答案和选择图片，排序服务失败时保持 RRF 顺序。公开结果不交付原文、候选列表、来源元数据或文档总数，必要标题可存在于答案正文。`legacy` 保留原混合检索、文档路由和旧 P2/P3 代码作为人工回滚；有效 V2 已不创建旧 Planner 任务或 Trace。Support 继续处理自身聚焦文档、Profile/文档路由和工作流。
+3. RAG 只有 V2 主路径：准备阶段冻结轮次和运行参数；LLM 1 根据当前问题和最近完整轮次判断新任务、追问或纠正，并产生有界查询。查询一次批量 Embedding 后，以冻结索引的 Chunk/文档卡片聚合文档；RRF 候选经 Rerank Provider 做一次文档级排序，将前 1～3 份完整有序元素作为隐藏上下文交给 LLM 2 生成答案和选择图片，排序服务失败时保持 RRF 顺序。公开结果不交付原文、候选列表、来源元数据或文档总数。旧首轮、焦点、Query Rewrite、双 Planner 和六策略实现已删除；Support 代码冻结保留，但当前运行策略为 `RAG_ONLY`。
 4. 策略允许且 Support 返回指定回退类型时，Gateway 复用消息上下文调用 RAG，并建立父子 Trace 关联。
 5. 内部管理聊天流（经 Gateway）按 SSE 发送 `status`、`trace`、`message`、可选 `fallback` 和终态 `done`/`error`。对外 Assistant 流不是原样透传：它先发送 `accepted`，随后按需要发送 `progress`、`context`、`delta`，并以 `complete` 或 `error` 结束；上游长时间无帧时每 15 秒发送 SSE 注释心跳 `: ping`。两套接口的字段和事件名不能混用。
 
@@ -61,11 +61,11 @@ Vue 管理台 / 业务后端
 - 知识库后台可维护状态、RAG/Support 发布状态和 Assistant 对外上线状态彼此独立；新知识库默认不对 Assistant 上线。管理台按库保存推荐问题并确认上下线，使用管理凭据和配置修订检查；Assistant 欢迎接口只消费已上线库的保存值，保持外部契约。
 - 聊天会话会冻结使用的索引/发布版本，避免在线版本切换改变既有会话语义。
 - RAG 索引自动激活与 Support Profile 人工审核发布彼此独立。
-- RAG 文档卡片绑定知识库、冻结索引和文档，使用索引冻结的 Embedding 模型；显示名称查询时联接 `document_source`。卡片生成/审核是管理能力；V2 使用有效卡片参与文档级召回，但标题只作为内部检索信息，不进入公开回答。legacy 的 P2/P3 行为保持兼容。
+- RAG 文档卡片绑定知识库、冻结索引和文档，使用索引冻结的 Embedding 模型；显示名称查询时联接 `document_source`。卡片生成/审核是管理能力；V2 使用有效卡片参与文档级召回，标题可按解决问题需要出现在答案正文。
 - 生产运行时容器采用只读根文件系统与 `/tmp` tmpfs；部署细节见 [`environment.md`](environment.md)。
 
 ## RAG V2 实施状态
 
-ADR-0019 与 [RAG 隐藏全文双 LLM V2 执行计划](../technical/rag-full-document-generation-v2-execution-plan.md) 已取代继续收口原 P3/P4 的方向。V0～V4.2 已在本地实现“独立完整轮次历史 → LLM 1 还原问题/任务关系和补充查询 → 单次批量 Embedding 的 Chunk/卡片聚合 → 文档级 Rerank → 加载有界完整候选文档 → LLM 2 统一生成答案并选图 → 公开边界校验”。完整文档作为用户不可见上下文，不再直接交付给用户；管理试问和 Assistant 共用 V2 生成终态，有效 V2 已旁路旧首轮、Query Rewrite、焦点/待确认状态、legacy 预检索和 P2/P3 Planner，并停止旧 Planner 任务和 Trace 写入。标题、文件名、正常技术编号、产品私网 URL 和普通产品 API 可作为技术正文；严格隐藏的是文档总数、Prompt、候选诊断、对象存储位置与未经证据支持的内部服务/管理信息。参数来源只做 Trace 观测，不作为硬失败。
+ADR-0019 与 [RAG 隐藏全文双 LLM V2 执行计划](../technical/rag-full-document-generation-v2-execution-plan.md) 已取代继续收口原 P3/P4 的方向。V0～V4.3 已在本地实现“独立完整轮次历史 → LLM 1 还原问题/任务关系和补充查询 → 单次批量 Embedding 的 Chunk/卡片聚合 → 文档级 Rerank → 加载有界完整候选文档 → LLM 2 统一生成答案并选图 → 公开边界校验”。LLM 2 会区分主任务与补充证据，补充文档不能替代主任务文档明确要求的并列、前置或后续动作；图片内部别名由服务器确定性转换为有序结构化图片，成组或异常标记不会进入公开正文。完整文档作为用户不可见上下文，不再直接交付给用户；管理试问和 Assistant 共用 V2 生成终态，有效 V2 已旁路旧首轮、Query Rewrite、焦点/待确认状态、legacy 预检索和 P2/P3 Planner，并停止旧 Planner 任务和 Trace 写入。标题、文件名、正常技术编号、产品私网 URL 和普通产品 API 可作为技术正文；严格隐藏的是文档总数、Prompt、候选诊断、对象存储位置与未经证据支持的内部服务/管理信息。参数来源只做 Trace 观测，不作为硬失败。
 
-开发环境默认 V2，生产继续显式 legacy；Support 的焦点工作流、Profile 和文档交付不变。V2 `begin_turn` 只读取显式关联、成功完成的最近问答轮次，不读取旧焦点或 `chat_context` 作为 RAG 输入，并保持共享数据库状态原样。共享 `conversation.focus_*` 等字段不得在 Support 解耦前删除。
+V5 已在本地完成：RAG V2 成为唯一实现，旧模式开关和旧运行代码已删除，回滚必须使用 Git 提交或旧镜像，不能再通过环境变量切换。Support 的焦点工作流、Profile 和文档交付被冻结但保留；V2 `begin_turn` 只读取显式关联、成功完成的最近问答轮次，不读取旧焦点或 `chat_context`，并保持共享数据库状态原样。共享 `conversation.focus_*` 等字段不得在 Support 解耦前删除。

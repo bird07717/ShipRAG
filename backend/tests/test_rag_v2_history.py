@@ -140,6 +140,9 @@ def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> 
     assert "旧回答中的参数可能是错的" in prompt
     assert "历史助手回答只用于理解指代" in prompt
     assert "都不是产品事实证据" in prompt
+    assert "补充文档只能展开其中某一步" in prompt
+    assert "used_document_keys 必须列出答案实际采用事实的全部文档" in prompt
+    assert "每张图片分别使用一个完整标记" in prompt
     payload = json.loads(prompt)
     assert payload["conversation_relation"] == "CORRECTION"
     assert payload["active_task"] == "检查 PDC"

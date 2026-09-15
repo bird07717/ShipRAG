@@ -18,7 +18,11 @@ from app.common.errors import ApiError
 from app.core.config import Settings
 from app.ingestion.embedding import EmbeddingError, EmbeddingProvider, create_embedding_provider
 from app.ingestion.models import EmbeddingInput
-from app.rag.doc_router import (
+from app.rag.models import ModelSnapshot, RerankDocument, RetrievalCandidate, RetrievalConfig
+from app.rag.repository import RagRepository
+from app.rag.rerank import RerankError, RerankProvider, create_rerank_provider
+from app.rag.retrieval import apply_rerank, reciprocal_rank_fusion
+from app.support.document_routing_policy import (
     ACTION_CLARIFY,
     ACTION_DELIVER,
     ACTION_NO_MATCH,
@@ -26,10 +30,6 @@ from app.rag.doc_router import (
     ACTION_STAY,
     decide_doc_routing,
 )
-from app.rag.models import ModelSnapshot, RerankDocument, RetrievalCandidate, RetrievalConfig
-from app.rag.repository import RagRepository
-from app.rag.rerank import RerankError, RerankProvider, create_rerank_provider
-from app.rag.retrieval import apply_rerank, reciprocal_rank_fusion
 from app.support.models import ProblemProfile
 from app.support.problem_resolver import normalize_for_match
 from app.support.repository import SupportRepository

@@ -21,8 +21,6 @@ from app.ingestion.image_understanding import (
 )
 from app.ingestion.models import ImageUnderstandingResult, ParsedElement
 from app.ingestion.pipeline import IndexPipeline
-from app.rag.models import RetrievalCandidate
-from app.rag.prompt import build_context
 
 
 @pytest.mark.asyncio
@@ -174,29 +172,6 @@ async def test_disabled_image_capability_is_explicitly_skipped() -> None:
         "error_code": None,
         "metadata": {},
     }
-
-
-def test_multimodal_source_exposes_only_registered_image_assets() -> None:
-    image_asset_id = uuid4()
-    candidate = RetrievalCandidate(
-        chunk_id=uuid4(),
-        document_id=uuid4(),
-        document="部署手册.docx",
-        chunk_type="MIXED",
-        content="图片文字：端口 3306",
-        token_count=10,
-        section_path=["数据库"],
-        element_ids=[uuid4()],
-        distance=0.1,
-        similarity=0.9,
-        rank=1,
-        image_asset_ids=[image_asset_id],
-    )
-
-    context, sources = build_context([candidate])
-
-    assert "图片文字：端口 3306" in context
-    assert sources[0].public_dict()["image_asset_ids"] == [str(image_asset_id)]
 
 
 def test_standalone_image_builds_image_chunk_with_understanding_text() -> None:

@@ -28,6 +28,7 @@ from app.assistant.service import (
     sse,
 )
 from app.common.errors import ApiError
+from app.common.turn_gate import TurnSlot, turn_gate_snapshot
 from app.core.config import Settings
 
 
@@ -38,6 +39,10 @@ def _event(frame: bytes) -> tuple[str | None, dict | None]:
 class _Repository:
     def __init__(self, *, replay: bool = False) -> None:
         self.replay = replay
+        # The admission gate reads the process settings through the
+        # repository; keep the gate disabled for unit tests by default.
+        self.settings = Settings(_env_file=None, app_env="test", chat_turn_concurrency_limit=0)
+        self.reservations = 0
         self.completed: dict | None = None
         self.context: dict | None = None
         self.failed: dict | None = None
@@ -54,6 +59,7 @@ class _Repository:
         return object()
 
     async def reserve_assistant_request(self, **_: object) -> tuple[str, dict]:
+        self.reservations += 1
         if self.replay:
             return "REPLAY", {
                 "id": uuid4(),
@@ -420,6 +426,92 @@ async def test_facade_persists_unexpected_stream_failure() -> None:
     assert event == "error"
     assert payload and payload["code"] == "INTERNAL_ERROR"
     assert repository.failed is not None
+
+
+def _gated_repository_settings(limit: int) -> Settings:
+    return Settings(
+        _env_file=None,
+        app_env="test",
+        chat_turn_concurrency_limit=limit,
+        chat_turn_wait_seconds=0.1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_facade_rejects_new_turn_when_gate_is_exhausted() -> None:
+    repository = _Repository()
+    repository.settings = _gated_repository_settings(limit=1)
+    holder = TurnSlot(repository.settings)
+    await holder.acquire()
+    service = AssistantFacadeService(repository, _Gateway())  # type: ignore[arg-type]
+    try:
+        with pytest.raises(ApiError) as raised:
+            await service.prepare_stream(
+                external_user_id="business-user-1",
+                knowledge_id=KNOWLEDGE_ID,
+                conversation_id=None,
+                question="怎么做",
+                choice_id=None,
+                include_images=True,
+                idempotency_key="key-1",
+                request_id="request-1",
+            )
+        assert raised.value.code == "SERVICE_BUSY"
+        assert raised.value.status_code == 503
+        # A capacity rejection must not burn the idempotency key.
+        assert repository.reservations == 0
+    finally:
+        holder.release()
+
+
+@pytest.mark.asyncio
+async def test_facade_releases_gate_slot_after_terminal_event() -> None:
+    repository = _Repository()
+    repository.settings = _gated_repository_settings(limit=1)
+    service = AssistantFacadeService(repository, _Gateway())  # type: ignore[arg-type]
+
+    frames = [
+        frame
+        async for frame in service.stream(
+            external_user_id="business-user-1",
+            knowledge_id=KNOWLEDGE_ID,
+            conversation_id=None,
+            question="怎么做",
+            choice_id=None,
+            include_images=True,
+            idempotency_key="key-1",
+            request_id="request-1",
+        )
+    ]
+
+    assert [event for event, _ in map(_event, frames)][-1] == "complete"
+    assert turn_gate_snapshot(repository.settings) == {"limit": 1, "in_flight": 0}
+
+
+@pytest.mark.asyncio
+async def test_facade_releases_gate_slot_when_reservation_fails() -> None:
+    repository = _Repository()
+    repository.settings = _gated_repository_settings(limit=1)
+
+    async def refuse(**_: object) -> tuple[str, dict]:
+        raise ApiError("CONVERSATION_BUSY", "会话正在生成回答", 409)
+
+    repository.reserve_assistant_request = refuse  # type: ignore[method-assign]
+    service = AssistantFacadeService(repository, _Gateway())  # type: ignore[arg-type]
+
+    with pytest.raises(ApiError):
+        await service.prepare_stream(
+            external_user_id="business-user-1",
+            knowledge_id=KNOWLEDGE_ID,
+            conversation_id=None,
+            question="怎么做",
+            choice_id=None,
+            include_images=True,
+            idempotency_key="key-1",
+            request_id="request-1",
+        )
+
+    assert turn_gate_snapshot(repository.settings) == {"limit": 1, "in_flight": 0}
 
 
 @pytest.mark.asyncio

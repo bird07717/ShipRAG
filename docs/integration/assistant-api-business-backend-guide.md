@@ -898,6 +898,7 @@ Content-Type: application/json
 | 参数或游标错误 | HTTP 422 | 修正请求；游标错误时从第一页重新加载。 |
 | 会话不存在 | HTTP 404 `CONVERSATION_NOT_FOUND` | 清理本地会话映射，回到新会话流程。 |
 | 会话正在处理 | HTTP 409 `CONVERSATION_BUSY` | 禁止并发发送；等待当前请求结束后再处理。 |
+| 服务并发达到上限 | HTTP 503 `SERVICE_BUSY` | 短暂故障；未占用幂等键，稍后用原 Key 和相同请求体重试。 |
 | 幂等请求仍在处理 | HTTP 409 `REQUEST_IN_PROGRESS` | 使用原 Key 延迟重试，不生成新 Key。 |
 | 幂等 Key 与请求体冲突 | HTTP 409 `IDEMPOTENCY_KEY_REUSED` | 终止请求并告警，检查调用方幂等实现。 |
 | SSE `TURN_DEADLINE_EXCEEDED` | `error` 终止事件 | 标记本次失败；由用户重新发送时生成新 Key。 |

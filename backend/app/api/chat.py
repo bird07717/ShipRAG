@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from app.api.schemas import (
     RuntimePolicyUpdate,
     WelcomeResponse,
 )
+from app.common.turn_gate import turn_slot_scope
 from app.gateway.models import ExecutionPolicy
 from app.gateway.repository import GatewayRepository
 from app.gateway.service import ChatGatewayService
@@ -47,19 +49,20 @@ async def chat(
         knowledge_id=payload.knowledge_id,
         conversation_id=payload.conversation_id,
     )
-    return await gateway.handle(
-        policy=policy,
-        knowledge_id=payload.knowledge_id,
-        conversation_id=payload.conversation_id,
-        question=payload.question,
-        request_id=payload.request_id or str(request.state.request_id),
-        user_id=payload.user_id,
-        problem_code=payload.problem_code,
-        document_id=payload.document_id,
-        choice_id=payload.choice_id,
-        include_images=payload.include_images,
-        idempotency_key=idempotency_key,
-    )
+    async with turn_slot_scope(repository.settings):
+        return await gateway.handle(
+            policy=policy,
+            knowledge_id=payload.knowledge_id,
+            conversation_id=payload.conversation_id,
+            question=payload.question,
+            request_id=payload.request_id or str(request.state.request_id),
+            user_id=payload.user_id,
+            problem_code=payload.problem_code,
+            document_id=payload.document_id,
+            choice_id=payload.choice_id,
+            include_images=payload.include_images,
+            idempotency_key=idempotency_key,
+        )
 
 
 @router.post("/chat/stream", tags=["chat"])
@@ -74,10 +77,12 @@ async def chat_stream(
         knowledge_id=payload.knowledge_id,
         conversation_id=payload.conversation_id,
     )
-    return StreamingResponse(
-        observe_stream_errors(
-            request,
-            gateway.stream(
+
+    async def _gated_stream() -> AsyncIterator[bytes]:
+        # Acquired on first iteration; a busy gate surfaces as an SSE error
+        # event via observe_stream_errors (admin playground contract).
+        async with turn_slot_scope(repository.settings):
+            async for frame in gateway.stream(
                 policy=policy,
                 knowledge_id=payload.knowledge_id,
                 conversation_id=payload.conversation_id,
@@ -89,9 +94,11 @@ async def chat_stream(
                 choice_id=payload.choice_id,
                 include_images=payload.include_images,
                 idempotency_key=idempotency_key,
-            ),
-            user_facing=True,
-        ),
+            ):
+                yield frame
+
+    return StreamingResponse(
+        observe_stream_errors(request, _gated_stream(), user_facing=True),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

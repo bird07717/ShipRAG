@@ -253,11 +253,6 @@ async def run(
             # (gateway status, then trace/source/message/done); the runtime default routes /chat to
             # the technical-support workflow whose stream has no trace event.
             "chat_execution_mode": "legacy_rag",
-            # The generic smoke's fake provider emits the legacy streaming marker format.
-            # V2 uses two structured completions and is covered by its pipeline/Assistant tests
-            # plus the real-model V2 smoke; pinning this fixture prevents local .env mode changes
-            # from silently changing what this long-standing smoke validates.
-            "m3_rag_pipeline_mode": "legacy",
         }
     )
     resources = AppResources.create(settings)
@@ -327,24 +322,24 @@ async def run(
             raise RuntimeError("M3 SSE stream had no message delta")
         if trace["status"] != "COMPLETED":
             raise RuntimeError("M3 trace was not completed")
-        if len(trace["retrieval_result"].get("vector_candidates", [])) != 1:
-            raise RuntimeError("M3 vector retrieval did not return the scoped chunk")
-        if len(trace["retrieval_result"].get("bm25_candidates", [])) != 1:
-            raise RuntimeError("M5 BM25 retrieval did not return the scoped chunk")
-        if len(trace["retrieval_result"].get("fusion_candidates", [])) != 1:
-            raise RuntimeError("M5 RRF fusion did not deduplicate the scoped chunk")
-        if trace["rerank_result"].get("status") != "PASSED":
-            raise RuntimeError("M5 rerank did not pass")
+        generation = trace["runtime_snapshot"].get("generation", {})
+        if generation.get("pipeline") != "V2":
+            raise RuntimeError("RAG V2 generation trace is missing")
+        retrieval = generation.get("retrieval", {})
+        if retrieval.get("query_count") != 1:
+            raise RuntimeError("RAG V2 did not execute the expected retrieval query")
+        if generation.get("context", {}).get("document_count") != 1:
+            raise RuntimeError("RAG V2 did not load exactly one scoped document")
         selected_context = trace["selected_context"]
         if len(selected_context) != 1 or selected_context[0]["document_id"] != str(document_id):
             raise RuntimeError("M3 vector retrieval crossed the requested knowledge boundary")
-        if len(selected_context[0].get("image_asset_ids", [])) != 1:
-            raise RuntimeError("M5 multimodal source did not contain its image asset")
+        if generation.get("context", {}).get("image_count") != 1:
+            raise RuntimeError("RAG V2 context did not register the document image")
         if [message["role"] for message in messages] != ["USER", "ASSISTANT"]:
             raise RuntimeError("M3 conversation messages were not persisted")
         done = events[-1][1]
-        if trace["citation_result"].get("citation_missing") is not False:
-            raise RuntimeError("M5 citation validation did not register the real source")
+        if trace["citation_result"].get("status") != "NOT_PUBLIC":
+            raise RuntimeError("RAG V2 public evidence boundary is invalid")
         return {
             "status": "passed",
             "knowledge_id": str(knowledge_id),
@@ -353,17 +348,16 @@ async def run(
             "embedding_provider": embedding_provider,
             "llm_provider": llm_provider,
             "rerank_provider": rerank_provider,
-            "rag_pipeline_mode": settings.effective_rag_pipeline_mode,
-            "vector_candidates": 1,
-            "bm25_candidates": 1,
-            "fusion_candidates": 1,
-            "rerank_status": trace["rerank_result"]["status"],
+            "rag_pipeline": "V2",
+            "retrieval_queries": retrieval["query_count"],
+            "context_documents": generation["context"]["document_count"],
+            "document_rerank_status": retrieval["document_rerank"]["status"],
             "knowledge_scope_verified": True,
             "multimodal_rerank_input_verified": True,
             "sse_events": event_names,
             "answer_chars": len(done["answer"]),
-            "validated_sources": len(done["sources"]),
-            "citation_missing": trace["citation_result"]["citation_missing"],
+            "validated_sources": len(done["references"]),
+            "citation_status": trace["citation_result"]["status"],
             "trace_status": trace["status"],
             "assistant_status": messages[-1]["status"],
         }

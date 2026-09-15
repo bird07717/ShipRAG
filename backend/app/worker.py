@@ -8,6 +8,10 @@ from rq import Queue, Worker
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.tasks.assistant_recovery import (
+    ensure_periodic_assistant_request_recovery,
+    run_stale_assistant_request_recovery_sync,
+)
 from app.tasks.assistant_retention import (
     ensure_periodic_assistant_request_retention,
     run_assistant_request_retention_sync,
@@ -66,6 +70,19 @@ def main() -> None:
                 )
             if ensure_periodic_assistant_request_retention(connection):
                 logger.info("Daily Assistant request retention scheduled")
+        # Assistant requests left RUNNING by a killed API process keep their
+        # conversations locked with CONVERSATION_BUSY until recovered.  Fail
+        # stale rows on startup and periodically so blocked conversations
+        # self-heal instead of waiting for the manual recovery command.
+        if settings.assistant_request_stale_seconds > 0:
+            assistant_recovery_result = run_stale_assistant_request_recovery_sync(settings)
+            if assistant_recovery_result.get("request_count"):
+                logger.warning(
+                    "Recovered %s stale Assistant request(s) at startup",
+                    assistant_recovery_result["request_count"],
+                )
+            if ensure_periodic_assistant_request_recovery(connection):
+                logger.info("Periodic Assistant request recovery scheduled")
         # Periodic GC runs on the maintenance queue as a self-rescheduling
         # delayed job; the built-in scheduler on this worker promotes due
         # jobs.  The sentinel keeps concurrent worker startups from
@@ -84,6 +101,7 @@ def main() -> None:
             and (
                 (settings.index_gc_enabled and settings.index_gc_interval_seconds > 0)
                 or settings.assistant_request_retention_days > 0
+                or settings.assistant_request_stale_seconds > 0
             )
         )
     )

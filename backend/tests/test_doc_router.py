@@ -1,4 +1,4 @@
-"""Unit tests for app.rag.doc_router aggregation and decision policy."""
+"""Unit tests for the frozen Support document routing policy."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ from uuid import uuid4
 
 import pytest
 
-from app.rag.doc_router import (
+from app.rag.models import RetrievalCandidate
+from app.support.document_routing_policy import (
     ACTION_CLARIFY,
     ACTION_DELIVER,
     ACTION_NO_MATCH,
@@ -16,7 +17,6 @@ from app.rag.doc_router import (
     decide_doc_routing,
     resolve_pending_option,
 )
-from app.rag.models import RetrievalCandidate
 
 DOC_A = uuid4()
 DOC_B = uuid4()

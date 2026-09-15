@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import asdict
 from datetime import datetime
@@ -13,10 +12,8 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.common.errors import ApiError
-from app.common.text import estimate_tokens
 from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
-from app.rag.answer_policy import build_scope_snapshot, normalize_scope_description
 from app.rag.document_cards import DOCUMENT_CARD_SCHEMA_VERSION
 from app.rag.model_providers import environment_api_key, supported_providers
 from app.rag.models import (
@@ -26,6 +23,7 @@ from app.rag.models import (
     RetrievalConfig,
     Turn,
 )
+from app.rag.scope import build_scope_snapshot, normalize_scope_description
 
 # Converted documents ("conv") export the original file's highlighted text
 # regions as flat images: solid-colour strips (all <= 65px tall in this
@@ -172,13 +170,8 @@ class RagRepository:
                 raise ApiError("INDEX_NOT_READY", "知识库 Active Index 状态异常", 409)
 
             resolved_conversation_id = conversation_id or uuid4()
-            chat_context: dict[str, Any] = {}
-            focus_document_id: UUID | None = None
-            focus_epoch = 0
-            context_version = 0
             effective_index_id = UUID(str(kb["rag_active_index_id"]))
             embedding_model_name = str(kb["embedding_model_name"])
-            uses_v2 = self.settings.effective_rag_pipeline_mode == "v2"
             scope = build_scope_snapshot(
                 kb["kb_description"], max_tokens=self.settings.m3_rag_scope_max_tokens
             )
@@ -202,17 +195,10 @@ class RagRepository:
                     },
                 )
             else:
-                conversation_columns = (
-                    "knowledge_id, rag_index_id"
-                    if uses_v2
-                    else (
-                        "knowledge_id, focus_document_id, chat_context, rag_index_id, "
-                        "focus_epoch, support_context_version"
-                    )
-                )
                 conversation_result = await connection.execute(
                     text(
-                        f"SELECT {conversation_columns} FROM conversation WHERE id = :id FOR UPDATE"
+                        "SELECT knowledge_id, rag_index_id "
+                        "FROM conversation WHERE id = :id FOR UPDATE"
                     ),
                     {"id": conversation_id},
                 )
@@ -221,17 +207,6 @@ class RagRepository:
                     raise ApiError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
                 if conversation_row["knowledge_id"] != knowledge_id:
                     raise ApiError("CONVERSATION_KB_MISMATCH", "会话不属于指定知识库", 409)
-                if not uses_v2:
-                    focus_document_id = (
-                        UUID(str(conversation_row["focus_document_id"]))
-                        if conversation_row["focus_document_id"]
-                        else None
-                    )
-                    raw_context = conversation_row["chat_context"]
-                    if isinstance(raw_context, dict):
-                        chat_context = dict(raw_context)
-                    focus_epoch = int(conversation_row["focus_epoch"] or 0)
-                    context_version = int(conversation_row["support_context_version"] or 0)
                 if conversation_row["rag_index_id"] is not None:
                     effective_index_id = UUID(str(conversation_row["rag_index_id"]))
                     frozen_result = await connection.execute(
@@ -261,53 +236,6 @@ class RagRepository:
                         {"index_id": effective_index_id, "id": conversation_id},
                     )
 
-                issue = chat_context.get("rag_issue")
-                if isinstance(issue, dict):
-                    try:
-                        origin_id = UUID(str(issue["origin_user_message_id"]))
-                        pending = issue["pending_condition"]
-                        source_user_id = UUID(str(pending["source_user_message_id"]))
-                        assistant_id = UUID(str(pending["source_assistant_message_id"]))
-                    except (KeyError, TypeError, ValueError):
-                        chat_context.pop("rag_issue", None)
-                    else:
-                        source_result = await connection.execute(
-                            text(
-                                """
-                                SELECT id, role, status, rag_user_message_id
-                                FROM message
-                                WHERE conversation_id = :conversation_id
-                                  AND id IN (:origin_id, :source_user_id, :assistant_id)
-                                """
-                            ),
-                            {
-                                "conversation_id": resolved_conversation_id,
-                                "origin_id": origin_id,
-                                "source_user_id": source_user_id,
-                                "assistant_id": assistant_id,
-                            },
-                        )
-                        source_rows = {
-                            UUID(str(row["id"])): row for row in source_result.mappings()
-                        }
-                        origin = source_rows.get(origin_id)
-                        source_user = source_rows.get(source_user_id)
-                        assistant = source_rows.get(assistant_id)
-                        valid_issue = (
-                            origin is not None
-                            and origin["role"] == "USER"
-                            and origin["status"] == "COMPLETED"
-                            and source_user is not None
-                            and source_user["role"] == "USER"
-                            and source_user["status"] == "COMPLETED"
-                            and assistant is not None
-                            and assistant["role"] == "ASSISTANT"
-                            and assistant["status"] == "COMPLETED"
-                            and assistant["rag_user_message_id"] == source_user_id
-                        )
-                        if not valid_issue:
-                            chat_context.pop("rag_issue", None)
-
             if reuse_messages:
                 if conversation_id is None:
                     raise ApiError("CONVERSATION_NOT_FOUND", "降级消息缺少所属会话", 409)
@@ -335,58 +263,11 @@ class RagRepository:
                 ):
                     raise ApiError("FALLBACK_MESSAGE_CONFLICT", "降级消息状态不一致", 409)
 
-            history_rows: list[dict[str, Any]] = []
-            if uses_v2:
-                history, history_diagnostics = await self._v2_history(
-                    connection,
-                    resolved_conversation_id,
-                    assistant_message_id if reuse_messages else None,
-                )
-            else:
-                history_result = await connection.execute(
-                    text(
-                        """
-                        SELECT role, content FROM (
-                            SELECT role, content, sequence_no
-                            FROM message
-                            WHERE conversation_id = :conversation_id AND status = 'COMPLETED'
-                              AND (
-                                  :reuse_messages = false
-                                  OR id NOT IN (:user_message_id, :assistant_message_id)
-                              )
-                            ORDER BY sequence_no DESC
-                            LIMIT :history_limit
-                        ) recent
-                        ORDER BY sequence_no
-                        """
-                    ),
-                    {
-                        "conversation_id": resolved_conversation_id,
-                        "history_limit": self.settings.m3_history_max_messages,
-                        "reuse_messages": reuse_messages,
-                        "user_message_id": user_message_id,
-                        "assistant_message_id": assistant_message_id,
-                    },
-                )
-                history_rows = [dict(row) for row in history_result.mappings()]
-                history = self._budget_history(history_rows)
-                history_diagnostics = {"strategy": "legacy"}
-            if not uses_v2 and self.settings.m3_history_strategy == "focused":
-                history, history_diagnostics = await self._focused_history(
-                    connection,
-                    resolved_conversation_id,
-                    focus_epoch,
-                    assistant_message_id if reuse_messages else None,
-                    focus_document_id=focus_document_id,
-                    index_id=effective_index_id,
-                )
-
-            prompt_result = await connection.execute(
-                text("SELECT content FROM prompt_template WHERE active")
+            history, history_diagnostics = await self._v2_history(
+                connection,
+                resolved_conversation_id,
+                assistant_message_id if reuse_messages else None,
             )
-            prompt_template = prompt_result.scalar_one_or_none()
-            if prompt_template is None:
-                raise ApiError("MODEL_NOT_CONFIGURED", "Active Prompt 未配置", 503)
 
             llm_result = await connection.execute(
                 text(
@@ -517,9 +398,7 @@ class RagRepository:
                     "embedding": model_snapshot(embedding_snapshot),
                 },
                 "retrieval": asdict(retrieval),
-                "prompt": {
-                    "sha256": hashlib.sha256(str(prompt_template).encode()).hexdigest(),
-                },
+                "pipeline": "V2",
             }
 
             if reuse_messages:
@@ -591,7 +470,8 @@ class RagRepository:
                         "question": question,
                         "user_sequence": first_sequence,
                         "assistant_sequence": first_sequence + 1,
-                        "focus_epoch": 0 if uses_v2 else focus_epoch,
+                        # RAG V2 does not own Support's conversation focus state.
+                        "focus_epoch": 0,
                     },
                 )
             await connection.execute(
@@ -648,7 +528,6 @@ class RagRepository:
             knowledge_id=knowledge_id,
             index_id=effective_index_id,
             embedding_model_name=embedding_model_name,
-            prompt_template=str(prompt_template),
             llm=ModelSnapshot(
                 provider=str(llm_row["provider"]),
                 model_name=str(llm_row["model_name"]),
@@ -658,7 +537,6 @@ class RagRepository:
             ),
             history=history,
             history_diagnostics=history_diagnostics,
-            has_prior_messages=bool(history) if uses_v2 else bool(history_rows),
             rerank=ModelSnapshot(
                 provider=str(rerank_row["provider"]),
                 model_name=str(rerank_row["model_name"]),
@@ -669,10 +547,6 @@ class RagRepository:
                 api_key=self._decrypt_api_key(dict(rerank_row)),
             ),
             embedding=embedding_snapshot,
-            focus_document_id=None if uses_v2 else focus_document_id,
-            focus_epoch=0 if uses_v2 else focus_epoch,
-            context_version=0 if uses_v2 else context_version,
-            chat_context={} if uses_v2 else chat_context,
             retrieval=retrieval,
             knowledge_name=normalize_scope_description(str(kb["kb_name"])),
             knowledge_description=(
@@ -684,64 +558,6 @@ class RagRepository:
             scope_chars=scope.chars,
             scope_tokens=scope.tokens,
             scope_truncated=scope.truncated,
-        )
-
-    async def _focused_history(
-        self,
-        connection: Any,
-        conversation_id: UUID,
-        focus_epoch: int,
-        excluded_message_id: UUID | None = None,
-        *,
-        focus_document_id: UUID | None = None,
-        index_id: UUID | None = None,
-    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        from app.rag.history import select_history
-
-        result = await connection.execute(
-            text("""
-            SELECT a.id, a.content AS answer, COALESCE(ar.status, a.status) AS status,
-                   a.focus_epoch, a.rag_history_context,
-                   (CAST(:focus_id AS uuid) IS NULL OR EXISTS (
-                       SELECT 1 FROM document_source d
-                       JOIN document_element e ON e.document_id = d.id
-                       WHERE d.id = :focus_id AND d.status = 'STORED'
-                         AND e.index_id = :index_id
-                         AND d.kb_id = (SELECT knowledge_id FROM conversation
-                                        WHERE id = :conversation_id)
-                   )) AS focus_valid,
-                   u.id AS user_id, u.content AS question, u.status AS user_status,
-                   u.focus_epoch AS user_epoch
-            FROM (
-                SELECT * FROM message
-                WHERE conversation_id = :conversation_id AND role = 'ASSISTANT'
-                  AND (CAST(:excluded AS uuid) IS NULL OR id != :excluded)
-                ORDER BY sequence_no DESC LIMIT :scan_limit
-            ) a
-            LEFT JOIN LATERAL (
-                SELECT user_message_id, status FROM assistant_request
-                WHERE assistant_message_id = a.id AND conversation_id = a.conversation_id
-                ORDER BY created_at DESC, id DESC LIMIT 1
-            ) ar ON true
-            LEFT JOIN message u
-              ON u.id = COALESCE(a.rag_user_message_id, ar.user_message_id)
-             AND u.conversation_id = a.conversation_id AND u.role = 'USER'
-             AND u.sequence_no < a.sequence_no
-            ORDER BY a.sequence_no DESC
-        """),
-            {
-                "conversation_id": conversation_id,
-                "excluded": excluded_message_id,
-                "focus_id": focus_document_id,
-                "index_id": index_id,
-                "scan_limit": max(20, self.settings.m3_history_max_messages * 4),
-            },
-        )
-        return select_history(
-            [dict(row) for row in result.mappings()],
-            focus_epoch=focus_epoch,
-            max_messages=self.settings.m3_history_max_messages,
-            token_budget=self.settings.m3_history_token_budget,
         )
 
     async def _v2_history(
@@ -785,88 +601,6 @@ class RagRepository:
             max_messages=self.settings.m3_history_max_messages,
             token_budget=self.settings.m3_history_token_budget,
         )
-
-    def _budget_history(self, messages: list[dict[str, Any]]) -> list[dict[str, str]]:
-        # Take-then-stop: oversized leading messages (usually the newest, e.g. a
-        # very long assistant answer) are skipped, but once filling starts the
-        # first overflow stops selection. This keeps the retained window both
-        # as recent as possible and contiguous — a skipped middle message would
-        # break reference/ellipsis chains in the rendered history.
-        selected: list[dict[str, str]] = []
-        remaining = self.settings.m3_history_token_budget
-        for item in reversed(messages):
-            content = str(item["content"])
-            estimate = max(1, estimate_tokens(content))
-            if estimate > remaining:
-                if selected:
-                    break
-                continue
-            remaining -= estimate
-            selected.append({"role": str(item["role"]), "content": content})
-        selected.reverse()
-        return selected
-
-    async def get_generation_headings(
-        self, *, index_id: UUID, knowledge_id: UUID, document_ids: list[UUID]
-    ) -> dict[UUID, dict[str, Any]]:
-        """Read only the first native text element; never guess from chunk position."""
-        async with self.engine.connect() as connection:
-            result = await connection.execute(
-                text("""
-                SELECT d.id, COALESCE(NULLIF(d.display_name, ''), d.filename) AS title,
-                       h.id AS element_id, h.content
-                FROM document_source d
-                JOIN LATERAL (
-                    SELECT id, content FROM document_element
-                    WHERE document_id=d.id AND index_id=:index_id AND element_type='TEXT'
-                      AND content ~ '[^[:space:]]'
-                    ORDER BY sequence_no LIMIT 1
-                ) h ON true
-                WHERE d.kb_id=:knowledge_id AND d.status='STORED'
-                  AND d.id=ANY(CAST(:ids AS uuid[]))
-            """),
-                {"index_id": index_id, "knowledge_id": knowledge_id, "ids": document_ids},
-            )
-            return {row["id"]: dict(row) for row in result.mappings()}
-
-    async def get_query_planner_focus(
-        self, *, knowledge_id: UUID, index_id: UUID, document_id: UUID | None
-    ) -> dict[str, Any] | None:
-        """Resolve only an in-scope, indexed focus title and optional ready card type."""
-        if document_id is None:
-            return None
-        async with self.engine.connect() as connection:
-            row = (
-                (
-                    await connection.execute(
-                        text(
-                            """
-                            SELECT d.display_name AS document_title, c.document_type
-                            FROM document_source d
-                            JOIN index_document idoc
-                              ON idoc.document_id = d.id AND idoc.index_id = :index_id
-                             AND idoc.status = 'READY'
-                            LEFT JOIN rag_document_card c
-                              ON c.knowledge_id = :knowledge_id AND c.index_id = :index_id
-                             AND c.document_id = d.id AND c.generation_status = 'READY'
-                             AND c.schema_version = :schema_version
-                             AND c.review_status <> 'REJECTED'
-                            WHERE d.id = :document_id AND d.kb_id = :knowledge_id
-                              AND d.status = 'STORED'
-                            """
-                        ),
-                        {
-                            "knowledge_id": knowledge_id,
-                            "index_id": index_id,
-                            "document_id": document_id,
-                            "schema_version": DOCUMENT_CARD_SCHEMA_VERSION,
-                        },
-                    )
-                )
-                .mappings()
-                .one_or_none()
-            )
-        return dict(row) if row is not None else None
 
     async def vector_search(
         self,
@@ -1150,196 +884,6 @@ class RagRepository:
             bm25_score=(float(row["bm25_score"]) if row.get("bm25_score") is not None else None),
         )
 
-    async def get_chunks_by_ids(
-        self, *, index_id: UUID, chunk_ids: list[UUID]
-    ) -> list[RetrievalCandidate]:
-        if not chunk_ids:
-            return []
-        async with self.engine.connect() as connection:
-            result = await connection.execute(
-                text(
-                    """
-                    SELECT c.id, c.document_id, d.display_name AS document,
-                           c.chunk_type, c.sequence_no, c.content, c.token_count, c.section_path,
-                           c.parent_id, c.previous_chunk_id, c.next_chunk_id,
-                           c.suspected_incomplete, c.incomplete_reasons, c.is_procedural,
-                           ARRAY(
-                               SELECT ce.element_id::text FROM chunk_element ce
-                               WHERE ce.chunk_id = c.id ORDER BY ce.ordinal
-                           ) AS element_ids,
-                           ARRAY(
-                               SELECT a.id::text
-                               FROM chunk_element ce
-                               JOIN image_asset a ON a.element_id = ce.element_id
-                               WHERE ce.chunk_id = c.id ORDER BY ce.ordinal
-                           ) AS image_asset_ids
-                    FROM document_chunk c
-                    JOIN document_source d ON d.id = c.document_id
-                    WHERE c.index_id = :index_id AND d.status = 'STORED'
-                      AND c.id = ANY(CAST(:chunk_ids AS uuid[]))
-                    """
-                ),
-                {"index_id": index_id, "chunk_ids": chunk_ids},
-            )
-            rows = list(result.mappings())
-        order = {chunk_id: position for position, chunk_id in enumerate(chunk_ids)}
-        candidates = [
-            RetrievalCandidate(
-                chunk_id=UUID(str(row["id"])),
-                document_id=UUID(str(row["document_id"])),
-                document=str(row["document"]),
-                chunk_type=str(row["chunk_type"]),
-                content=str(row["content"]),
-                token_count=int(row["token_count"]),
-                section_path=list(row["section_path"]),
-                element_ids=[UUID(item) for item in row["element_ids"]],
-                distance=None,
-                similarity=None,
-                rank=order[UUID(str(row["id"]))] + 1,
-                sequence_no=int(row["sequence_no"]),
-                parent_id=UUID(str(row["parent_id"])) if row["parent_id"] else None,
-                previous_chunk_id=(
-                    UUID(str(row["previous_chunk_id"])) if row["previous_chunk_id"] else None
-                ),
-                next_chunk_id=(UUID(str(row["next_chunk_id"])) if row["next_chunk_id"] else None),
-                suspected_incomplete=bool(row["suspected_incomplete"]),
-                incomplete_reasons=list(row["incomplete_reasons"]),
-                is_procedural=bool(row["is_procedural"]),
-                image_asset_ids=[UUID(item) for item in row["image_asset_ids"]],
-            )
-            for row in rows
-        ]
-        return sorted(candidates, key=lambda item: order[item.chunk_id])
-
-    async def title_recall_candidates(
-        self, *, knowledge_id: UUID, index_id: UUID, question: str, terms: list[str]
-    ) -> list[RetrievalCandidate]:
-        """At most three documents, one indexed chunk each; never cross KB/index."""
-        import re
-
-        patterns = [rf"(^|[^a-z0-9]){re.escape(term)}([^a-z0-9]|$)" for term in terms[:3]]
-        normalized = re.sub(r"\s+", "", question).casefold().rstrip("？?。.!！;；,，")
-        async with self.engine.connect() as connection:
-            result = await connection.execute(
-                text("""
-                SELECT picked.id FROM document_source d
-                JOIN LATERAL (
-                    SELECT c.id FROM document_chunk c
-                    WHERE c.document_id=d.id AND c.kb_id=:kb_id AND c.index_id=:index_id
-                    ORDER BY c.is_procedural DESC, c.token_count DESC, c.sequence_no, c.id
-                    LIMIT 1
-                ) picked ON true
-                WHERE d.kb_id=:kb_id AND d.status='STORED' AND (
-                    lower(d.display_name) ~ ANY(CAST(:patterns AS text[])) OR
-                    (:exact_allowed AND strpos(
-                        regexp_replace(lower(d.display_name),'[[:space:]]','','g'), :question
-                    ) > 0)
-                )
-                ORDER BY d.id LIMIT 4
-            """),
-                {
-                    "kb_id": knowledge_id,
-                    "index_id": index_id,
-                    "patterns": patterns,
-                    "question": normalized,
-                    "exact_allowed": len(normalized) >= 6,
-                },
-            )
-            chunk_ids = [UUID(str(value)) for value in result.scalars()]
-        # A generic product code may match the whole library. Do not add
-        # arbitrary documents just because their UUIDs sort first.
-        if len(chunk_ids) > 3:
-            return []
-        candidates = await self.get_chunks_by_ids(index_id=index_id, chunk_ids=chunk_ids)
-        return [item for item in candidates if item.document_id is not None]
-
-    async def get_rerank_image_assets(
-        self, *, index_id: UUID, image_asset_ids: list[UUID]
-    ) -> dict[UUID, dict[str, Any]]:
-        if not image_asset_ids:
-            return {}
-        async with self.engine.connect() as connection:
-            result = await connection.execute(
-                text(
-                    """
-                    SELECT id, minio_bucket, minio_object_key, mime_type
-                    FROM image_asset
-                    WHERE index_id = :index_id AND id = ANY(CAST(:ids AS uuid[]))
-                    """
-                ),
-                {"index_id": index_id, "ids": image_asset_ids},
-            )
-            return {UUID(str(row["id"])): dict(row) for row in result.mappings()}
-
-    async def save_prepared(
-        self,
-        turn: Turn,
-        *,
-        embedding_provider: str,
-        embedding_model: str,
-        vector_candidates: list[RetrievalCandidate],
-        bm25_candidates: list[RetrievalCandidate],
-        fusion_candidates: list[RetrievalCandidate],
-        rerank_candidates: list[RetrievalCandidate],
-        rerank_result: dict[str, Any],
-        selected_context: list[dict[str, Any]],
-        prompt: str,
-        timings: dict[str, Any],
-        embedding_result: dict[str, Any] | None = None,
-    ) -> None:
-        effective_embedding_result = embedding_result or {"status": "PASSED", "reason": None}
-        retrieval_result = {
-            "mode": (
-                "HYBRID"
-                if effective_embedding_result.get("status") == "PASSED"
-                else "LEXICAL_FALLBACK"
-            ),
-            "query_embedding_provider": embedding_provider,
-            "query_embedding_model": embedding_model,
-            "embedding_model": turn.embedding_model_name,
-            "query_embedding": effective_embedding_result,
-            "vector_candidates": [item.trace_dict() for item in vector_candidates],
-            "lexical_engine": "pg_search",
-            "lexical_engine_version": "0.25.0",
-            "bm25_candidates": [item.trace_dict() for item in bm25_candidates],
-            "fusion_method": "RRF",
-            "rrf_k": self.settings.m5_rrf_k,
-            "fusion_candidates": [item.trace_dict() for item in fusion_candidates],
-        }
-        async with self.engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """
-                    UPDATE rag_trace
-                    SET retrieval_result = CAST(:retrieval AS jsonb),
-                        selected_context = CAST(:context AS jsonb),
-                        rerank_result = CAST(:rerank AS jsonb),
-                        prompt = :prompt,
-                        runtime_snapshot = jsonb_set(
-                            COALESCE(runtime_snapshot, '{}'::jsonb),
-                            '{retrieval}', CAST(:effective_retrieval AS jsonb)
-                        ),
-                        latency = CAST(:latency AS jsonb)
-                    WHERE trace_id = :trace_id AND status = 'RUNNING'
-                    """
-                ),
-                {
-                    "trace_id": turn.trace_id,
-                    "retrieval": json.dumps(retrieval_result, ensure_ascii=False),
-                    "context": json.dumps(selected_context, ensure_ascii=False),
-                    "rerank": json.dumps(
-                        {
-                            **rerank_result,
-                            "candidates": [item.trace_dict() for item in rerank_candidates],
-                        },
-                        ensure_ascii=False,
-                    ),
-                    "prompt": prompt if self.settings.m3_trace_retain_prompt else None,
-                    "effective_retrieval": json.dumps(asdict(turn.retrieval)),
-                    "latency": json.dumps(timings),
-                },
-            )
-
     async def save_v2_progress(
         self,
         turn: Turn,
@@ -1391,12 +935,9 @@ class RagRepository:
         usage: dict[str, Any],
         citation_result: dict[str, Any],
         timings: dict[str, int],
-        prompt: str | None = None,
         doc_routing: dict[str, Any] | None = None,
         response_type: str | None = None,
         answer_mode: str | None = None,
-        context_patch: dict[str, Any] | None = None,
-        pending_options_after: list[dict[str, Any]] | None = None,
     ) -> None:
         routing_patch = ""
         routing_params: dict[str, Any] = {}
@@ -1413,38 +954,7 @@ class RagRepository:
                     " '{generation}', CAST(:generation AS jsonb))"
                 )
                 routing_params["generation"] = json.dumps(generation)
-        prompt_patch = ""
-        if prompt is not None:
-            prompt_patch = ", prompt = :prompt"
-            routing_params["prompt"] = prompt if self.settings.m3_trace_retain_prompt else None
         async with self.engine.begin() as connection:
-            if context_patch is not None:
-                context_result = await connection.execute(
-                    text(
-                        """
-                        UPDATE conversation
-                        SET chat_context = jsonb_strip_nulls(
-                                COALESCE(chat_context, '{}'::jsonb)
-                                || CAST(:context_patch AS jsonb)
-                            ),
-                            pending_switch_options = CAST(:pending_options AS jsonb),
-                            support_context_version = support_context_version + 1,
-                            updated_at = now()
-                        WHERE id = :conversation_id
-                          AND support_context_version = :expected_context_version
-                        """
-                    ),
-                    {
-                        "conversation_id": turn.conversation_id,
-                        "expected_context_version": turn.context_version,
-                        "context_patch": json.dumps(context_patch, ensure_ascii=False),
-                        "pending_options": json.dumps(
-                            pending_options_after or [], ensure_ascii=False
-                        ),
-                    },
-                )
-                if context_result.rowcount != 1:
-                    raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
             await connection.execute(
                 text(
                     """
@@ -1470,7 +980,6 @@ class RagRepository:
                         status = 'COMPLETED', finished_at = now()
                     """
                     + routing_patch
-                    + prompt_patch
                     + """
                     WHERE trace_id = :trace_id AND status = 'RUNNING'
                     """
@@ -1565,173 +1074,6 @@ class RagRepository:
         if row is None:
             raise ApiError("DOCUMENT_NOT_FOUND", "文档不存在或已删除", 404)
         return dict(row)
-
-    async def set_conversation_focus(
-        self,
-        conversation_id: UUID,
-        document_id: UUID,
-        index_id: UUID,
-        *,
-        expected_context_version: int | None = None,
-        user_message_id: UUID | None = None,
-        assistant_message_id: UUID | None = None,
-        origin_query: str | None = None,
-        preserve_rag_issue: bool = False,
-    ) -> int:
-        """Promote a delivered document through the shared state CAS."""
-        async with self.engine.begin() as connection:
-            result = await connection.execute(
-                text(
-                    """
-                    UPDATE conversation
-                    SET focus_document_id = :document_id,
-                        focus_index_id = :index_id,
-                        chat_context = CASE
-                            WHEN :preserve_rag_issue
-                            THEN jsonb_strip_nulls(jsonb_build_object(
-                                'rag_issue', chat_context->'rag_issue'
-                            ))
-                            ELSE '{}'::jsonb
-                        END,
-                        pending_switch_options = '[]'::jsonb,
-                        focus_epoch = CASE
-                            WHEN focus_document_id IS DISTINCT FROM :document_id
-                            THEN focus_epoch + 1
-                            ELSE focus_epoch
-                        END,
-                        support_context_version = support_context_version + 1,
-                        updated_at = now()
-                    WHERE id = :conversation_id
-                      AND (
-                          CAST(:expected_context_version AS integer) IS NULL
-                          OR support_context_version = :expected_context_version
-                      )
-                    RETURNING focus_epoch
-                    """
-                ),
-                {
-                    "conversation_id": conversation_id,
-                    "document_id": document_id,
-                    "index_id": index_id,
-                    "expected_context_version": expected_context_version,
-                    "preserve_rag_issue": preserve_rag_issue,
-                },
-            )
-            focus_epoch = result.scalar_one_or_none()
-            if focus_epoch is None:
-                raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
-            if user_message_id is not None and assistant_message_id is not None:
-                message_result = await connection.execute(
-                    text(
-                        """
-                        UPDATE message SET focus_epoch = :focus_epoch,
-                            rag_history_context = CASE WHEN role = 'ASSISTANT'
-                                THEN CASE WHEN CAST(:origin_query AS text) IS NULL
-                                    THEN '{}'::jsonb
-                                    ELSE jsonb_build_object(
-                                        'origin_query', CAST(:origin_query AS text)
-                                    ) END
-                                ELSE rag_history_context END
-                        WHERE conversation_id = :conversation_id AND (
-                            (id = :user_message_id AND role = 'USER') OR
-                            (id = :assistant_message_id AND role = 'ASSISTANT')
-                        )
-                        """
-                    ),
-                    {
-                        "focus_epoch": int(focus_epoch),
-                        "origin_query": origin_query,
-                        "conversation_id": conversation_id,
-                        "user_message_id": user_message_id,
-                        "assistant_message_id": assistant_message_id,
-                    },
-                )
-                if message_result.rowcount != 2:
-                    raise ApiError("WORKFLOW_CONFLICT", "会话消息关联已变化，请重试", 409)
-        return int(focus_epoch)
-
-    async def clear_conversation_focus(self, conversation_id: UUID) -> None:
-        async with self.engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """
-                    UPDATE conversation
-                    SET focus_document_id = NULL,
-                        focus_index_id = NULL,
-                        chat_context = '{}'::jsonb,
-                        updated_at = now()
-                    WHERE id = :conversation_id
-                    """
-                ),
-                {"conversation_id": conversation_id},
-            )
-
-    async def set_conversation_pending(
-        self,
-        conversation_id: UUID,
-        *,
-        pending_options: list[dict[str, Any]],
-        pending_query: str,
-        expected_context_version: int | None = None,
-    ) -> None:
-        async with self.engine.begin() as connection:
-            result = await connection.execute(
-                text(
-                    """
-                    UPDATE conversation
-                    SET chat_context = CAST(:chat_context AS jsonb),
-                        pending_switch_options = CAST(:pending_options AS jsonb),
-                        support_context_version = support_context_version + 1,
-                        updated_at = now()
-                    WHERE id = :conversation_id
-                      AND (
-                          CAST(:expected_context_version AS integer) IS NULL
-                          OR support_context_version = :expected_context_version
-                      )
-                    """
-                ),
-                {
-                    "conversation_id": conversation_id,
-                    "chat_context": json.dumps(
-                        {
-                            "pending_options": pending_options,
-                            "pending_query": pending_query,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    "pending_options": json.dumps(pending_options, ensure_ascii=False),
-                    "expected_context_version": expected_context_version,
-                },
-            )
-            if expected_context_version is not None and result.rowcount != 1:
-                raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
-
-    async def clear_conversation_pending(
-        self, conversation_id: UUID, *, expected_context_version: int | None = None
-    ) -> None:
-        async with self.engine.begin() as connection:
-            result = await connection.execute(
-                text(
-                    """
-                    UPDATE conversation
-                    SET chat_context = '{}'::jsonb,
-                        pending_switch_options = '[]'::jsonb,
-                        support_context_version = support_context_version + 1,
-                        updated_at = now()
-                    WHERE id = :conversation_id
-                      AND (
-                          CAST(:expected_context_version AS integer) IS NULL
-                          OR support_context_version = :expected_context_version
-                      )
-                    """
-                ),
-                {
-                    "conversation_id": conversation_id,
-                    "expected_context_version": expected_context_version,
-                },
-            )
-            if expected_context_version is not None and result.rowcount != 1:
-                raise ApiError("WORKFLOW_CONFLICT", "会话状态已被另一请求更新，请重试", 409)
 
     async def get_knowledge_base_summary(
         self,

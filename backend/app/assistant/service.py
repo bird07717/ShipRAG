@@ -4,12 +4,13 @@ import asyncio
 import base64
 import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from app.common.errors import ApiError
+from app.common.turn_gate import TurnSlot
 from app.gateway.repository import GatewayRepository
 from app.gateway.service import ChatGatewayService
 
@@ -202,12 +203,14 @@ class PreparedAssistantStream:
         durable_id: UUID,
         request_id: str,
         reserved: bool,
+        release_slot: Callable[[], None] | None = None,
     ) -> None:
         self._source = source
         self._repository = repository
         self._durable_id = durable_id
         self._request_id = request_id
         self._reserved = reserved
+        self._release_slot = release_slot
         self._terminal = False
         self._closed = False
         self._answer_parts: list[str] = []
@@ -235,6 +238,10 @@ class PreparedAssistantStream:
             if close is not None:
                 await close()
         finally:
+            # The admission gate must be released exactly once even when the
+            # stream never reached a terminal event (client disconnect).
+            if self._release_slot is not None:
+                self._release_slot()
             if self._reserved and not self._terminal:
                 await self._repository.cancel_assistant_request(
                     request_id=self._durable_id,
@@ -284,23 +291,32 @@ class AssistantFacadeService:
         policy = await self.repository.resolve_policy(
             knowledge_id=knowledge_id, conversation_id=conversation_id
         )
-        state, stored = await self.repository.reserve_assistant_request(
-            external_user_id=external_user_id,
-            knowledge_id=knowledge_id,
-            idempotency_key=idempotency_key,
-            request_hash=request_hash(
+        # Admission gate before reservation: a busy process answers with a
+        # plain HTTP 503 (the documented pre-stream failure contract) instead
+        # of burning an idempotency key on a doomed generation.
+        slot = TurnSlot(self.repository.settings)
+        await slot.acquire()
+        try:
+            state, stored = await self.repository.reserve_assistant_request(
+                external_user_id=external_user_id,
+                knowledge_id=knowledge_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash(
+                    conversation_id=conversation_id,
+                    question=question,
+                    choice_id=choice_id,
+                    include_images=include_images,
+                ),
                 conversation_id=conversation_id,
-                question=question,
-                choice_id=choice_id,
-                include_images=include_images,
-            ),
-            conversation_id=conversation_id,
-            input_payload={
-                "question": question,
-                "choice_id": choice_id,
-                "include_images": include_images,
-            },
-        )
+                input_payload={
+                    "question": question,
+                    "choice_id": choice_id,
+                    "include_images": include_images,
+                },
+            )
+        except BaseException:
+            slot.release()
+            raise
         durable_id = UUID(str(stored["id"]))
         return PreparedAssistantStream(
             self._stream_prepared(
@@ -319,6 +335,7 @@ class AssistantFacadeService:
             durable_id=durable_id,
             request_id=request_id,
             reserved=state == "NEW",
+            release_slot=slot.release,
         )
 
     async def stream(

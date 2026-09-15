@@ -308,13 +308,10 @@ async function saveEdit(): Promise<void> {
       <el-tab-pane label="Prompt 模板（Prompts）" name="prompts">
         <div class="panel prompt-scope-note">
           <p>
-            运行时内置模板是 Chat 主路径实际使用的 Prompt（聚焦文档问答、超长文档降级问答、
-            未命中可信文档时的路由回答），与解析逻辑强耦合，
+            运行时内置模板是 RAG V2 主路径实际使用的两个 Prompt（查询理解与回答生成），
+            与结构化输出和校验逻辑强耦合，
             由代码版本化管理（<span class="mono">backend/app/rag/prompt.py</span>），此处只读展示；
-            模板中的 <span class="mono">__PRODUCT_NAME__</span> /
-            <span class="mono">__SCOPE_DESCRIPTION__</span> 占位符按请求注入。
-            多候选澄清与文档切换确认使用固定模板回复（不经过 LLM），不在此列。
-            数据库模板仅在 Playground 调试路径生效。
+            数据库模板仅保留用于管理和历史查看，不控制 RAG V2 回答。
           </p>
         </div>
         <div v-if="store.prompts.length" class="prompt-layout">

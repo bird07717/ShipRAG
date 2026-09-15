@@ -800,6 +800,15 @@ class AssistantRetentionStat(BaseModel):
     expired: int
 
 
+class AssistantConcurrencyStat(BaseModel):
+    """Concurrency health: RUNNING backlog and admission rejections."""
+
+    running_requests: int
+    oldest_running_age_seconds: int
+    stale_running_requests: int
+    busy_rejections: dict[str, int]
+
+
 class AssistantMetricsResponse(BaseModel):
     days: int
     sources: list[AssistantSourceStat]
@@ -808,6 +817,26 @@ class AssistantMetricsResponse(BaseModel):
     http_errors: list[AssistantHttpErrorStat]
     idempotency: AssistantIdempotencyStat
     retention: AssistantRetentionStat
+    concurrency: AssistantConcurrencyStat
+
+
+class RuntimeTurnGateStat(BaseModel):
+    limit: int
+    in_flight: int
+
+
+class RuntimeDatabasePoolStat(BaseModel):
+    size: int
+    checked_in: int
+    checked_out: int
+    overflow: int
+
+
+class RuntimeMetricsResponse(BaseModel):
+    """Per-process runtime snapshot (turn gate and DB pool of this worker)."""
+
+    turn_gate: RuntimeTurnGateStat
+    database_pool: RuntimeDatabasePoolStat
 
 
 class RequestErrorLogSummary(BaseModel):

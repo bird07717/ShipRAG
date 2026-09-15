@@ -1,20 +1,14 @@
-"""Pure query provenance and candidate fusion for P2 shadow evaluation."""
+"""Query provenance and candidate fusion shared by the active RAG V2 retriever."""
 
 from __future__ import annotations
 
 import hashlib
-import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
 from app.rag.models import DocumentCardCandidate, RetrievalCandidate
-from app.rag.query_planner import QueryPlanOutcome
 
-QuerySource = Literal["ORIGINAL", "STANDALONE", "CONTEXT_ANCHOR", "PLANNER"]
-
-
-def _query_key(value: str) -> str:
-    return "".join(unicodedata.normalize("NFKC", value).casefold().split()).rstrip("？?。.!！")
+QuerySource = Literal["ORIGINAL", "STANDALONE", "CONTEXT_ANCHOR", "INTERPRETER"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,31 +31,6 @@ class QueryRetrieval:
     chunk_bm25: list[RetrievalCandidate]
     card_vector: list[DocumentCardCandidate]
     card_bm25: list[DocumentCardCandidate]
-
-
-def build_semantic_queries(
-    original_question: str, outcome: QueryPlanOutcome, *, variant_limit: int
-) -> list[SemanticQuery]:
-    registry: dict[str, tuple[str, list[QuerySource]]] = {}
-
-    def add(text: str, source: QuerySource) -> None:
-        cleaned = " ".join(text.split()).strip()
-        if not cleaned:
-            return
-        key = _query_key(cleaned)
-        if not key:
-            return
-        if key in registry:
-            if source not in registry[key][1]:
-                registry[key][1].append(source)
-            return
-        registry[key] = (cleaned, [source])
-
-    add(original_question, "ORIGINAL")
-    add(outcome.plan.standalone_question, "STANDALONE")
-    for query in outcome.plan.retrieval_queries[:variant_limit]:
-        add(query, "PLANNER")
-    return [SemanticQuery(text, tuple(sources)) for text, sources in registry.values()]
 
 
 def _rrf_score(rank: int, rrf_k: int) -> float:

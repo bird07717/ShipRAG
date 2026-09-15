@@ -445,19 +445,23 @@ class MetricsRepository:
         days: int = 7,
         retention_days: int = 7,
         knowledge_id: Any = None,
+        stale_seconds: int = 600,
     ) -> dict[str, Any]:
         """Operational aggregation for the online Assistant surface.
 
-        Covers the five dimensions the admin dashboard panel needs: call
+        Covers the six dimensions the admin dashboard panel needs: call
         source mix, external user activity, turn-level and HTTP-level error
-        rates, idempotency protection/replay, and conversation retention
-        state. Everything is derived from existing ledgers — no extra
-        write-path instrumentation beyond ``replay_count``.
+        rates, idempotency protection/replay, conversation retention state,
+        and concurrency health (RUNNING backlog plus busy rejections).
+        Everything is derived from existing ledgers — no extra write-path
+        instrumentation beyond ``replay_count``.
         """
         if not 1 <= days <= _MAX_RANGE_DAYS:
             raise ApiError("VALIDATION_ERROR", "days 必须在 1 到 92 之间", 422)
         if retention_days < 1:
             raise ApiError("VALIDATION_ERROR", "会话留存天数必须为正整数", 422)
+        if stale_seconds < 0:
+            raise ApiError("VALIDATION_ERROR", "stale_seconds 必须为非负整数", 422)
 
         end = datetime.now(UTC)
         start = end - timedelta(days=days)
@@ -618,6 +622,51 @@ class MetricsRepository:
                 .mappings()
                 .one()
             )
+            # Concurrency health: a RUNNING backlog that never drains means
+            # crashed processes are leaking requests; busy rejections show
+            # how often clients hit the per-conversation / admission limits.
+            running_row = (
+                (
+                    await connection.execute(
+                        text(f"""
+                            SELECT count(*) AS count,
+                                   COALESCE(
+                                       EXTRACT(EPOCH FROM (now() - min(updated_at))), 0
+                                   )::bigint AS oldest_age_seconds,
+                                   count(*) FILTER (
+                                       WHERE updated_at
+                                           < now() - make_interval(secs => :stale_seconds)
+                                   ) AS stale_count
+                            FROM assistant_request
+                            WHERE status = 'RUNNING'{assistant_request_kb_clause}
+                        """),
+                        {**parameters, "stale_seconds": stale_seconds},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            busy_rows = (
+                (
+                    await connection.execute(
+                        text("""
+                            SELECT COALESCE(error_code, 'UNKNOWN') AS error_code,
+                                   count(*) AS count
+                            FROM request_error_log
+                            WHERE created_at >= :start AND created_at < :end
+                              AND (path LIKE '/api/v1/chat%' OR path LIKE '/api/v1/assistant%')
+                              AND error_code IN (
+                                  'CONVERSATION_BUSY', 'REQUEST_IN_PROGRESS', 'SERVICE_BUSY'
+                              )
+                            GROUP BY 1
+                            ORDER BY count DESC
+                        """),
+                        parameters,
+                    )
+                )
+                .mappings()
+                .all()
+            )
 
         sources = [
             {
@@ -671,6 +720,12 @@ class MetricsRepository:
                 "total": int(retention_row["total"]),
                 "active": int(retention_row["active"]),
                 "expired": int(retention_row["expired"]),
+            },
+            "concurrency": {
+                "running_requests": int(running_row["count"]),
+                "oldest_running_age_seconds": int(running_row["oldest_age_seconds"]),
+                "stale_running_requests": int(running_row["stale_count"]),
+                "busy_rejections": {str(row["error_code"]): int(row["count"]) for row in busy_rows},
             },
         }
 

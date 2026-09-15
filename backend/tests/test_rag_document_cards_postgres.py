@@ -318,15 +318,8 @@ async def test_online_card_search_is_scoped_and_excludes_rejected_cards() -> Non
             query="VAU 图像配置",
             limit=5,
         )
-        focus = await repository.get_query_planner_focus(
-            knowledge_id=knowledge_id,
-            index_id=index_id,
-            document_id=document_ids[0],
-        )
-
         assert vector[0].document_id == document_ids[0]
         assert lexical[0].document_id == document_ids[0]
-        assert focus == {"document_title": "文档 1", "document_type": "PROCEDURE"}
 
         current = await cards.get_card(knowledge_id, index_id, document_ids[0])
         assert current is not None
@@ -343,14 +336,7 @@ async def test_online_card_search_is_scoped_and_excludes_rejected_cards() -> Non
             embedding=query_embedding,
             limit=5,
         )
-        rejected_focus = await repository.get_query_planner_focus(
-            knowledge_id=knowledge_id,
-            index_id=index_id,
-            document_id=document_ids[0],
-        )
-
         assert all(item.document_id != document_ids[0] for item in after_reject)
-        assert rejected_focus == {"document_title": "文档 1", "document_type": None}
 
 
 async def test_index_gc_foreign_key_cascades_cards() -> None:

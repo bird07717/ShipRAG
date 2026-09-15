@@ -460,7 +460,7 @@ P3 已交付严格响应 Planner、候选文档/Source/引用白名单、六策�
 
 ## ADR-0019：RAG 改为每轮重检索的隐藏全文双 LLM 生成链路
 
-- 状态：已接受；V0～V4.2 本地已实施，V5～V6 待完成，生产继续显式使用旧链路
+- 状态：已接受；V0～V5 本地已实施，V6 为可选数据库清理，生产待部署验证
 - 日期：2026-09-14
 - 影响范围：RAG 查询理解、文档检索、完整上下文、回答生成、图片、会话历史、Trace、配置和旧代码退出；Support 保持独立
 - 关联：[RAG 隐藏全文双 LLM V2 执行计划](../technical/rag-full-document-generation-v2-execution-plan.md)
@@ -484,7 +484,7 @@ RAG V2 不读取或写入 `focus_document_id`、`focus_index_id`、`focus_epoch`
 
 短追问和纠正由 LLM 1 显式输出 `relation` 与 `active_task`；任务只从最近完整轮次的用户请求继承，不从旧助手回答建立产品事实。任务锚点参与本轮查询召回、文档级 Rerank 和 LLM 2 选证；明确换题使用 `NEW_TASK`，不携带旧任务锚点。有效 V2 的准备阶段只冻结轮次和参数，不执行 legacy 预检索；本轮所有去重查询只批量嵌入一次，候选只由 V2 文档检索产生，避免两套检索结果交叉污染。
 
-开发通过新的 `M3_RAG_PIPELINE_MODE` 默认进入 `v2`，以便立即观察行为；staging/production 和 Production Compose 默认 `legacy`。V2 内部降级使用原问题、词法候选或有界通用回答，不自动跳回旧路由。旧实现按停止调用、提取 Support 共享代码、删除 RAG 专用实现、最后评估共享数据库字段的顺序退出。
+V5 后 RAG V2 是开发、staging 和 Production Compose 的唯一代码路径，不再存在 `M3_RAG_PIPELINE_MODE`。V2 内部降级使用原问题、词法候选或有界通用回答，不跳转到已删除的旧路由。旧首轮、焦点、Query Rewrite、Query/Response Planner、六策略和 RAG 原文交付已物理删除；回滚只能使用旧 Git 提交或旧镜像。
 
 ### 关联一致性约束
 
@@ -496,7 +496,7 @@ RAG V2 不读取或写入 `focus_document_id`、`focus_index_id`、`focus_epoch`
 
 完整候选文档能减少局部 Chunk 缺证，但会增加 LLM 输入、数据处理范围、延迟和上下文干扰；必须限制文档数和总 Token。LLM 生成仍可能遗漏步骤或改写参数，因此“看过全文”不能代替完整操作 Golden 和工程师评审。文本模型只能根据图片 caption/OCR 选图，若需要观察像素需另行引入多模态回答。
 
-P1 文档卡片、冻结索引、混合检索、Rerank、完整元素读取、图片资产和 Assistant 幂等继续复用。V0～V4.2 已建立开发默认 V2 的端到端链路、非焦点完整轮次历史、任务继承、双入口一致生成、单一 V2 检索所有权、文档级排序和公开边界，并停止有效 V2 的旧双 Planner 运行时及 Trace 写入；旧代码物理删除仍按 V5～V6 执行。当前 legacy 代码只为生产与人工回滚保留，不再作为后续目标。质量验收看整体解决率和关键错误，不为单条非关键模型波动添加问题文本、标题或编号特判。详细阶段、配置迁移、删除顺序、测试门槛和回滚条件以关联执行计划为准。本决策不授权生产切换或清理业务数据。
+P1 文档卡片、冻结索引、混合检索、Rerank、完整元素读取、图片资产和 Assistant 幂等继续复用。V0～V5 已建立唯一 V2 链路、非焦点完整轮次历史、任务继承、双入口一致生成、单一检索所有权、文档级排序、多文档证据覆盖和公开边界，并删除旧运行时代码与配置。Support 专用路由策略已移入 `app.support` 并冻结；共享数据库字段和历史迁移按 V6 条件保留。质量验收看整体解决率和关键错误，不为单条非关键模型波动添加问题文本、标题或编号特判。详细阶段、配置、测试门槛和回滚条件以关联执行计划为准。本决策不授权生产部署或清理业务数据。
 
 ## ADR-0020：PDF 直接解析入库，content_revision 按格式版本化
 
@@ -523,3 +523,24 @@ PDF 直接解析入库，不做 PDF→DOCX 转换：pdf2docx/LibreOffice 转换�
 ### 影响
 
 上传链路按扩展名分发：`.pdf` 走 PDF 校验（魔数、加密、`m2_pdf_max_bytes` 100 MiB、`m2_pdf_max_pages` 200）与 `source.pdf` 对象键；DOCX 路径行为不变。分块、嵌入、图片富化、索引持久化、检索与问答链路全部复用，不感知来源格式。无数据库迁移（`document_source.mime_type` 列已存在）。`index_document.metadata` 的 `mammoth_warnings` 键泛化为 `parser_warnings`。生产部署前须先用真实 PDF 样本执行候选索引构建与人工核验（元素顺序、图片数量、页眉剔除效果、检索质量），通过后才激活。
+
+## ADR-0021：Support 优先运行模式冻结，运行边界按 RAG_ONLY 设计
+
+- 状态：已接受（2026-09-15 用户确认）
+- 日期：2026-09-15
+- 影响范围：`engine_runtime_policy`、`chat_execution_mode`、Assistant 请求自动恢复、问答轮次准入闸门
+- 关联模块：`backend/app/core/config.py`、`backend/app/tasks/assistant_recovery.py`、`backend/app/common/turn_gate.py`
+
+### 背景
+
+系统保留 RAG 与 Support 双引擎及 `SUPPORT_WITH_RAG_FALLBACK` 运行策略，但用户于 2026-09-15 确认 Support 优先模式已冻结、不再使用；实际运行均为 RAG_ONLY。RAG 轮次由 `M3_TURN_DEADLINE_SECONDS` 的总时限严格包络；Support 轮次的结构化调用在轮次时限包络之外（`complete_structured` 最多两次尝试、每次最长 provider timeout），且 Support 路径没有独立总时限。
+
+### 决策
+
+- Support 优先仅作为代码兼容路径保留，不作为运行模式使用；默认与部署配置均为 RAG_ONLY。
+- 运行时限、容量与自动恢复边界按 RAG_ONLY 设计：`ASSISTANT_REQUEST_STALE_SECONDS` 只需大于轮次时限（Settings 校验器强制）。若未来重新启用 `SUPPORT_WITH_RAG_FALLBACK`，必须先把该边界提高到 `2 × M3_PROVIDER_TIMEOUT_SECONDS + M3_TURN_DEADLINE_SECONDS` 以上（校验器注释已标注），并重新评估准入闸门的持有时限假设。
+- 生产各知识库 `engine_runtime_policy` 是否存在 Support 策略行未逐一核对（待确认）；启用前应先检查并切换。
+
+### 影响
+
+准入闸门、自动恢复、监控指标与文档均以 RAG_ONLY 为前提；Support 代码与测试保持可编译可回归，但不作为容量或时限验收对象。V5 将原 `app.rag.doc_router` 的共享决策代码移至 `app.support.document_routing_policy`，RAG 不再导入；这属于冻结和隔离，不代表删除 Support 数据、接口或数据库字段。

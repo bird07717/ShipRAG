@@ -4,7 +4,7 @@ import json
 import time
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -32,6 +32,7 @@ from app.rag.v2.validation import (
     normalize_evidence_bindings,
     parameter_observations,
     public_leaks,
+    validate_generated_answer,
 )
 from app.services.rag import RagService
 
@@ -66,7 +67,6 @@ def _turn() -> Turn:
         knowledge_id=uuid4(),
         index_id=uuid4(),
         embedding_model_name="deterministic-shake256",
-        prompt_template="{{history}} {{context}} {{question}}",
         llm=ModelSnapshot("fake", "fake", {}),
         history=[],
         rerank=ModelSnapshot("fake", "fake", {}),
@@ -260,7 +260,7 @@ async def test_v2_generate_uses_two_llms_and_one_batched_embedding_request() -> 
 
     service = RagService(
         cast(RagRepository, repository),
-        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        Settings(_env_file=None, app_env="test"),
         embedding_factory=lambda _settings: embedding,
         llm_factory=llm_factory,
     )
@@ -287,14 +287,8 @@ async def test_v2_generates_from_hidden_full_document_and_maps_image() -> None:
     repository.turn = _turn()
     prepared = PreparedRag(
         turn=repository.turn,
-        prompt="legacy prompt",
-        candidates=[candidate],
-        selected_candidates=[candidate],
-        sources=[],
         timings={},
         started_at=time.perf_counter(),
-        rerank_candidates=[candidate],
-        rerank_status="PASSED",
     )
     completions = [
         '{"resolved_question":"如何配置 VAU 图像","search_queries":["VAU 图像配置"],'
@@ -309,7 +303,7 @@ async def test_v2_generates_from_hidden_full_document_and_maps_image() -> None:
 
     service = RagService(
         cast(RagRepository, repository),
-        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        Settings(_env_file=None, app_env="test"),
         embedding_factory=lambda _settings: FakeEmbeddingProvider(1024),
         llm_factory=llm_factory,
     )
@@ -331,7 +325,7 @@ async def test_v2_generates_from_hidden_full_document_and_maps_image() -> None:
     ]
     assert repository.completed is not None
     assert repository.completed["sources"] == []
-    assert repository.completed["prompt"] is None
+    assert "prompt" not in repository.completed
     assert repository.completed["doc_routing"]["pipeline"] == "V2"
     answer_trace = repository.completed["doc_routing"]["generation"]["answer"]
     assert answer_trace["unsupported_parameter_count"] == 0
@@ -362,13 +356,8 @@ async def test_v2_include_images_false_persists_filtered_terminal_snapshot() -> 
     repository.turn = _turn()
     prepared = PreparedRag(
         turn=repository.turn,
-        prompt="legacy",
-        candidates=[candidate],
-        selected_candidates=[candidate],
-        sources=[],
         timings={},
         started_at=time.perf_counter(),
-        rerank_candidates=[candidate],
     )
     completions = [
         '{"resolved_question":"VAU IP","search_queries":[],"key_constraints":[],'
@@ -379,7 +368,7 @@ async def test_v2_include_images_false_persists_filtered_terminal_snapshot() -> 
     ]
     service = RagService(
         cast(RagRepository, repository),
-        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        Settings(_env_file=None, app_env="test"),
         embedding_factory=lambda _settings: FakeEmbeddingProvider(1024),
         llm_factory=lambda _settings, _snapshot: FakeLlmProvider(completions=[completions.pop(0)]),
     )
@@ -398,22 +387,14 @@ async def test_v2_include_images_false_persists_filtered_terminal_snapshot() -> 
 
 
 @pytest.mark.asyncio
-async def test_v2_playground_stream_uses_same_hidden_document_generator(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_v2_playground_stream_uses_same_hidden_document_generator() -> None:
     candidate = _candidate()
     repository = _Repository(candidate)
     repository.turn = _turn()
     prepared = PreparedRag(
         turn=repository.turn,
-        prompt="legacy prompt must not be streamed",
-        candidates=[candidate],
-        selected_candidates=[candidate],
-        sources=[],
         timings={},
         started_at=time.perf_counter(),
-        rerank_candidates=[candidate],
-        rerank_status="PASSED",
         policy_question="如何配置 VAU 图像？",
     )
     completions = [
@@ -425,27 +406,10 @@ async def test_v2_playground_stream_uses_same_hidden_document_generator(
     ]
     service = RagService(
         cast(RagRepository, repository),
-        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        Settings(_env_file=None, app_env="test"),
         embedding_factory=lambda _settings: FakeEmbeddingProvider(1024),
         llm_factory=lambda _settings, _snapshot: FakeLlmProvider(completions=[completions.pop(0)]),
     )
-
-    async def retired_async_path(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("V2 called a retired legacy RAG path")
-
-    def retired_sync_path(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("V2 called a retired legacy RAG path")
-
-    for name in (
-        "_safely_plan_chat_turn",
-        "_plan_chat_turn",
-        "_focus_document",
-        "_deliver_chat_document",
-        "_document_qa_plan",
-    ):
-        monkeypatch.setattr(service, name, retired_async_path)
-    for name in ("_domain_assist_plan", "_completion_context_update"):
-        monkeypatch.setattr(service, name, retired_sync_path)
 
     frames = [frame.decode() async for frame in service.stream(prepared)]
     event_names = [frame.splitlines()[0] for frame in frames]
@@ -485,7 +449,7 @@ async def test_v2_meta_ack_completes_without_retrieval_or_model_call() -> None:
 
     service = RagService(
         cast(RagRepository, repository),
-        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        Settings(_env_file=None, app_env="test"),
         embedding_factory=lambda _settings: FakeEmbeddingProvider(1024),
         llm_factory=forbidden_llm_factory,
     )
@@ -521,7 +485,7 @@ async def test_v2_low_information_and_prompt_extraction_are_unconfirmed(
     repository.turn = _turn()
     service = RagService(
         cast(RagRepository, repository),
-        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        Settings(_env_file=None, app_env="test"),
         embedding_factory=lambda _settings: FakeEmbeddingProvider(1024),
         llm_factory=lambda _settings, _snapshot: (_ for _ in ()).throw(
             AssertionError("guarded input must not call the model")
@@ -552,6 +516,23 @@ def test_v2_allows_empty_model_answer_only_for_out_of_scope() -> None:
         GeneratedAnswer(response_kind="ANSWER", basis="GENERAL", answer="")
 
 
+@pytest.mark.parametrize("response_kind", ["ASK_ONE", "OUT_OF_SCOPE"])
+def test_v2_normalizes_non_answer_evidence_bookkeeping(
+    response_kind: Literal["ASK_ONE", "OUT_OF_SCOPE"],
+) -> None:
+    value = GeneratedAnswer(
+        response_kind=response_kind,
+        basis="DOCUMENT",
+        answer="请补充具体部件。",
+        used_document_keys=["D1"],
+        used_image_keys=["I1"],
+    )
+
+    assert value.basis == "NONE"
+    assert value.used_document_keys == []
+    assert value.used_image_keys == []
+
+
 @pytest.mark.asyncio
 async def test_v2_repairs_public_title_alias_and_internal_markers_once() -> None:
     candidate = _candidate()
@@ -559,13 +540,8 @@ async def test_v2_repairs_public_title_alias_and_internal_markers_once() -> None
     repository.turn = _turn()
     prepared = PreparedRag(
         turn=repository.turn,
-        prompt="legacy",
-        candidates=[candidate],
-        selected_candidates=[candidate],
-        sources=[],
         timings={},
         started_at=time.perf_counter(),
-        rerank_candidates=[candidate],
     )
     calls = 0
 
@@ -592,7 +568,7 @@ async def test_v2_repairs_public_title_alias_and_internal_markers_once() -> None
 
     service = RagService(
         cast(RagRepository, repository),
-        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        Settings(_env_file=None, app_env="test"),
         embedding_factory=lambda _settings: FakeEmbeddingProvider(1024),
         llm_factory=llm_factory,
     )
@@ -622,13 +598,8 @@ async def test_v2_degrades_unsupported_lexical_queries_and_keeps_vector_evidence
     repository.turn = _turn()
     prepared = PreparedRag(
         turn=repository.turn,
-        prompt="legacy",
-        candidates=[candidate],
-        selected_candidates=[candidate],
-        sources=[],
         timings={},
         started_at=time.perf_counter(),
-        rerank_candidates=[candidate],
     )
     completions = [
         '{"resolved_question":"配置 VAU 图像","search_queries":["VAU/FFC600 图像"],'
@@ -639,7 +610,7 @@ async def test_v2_degrades_unsupported_lexical_queries_and_keeps_vector_evidence
     ]
     service = RagService(
         cast(RagRepository, repository),
-        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        Settings(_env_file=None, app_env="test"),
         embedding_factory=lambda _settings: FakeEmbeddingProvider(1024),
         llm_factory=lambda _settings, _snapshot: FakeLlmProvider(completions=[completions.pop(0)]),
     )
@@ -665,13 +636,8 @@ async def test_v2_repairs_invalid_evidence_keys_within_same_single_retry_budget(
     repository.turn = _turn()
     prepared = PreparedRag(
         turn=repository.turn,
-        prompt="legacy",
-        candidates=[candidate],
-        selected_candidates=[candidate],
-        sources=[],
         timings={},
         started_at=time.perf_counter(),
-        rerank_candidates=[candidate],
     )
     calls = 0
 
@@ -698,7 +664,7 @@ async def test_v2_repairs_invalid_evidence_keys_within_same_single_retry_budget(
 
     service = RagService(
         cast(RagRepository, repository),
-        Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        Settings(_env_file=None, app_env="test"),
         embedding_factory=lambda _settings: FakeEmbeddingProvider(1024),
         llm_factory=llm_factory,
     )
@@ -760,6 +726,66 @@ def test_v2_does_not_treat_document_metadata_or_identifiers_as_leaks(answer: str
 
 def test_v2_public_leak_detector_allows_consumed_image_placeholder() -> None:
     assert public_leaks("按图操作。[IMG:I1]", ()) == []
+
+
+def test_v2_grouped_image_markers_are_structured_without_public_aliases() -> None:
+    context = DocumentContext(
+        prompt_context="",
+        document_keys=("D1",),
+        image_bindings=(
+            ImageBinding("I1", "D1", "asset-1"),
+            ImageBinding("I2", "D1", "asset-2"),
+        ),
+        title_aliases=(),
+        document_ids=(str(DOC_ID),),
+        estimated_tokens=0,
+        context_mode="FULL_DOCUMENT",
+    )
+    result = validate_generated_answer(
+        GeneratedAnswer(
+            response_kind="ANSWER",
+            basis="DOCUMENT",
+            answer="检查接线。[IMG:I1, I2]然后复位。",
+            used_document_keys=["D1"],
+            used_image_keys=["I2", "I1"],
+        ),
+        context=context,
+        include_images=True,
+    )
+
+    assert result.answer == "检查接线。然后复位。"
+    assert [(block.type, block.image_asset_id) for block in result.content] == [
+        ("text", None),
+        ("image", "asset-1"),
+        ("image", "asset-2"),
+        ("text", None),
+    ]
+
+
+def test_v2_malformed_or_undeclared_image_markers_never_reach_public_text() -> None:
+    context = DocumentContext(
+        prompt_context="",
+        document_keys=("D1",),
+        image_bindings=(ImageBinding("I1", "D1", "asset-1"),),
+        title_aliases=(),
+        document_ids=(str(DOC_ID),),
+        estimated_tokens=0,
+        context_mode="FULL_DOCUMENT",
+    )
+    result = validate_generated_answer(
+        GeneratedAnswer(
+            response_kind="ANSWER",
+            basis="DOCUMENT",
+            answer="检查接线。[IMG:I99 / unknown]然后复位。",
+            used_document_keys=["D1"],
+            used_image_keys=[],
+        ),
+        context=context,
+        include_images=True,
+    )
+
+    assert result.answer == "检查接线。然后复位。"
+    assert all(block.type != "image" for block in result.content)
 
 
 @pytest.mark.parametrize(
@@ -853,7 +879,7 @@ async def test_v2_document_level_rerank_reorders_and_degrades_safely(
 
     candidates, trace = await retrieve_documents(
         repository,
-        settings=Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        settings=Settings(_env_file=None, app_env="test"),
         turn=repository.turn,
         question="检查设备",
         interpretation=QueryInterpretation(
@@ -886,7 +912,7 @@ async def test_v2_follow_up_task_anchor_reaches_search_and_document_rerank() -> 
 
     _, trace = await retrieve_documents(
         repository,
-        settings=Settings(_env_file=None, app_env="test", m3_rag_pipeline_mode="v2"),
+        settings=Settings(_env_file=None, app_env="test"),
         turn=repository.turn,
         question="操作时使用哪个端口？",
         interpretation=QueryInterpretation(

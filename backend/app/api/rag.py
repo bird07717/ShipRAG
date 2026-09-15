@@ -120,8 +120,8 @@ async def download_document(
 async def list_prompts(
     repository: Annotated[RagRepository, Depends(get_rag_repository)],
 ) -> list[dict[str, Any]]:
-    # Runtime (code-managed, main chat path) templates come first; database
-    # rows only serve the chunk-RAG fallback path.
+    # Runtime (code-managed, RAG V2) snapshots come first. Database rows remain
+    # available for administration and historical inspection, but do not drive V2.
     return runtime_prompt_entries() + await repository.list_prompts()
 
 

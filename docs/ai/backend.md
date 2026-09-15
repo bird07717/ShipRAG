@@ -24,8 +24,8 @@
 | `core/` | Settings、日志、连接资源、模型密钥加密。 |
 | `common/` | 错误模型、中间件、文本与资产工具。 |
 | `gateway/` | 读取运行策略及会话模式，调度 RAG/Support 和记录回退。 |
-| `rag/` 与 `services/rag.py` | legacy 查询改写/文档路由，以及 V2 的双 LLM、文档级检索、隐藏全文上下文、答案/图片校验；共同负责嵌入、重排、Trace 和 RAG 文档卡片。 |
-| `support/` | 技术支持 Profile 解析、聚焦工作流、文档交付、风险校验、幂等。 |
+| `rag/` 与 `services/rag.py` | 唯一 RAG V2：双 LLM、文档级检索、隐藏全文上下文、答案/图片校验、Trace 和 RAG 文档卡片。 |
+| `support/` | 已冻结的兼容链路：保留技术支持 Profile、聚焦工作流、文档交付、风险校验和幂等。 |
 | `ingestion/` 与 `services/ingestion.py` | DOCX/PDF 安全校验、按格式解析、图像理解、分块、嵌入、索引构建。 |
 | `document_profiles/`、`releases/` | Profile 生成、审核、发布与回滚。 |
 | `assistant/` | 对外 Assistant API 的门面、公开响应过滤、游标及遗留运行请求恢复。 |
@@ -36,13 +36,19 @@
 
 RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生产均将索引 Worker 和维护 Worker 分开：索引 Worker 负责索引构建、启动时的索引恢复/GC；维护 Worker 负责 Profile/维护任务、过期错误日志和周期 GC 调度。不要因方便把它们合并，长索引任务会阻塞维护工作。
 
+维护 Worker 启动时及每 15 分钟还会执行陈旧 Assistant 请求自动恢复（`app/tasks/assistant_recovery.py`）：超过 `ASSISTANT_REQUEST_STALE_SECONDS`（默认 600，必须大于轮次时限，0 禁用）仍 `RUNNING` 的 `assistant_request` 及关联消息/Trace 用与手动 `app.assistant.recovery` 相同的单语句收口为失败，被 `CONVERSATION_BUSY` 锁死的会话因此自愈；Redis 哨兵键防止多 Worker 重复注册周期链。保留期任务仍不删除 `RUNNING`。
+
+问答轮次准入闸门位于 `app/common/turn_gate.py`：管理 `/api/v1/chat`、`/chat/stream` 和对外 Assistant 流在预留请求/调用模型前获取每进程信号量（按事件循环隔离），超过 `CHAT_TURN_CONCURRENCY_LIMIT`（默认 64，0 禁用）的轮次在等待 `CHAT_TURN_WAIT_SECONDS` 后快速失败 503 `SERVICE_BUSY`；Assistant 路径在预留幂等请求前判定，容量拒绝不消耗幂等键，信号量随流收口释放。管理端复测（answer retest）不走该闸门，由其每标记单运行的唯一索引约束。
+
 `RAG_DOCUMENT_CARD_GENERATE` 运行在 `maintenance` 队列，可对活动/指定就绪索引全量回填或生成单文档卡片。同一索引只允许一个活动任务，支持合作取消和孤儿任务恢复；索引构建成功后会尽力提交该任务，但卡片或模型失败不改变索引成功状态。卡片 Prompt 携带实际 JSON Schema；仅对大小写及语义明确的类型别名做确定性归一化，其他非法结构仍失败。结构错误可使用离线重试预算；整批 0 成功必须把任务标为失败，部分失败保留成功卡片并报告计数。Embedding 使用 `knowledge_index.embedding_model_id` 冻结快照；每份保存必须使用该 `document_id` 对应 revision，失败卡片不可标为 `READY`。
 
 管理 API 在 `/knowledge-bases/{knowledge_id}/rag-document-cards` 下提供列表、就绪检查和生成，在同一知识库的文档路径下提供单卡查看、编辑与审核。编辑/审核携带 `expected_revision`，冲突返回 409；自动生成是 `AUTO`，人工编辑后重新回到 `AUTO`，只有显式审核成为 `CONFIRMED/REJECTED`。已确认卡片默认不被自动生成覆盖，显式替换成功后也回到待确认状态。以上端点只属于管理认证，不加入外部 Assistant 契约。
 
 外部服务包括 PostgreSQL、Redis、MinIO，以及可配置的模型服务。代码支持 SiliconFlow 嵌入/重排/OCR、智谱 LLM/视觉，以及阿里云百炼 DashScope OpenAI 兼容 LLM；DashScope 当前只注册为 LLM Provider，不据兼容地址推定其 Embedding、Rerank、OCR 或 Vision 能力。`auto` 模式会按环境或数据库模型快照中的凭据选择。Embedding、LLM、Rerank 在 staging/production 中禁止显式或隐式回退到 fake，缺少凭据时失败关闭；fake 仅用于开发/测试的受控场景。实际模型、超时和阈值来自 Settings、模型快照及环境变量，不能仅根据本文推断部署值。
 
-## 关键实现约束
+## 已删除的 RAG legacy 约束（历史记录）
+
+本节到“通用实现约束”之前仅解释历史 Trace 和旧验收资料，V5 后不再对应运行时代码；当前 RAG 以“RAG V2 边界与当前实现”为准。
 
 - RAG 上下文先按相关性决定保留集合，再按文档阅读顺序渲染；预算裁剪不按阅读顺序删除末尾步骤。邻接块继承种子的重排分数，仍保留块完整性提示，不截断块内正文。
 - DOC_QA、CHUNK_QA 与 ROUTING 的最终提示词都检查字符和估算 Token 上限。焦点全文超预算时，复用本轮改写查询及查询向量，在同知识库、会话冻结索引和已确认文档内重新混合检索/重排；无相关片段、重排降级或超时不使用其他文档代答，保留原焦点。查询模型不新增调用，文档内二次重排仅在全文超预算时发生，受本轮剩余时限限制。
@@ -66,14 +72,14 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - P3 六种内部策略映射既有公开契约：`SHORT_ANSWER`/`DOCUMENT_ASSISTED` 为 `ANSWERED`，`DOCUMENT_DELIVERY` 为 `DOC_DELIVERED`，其余为通用回答、单条件 `UNCONFIRMED` 或 `OUT_OF_SCOPE`。响应规划失败时只在本轮剩余总时限内回到旧路由；规划 Trace 在执行或旧路由失败前独立合并持久化。Support 不调用该 Planner。
 - `runtime_snapshot.semantic_orchestration` 只保存 P2 版本、配置/有效模式、Planner Prompt 与问题/查询哈希、分类计数、查询来源、文档/Chunk 候选摘要及耗时；`runtime_snapshot.response_plan` 只保存策略、白名单 ID、答案哈希/长度、状态和降级原因，不复制答案正文。`runtime_snapshot.semantic_orchestration_config` 保存本轮配置快照。`shadow` 下原 `retrieval_result`、`selected_context` 和 Prompt 仍是公开旧路径的权威记录。
 
+## 通用实现约束
+
 - 嵌入维度在 Settings 与数据库契约中固定为 1024，变更需要迁移与重建计划。
 - 查询嵌入优先使用与 Active Index 模型一致的数据库模型快照，无法使用时才尝试环境配置；Trace 的 `retrieval_result` 同时记录索引模型及实际查询 Embedding provider/model，便于识别索引与查询向量不一致。
 - 明显低信息输入（纯符号、单字符、同字符重复、连续键盘字符）在检索和模型调用前返回 `UNCONFIRMED`；待确认选项存在时，`1` 等合法选择回复不受该门禁影响。
-- Rerank 降级为无分数排名时不得据此选中或沿用文档；即使会话已有焦点也返回不带来源和下载引用的 `UNCONFIRMED`，但保留焦点供下一轮有效追问。任何 `UNCONFIRMED`、`OUT_OF_SCOPE` 或通用解释响应都不得公开文档引用。
-- 运行策略有 `RAG_ONLY` 和 `SUPPORT_WITH_RAG_FALLBACK`；会话模式可覆盖引擎选择。
-- RAG 首轮保护位于 `rag/first_turn.py` 和 `services/rag.py`，不修改共享 `doc_router.py`，不读取 Support Profile/标准问题/标签。首轮指无历史、无焦点、无待确认选项；重排成功且非寒暄时，聚合直达目标与原始最高分块所属文档冲突就转为两份文档澄清，不自动改选。用户确认仍走既有交付与会话版本校验。
-- 精确字母数字型号可在首轮补召回当前知识库、当前会话索引内的文档块：按最新显示名称匹配，最多三份文档、每份一块；匹配超过三份时不随机截取。候选仍参加原问题 Rerank，不因标题含型号而直达；`rerank_result.title_recall` 记录补召回来源。
-- RAG 单强直达默认 `shadow`：原始最高块分数至少 0.85、领先另一文档最高块至少 0.18，且至少两份不同候选文档；只在原 NO_MATCH/CLARIFY 且无聚合冲突时判断。影子结果在路由 thresholds 的 `rag_single_strong` 中记录；`enabled` 才改变回答，并交付整份文档步骤和图片，不只交付单块。降级排名、既有焦点和待确认回复不触发新规则。
+- **已删除的 legacy 行为：**旧 RAG 在 Rerank 降级后不选文档并保留焦点；V2 的文档级 Rerank 降级会保留 RRF 顺序，由 LLM 2 在隐藏候选上下文内回答。
+- 运行策略有 `RAG_ONLY` 和 `SUPPORT_WITH_RAG_FALLBACK`；会话模式可覆盖引擎选择。Support 优先模式已冻结、不再使用（ADR-0021）：实际运行均为 RAG_ONLY，轮次被 `M3_TURN_DEADLINE_SECONDS` 严格包络；重新启用 Support 前必须重评 `ASSISTANT_REQUEST_STALE_SECONDS` 边界。
+- **已删除的 legacy 行为：**首轮冲突保护、标题补召回和单强直达已在 V5 连同相关开关与测试删除；V2 每轮使用相同 Query Interpreter、Chunk/卡片融合和文档级 Rerank。
 - DOCX 解析支持旧式 `v:imagedata`，保留重复引用的实际出现次数，兼容分支只取一份；图片未完整提取时失败，正文稀疏时告警。少于 80 字符正文且至少十个小型 VML 图片时进入文字碎片恢复；仅顺序内联版式允许真实 OCR、预处理和异常输出校验。绝对定位的浮动文字图片以 `LEGACY_FLOATING_TEXT_LAYOUT` 中止构建，不按 XML 锚点顺序拼接步骤；普通小图标仍走原图片处理流程。正式 OOXML 页眉/页脚是独立部件，解析器从不读取；只有拖入正文的图片会入库。
 - PDF 摄取（`ingestion/parser_pdf.py`，pdfplumber，MIT）产出与 DOCX 相同的 TEXT/IMAGE 元素契约，按（页码, 纵坐标, 横坐标）保证阅读顺序，图文自然交错；字号聚类（相对正文 ≥1.15 倍的三个最大字号）推断 h1–h3 生成 `section_path`。页眉/页脚剔除在一切输出之前：顶部/底部 10% 区域内跨页重复文本（数字归一化判重）、页码模式行、跨页重复的带内图片（按解码字节摘要判重，正文区同图保留）；区域内一次性内容保留。栅格图片解码 DCT（原样 JPEG）/Flate（按 colorspace/bits 重组，SMask 合成后转 PNG）/JPX（PIL 转换）；不支持的编码、位深或损坏图片使整份构建失败，不静默入库；小于 16px 的装饰性小图跳过并告警。加密 PDF 在上传校验即拒绝；限制为 `m2_pdf_max_bytes`（默认 100 MiB）与 `m2_pdf_max_pages`（默认 200）。PDF 不产 TABLE 元素；若未来文档出现表格，其文字仍按行提取，届时以新的 PDF 解析版本号触发重解析。上传链路按扩展名分发校验与存储：对象键 `source.pdf`、MIME `application/pdf` 写入 `document_source.mime_type`，管线按该列分发解析器；DOCX 上传行为不变。
 - 摄取结果按格式记录 `content_revision`：DOCX 为 `ooxml-vml-1`，PDF 为 `pdf-1`（`models.content_revision_for_mime` 按文档 MIME 分派）。构建计划及执行 REUSE 时都按各自格式的期望版本检查，执行时同时检查源哈希与 READY 状态；升级一种格式的解析版本不会强制另一种格式重解析。`index_document.metadata` 记录 `parser`（`mammoth+ooxml` / `pdfplumber-pdf`）与 `parser_warnings`（原 `mammoth_warnings` 键已泛化）。无当前版本标记的旧结果须重新解析，不能冒用新版本；旧活动索引不因此被修改。该摄取规则为公共基础能力，RAG/Support 都受影响，但两条问答路由没有混用。DC24V 浮动版式正文仍需转换核验，不能宣称已恢复其检索质量。
@@ -81,7 +87,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - Assistant 消息分页从数据库正序返回的最近 `limit+1` 条中取末尾 `limit` 条，以本页最早序号作为 `next_before`；不丢弃最新消息。游标仅接受正的 ASCII 十进制 int32 序号；会话列表仍按倒序取前 `limit` 条，两种分页不可共用截取方向。
 - 失败幂等重放使用公开错误字段白名单，保留保存的 `retryable`、请求/会话/消息/Trace 标识与 `partial_content`；新 HTTP 请求的标识在响应头和 `accepted` 中，旧错误快照的 `request_id` 不被覆盖。旧记录缺少布尔重试标志时按已知错误码补默认值，未知错误不建议重试。
 - 新失败/取消请求在收口事务中同步关联 Message 的公开错误快照；失败同时同步关联 Trace，终态请求不被重复收口覆盖。历史错误优先使用 Message 快照，再兼容旧 Trace；Trace 详情过期不影响新消息已保存的错误语义。旧历史不批量回填。
-- RAG 原文交付不再使用 Token 预算截断元素，完整返回当前索引中已解析的正文、表格和图片引用，保留顺序、重复图片出现次数及 `include_images`；交付不再删除首条非空文本行（ADR-0011 已废弃）。同步、流式、Support→RAG 回退共用同一构造；Support 原有完整交付不变。`M3_DOC_DELIVERY_MAX_TOKENS` 仅保留为废弃兼容配置，不再控制交付；LLM Prompt、生成预算与超时不变。此保证不包括摄取前已经缺失的源内容或 DOCX 页面排版。
+- RAG V2 不再公开交付原文；完整候选文档只作为 LLM 2 的隐藏上下文。冻结的 Support 仍保留其完整文档交付实现。
 - `include_images` 默认 `true`。Gateway 在同步/流式直入 RAG 及 Support 回退 RAG 时传递该参数；RAG 在结果保存前过滤图片块及交付来源中的图片 ID，不改变用于检索、重排和文档问答的图片证据。Support 原有图片控制保持不变。新 Assistant 请求保存过滤后的公开终态，历史与幂等重放沿用该快照。
 - Assistant 历史消息优先采用 `message.response_payload` 的公开答案和内容块；显式空 `content` 不得回退到内部 `content_blocks`。没有公开内容快照的旧记录才读取内部块，并递归移除 `url`/`download_url`；历史读取和旧终态重放均执行同一地址过滤，不回写原记录、不重新调用模型。修复前已经保存的错误带图结果不会按新规则追溯重算，重新验证需使用新幂等键。
 - 对外 Assistant 只列出 `assistant_online=true` 且知识库本身启用的项目；欢迎语、问答、会话和图片入口都执行同一上线边界及知识库归属检查。新知识库默认不对外，迁移前已经启用的知识库保持原可见性。
@@ -101,14 +107,20 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 `backend/tests/` 覆盖 API、网关、RAG、Support、摄取、任务和 PostgreSQL 集成。常规全套校验由根目录 `scripts/check.sh` 编排；以当前配置和实际结果为准，详见 [`environment.md`](environment.md) 与 [`known-issues.md`](known-issues.md)。
 
+## 并发观测
+
+- `/api/v1/metrics/assistant` 响应新增 `concurrency` 段：当前 `RUNNING` 请求数、最老 RUNNING 年龄、超过陈旧窗口的计数，以及窗口期内 `CONVERSATION_BUSY`/`REQUEST_IN_PROGRESS`/`SERVICE_BUSY` 拒绝计数（来自 `request_error_log`，仅管理认证）。
+- `/api/v1/metrics/runtime`（管理认证）返回本进程快照：准入闸门 `limit`/`in_flight` 与数据库连接池 `size/checked_in/checked_out/overflow`；多 uvicorn Worker 时每个实例只报告自身，需按实例抓取。
+
 ## RAG V2 边界与当前实现
 
-- ADR-0019 已停止原 P3 六策略和 P4 `rag_case` 的继续实施。V0～V4.2 已交付 `app.rag.v2` 及运行时收口：最小 Query Interpreter 输出独立问题、补充查询、用户条件、范围、会话关系和当前任务，不决定回答形式；`FOLLOW_UP/CORRECTION` 的任务只从最近完整轮次的用户请求继承，旧助手回答仅用于理解指代。V2 不调用旧 `_PRECISE_TOKEN_PATTERN` 校验、Query Rewrite、首轮标题召回、焦点路由或 P2/P3 Planner，也不写旧三类 Planner Trace。
+- ADR-0019 已停止原 P3 六策略和 P4 `rag_case` 的继续实施。V0～V4.3 已交付 `app.rag.v2` 及运行时收口：最小 Query Interpreter 输出独立问题、补充查询、用户条件、范围、会话关系和当前任务，不决定回答形式；`FOLLOW_UP/CORRECTION` 的任务只从最近完整轮次的用户请求继承，旧助手回答仅用于理解指代。V2 不调用旧 `_PRECISE_TOKEN_PATTERN` 校验、Query Rewrite、首轮标题召回、焦点路由或 P2/P3 Planner，也不写旧三类 Planner Trace。
 - V2 复用文档卡片、Chunk/卡片文档级融合、Rerank 和 `get_document_blocks()`。`RagService.prepare()` 在有效 V2 下只创建冻结轮次，不构造 Embedding/Rerank Provider、不运行 legacy Chunk/BM25 检索，也不保存旧准备 Prompt；原问题、独立问题、追问任务锚点和补充查询去重后只发起一次批量 Embedding。多查询结果先做 RRF 文档聚合，再以当前任务、独立问题、标题、已确认卡片及最多 3 个代表 Chunk 复用现有 Rerank Provider 做一次文档级排序，最后把前 1～3 份同库、冻结索引候选的有序元素送入 LLM 2；排序超时或协议失败保持原 RRF 顺序。LLM 2 输出答案和图片别名；后端校验文档/图片白名单并映射为公开结构，`references=[]`，不公开 `DOCUMENT_DELIVERY` 或完整原文。文档标题、文件名和普通 D/S/I 技术编号可按回答需要出现在正文，不作为秘密拦截。
+- LLM 2 在回答操作前后、下一步或失败追问时，必须检查所有与当前任务直接相关的候选；主任务文档定义必需动作，补充文档只能展开某一步，不能替代主任务文档中的其他并列动作。实际采用事实的文档全部写入内部证据键。图片输出兼容单个或成组 `[IMG:...]` 标记，按标记顺序映射白名单图片；未声明、无效或异常图片标记只被清除，不产生图片，也不会泄漏到公开文本。该兼容不增加模型调用。
 - `document_source.status='STORED'` 已统一应用于向量、BM25 和按 Chunk ID 读取，避免已软删除文档成为 V2 全文候选；全文加载还会再次校验知识库归属。V2 准备 Trace 不保存 legacy Chunk Prompt，`selected_context` 只记录候选标识与内容 SHA-256；生成 Trace 记录全文包/答案 SHA-256、数量、预算和耗时，不复制正文。
 - 管理试问和 Assistant 的有效 V2 路径均进入 `_generate_v2()`；管理端额外信息只从 Trace 取得。最终答案发布前只检测 Prompt 标记、内部服务主机、未经本轮证据支持的相对管理路径和对象存储字段，证据 D/I key 仍做归属白名单校验；不因标题、文件名、技术编号、产品私网 URL 或普通产品 API 直接失败。IP、版本、带单位数值和端口只写入 `runtime_snapshot.generation.answer.parameter_observations`，按文档、用户输入或无来源分类，不参与回答拒绝或修复。Assistant Facade 以公开字段白名单移除模型用量、检索/重排诊断、候选分数、管理 URL 和 MinIO 位置；欢迎语和外部响应不公开文档总数。
 - V2 不恢复 `rag_issue`、不消费待选文档，也不读写 RAG 焦点。`begin_turn` 使用独立的完整轮次选择器：只接受 `message.rag_user_message_id` 或 `assistant_request.user_message_id` 显式关联且双方成功完成的轮次，按最近连续轮次、消息数和 Token 预算裁剪；失败、取消、运行中、无法配对及当前复用轮次排除。历史 Prompt 不携带消息 ID；任务正文和检索查询在 Trace 中只保存长度、来源与 SHA-256，完整上下文只保存文档 ID/内部别名和内容哈希。共享焦点字段仍被 Support/Gateway 使用，不能删列。
-- 开发配置显式 `v2`，代码 `auto` 在 development 解析为 V2，生产示例与 Compose 显式 `legacy`。V4 已停止有效 V2 对旧 Planner 的运行时调用；旧实现仅为回滚保留，V5 才物理删除。具体阶段、删除顺序和门槛见 [V2 执行计划](../technical/rag-full-document-generation-v2-execution-plan.md)。
+- V5 后代码和所有环境默认只有 V2，不存在 `auto/legacy/v2` 模式分派。旧首轮、焦点、Query Rewrite、Query/Response Planner、六策略与 RAG 原文交付已物理删除；回滚只能部署旧 Git 提交或旧镜像。数据库 Prompt 行只供管理和历史查看，RAG 就绪不再要求 Active Prompt；两个运行时 Prompt 由代码只读展示。具体删除边界见 [V2 执行计划](../technical/rag-full-document-generation-v2-execution-plan.md)。
 
 ## 知识库 Assistant 管理
 

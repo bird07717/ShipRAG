@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.core.config import Settings, get_settings
 from app.core.resources import AppResources
@@ -69,7 +70,9 @@ class AssistantRequestRecoveryRepository:
             )
         return dict(row)
 
-    async def reconcile(self, *, stale_before: datetime) -> dict[str, int]:
+    async def reconcile(
+        self, *, stale_before: datetime, connection: AsyncConnection | None = None
+    ) -> dict[str, int]:
         recovered_at = datetime.now(UTC)
         error = json.dumps(
             {
@@ -80,7 +83,11 @@ class AssistantRequestRecoveryRepository:
             },
             ensure_ascii=False,
         )
-        async with self.engine.begin() as connection:
+        # An externally owned transaction (integration tests) can replace the
+        # default short-lived one; the statement itself is identical.
+        async with (
+            self.engine.begin() if connection is None else nullcontext(connection)
+        ) as connection:
             row = (
                 (
                     await connection.execute(

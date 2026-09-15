@@ -49,10 +49,7 @@ async def run() -> dict[str, Any]:
             "m4_ocr_provider": "fake",
             "m4_vision_provider": "fake",
             "m5_rerank_provider": "fake",
-            # This smoke verifies management publication and Trace plumbing.
-            # The generic fake provider has no structured V2 completions;
-            # V2 Playground dispatch is covered by its dedicated tests.
-            "m3_rag_pipeline_mode": "legacy",
+            # This smoke verifies management publication and V2 Trace plumbing.
         }
     )
     resources = AppResources.create(settings)
@@ -186,8 +183,10 @@ async def run() -> dict[str, Any]:
             raise RuntimeError("Playground did not produce a completed trace")
         if trace["index_id"] != str(second_index_id):
             raise RuntimeError("Playground did not freeze the newly Active index")
-        if not trace["retrieval_result"].get("fusion_candidates"):
-            raise RuntimeError("Playground trace is missing retrieval diagnostics")
+        generation = trace["runtime_snapshot"].get("generation", {})
+        retrieval = generation.get("retrieval", {})
+        if generation.get("pipeline") != "V2" or retrieval.get("query_count", 0) < 1:
+            raise RuntimeError("Playground trace is missing RAG V2 retrieval diagnostics")
         if not traces_response.json():
             raise RuntimeError("Trace list did not expose the Playground run")
         if not tasks_response.json() or len(indexes_response.json()) != 2:

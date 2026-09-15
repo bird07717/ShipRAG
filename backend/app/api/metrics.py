@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy.pool import QueuePool
 
 from app.api.dependencies import get_resources
 from app.api.schemas import (
@@ -12,9 +13,11 @@ from app.api.schemas import (
     MetricsLatencyResponse,
     MetricsOverviewResponse,
     MetricsTimeseriesPoint,
+    RuntimeMetricsResponse,
     SupportMetricsResponse,
 )
 from app.common.errors import ApiError
+from app.common.turn_gate import turn_gate_snapshot
 from app.core.config import Settings, get_settings
 from app.core.resources import AppResources
 from app.rag.metrics import MetricsRepository
@@ -125,4 +128,30 @@ async def assistant_metrics(
         days=days,
         retention_days=settings.conversation_retention_days,
         knowledge_id=knowledge_id,
+        stale_seconds=settings.assistant_request_stale_seconds,
     )
+
+
+@router.get("/metrics/runtime", response_model=RuntimeMetricsResponse)
+async def runtime_metrics(
+    settings: Annotated[Settings, Depends(get_settings)],
+    resources: Annotated[AppResources, Depends(get_resources)],
+) -> dict[str, Any]:
+    """Per-process runtime snapshot: turn-gate occupancy and DB pool state.
+
+    Behind multiple uvicorn workers each instance reports only its own
+    gate and pool; scrape per instance (or accept the mix) when sharded.
+    """
+    pool: dict[str, int] = {"size": 0, "checked_in": 0, "checked_out": 0, "overflow": 0}
+    raw_pool = resources.database.pool
+    if isinstance(raw_pool, QueuePool):
+        pool.update(
+            size=raw_pool.size(),
+            checked_in=raw_pool.checkedin(),
+            checked_out=raw_pool.checkedout(),
+            overflow=raw_pool.overflow(),
+        )
+    return {
+        "turn_gate": turn_gate_snapshot(settings),
+        "database_pool": pool,
+    }

@@ -9,7 +9,7 @@ from typing import Any
 from app.core.config import Settings
 from app.rag.llm import LlmError, LlmProvider
 from app.rag.models import ModelSnapshot, PreparedRag
-from app.rag.routing import ChatResult
+from app.rag.response import ChatResult
 from app.rag.v2.answer_generator import (
     build_answer_prompt,
     generate_answer,
@@ -36,7 +36,6 @@ LlmFactory = Callable[[Settings, ModelSnapshot], LlmProvider]
 @dataclass(frozen=True, slots=True)
 class RagV2Result:
     result: ChatResult
-    prompt: str
     usage: dict[str, Any]
     trace: dict[str, Any]
     timings: dict[str, int]
@@ -83,8 +82,8 @@ class RagV2Pipeline:
                 scope_description=turn.scope_description or scope_description,
                 max_rounds=self.settings.m3_rag_history_max_rounds,
                 variant_limit=self.settings.m3_rag_query_variant_limit,
-                max_tokens=self.settings.m3_rag_query_planner_max_tokens,
-                timeout_seconds=self.settings.m3_rag_query_planner_timeout_seconds,
+                max_tokens=self.settings.m3_rag_query_interpreter_max_tokens,
+                timeout_seconds=self.settings.m3_rag_query_interpreter_timeout_seconds,
             )
             query_usage = dict(query_provider.usage)
         except Exception as exc:
@@ -189,7 +188,7 @@ class RagV2Pipeline:
                 ),
                 *evidence_violations(generated, context),
             ]
-            while violations and repair_count < self.settings.m3_rag_title_leak_repair_attempts:
+            while violations and repair_count < self.settings.m3_rag_answer_repair_attempts:
                 repair_count += 1
                 generated = await repair_generated_answer(
                     answer_provider,
@@ -257,7 +256,6 @@ class RagV2Pipeline:
 
         return RagV2Result(
             result=result,
-            prompt=prompt,
             usage={"pipeline": "V2", "query_interpreter": query_usage, "answer": answer_usage},
             trace={
                 "pipeline": "V2",

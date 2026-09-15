@@ -1,9 +1,9 @@
 # RAG 隐藏全文双 LLM V2 执行计划
 
 > 日期：2026-09-14  
-> 状态：V0～V4 已在本地开发环境实施并完成工程验收，V4.1 检索与校验及 V4.2 短追问/单一检索收口已完成；V5～V6 待执行，生产仍运行旧链路。
+> 状态：V0～V5 已在本地开发环境实施并完成工程验收；V6 为受条件约束的可选数据库清理，生产尚未部署本次 V5 代码。
 > 首个可见目标：开发环境默认进入 V2，用户只看到基于完整候选文档生成的答案和必要图片，不再看到整篇原文或选文档交互。  
-> 生产边界：本计划当前只授权本地开发实施和验证；生产配置继续显式使用 `legacy`，不得随代码默认值自动切换。  
+> 生产边界：V5 后仓库只保留 V2 RAG 运行路径，生产部署本次代码也会进入 V2；上线前必须保存旧镜像/提交作为回滚点并完成真实模型验收。
 > 适用范围：RAG、经 Gateway 进入 RAG 的 Assistant/管理试问、RAG Trace 和相关配置；Support 引擎自身的 Profile、焦点工作流和文档交付保持独立。
 
 ## 目录
@@ -35,7 +35,7 @@ V2 不再继续修补“首轮命中、单强直达、事实短答、解释模�
 5. LLM 2 统一完成短答、完整操作说明、故障分析、通用工程扩展或一个关键问题，不再选择“向用户交付全文”。
 6. Assistant/管理试问只呈现最终答案与白名单图片，不公开完整原始文档、候选列表、检索诊断或文档总数；技术回答确有需要时可自然提及文档标题、文件名和设备内部编号。
 7. 不再维护 RAG 文档焦点、焦点代次、待选文档或 `rag_case`；每轮根据对话重新检索。
-8. 开发环境从首个端到端阶段开始默认 `v2`；生产示例和 Production Compose 始终显式 `legacy`，直至另行批准。
+8. 开发环境、测试环境和 Production Compose 均使用唯一 V2 路径；不再提供环境变量模式切换，回滚只能部署 V5 前的提交或镜像。
 9. 旧链路按“停止新增依赖 → 停止运行时调用 → 删除 RAG 专用实现 → 最后评估共享数据库字段”的顺序退出，不一次性硬删。
 
 这不是现有 P3 的继续收口。P1 的 RAG 文档卡片、冻结索引、混合检索、Rerank、完整元素读取、图片资产和 Assistant 幂等契约继续复用；P2 的多查询与文档聚合可以重构复用；P3 六策略执行器和 P4 结构化问题状态不再继续。
@@ -124,7 +124,7 @@ LLM 2：Answer Generator
 公开 SSE complete / 历史 / 幂等重放使用同一终态快照
 ```
 
-V2 不自动降级回旧路由。LLM 1 失败时在 V2 内使用原始问题；卡片缺失时在 V2 内使用 Chunk 文档聚合；无可靠文档但问题在产品范围内时仍由 LLM 2 做有界通用回答；LLM 2 失败时返回现有可重试错误。旧链路只通过显式 `legacy` 模式人工回滚，避免同一问题因内部失败突然恢复成旧式全文或选文档体验。
+V2 不自动降级回旧路由。LLM 1 失败时在 V2 内使用原始问题；卡片缺失时在 V2 内使用 Chunk 文档聚合；无可靠文档但问题在产品范围内时仍由 LLM 2 做有界通用回答；LLM 2 失败时返回现有可重试错误。V5 后旧路由已删除，只能部署旧提交或旧镜像回滚，避免同一问题因内部失败突然恢复成旧式全文或选文档体验。
 
 ## 五、LLM 1 与检索
 
@@ -308,7 +308,7 @@ V2 继续使用现有 Assistant 路径、鉴权、请求字段、SSE 事件、�
 - `RAG_ONLY` 和 Support→RAG 回退进入同一个 V2 入口，不能分别实现两套答案行为。
 - Support 自身仍保留焦点、Profile、标准问题、标签、文档交付和风险校验。
 - 不把 RAG 文档卡片、V2 Query Interpreter 或 Answer Generator 接入 Support。
-- 不移动或删除 `app.rag.doc_router` 中仍被 `app.support.document_router` 导入的共享排序代码；先抽到中立模块并验证 Support，再删除旧 RAG 模块。
+- 原 `app.rag.doc_router` 中仍被 Support 使用的排序策略已迁入 `app.support.document_routing_policy`；RAG 不再依赖该策略，Support 保持冻结并通过回归。
 - Gateway 仍负责父子 Trace、最终 execution engine 和 Assistant 就绪判断；RAG V2 不直接改运行策略。
 
 ## 十、配置迁移
@@ -317,9 +317,8 @@ V2 继续使用现有 Assistant 路径、鉴权、请求字段、SSE 事件、�
 
 | 配置 | 开发初始值 | 生产初始值 | 说明 |
 | --- | ---: | ---: | --- |
-| `M3_RAG_PIPELINE_MODE` | `v2` | `legacy` | `auto/legacy/v2`；`auto` 仅在 `APP_ENV=development` 解析为 `v2`，其他环境解析为 `legacy`。 |
-| `M3_RAG_QUERY_PLANNER_MAX_TOKENS` | `512` | `512` | LLM 1 最小 JSON；保留变量名，替换旧 Schema 语义。 |
-| `M3_RAG_QUERY_PLANNER_TIMEOUT_SECONDS` | `15` | `15` | 失败使用原问题继续 V2。切换模型后需实测。 |
+| `M3_RAG_QUERY_INTERPRETER_MAX_TOKENS` | `512` | `512` | LLM 1 最小 JSON。 |
+| `M3_RAG_QUERY_INTERPRETER_TIMEOUT_SECONDS` | `15` | `15` | 失败使用原问题继续 V2。切换模型后需实测。 |
 | `M3_RAG_QUERY_VARIANT_LIMIT` | `3` | `3` | 补充查询上限。 |
 | `M3_RAG_DOCUMENT_CARD_TOP_K` | `5` | `5` | 文档卡片候选数。 |
 | `M3_RAG_FULL_DOCUMENT_LIMIT` | `3` | `3` | 进入全文包的最大文档数，替换 `M3_RAG_RESPONSE_DOCUMENT_LIMIT`。 |
@@ -327,25 +326,23 @@ V2 继续使用现有 Assistant 路径、鉴权、请求字段、SSE 事件、�
 | `M3_RAG_ANSWER_MAX_TOKENS` | `4096` | `4096` | 完整操作与多文档回答预算，最终还受模型快照上限约束。 |
 | `M3_RAG_ANSWER_TIMEOUT_SECONDS` | `45` | `45` | LLM 2 单次超时；必须小于单轮总时限并预留收口时间。 |
 | `M3_RAG_HISTORY_MAX_ROUNDS` | `4` | `4` | 最近完整问答轮次数，不使用焦点代次。 |
-| `M3_RAG_TITLE_LEAK_REPAIR_ATTEMPTS` | `1` | `1` | 兼容名称；当前表示真实实现信息或证据白名单违规后的最多修复次数，V5 再评估改名。 |
+| `M3_RAG_ANSWER_REPAIR_ATTEMPTS` | `1` | `1` | 真实实现信息、结构或证据白名单违规后的最多修复次数。 |
 
 初始值用于第一轮开发，不是生产性能结论。若当前 LLM 上下文窗口或管理端模型 `max_tokens` 与这些值冲突，按更小值失败关闭并在 Trace 记录，不静默截断。
 
-### 10.2 环境文件修改
+### 10.2 环境文件修改（V5 后）
 
-V1 实施必须同时修改：
+V5 完成后环境关系为：
 
-- `backend/app/core/config.py`：增加新字段、范围校验和 `APP_ENV` 有效模式解析。
-- `.env.example`：显式 `M3_RAG_PIPELINE_MODE=v2`，使本地复制示例后立即看到新行为；不得加入真实凭据。
-- 本地忽略的 `.env`：只增加/更新上述非敏感 V2 参数，保留用户现有密钥和端口，不回显真实值。
-- `.env.production.example`：显式 `M3_RAG_PIPELINE_MODE=legacy`。
-- `compose.production.yaml`：使用 `${M3_RAG_PIPELINE_MODE:-legacy}`，传入全部 V2 参数；不得依赖代码的开发默认值。
-- `backend/tests/test_config.py`：分别断言 development/production 的有效模式和所有上下限。
+- `backend/app/core/config.py`：只保留 V2 字段及范围/总时限校验，没有管线模式解析。
+- `.env.example`、`.env.production.example` 和 `compose.production.yaml`：使用相同 V2 变量名；不得加入真实凭据。
+- 本地忽略的 `.env`：保留用户现有密钥和端口，不回显真实值；旧字段应人工移除，遗留未知字段会被忽略。
+- `backend/tests/test_config.py`：断言 V2 上下限及 Query/Answer 时限之和小于单轮总时限。
 - `docs/ai/environment.md`、README 配置导航：同步当前有效值和启停方法。
 
 ### 10.3 旧配置退出顺序
 
-第一阶段旧变量继续被 Settings 接受，仅在 `legacy` 使用；V2 忽略并记录一次弃用日志：
+V5 已从 Settings、环境示例和 Production Compose 删除以下 RAG 旧变量：
 
 - `M3_RAG_SEMANTIC_ORCHESTRATION_MODE`
 - `M3_RAG_LEGACY_FALLBACK_RESERVE_SECONDS`
@@ -359,11 +356,10 @@ V1 实施必须同时修改：
 - `M3_RAG_EXPLANATION_MODE`
 - `M3_RAG_TECH_ASSIST_MODE`
 - `M3_HISTORY_STRATEGY`
-- `M3_DOC_AGG_*`、`M3_DOC_STAY_SCORE`、`M3_DOC_SWITCH_GAP`、`M3_DOC_LOCK_BEST_FLOOR`、`M3_DOC_SINGLE_CLARIFY_BEST_FLOOR`
 - `M3_DOC_DELIVERY_MAX_TOKENS`
 - `M3_QUERY_REWRITE_*`
 
-当 `legacy` 代码入口删除后，先从 `.env.example`、`.env.production.example` 和 Production Compose 删除这些变量；再从 Settings、验证器、测试和文档删除。部署方 `.env` 中遗留的未知变量会被 Pydantic 忽略，但在一个过渡阶段应由启动检查明确列出弃用变量，避免运维误以为仍生效。
+Support 专用 `M3_DOC_*` 阈值仍保留，当前 RAG 不读取。部署方 `.env` 中遗留的 RAG 旧变量会被 Pydantic 忽略，部署前应人工清理，避免运维误以为仍生效。
 
 ## 十一、逐步实施和删除清单
 
@@ -514,21 +510,33 @@ V1 不删除旧实现，只停止开发默认路径调用。完成条件：VAU �
 
 完成条件：真实 Trace 中追问出现任务锚点、换题不出现；有效 V2 没有旧准备检索耗时键；自动化证明每轮只有一批查询 Embedding；同口径完整 Golden 不低于 V4.1 且原失败用例修复。以上条件已满足。
 
+#### V4.3：上线必要的证据覆盖与图片标记收口
+
+状态：本地已完成；未部署生产。
+
+- LLM 2 回答前检查与当前任务直接相关的全部候选：主任务文档定义必需动作，补充文档只能展开步骤，不得替代主文档中的其他并列、前置或后续动作；实际贡献事实的文档全部写入内部证据键。该规则不增加 Planner 或模型调用，不硬编码产品词、标题或问题。
+- 图片公开组装从只识别单个严格 `[IMG:I1]` 扩展为兼容 `[IMG:I1, I2]` 等成组输出；只映射 `used_image_keys` 与上下文白名单的交集，按正文标记顺序输出结构化图片，其余声明图片按模型列表顺序补到末尾。异常、未知或未声明标记确定性移除，不触发第三次调用或用户硬失败。
+- 定向真实 Assistant 2/2 用例、3/3 轮通过；LRU 更换后的软件操作同时采用更换/升级文档并覆盖 Update 与配置导入，VAU 完整步骤返回结构化图片且公开正文无内部标记。
+- 同口径完整技术助手 Golden 50/50（100%，50 题/72 轮），六类全通过；p50 16.418 秒、p95 25.221 秒、最大 30.674 秒。回答中位长度由 568 降为 504 字，公开图片标记由 2 降为 0；结构化图片总数 335、单轮最高 19，暂不硬截断关键步骤图，列为生产观察项。
+- 最终 `scripts/check.sh` 退出码 0：Ruff/format、Mypy（143 个源文件）、后端 1181 项、三项 fake 冒烟和累计覆盖率 83% 通过；前端 22 个文件 161 项、lint、类型检查、累计覆盖率 91.36% 和生产构建通过，仅保留既有 Vite 大包警告。
+- 本阶段不新增接口、配置、迁移或索引重建，不改 Support，不执行 V5，不授权生产切换。
+
 ### V5：物理删除 RAG 旧实现
 
-按依赖顺序执行：
+状态：本地已完成，未部署生产。
 
-1. 将 `app.rag.doc_router` 中 Support 仍需的通用聚合/排序函数移动到中立模块，更新 Support 导入并先跑 Support 全量回归。
-2. 删除 `app.rag.first_turn`、旧首轮专用代码及 `test_rag_first_turn.py`，用 V2 行为测试替代。
-3. 删除 `app.rag.query_rewrite` 的 RAG 旧调用和焦点标题兜底；若其他模块仍使用则先拆分通用历史渲染。
-4. 删除 `app.rag.doc_router` 的 RAG 决策、待选文档和焦点 stay/switch 逻辑；只有 Support 零导入后才能删除整个文件。
-5. 拆分 `answer_policy.py`：保留知识库范围规范化到 `scope.py`，删除 `AnswerStyle`、首轮分类、condition/rag_issue 逻辑。
-6. 用 V2 Prompt 注册替换 `DOC_QA/CHUNK_QA/ROUTING/DOMAIN_ASSIST`；同步管理配置页后删除旧模板。
-7. 用 V2 结果校验替换 `routing.py` 中 MODE/Source 引用处理；保留仍被公开内容和图片构造使用的中立类型。
-8. 删除 `response_planner.py` 六策略实现和对应测试；`query_planner.py` 仅保留新 Query Interpreter，或完成引用更新后改名。
-9. 从 `services/rag.py` 删除 `DELIVER/DOC_QA/CHUNK_RAG/ROUTING/DOMAIN_ASSIST/P3_*` Plan 分支、标题列表和文档确认渲染。
-10. 删除只服务于 RAG 的 repository `set_conversation_focus/clear_conversation_focus/set_conversation_pending/clear_conversation_pending/get_query_planner_focus`；先用 `rg` 确认 Support/Gateway 没有通过共享 repository 调用。
-11. 删除旧环境字段、验证器、弃用日志和旧模式测试。
+完成结果：
+
+1. `app.rag.doc_router` 的仍用策略移动到 `app.support.document_routing_policy`；RAG 零导入，Support 行为回归通过。
+2. 删除 `first_turn.py`、`query_rewrite.py`、`query_planner.py`、`response_planner.py`、`answer_policy.py`、`routing.py`、旧 `history.py` 及对应测试/实验脚本。
+3. `services/rag.py` 改为 V2 单路径，删除首轮、焦点、待确认、原文交付、旧 Query/Response Planner 和六策略分支；`PreparedRag` 删除旧候选与 Prompt 状态。
+4. 范围、公开响应和系统保护分别移入中立 `scope.py`、`response.py`、`security.py`；V2 Prompt 管理页只展示 Query Interpreter 与 Answer Generator。
+5. 删除只服务旧 RAG 的 repository 焦点/待选/标题召回/旧准备方法；V2 不读取或改写 Support 焦点。
+6. 删除旧 RAG 环境字段和模式开关，重命名 Query Interpreter 与 Answer Repair 配置；Production Compose 默认总时限调为 90 秒。
+7. RAG 就绪不再依赖数据库 Active Prompt；数据库 Prompt 和历史 Trace 字段继续只读兼容。
+8. 最终 `scripts/check.sh` 同次通过：后端 778 项、三项 fake smoke、81% 覆盖率，前端 161 项、91.36% 覆盖率、lint、类型检查和生产构建；Production Compose 配置展开通过。
+9. 历史迁移 `0007/0012` 仍需在 Alembic 构建迁移图时导入 `DEFAULT_RAG_PROMPT`；该常量作为不可删除的迁移种子兼容面保留，不参与 V2 运行或就绪判断，并由全迁移图加载测试保护。
+10. 同口径真实技术助手 Golden 完整集 49/50（50 题/72 轮，p50 11.542 秒、p95 16.661 秒、最大 19.366 秒）；唯一失败短追问命中正确文档但答案未包含评测期待词，单独复跑 1/1 通过，不增加文本特判。另将模型 `ASK_ONE/OUT_OF_SCOPE` 附带内部证据键的无害结构偏差改为确定性清空，避免向用户返回可重试错误且不增加模型调用。
 
 历史 Alembic 文件永不修改或删除。旧 Trace/Message 的枚举和 JSON 快照读取兼容至少保留一个发布周期，管理台遇到旧结构只展示“旧链路记录”，不得报错。
 
@@ -646,29 +654,17 @@ bash scripts/check.sh
 
 ### 15.1 开发回滚
 
-设置：
-
-```dotenv
-M3_RAG_PIPELINE_MODE=legacy
-```
-
-重启 API/相关开发进程即可恢复旧 RAG。回滚不删除卡片、索引、会话、历史或数据卷。V4 之后只有在 legacy 实现尚未物理删除时可这样回滚；V5 完成后回滚必须使用 Git 版本，不再保留运行时双实现。
+V5 完成后不能通过环境变量恢复旧 RAG。回滚必须部署 V5 前的 Git 提交或旧镜像；卡片、索引、会话、历史和数据卷不需要删除。
 
 ### 15.2 生产约束
 
-生产当前固定：
-
-```dotenv
-M3_RAG_PIPELINE_MODE=legacy
-```
-
-本计划不授权生产切换。未来若批准生产 V2，需要重新编写部署任务，至少包含数据处理审查、真实模型报告、Assistant 对接方确认、备份、回滚版本和观察窗口。
+Production Compose 已只有 V2 配置，但当前工作区改动尚未部署。本计划不等同于生产发布授权；部署任务至少要保存旧镜像/提交、清理旧环境变量、复跑真实模型 Golden、验证 Assistant 契约并设置观察窗口。
 
 ### 15.3 完成定义
 
 V2 只有满足以下条件才算完成：
 
-- 开发环境默认 V2，生产显式 legacy，配置解析有测试。
+- 开发和 Production Compose 只有 V2，配置解析有测试。
 - 两个 LLM 职责和结构已按本文收敛。
 - 候选完整文档真正进入 LLM 2；Trace 能证明 FULL/SECTION_FALLBACK。
 - RAG 不读写焦点、待选文档或 `rag_issue`，每轮重新检索。
@@ -679,4 +675,4 @@ V2 只有满足以下条件才算完成：
 - V5 旧 RAG 代码删除满足零引用条件；共享数据库字段按 V6 条件保留或安全迁移。
 - `docs/ai/`、对接文档和 README 按真实实现同步，不把计划写成当前生产能力。
 
-在这些条件全部完成前，本文仍是后续实施依据。当前仅能表述为“本地开发默认已启用 V2，V0～V4.2 工程阶段已完成”；不能表述为整套 V2 计划全部完成、生产已启用或旧链路已经可以物理删除。
+V0～V5 工程阶段已在本地完成；V6 是受 Support 迁移条件约束的可选数据库清理，不计为 RAG V2 代码未完成。当前不能表述为生产已部署或已完成部署后真实模型验收。

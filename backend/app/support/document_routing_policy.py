@@ -1,9 +1,8 @@
-"""Document-level routing for the chat pipeline.
+"""Frozen document-level routing policy used only by formal Support.
 
 Pure functions only: aggregation of reranked chunk candidates into document
 scores, the ALIGNING/DOC_FOCUS decision policy, and rule-based resolution of
-clarification replies. The target replacement is documented in
-docs/technical-support-refactor-plan.md.
+clarification replies. RAG V2 does not import this module.
 """
 
 from __future__ import annotations

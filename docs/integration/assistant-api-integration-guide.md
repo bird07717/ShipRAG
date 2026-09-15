@@ -866,6 +866,7 @@ Android/iOS 必须：
 | 409 | IDEMPOTENCY_KEY_REUSED | 记录接入错误，检查 Key 使用逻辑 |
 | 409 | WORKFLOW_CONFLICT | 提示用户重试，不静默并发重发 |
 | 409/503 | KNOWLEDGE_BASE_NOT_READY | 知识库不可用，刷新知识库状态 |
+| 503 | SERVICE_BUSY | 服务并发已达上限；未占用幂等键，稍后可用原 Key 重试 |
 | 422 | VALIDATION_ERROR | 检查请求字段、类型和长度 |
 | 504 | TURN_DEADLINE_EXCEEDED | 展示可重试提示 |
 | SSE error | 事件中的 code | 展示 message，记录 request_id 和 trace_id |

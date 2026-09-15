@@ -36,19 +36,13 @@ class Turn:
     knowledge_id: UUID
     index_id: UUID
     embedding_model_name: str
-    prompt_template: str
     llm: ModelSnapshot
     history: list[dict[str, str]]
     history_diagnostics: dict[str, Any] = field(default_factory=dict)
-    has_prior_messages: bool = False
     rerank: ModelSnapshot | None = None
     # Enabled EMBEDDING row snapshot at turn start.  Query-side embedding
     # prefers it when it matches the active index; None falls back to env.
     embedding: ModelSnapshot | None = None
-    focus_document_id: UUID | None = None
-    focus_epoch: int = 0
-    context_version: int = 0
-    chat_context: dict[str, Any] = field(default_factory=dict)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     knowledge_name: str = ""
     knowledge_description: str | None = None
@@ -164,52 +158,10 @@ class RerankOutcome:
     usage: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
-class Source:
-    source_id: str
-    document_id: UUID
-    document: str
-    section_path: list[str]
-    page: int | None
-    element_ids: list[UUID]
-    chunk_id: UUID
-    image_asset_ids: list[UUID] = field(default_factory=list)
-
-    def public_dict(self) -> dict[str, Any]:
-        return {
-            "source_id": self.source_id,
-            "document_id": str(self.document_id),
-            "document": self.document,
-            "section_path": self.section_path,
-            "page": self.page,
-            "element_ids": [str(item) for item in self.element_ids],
-            "chunk_id": str(self.chunk_id),
-            "image_asset_ids": [str(item) for item in self.image_asset_ids],
-        }
-
-
 @dataclass(slots=True)
 class PreparedRag:
     turn: Turn
-    prompt: str
-    candidates: list[RetrievalCandidate]
-    selected_candidates: list[RetrievalCandidate]
-    sources: list[Source]
     timings: dict[str, int]
     started_at: float
-    answer_parts: list[str] = field(default_factory=list)
-    rerank_candidates: list[RetrievalCandidate] = field(default_factory=list)
-    rerank_status: str = "SKIPPED"
-    rerank_error_code: str | None = None
     input_guard_reason: str | None = None
-    retrieval_query: str = ""
-    query_embedding: list[float] = field(default_factory=list)
-    query_embedding_status: str = "PASSED"
-    query_embedding_reason: str | None = None
     policy_question: str = ""
-    issue_resumed: bool = False
-    # P2/P3 internal data. The persisted semantic record is privacy-reduced;
-    # the raw query plan stays request-local and is never serialized directly.
-    semantic_orchestration: dict[str, Any] | None = None
-    semantic_query_plan: dict[str, Any] = field(default_factory=dict)
-    response_plan_trace: dict[str, Any] | None = None

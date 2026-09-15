@@ -173,10 +173,7 @@ class GatewayRepository:
                                           )
                                             AND e.document_id = p.document_id
                                             AND e.element_type = 'IMAGE' AND a.id IS NULL
-                                      )) AS ready_profile_count,
-                                   EXISTS (
-                                       SELECT 1 FROM prompt_template WHERE active
-                                   ) AS prompt_ready
+                                      )) AS ready_profile_count
                             FROM knowledge_base kb
                             LEFT JOIN knowledge_index ri ON ri.id = COALESCE(
                                 kb.rag_active_index_id, kb.active_index_id
@@ -238,9 +235,6 @@ class GatewayRepository:
             rag_blockers.append("知识库没有 Active Index")
         elif kb["rag_index_status"] != "ACTIVE":
             rag_blockers.append("Active Index 状态异常")
-        if not kb["prompt_ready"]:
-            rag_blockers.append("Active Prompt 未配置")
-
         rerank = models.get("RERANK")
         if rerank is None:
             rag_blockers.append("Rerank 模型未启用")

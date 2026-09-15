@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from app.rag.llm import LlmError
 from app.rag.presentation import clean_model_text
-from app.rag.routing import (
+from app.rag.response import (
     OUT_OF_SCOPE_MESSAGE,
     TECHNICAL_DISCLAIMER,
     AnswerMode,
@@ -19,7 +19,8 @@ from app.rag.routing import (
 from app.rag.v2.answer_generator import GeneratedAnswer
 from app.rag.v2.document_context import DocumentContext
 
-_IMAGE_PATTERN = re.compile(r"\[IMG:(I[1-9][0-9]*)\]")
+_IMAGE_MARKER_PATTERN = re.compile(r"\[IMG:([^\]\r\n]{1,100})\]", re.IGNORECASE)
+_IMAGE_KEY_PATTERN = re.compile(r"(?i)(?<![A-Z0-9])I[1-9][0-9]*(?![A-Z0-9])")
 _ABSOLUTE_URL_PATTERN = re.compile(r"(?i)https?://[^\s)\]}>]+")
 _MANAGEMENT_PATH_PATTERN = re.compile(
     r"(?i)/(?:api/v1/)?(?:admin|management)(?=$|[/\s?#.,;:，。；：！、])"
@@ -71,7 +72,7 @@ def public_leaks(
     """
 
     del aliases
-    visible = _IMAGE_PATTERN.sub("", answer)
+    visible = _IMAGE_MARKER_PATTERN.sub("", answer)
     leaks: list[str] = []
     if match := _PROMPT_MARKER_PATTERN.search(visible):
         leaks.append(f"prompt_marker:{match.group(0)}")
@@ -212,26 +213,27 @@ def _content_blocks(
     answer: str,
     *,
     context: DocumentContext,
-    used_images: set[str],
+    used_images: tuple[str, ...],
     include_images: bool,
 ) -> tuple[str, list[ContentBlock]]:
     image_map = {binding.key: binding.asset_id for binding in context.image_bindings}
     blocks: list[ContentBlock] = []
     last_end = 0
     emitted: set[str] = set()
-    for match in _IMAGE_PATTERN.finditer(answer):
+    for match in _IMAGE_MARKER_PATTERN.finditer(answer):
         text = clean_model_text(answer[last_end : match.start()].strip())
         if text:
             blocks.append(ContentBlock(type="text", text=text))
-        key = match.group(1)
-        if include_images and key in used_images and key in image_map and key not in emitted:
-            blocks.append(ContentBlock(type="image", image_asset_id=image_map[key]))
-            emitted.add(key)
+        marker_keys = [item.upper() for item in _IMAGE_KEY_PATTERN.findall(match.group(1))]
+        for key in marker_keys:
+            if include_images and key in used_images and key in image_map and key not in emitted:
+                blocks.append(ContentBlock(type="image", image_asset_id=image_map[key]))
+                emitted.add(key)
         last_end = match.end()
     tail = clean_model_text(answer[last_end:].strip())
     if tail:
         blocks.append(ContentBlock(type="text", text=tail))
-    public_answer = clean_model_text(_IMAGE_PATTERN.sub("", answer))
+    public_answer = clean_model_text(_IMAGE_MARKER_PATTERN.sub("", answer))
     if include_images:
         for key in used_images:
             if key in image_map and key not in emitted:
@@ -249,7 +251,7 @@ def validate_generated_answer(
     allowed_text: str = "",
 ) -> ChatResult:
     used_documents = set(generated.used_document_keys)
-    used_images = set(generated.used_image_keys)
+    used_images = tuple(dict.fromkeys(key.upper() for key in generated.used_image_keys))
     if violations := evidence_violations(generated, context):
         raise LlmError(
             "V2_EVIDENCE_INVALID",

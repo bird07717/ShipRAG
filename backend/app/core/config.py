@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
@@ -85,24 +84,19 @@ class Settings(BaseSettings):
     m3_context_token_budget: int = 6_000
     m3_history_max_messages: int = 10
     m3_history_token_budget: int = 2_000
-    m3_history_strategy: Literal["legacy", "focused"] = "focused"
     m3_question_max_chars: int = 4_000
     m3_prompt_max_chars: int = 60_000
     m3_prompt_token_budget: int = 30_000
     m3_turn_deadline_seconds: float = 90.0
     m3_llm_max_tokens: int = 2_048
     m3_llm_temperature: float = 0.1
-    m3_trace_retain_prompt: bool = True
     m3_provider_timeout_seconds: float = 120.0
-    # RAG V2 is the development default. Deployed environments stay on the
-    # legacy route unless their operator explicitly opts in.
-    m3_rag_pipeline_mode: Literal["auto", "legacy", "v2"] = "auto"
     m3_rag_full_document_limit: int = 3
     m3_rag_full_context_token_budget: int = 20_000
     m3_rag_answer_max_tokens: int = 4_096
     m3_rag_answer_timeout_seconds: float = 45.0
     m3_rag_history_max_rounds: int = 4
-    m3_rag_title_leak_repair_attempts: int = 1
+    m3_rag_answer_repair_attempts: int = 1
 
     # Document Profile generation (Profile Review page). One short structured
     # draft call per document. Keep concurrency low so a
@@ -143,35 +137,11 @@ class Settings(BaseSettings):
     # A single-option clarify needs a confident best chunk; a lone weak
     # candidate falls through to the catalog-aware routing answer instead.
     m3_doc_single_clarify_best_floor: float = 0.65
-    # Deprecated compatibility setting: original document delivery is complete;
-    # only LLM prompt/generation paths retain their separate token budgets.
-    m3_doc_delivery_max_tokens: int = 8_000
-    m3_rag_conflict_guard: bool = True
-    m3_rag_title_recall: bool = True
-    m3_rag_single_strong_mode: Literal["off", "shadow", "enabled"] = "shadow"
-    m3_rag_fact_qa_mode: Literal["off", "shadow", "enabled"] = "shadow"
-    m3_rag_explanation_mode: Literal["off", "shadow", "enabled"] = "enabled"
-    m3_rag_tech_assist_mode: Literal["off", "shadow", "enabled"] = "off"
     m3_rag_scope_max_tokens: int = 800
-    # V4 retired the legacy P2/P3 dual-planner runtime. These fields remain for
-    # one compatibility stage so stale deployments fail softly and emit a
-    # deprecation warning; they do not change RAG behavior.
-    m3_rag_semantic_orchestration_mode: Literal["off", "shadow", "enabled"] = "off"
-    m3_rag_query_planner_max_tokens: int = 512
-    m3_rag_query_planner_timeout_seconds: float = 15.0
-    m3_rag_response_planner_max_tokens: int = 1_200
-    m3_rag_response_planner_timeout_seconds: float = 30.0
-    m3_rag_legacy_fallback_reserve_seconds: float = 12.0
+    m3_rag_query_interpreter_max_tokens: int = 512
+    m3_rag_query_interpreter_timeout_seconds: float = 15.0
     m3_rag_query_variant_limit: int = 3
     m3_rag_document_card_top_k: int = 5
-    m3_rag_response_document_limit: int = 3
-    m3_rag_single_strong_floor: float = 0.85
-    m3_rag_single_strong_gap: float = 0.18
-
-    m3_query_rewrite_enabled: bool = True
-    m3_query_rewrite_max_chars: int = 40
-    m3_query_rewrite_max_tokens: int = 192
-    m3_query_rewrite_timeout_seconds: float = 3.0
     # Fast-fail ceilings below the turn deadline: a hung upstream request
     # retries once (embedding, idempotent and cheap) or degrades to
     # rank-fallback routing (rerank) instead of burning the whole turn
@@ -217,6 +187,22 @@ class Settings(BaseSettings):
     # requests follow the conversation lifecycle through ON DELETE CASCADE.
     # 0 disables orphan pruning.
     assistant_request_retention_days: int = 7
+
+    # Assistant requests still RUNNING after this window were abandoned by a
+    # crashed/killed API process: the maintenance worker fails them
+    # automatically on startup and periodically afterwards.  Blocked
+    # conversations then self-heal instead of waiting for the manual
+    # ``app.assistant.recovery`` command.  The validator enforces a bound
+    # above the worst-case legitimate turn (see validate_assistant_stale_window).
+    # 0 disables automatic recovery.
+    assistant_request_stale_seconds: int = 600
+
+    # Process-wide admission gate for chat turn generation (RAG and Support,
+    # admin playground and external Assistant alike).  Turns queued beyond
+    # the limit fail fast with 503 SERVICE_BUSY after the wait window.
+    # 0 disables the gate.
+    chat_turn_concurrency_limit: int = 64
+    chat_turn_wait_seconds: float = 2.0
 
     # Conversation content is visible for seven days.  Trace payload is
     # redacted after that window and retained as a minimal operations record
@@ -273,6 +259,27 @@ class Settings(BaseSettings):
     def validate_assistant_request_retention_days(cls, value: int) -> int:
         if not 0 <= value <= 3_650:
             raise ValueError("Assistant request retention days must be between 0 and 3650")
+        return value
+
+    @field_validator("assistant_request_stale_seconds")
+    @classmethod
+    def validate_assistant_request_stale_seconds(cls, value: int) -> int:
+        if not 0 <= value <= 86_400:
+            raise ValueError("Assistant request stale seconds must be between 0 and 86400")
+        return value
+
+    @field_validator("chat_turn_concurrency_limit")
+    @classmethod
+    def validate_chat_turn_concurrency_limit(cls, value: int) -> int:
+        if not 0 <= value <= 1_000:
+            raise ValueError("Chat turn concurrency limit must be between 0 and 1000")
+        return value
+
+    @field_validator("chat_turn_wait_seconds")
+    @classmethod
+    def validate_chat_turn_wait_seconds(cls, value: float) -> float:
+        if not 0.1 <= value <= 30:
+            raise ValueError("Chat turn wait seconds must be between 0.1 and 30")
         return value
 
     @field_validator("trace_full_retention_days", "trace_summary_retention_days")
@@ -393,6 +400,23 @@ class Settings(BaseSettings):
             raise ValueError("M2 parent chunk max chars cannot be smaller than child max chars")
         return self
 
+    @model_validator(mode="after")
+    def validate_assistant_stale_window(self) -> Self:
+        # Auto recovery must never reap a turn that could still be live.
+        # RAG turns are bounded by the overall turn deadline, so with the
+        # Support-first policy frozen (ADR-0021) that deadline is the
+        # worst-case legitimate turn duration.  If SUPPORT_WITH_RAG_FALLBACK
+        # is ever re-enabled, raise this bound above
+        # 2 * m3_provider_timeout_seconds + m3_turn_deadline_seconds.
+        if (
+            self.assistant_request_stale_seconds > 0
+            and self.assistant_request_stale_seconds <= self.m3_turn_deadline_seconds
+        ):
+            raise ValueError(
+                "Assistant request stale seconds must exceed the turn deadline or be 0 (disabled)"
+            )
+        return self
+
     @field_validator("m3_vector_top_k", "m3_context_max_chunks", "m3_history_max_messages")
     @classmethod
     def validate_m3_count_limits(cls, value: int) -> int:
@@ -405,8 +429,7 @@ class Settings(BaseSettings):
         "m3_history_token_budget",
         "m3_llm_max_tokens",
         "m3_rag_scope_max_tokens",
-        "m3_rag_query_planner_max_tokens",
-        "m3_rag_response_planner_max_tokens",
+        "m3_rag_query_interpreter_max_tokens",
         "m3_rag_full_context_token_budget",
         "m3_rag_answer_max_tokens",
     )
@@ -419,7 +442,6 @@ class Settings(BaseSettings):
     @field_validator(
         "m3_rag_query_variant_limit",
         "m3_rag_document_card_top_k",
-        "m3_rag_response_document_limit",
         "m3_rag_full_document_limit",
         "m3_rag_history_max_rounds",
     )
@@ -492,8 +514,6 @@ class Settings(BaseSettings):
         "m3_doc_stay_score",
         "m3_doc_switch_gap",
         "m3_doc_lock_best_floor",
-        "m3_rag_single_strong_floor",
-        "m3_rag_single_strong_gap",
     )
     @classmethod
     def validate_m3_doc_scores(cls, value: float) -> float:
@@ -515,45 +535,16 @@ class Settings(BaseSettings):
             raise ValueError("M3 doc routing hit limits must be between 1 and 10")
         return value
 
-    @field_validator("m3_doc_delivery_max_tokens")
-    @classmethod
-    def validate_m3_doc_delivery_tokens(cls, value: int) -> int:
-        if not 1_000 <= value <= 100_000:
-            raise ValueError("M3 doc delivery token limit must be between 1000 and 100000")
-        return value
-
-    @field_validator("m3_query_rewrite_max_chars")
-    @classmethod
-    def validate_query_rewrite_chars(cls, value: int) -> int:
-        if not 10 <= value <= 500:
-            raise ValueError("M3 query rewrite char limit must be between 10 and 500")
-        return value
-
-    @field_validator("m3_query_rewrite_max_tokens")
-    @classmethod
-    def validate_query_rewrite_tokens(cls, value: int) -> int:
-        if not 16 <= value <= 1_024:
-            raise ValueError("M3 query rewrite token limit must be between 16 and 1024")
-        return value
-
     @field_validator(
         "m3_query_embedding_timeout_seconds",
         "m3_rerank_timeout_seconds",
-        "m3_rag_query_planner_timeout_seconds",
-        "m3_rag_response_planner_timeout_seconds",
+        "m3_rag_query_interpreter_timeout_seconds",
         "m3_rag_answer_timeout_seconds",
     )
     @classmethod
     def validate_upstream_call_timeouts(cls, value: float) -> float:
         if not 0.1 <= value <= 60.0:
             raise ValueError("M3 upstream call timeouts must be between 0.1 and 60 seconds")
-        return value
-
-    @field_validator("m3_rag_legacy_fallback_reserve_seconds")
-    @classmethod
-    def validate_legacy_fallback_reserve(cls, value: float) -> float:
-        if not 0.5 <= value <= 120.0:
-            raise ValueError("RAG legacy fallback reserve must be between 0.5 and 120 seconds")
         return value
 
     @field_validator("m3_query_embedding_retries")
@@ -563,18 +554,11 @@ class Settings(BaseSettings):
             raise ValueError("M3 query embedding retries must be between 0 and 3")
         return value
 
-    @field_validator("m3_rag_title_leak_repair_attempts")
+    @field_validator("m3_rag_answer_repair_attempts")
     @classmethod
-    def validate_title_leak_repair_attempts(cls, value: int) -> int:
+    def validate_answer_repair_attempts(cls, value: int) -> int:
         if not 0 <= value <= 2:
-            raise ValueError("RAG V2 title leak repair attempts must be between 0 and 2")
-        return value
-
-    @field_validator("m3_query_rewrite_timeout_seconds")
-    @classmethod
-    def validate_query_rewrite_timeout(cls, value: float) -> float:
-        if not 1 <= value <= 60:
-            raise ValueError("M3 query rewrite timeout must be between 1 and 60 seconds")
+            raise ValueError("RAG V2 answer repair attempts must be between 0 and 2")
         return value
 
     @field_validator("m4_image_concurrency")
@@ -640,22 +624,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_security(self) -> Self:
-        retired_rag_fields = {
-            "m3_rag_semantic_orchestration_mode",
-            "m3_rag_response_planner_max_tokens",
-            "m3_rag_response_planner_timeout_seconds",
-            "m3_rag_legacy_fallback_reserve_seconds",
-            "m3_rag_response_document_limit",
-        }
-        configured_retired_fields = sorted(retired_rag_fields & self.model_fields_set)
-        if configured_retired_fields:
-            warnings.warn(
-                "Ignored retired RAG P2/P3 settings: " + ", ".join(configured_retired_fields),
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        if self.effective_rag_pipeline_mode == "v2" and (
-            self.m3_rag_query_planner_timeout_seconds + self.m3_rag_answer_timeout_seconds
+        if (
+            self.m3_rag_query_interpreter_timeout_seconds + self.m3_rag_answer_timeout_seconds
             >= self.m3_turn_deadline_seconds
         ):
             raise ValueError(
@@ -734,12 +704,6 @@ class Settings(BaseSettings):
     @staticmethod
     def has_secret(value: SecretStr | None) -> bool:
         return value is not None and bool(value.get_secret_value().strip())
-
-    @property
-    def effective_rag_pipeline_mode(self) -> Literal["legacy", "v2"]:
-        if self.m3_rag_pipeline_mode != "auto":
-            return self.m3_rag_pipeline_mode
-        return "v2" if self.app_env == "development" else "legacy"
 
 
 @lru_cache(maxsize=1)

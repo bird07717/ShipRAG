@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.pool import QueuePool
 
+from app.api.dependencies import get_resources
 from app.api.metrics import get_metrics_repository
 from app.api.rag import get_rag_repository
+from app.common.errors import ApiError
 from app.rag.metrics import MetricsRepository
 
 
@@ -142,6 +146,12 @@ class _StubMetricsRepository:
                 "ingestion_operations": {"upload_document:test-kb": 3},
             },
             "retention": {"retention_days": 7, "total": 6, "active": 5, "expired": 1},
+            "concurrency": {
+                "running_requests": 0,
+                "oldest_running_age_seconds": 0,
+                "stale_running_requests": 0,
+                "busy_rejections": {"CONVERSATION_BUSY": 2},
+            },
         }
 
 
@@ -203,9 +213,15 @@ class _MetricsConnection:
         sql = str(statement)
         self.calls.append((sql, parameters))
         if "FROM assistant_request" in sql:
+            if "status = 'RUNNING'" in sql:
+                return _RepositoryResult(
+                    rows=[{"count": 1, "oldest_age_seconds": 120, "stale_count": 0}]
+                )
             return _RepositoryResult(rows=[{"protected": 3, "replays": 2}])
         if "FROM conversation c" in sql:
             return _RepositoryResult(rows=[{"total": 0, "active": 0, "expired": 0}])
+        if "CONVERSATION_BUSY" in sql:
+            return _RepositoryResult(rows=[{"error_code": "CONVERSATION_BUSY", "count": 2}])
         return _RepositoryResult()
 
 
@@ -265,6 +281,42 @@ async def test_assistant_metrics_read_assistant_request_with_knowledge_filter() 
     assert parameters["kb_id"] == knowledge_id
 
 
+@pytest.mark.asyncio
+async def test_assistant_metrics_include_running_backlog_and_busy_rejections() -> None:
+    engine = _MetricsEngine()
+    repository = MetricsRepository(cast(AsyncEngine, engine))
+
+    result = await repository.assistant(stale_seconds=600)
+
+    assert result["concurrency"] == {
+        "running_requests": 1,
+        "oldest_running_age_seconds": 120,
+        "stale_running_requests": 0,
+        "busy_rejections": {"CONVERSATION_BUSY": 2},
+    }
+    running_sql, running_params = next(
+        call for call in engine.connection.calls if "status = 'RUNNING'" in call[0]
+    )
+    assert "FROM assistant_request" in running_sql
+    assert "make_interval(secs => :stale_seconds)" in running_sql
+    assert running_params["stale_seconds"] == 600
+    busy_sql, busy_params = next(
+        call for call in engine.connection.calls if "CONVERSATION_BUSY" in call[0]
+    )
+    assert "FROM request_error_log" in busy_sql
+    assert "SERVICE_BUSY" in busy_sql
+    assert "REQUEST_IN_PROGRESS" in busy_sql
+    assert busy_params["start"] < busy_params["end"]
+
+
+@pytest.mark.asyncio
+async def test_assistant_metrics_reject_negative_stale_window() -> None:
+    repository = MetricsRepository(cast(AsyncEngine, _MetricsEngine()))
+    with pytest.raises(ApiError) as error:
+        await repository.assistant(stale_seconds=-1)
+    assert error.value.status_code == 422
+
+
 class TestMetricsApi:
     def test_overview_endpoint_wires_filters(self, client: TestClient) -> None:
         stub = _StubMetricsRepository()
@@ -309,6 +361,8 @@ class TestMetricsApi:
             assert call["days"] == 14
             assert str(call["knowledge_id"]) == "00000000-0000-0000-0000-000000000002"
             assert call["retention_days"] > 0
+            assert call["stale_seconds"] > 0
+            assert body["concurrency"]["busy_rejections"] == {"CONVERSATION_BUSY": 2}
         finally:
             client.app.dependency_overrides.clear()
 
@@ -318,6 +372,50 @@ class TestMetricsApi:
 
     def test_assistant_requires_token(self, client: TestClient) -> None:
         response = client.get("/api/v1/metrics/assistant")
+        assert response.status_code == 401
+
+    def test_runtime_endpoint_reports_gate_and_pool(self, client: TestClient) -> None:
+        class _Pool(QueuePool):
+            """Counter-only fake: the endpoint reads pool statistics only."""
+
+            def __init__(self) -> None:
+                pass
+
+            def size(self) -> int:
+                return 5
+
+            def checkedin(self) -> int:
+                return 3
+
+            def checkedout(self) -> int:
+                return 2
+
+            def overflow(self) -> int:
+                return 0
+
+        class _Resources:
+            def __init__(self) -> None:
+                self.database = SimpleNamespace(pool=_Pool())
+
+        client.app.dependency_overrides[get_resources] = lambda: _Resources()
+        try:
+            response = client.get("/api/v1/metrics/runtime", headers=AUTH)
+        finally:
+            client.app.dependency_overrides.clear()
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["turn_gate"]["limit"] > 0
+        assert body["turn_gate"]["in_flight"] == 0
+        assert body["database_pool"] == {
+            "size": 5,
+            "checked_in": 3,
+            "checked_out": 2,
+            "overflow": 0,
+        }
+
+    def test_runtime_requires_token(self, client: TestClient) -> None:
+        response = client.get("/api/v1/metrics/runtime")
         assert response.status_code == 401
 
     def test_overview_rejects_invalid_iso_with_422(self, client: TestClient) -> None:

@@ -17,7 +17,7 @@ from app.rag.model_providers import (
     normalize_provider,
 )
 from app.rag.models import ModelSnapshot
-from app.rag.prompt import RAG_SYSTEM_GUARD
+from app.rag.security import RAG_SYSTEM_GUARD
 
 
 class LlmError(RuntimeError):
@@ -143,6 +143,40 @@ class FakeLlmProvider:
         temperature: float,
         timeout_seconds: float | None = None,
     ) -> StructuredModel:
+        if not self.completions and schema.__name__ in {"QueryInterpretation", "GeneratedAnswer"}:
+            try:
+                data = json.loads(prompt)
+            except (TypeError, json.JSONDecodeError):
+                data = {}
+            if schema.__name__ == "QueryInterpretation":
+                question = str(data.get("current_question") or "请说明当前问题")
+                return schema.model_validate(
+                    {
+                        "resolved_question": question,
+                        "search_queries": [],
+                        "key_constraints": [],
+                        "scope": "IN_SCOPE",
+                        "relation": "NEW_TASK",
+                        "active_task": None,
+                    }
+                )
+            document_keys = list(data.get("available_document_keys") or [])
+            image_keys = list(data.get("available_image_keys") or [])
+            context = str(data.get("hidden_document_context") or "")
+            port = re.search(r"\b3306\b", context)
+            answer = "数据库默认端口为3306。" if port else "已根据产品资料整理当前问题的处理建议。"
+            if image_keys:
+                answer += f"[IMG:{image_keys[0]}]"
+            return schema.model_validate(
+                {
+                    "response_kind": "ANSWER",
+                    "basis": "DOCUMENT",
+                    "answer": answer,
+                    "used_document_keys": document_keys[:1],
+                    "used_image_keys": image_keys[:1],
+                    "next_suggestions": [],
+                }
+            )
         return await _complete_structured(
             self,
             prompt,

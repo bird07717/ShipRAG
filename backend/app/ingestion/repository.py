@@ -2037,8 +2037,8 @@ class IngestionRepository:
         """Detach conversations frozen to this index so it can be force-deleted.
 
         RAG and Support conversations re-bind to the current active index on
-        their next message; focused conversations reset to generic support
-        mode (same field reset as ``clear_conversation_focus``).  Messages
+        their next message; focused Support conversations reset to generic
+        Support mode. Messages
         survive untouched.  Returns the number of released column
         references; a conversation frozen on the same index in several
         columns counts once per column.

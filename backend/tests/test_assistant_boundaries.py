@@ -7,30 +7,19 @@ from uuid import uuid4
 
 import pytest
 from test_assistant_content_consistency import (
-    RecordingFacadeRepository,
     message_row,
     terminal,
 )
 from test_assistant_facade import _Repository
-from test_chat_doc_routing_flow import (
-    DOC_A,
-    _candidate,
-    _RecordingLlmProvider,
-    _RoutingRepository,
-    _service,
-    _turn,
-)
-from test_gateway import FakeGatewayRepository, FakeSupport, policy
 
 from app.api.assistant import _message, messages
 from app.api.schemas import AssistantMessageResponse
 from app.assistant.service import AssistantFacadeService, parse_sse, public_error, sse
 from app.common.errors import ApiError
-from app.gateway.models import ExecutionPolicy
-from app.gateway.service import ChatGatewayService
-from app.rag.models import RetrievalConfig
 from app.support.document_delivery import deliver_document
 from app.support.models import DocumentContentBlock, FocusedDocument
+
+DOC_A = uuid4()
 
 
 class PageRepository:
@@ -229,69 +218,6 @@ def long_document():
         {"element_type": "IMAGE", "content": "", "image_asset_id": asset},
     ]
     return {"document_id": str(DOC_A), "title": "新显示名称", "elements": elements}
-
-
-@pytest.mark.parametrize("include_images", [False, True])
-@pytest.mark.parametrize(
-    "engine", [ExecutionPolicy.RAG_ONLY, ExecutionPolicy.SUPPORT_WITH_RAG_FALLBACK]
-)
-async def test_long_delivery_complete_saved_history_replay_and_sync_agree(engine, include_images):
-    document = long_document()
-    original = deepcopy(document)
-    repo = _RoutingRepository(
-        turn=_turn(),
-        candidates=[_candidate(DOC_A, i) for i in range(1, 4)],
-        document_blocks={str(DOC_A): document},
-    )
-    repo.get_engine_retrieval_config = AsyncMock(return_value=RetrievalConfig())
-    llm = _RecordingLlmProvider([])
-    rag = _service(repo, llm)
-    rag.settings.m3_doc_delivery_max_tokens = 1000  # old deployment config cannot truncate
-    selected = policy(engine)
-    facade_repo = RecordingFacadeRepository(selected, repo.turn)
-    facade = AssistantFacadeService(
-        facade_repo, ChatGatewayService(FakeGatewayRepository(), FakeSupport("NO_MATCH"), rag)
-    )
-    kwargs = dict(
-        external_user_id="user",
-        knowledge_id=repo.turn.knowledge_id,
-        conversation_id=None,
-        question="操作步骤",
-        choice_id=None,
-        include_images=include_images,
-        idempotency_key="long-doc",
-        request_id="first",
-    )
-    live = terminal([f async for f in facade.stream(**kwargs)], "complete")
-    assert live["response_type"] == "DOC_DELIVERED"
-    expected = (
-        ["text", "text", "image", "table", "text", "image"]
-        if include_images
-        else ["text", "text", "table", "text"]
-    )
-    assert [b["type"] for b in live["content"]] == expected
-    assert live["content"][0]["text"] == document["elements"][0]["content"]
-    assert live["content"][1]["text"] == document["elements"][1]["content"]
-    assert any(b.get("text") == document["elements"][-2]["content"] for b in live["content"])
-    assert live["answer"] == "**《新显示名称》**"
-    assert facade_repo.completed["response"] == live
-    assert _message(message_row(snapshot=live, blocks=[]))["content_blocks"] == live["content"]
-    replay = terminal(
-        [f async for f in facade.stream(**{**kwargs, "request_id": "second"})], "complete"
-    )
-    assert replay == live
-    synchronous = await rag.generate(
-        knowledge_id=repo.turn.knowledge_id,
-        conversation_id=None,
-        question="操作步骤",
-        request_id="sync",
-        include_images=include_images,
-    )
-    assert synchronous["content"] == live["content"]
-    images = [b["image_asset_id"] for b in live["content"] if b["type"] == "image"]
-    assert repo.completed["sources"][0]["image_asset_ids"] == images
-    assert document == original
-    assert llm.prompts == []
 
 
 @pytest.mark.parametrize("include_images", [False, True])

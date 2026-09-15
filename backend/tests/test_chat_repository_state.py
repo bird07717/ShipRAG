@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, cast
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -240,61 +240,6 @@ async def test_cancel_assistant_request_closes_linked_runtime_in_one_statement()
     assert params["partial_content"] == "部分回答"
 
 
-async def test_set_conversation_focus_resets_chat_context() -> None:
-    repo, connection = _repository([[0]])
-    conversation_id, document_id, index_id = uuid4(), uuid4(), uuid4()
-
-    await repo.set_conversation_focus(conversation_id, document_id, index_id)
-
-    sql, params = connection.executed[0]
-    assert "focus_document_id = :document_id" in sql
-    assert "focus_index_id = :index_id" in sql
-    assert "'{}'::jsonb" in sql
-    assert params is not None
-    assert params["conversation_id"] == conversation_id
-    assert params["document_id"] == document_id
-    assert params["index_id"] == index_id
-    assert params["expected_context_version"] is None
-
-
-async def test_clear_conversation_focus() -> None:
-    repo, connection = _repository([])
-    conversation_id = uuid4()
-
-    await repo.clear_conversation_focus(conversation_id)
-
-    sql, params = connection.executed[0]
-    assert "focus_document_id = NULL" in sql
-    assert "focus_index_id = NULL" in sql
-    assert params == {"conversation_id": conversation_id}
-
-
-async def test_set_conversation_pending_serializes_json() -> None:
-    repo, connection = _repository([])
-    conversation_id = uuid4()
-    options = [{"document_id": "doc-1", "title": "标题"}]
-
-    await repo.set_conversation_pending(
-        conversation_id, pending_options=options, pending_query="如何升级"
-    )
-
-    sql, params = connection.executed[0]
-    assert "chat_context = CAST(:chat_context AS jsonb)" in sql
-    payload = json.loads(str(params["chat_context"]))
-    assert payload == {"pending_options": options, "pending_query": "如何升级"}
-
-
-async def test_clear_conversation_pending() -> None:
-    repo, connection = _repository([])
-    conversation_id = uuid4()
-
-    await repo.clear_conversation_pending(conversation_id)
-
-    sql, params = connection.executed[0]
-    assert "chat_context = '{}'::jsonb" in sql
-    assert params == {"conversation_id": conversation_id, "expected_context_version": None}
-
-
 async def test_list_kb_documents_prefers_display_name() -> None:
     doc_id, kb_id = uuid4(), uuid4()
     repo, _ = _repository(
@@ -355,7 +300,7 @@ async def test_get_document_blocks_rejects_missing_document() -> None:
     assert exc_info.value.status_code == 404
 
 
-async def test_complete_turn_patches_doc_routing_and_prompt() -> None:
+async def test_complete_turn_patches_doc_routing() -> None:
     repo, connection = _repository([])
     turn = Turn(
         trace_id=uuid4(),
@@ -365,7 +310,6 @@ async def test_complete_turn_patches_doc_routing_and_prompt() -> None:
         knowledge_id=uuid4(),
         index_id=uuid4(),
         embedding_model_name="m",
-        prompt_template="t",
         llm=ModelSnapshot("zhipu", "glm", {}),
         history=[],
     )
@@ -378,16 +322,13 @@ async def test_complete_turn_patches_doc_routing_and_prompt() -> None:
         usage={},
         citation_result={"document_level": True},
         timings={"total_ms": 5},
-        prompt="实际 Prompt",
         doc_routing=routing,
     )
 
     trace_sql, params = connection.executed[1]
     assert "jsonb_set" in trace_sql
     assert "{doc_routing}" in trace_sql
-    assert "prompt = :prompt" in trace_sql
     assert json.loads(str(params["doc_routing"]))["decision"] == "DELIVER"
-    assert params["prompt"] == "实际 Prompt"
 
 
 async def test_complete_turn_without_routing_leaves_trace_untouched() -> None:
@@ -400,7 +341,6 @@ async def test_complete_turn_without_routing_leaves_trace_untouched() -> None:
         knowledge_id=uuid4(),
         index_id=uuid4(),
         embedding_model_name="m",
-        prompt_template="t",
         llm=ModelSnapshot("zhipu", "glm", {}),
         history=[],
     )
@@ -416,69 +356,6 @@ async def test_complete_turn_without_routing_leaves_trace_untouched() -> None:
 
     trace_sql, _ = connection.executed[1]
     assert "jsonb_set" not in trace_sql
-    assert "prompt = :prompt" not in trace_sql
-
-
-async def test_complete_turn_commits_rag_issue_patch_with_terminal_answer() -> None:
-    repo, connection = _repository([[{"updated": True}], [], [], []])
-    turn = Turn(
-        trace_id=uuid4(),
-        conversation_id=uuid4(),
-        user_message_id=uuid4(),
-        assistant_message_id=uuid4(),
-        knowledge_id=uuid4(),
-        index_id=uuid4(),
-        embedding_model_name="m",
-        prompt_template="t",
-        llm=ModelSnapshot("zhipu", "glm", {}),
-        history=[],
-        context_version=3,
-    )
-    issue = {
-        "version": 1,
-        "origin_user_message_id": str(turn.user_message_id),
-        "pending_condition": {
-            "source_user_message_id": str(turn.user_message_id),
-            "source_assistant_message_id": str(turn.assistant_message_id),
-        },
-    }
-
-    await repo.complete_turn(
-        turn,
-        answer="请确认设备型号？",
-        sources=[],
-        usage={},
-        citation_result={},
-        timings={},
-        context_patch={"rag_issue": issue},
-        pending_options_after=[],
-    )
-
-    context_sql, context_params = connection.executed[0]
-    assert "jsonb_strip_nulls" in context_sql
-    assert "support_context_version = :expected_context_version" in context_sql
-    assert context_params is not None and context_params["expected_context_version"] == 3
-    assert json.loads(str(context_params["context_patch"])) == {"rag_issue": issue}
-    assert "UPDATE message" in connection.executed[1][0]
-    assert "UPDATE rag_trace" in connection.executed[2][0]
-
-
-def test_turn_focus_defaults_are_backward_compatible() -> None:
-    turn = Turn(
-        trace_id=uuid4(),
-        conversation_id=uuid4(),
-        user_message_id=uuid4(),
-        assistant_message_id=uuid4(),
-        knowledge_id=uuid4(),
-        index_id=uuid4(),
-        embedding_model_name="m",
-        prompt_template="t",
-        llm=ModelSnapshot("zhipu", "glm", {}),
-        history=[],
-    )
-    assert turn.focus_document_id is None
-    assert turn.chat_context == {}
-    assert isinstance(turn.trace_id, UUID)
 
 
 async def test_list_traces_filters_by_error_code_and_conversation() -> None:

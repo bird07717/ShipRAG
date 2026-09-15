@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -10,18 +10,13 @@ import pytest
 from pydantic import SecretStr
 
 from app.core.config import Settings
-from app.ingestion.embedding import FakeEmbeddingProvider
 from app.rag.models import (
     ModelSnapshot,
     RerankDocument,
     RetrievalCandidate,
-    Source,
-    Turn,
 )
-from app.rag.repository import RagRepository
-from app.rag.rerank import RerankError, RerankProvider, SiliconFlowRerankProvider
+from app.rag.rerank import RerankError, SiliconFlowRerankProvider
 from app.rag.retrieval import apply_rerank, reciprocal_rank_fusion
-from app.services.rag import RagService
 
 
 def _candidate(name: str, rank: int) -> RetrievalCandidate:
@@ -37,22 +32,6 @@ def _candidate(name: str, rank: int) -> RetrievalCandidate:
         distance=0.1 * rank,
         similarity=1 - 0.1 * rank,
         rank=rank,
-    )
-
-
-def _turn() -> Turn:
-    return Turn(
-        trace_id=uuid4(),
-        conversation_id=uuid4(),
-        user_message_id=uuid4(),
-        assistant_message_id=uuid4(),
-        knowledge_id=uuid4(),
-        index_id=uuid4(),
-        embedding_model_name="embedding-model",
-        prompt_template="历史：{{history}}\n资料：{{context}}\n问题：{{question}}",
-        llm=ModelSnapshot("zhipu", "glm-test", {}),
-        history=[],
-        rerank=ModelSnapshot("siliconflow", "rerank-test", {}),
     )
 
 
@@ -197,100 +176,6 @@ async def test_rerank_rejects_duplicate_indices_as_protocol_error() -> None:
 
     assert captured.value.code == "UPSTREAM_PROTOCOL_ERROR"
     assert captured.value.degradable is False
-
-
-class _HybridRepository:
-    def __init__(self) -> None:
-        self.turn = _turn()
-        self.candidate = _candidate("hybrid", 1)
-        self.saved: dict[str, Any] | None = None
-        self.failed: dict[str, Any] | None = None
-
-    async def begin_turn(self, **kwargs: Any) -> Turn:
-        del kwargs
-        return self.turn
-
-    async def bm25_search(self, **kwargs: Any) -> list[RetrievalCandidate]:
-        del kwargs
-        return [
-            replace(
-                self.candidate,
-                distance=None,
-                similarity=None,
-                bm25_score=2.5,
-                bm25_rank=1,
-            )
-        ]
-
-    async def vector_search(self, **kwargs: Any) -> list[RetrievalCandidate]:
-        assert len(kwargs["embedding"]) == 1024
-        return [self.candidate]
-
-    async def save_prepared(self, turn: Turn, **kwargs: Any) -> None:
-        assert turn == self.turn
-        self.saved = kwargs
-
-    async def fail_turn(self, turn: Turn, **kwargs: Any) -> None:
-        assert turn == self.turn
-        self.failed = kwargs
-
-
-class _DegradedRerankProvider:
-    provider = "siliconflow"
-    model_name = "rerank-test"
-
-    async def rerank(self, query: str, documents: Any, top_n: int) -> Any:
-        del query, documents, top_n
-        raise RerankError("UPSTREAM_TIMEOUT", "Rerank 服务响应超时", degradable=True)
-
-    async def aclose(self) -> None:
-        return None
-
-
-@pytest.mark.asyncio
-async def test_rerank_timeout_degrades_to_rrf_and_is_traced() -> None:
-    repository = _HybridRepository()
-    provider = FakeEmbeddingProvider(1024)
-    service = RagService(
-        cast(RagRepository, repository),
-        Settings(_env_file=None, app_env="test"),
-        embedding_factory=lambda _: provider,
-        rerank_factory=lambda settings, snapshot: cast(RerankProvider, _DegradedRerankProvider()),
-    )
-
-    prepared = await service.prepare(
-        knowledge_id=repository.turn.knowledge_id,
-        conversation_id=None,
-        question="数据库端口是多少？",
-        request_id="m5-degraded",
-    )
-
-    assert prepared.selected_candidates[0].chunk_id == repository.candidate.chunk_id
-    assert repository.saved is not None
-    assert repository.saved["rerank_result"] | {"context_expansion": None} == {
-        "status": "DEGRADED",
-        "degraded": True,
-        "provider": "siliconflow",
-        "model": "rerank-test",
-        "error_code": "UPSTREAM_TIMEOUT",
-        "context_expansion": None,
-    }
-    assert repository.saved["rerank_result"]["context_expansion"]["status"] == "SKIPPED"
-    assert repository.failed is None
-
-
-def test_citation_result_records_missing_and_invalid_ids() -> None:
-    source = Source("S1", uuid4(), "手册.docx", [], None, [uuid4()], uuid4())
-
-    valid, result = RagService._validate_citations("未知[S99]，重复[S1][S1]", [source])
-    missing, missing_result = RagService._validate_citations("没有引用", [source])
-
-    assert valid == [source.public_dict()]
-    assert result["valid_source_ids"] == ["S1"]
-    assert result["invalid_source_ids"] == ["S99"]
-    assert result["citation_missing"] is False
-    assert missing == []
-    assert missing_result["citation_missing"] is True
 
 
 def test_bm25_expansion_terms_from_synonym_groups() -> None:
