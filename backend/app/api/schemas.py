@@ -288,6 +288,11 @@ class DocumentResponse(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    # 来自最近一次索引构建的 index_document 状态；SKIPPED/FAILED 表示
+    # 该文档未进入成品索引，文档页据此提示重新处理。
+    last_build_status: str | None = None
+    last_build_error: str | None = None
+    last_build_version: int | None = None
 
 
 class DocumentUpdate(BaseModel):

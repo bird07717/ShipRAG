@@ -1294,14 +1294,57 @@ class IngestionRepository:
             result = await connection.execute(
                 text(
                     """
-                    SELECT * FROM document_source
-                    WHERE kb_id = :kb_id AND status = 'STORED'
-                    ORDER BY created_at DESC
+                    SELECT d.*, last_idoc.status AS last_build_status,
+                           last_idoc.error_message AS last_build_error,
+                           last_idx.index_version AS last_build_version
+                    FROM document_source d
+                    LEFT JOIN LATERAL (
+                        SELECT i.id AS index_id, i.version AS index_version
+                        FROM knowledge_index i
+                        WHERE i.kb_id = d.kb_id
+                        ORDER BY i.created_at DESC, i.version DESC
+                        LIMIT 1
+                    ) last_idx ON true
+                    LEFT JOIN LATERAL (
+                        SELECT idoc.status, idoc.error_message
+                        FROM index_document idoc
+                        WHERE idoc.index_id = last_idx.index_id
+                          AND idoc.document_id = d.id
+                        LIMIT 1
+                    ) last_idoc ON true
+                    WHERE d.kb_id = :kb_id AND d.status = 'STORED'
+                    ORDER BY d.created_at DESC
                     """
                 ),
                 {"kb_id": knowledge_id},
             )
             return [self._document_response(dict(row)) for row in result.mappings()]
+
+    async def count_document_build_failures(
+        self, knowledge_id: UUID, document_id: UUID, error_code: str
+    ) -> int:
+        """Count how often a document already failed a build with this error.
+
+        Used by the pipeline to cap retries: after two aborted builds with the
+        same error the document is skipped instead of failing every followup.
+        """
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT count(*) FROM index_document idoc
+                    JOIN knowledge_index i ON i.id = idoc.index_id
+                    WHERE i.kb_id = :kb_id AND idoc.document_id = :document_id
+                      AND idoc.status = 'FAILED' AND idoc.error_code = :error_code
+                    """
+                ),
+                {
+                    "kb_id": knowledge_id,
+                    "document_id": document_id,
+                    "error_code": error_code,
+                },
+            )
+            return int(result.scalar_one_or_none() or 0)
 
     async def get_document(self, document_id: UUID) -> dict[str, Any]:
         async with self.engine.connect() as connection:
@@ -2321,7 +2364,7 @@ class IngestionRepository:
 
     @staticmethod
     def _document_response(document: dict[str, Any]) -> dict[str, Any]:
-        return {
+        response = {
             "id": str(document["id"]),
             "knowledge_id": str(document["kb_id"]),
             "filename": document["filename"],
@@ -2331,7 +2374,11 @@ class IngestionRepository:
             "status": document["status"],
             "created_at": document["created_at"].isoformat(),
             "updated_at": document["updated_at"].isoformat(),
+            "last_build_status": document.get("last_build_status"),
+            "last_build_error": document.get("last_build_error"),
+            "last_build_version": document.get("last_build_version"),
         }
+        return response
 
     @staticmethod
     def _build_response(build: BuildReference) -> dict[str, Any]:

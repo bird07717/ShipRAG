@@ -99,6 +99,27 @@ def build_pdf(pages: list[PageSpec]) -> bytes:
             zlib.compress(icc_raw),
         ),
     )
+    # Abbreviated /Fl (== FlateDecode): WPS exports and scanner firmware
+    # emit these in XObject dictionaries even though the spec reserves
+    # abbreviations for inline images.
+    add(
+        14,
+        stream_object(
+            b"/Type /XObject /Subtype /Image /Width 32 /Height 32 /ColorSpace /DeviceRGB"
+            b" /BitsPerComponent 8 /Filter /Fl",
+            zlib.compress(raw),
+        ),
+    )
+    # CCITTFax abbreviated as /CCF: a codec the parser genuinely does not
+    # support — the image must be skipped with a warning, not abort the parse.
+    add(
+        15,
+        stream_object(
+            b"/Type /XObject /Subtype /Image /Width 32 /Height 32 /ColorSpace /DeviceGray"
+            b" /BitsPerComponent 1 /Filter /CCF",
+            b"\x00" * 128,
+        ),
+    )
     add(3, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
 
     page_ids = list(range(100, 100 + len(pages)))
@@ -122,7 +143,7 @@ def build_pdf(pages: list[PageSpec]) -> bytes:
         ops.append(b"ET")
         xobjects: list[bytes] = []
         for image in page.get("images", []):
-            reference = {"jpeg": 10, "raw": 11, "icc": 13}[image["kind"]]
+            reference = {"jpeg": 10, "raw": 11, "icc": 13, "fl": 14, "ccf": 15}[image["kind"]]
             xobjects.append(f"/Im{reference} {reference} 0 R".encode())
             ops.append(
                 f"q {image['w']} 0 0 {image['h']} {image['x']} {image['y']} cm "
@@ -340,6 +361,48 @@ def test_parse_pdf_removes_repeated_logo_but_keeps_body_photo() -> None:
         assert element.metadata["page_number"] in {1, 2, 3}
         assert element.image_bytes == _jpeg_bytes()
     assert any("PDF_HEADER_FOOTER_REMOVED" in warning for warning in parsed.parser_warnings)
+
+
+def test_parse_pdf_accepts_abbreviated_filter_names() -> None:
+    """XObject 字典里的 /Fl 缩写（WPS 导出等）必须按 FlateDecode 解码。"""
+    parsed = parse_pdf(
+        build_pdf(
+            [
+                {
+                    "lines": [{"text": "标题", "y": 760, "size": 16}],
+                    "images": [{"kind": "fl", "x": 100, "y": 400, "w": 120, "h": 90}],
+                }
+            ]
+        ),
+        max_pages=10,
+    )
+    images = [element for element in parsed.elements if element.element_type == "IMAGE"]
+    assert len(images) == 1
+    assert not any("PDF_IMAGE_SKIPPED" in warning for warning in parsed.parser_warnings)
+
+
+def test_parse_pdf_skips_unsupported_codec_image_with_warning() -> None:
+    """真不支持的编码（CCITTFax 缩写 /CCF）跳过该图并告警，不中止文档。"""
+    parsed = parse_pdf(
+        build_pdf(
+            [
+                {
+                    "lines": [{"text": "正文内容", "y": 700, "size": 12}],
+                    "images": [
+                        {"kind": "ccf", "x": 20, "y": 400, "w": 120, "h": 90},
+                        {"kind": "raw", "x": 200, "y": 400, "w": 120, "h": 90},
+                    ],
+                }
+            ]
+        ),
+        max_pages=10,
+    )
+    images = [element for element in parsed.elements if element.element_type == "IMAGE"]
+    assert len(images) == 1
+    assert any(element.element_type == "TEXT" for element in parsed.elements)
+    skipped = [warning for warning in parsed.parser_warnings if "PDF_IMAGE_SKIPPED" in warning]
+    assert len(skipped) == 1
+    assert "第1页" in skipped[0]
 
 
 def test_parse_pdf_rejects_invalid_file() -> None:

@@ -546,3 +546,26 @@ PDF 直接解析入库，不做 PDF→DOCX 转换：pdf2docx/LibreOffice 转换�
 ### 影响
 
 准入闸门、自动恢复、监控指标与文档均以 RAG_ONLY 为前提；Support 代码与测试保持可编译可回归，但不作为容量或时限验收对象。V5 将原 `app.rag.doc_router` 的共享决策代码移至 `app.support.document_routing_policy`，RAG 不再导入；这属于冻结和隔离，不代表删除 Support 数据、接口或数据库字段。
+## ADR-0022：图片级解码失败降级为跳过告警，同文档同错误构建重试上限 2 次
+
+- 状态：已接受（2026-09-16 实施）
+- 日期：2026-09-16
+- 影响范围：PDF 解析器、索引构建管线、构建失败计数、文档列表 API、管理台文档页与构建详情
+- 关联模块：`backend/app/ingestion/parser_pdf.py`、`pipeline.py`、`repository.py`、`api/schemas.py`、`DocumentsView.vue`、`IndexBuildView.vue`
+- 取代：ADR-0020 中"不支持的编码或损坏图片使整份构建明确失败"的条款；ADR-0010 的"不静默发布残缺内容"原则在图片维度降级为显式告警
+
+### 背景
+
+真实语料出现 WPS 导出/扫描仪固件生成的 PDF，其图片 XObject 字典使用规范内联图像缩写滤镜名（`/Fl`、`/CCF` 等）。pdfminer 能按缩写解压数据，但解析器白名单只认全名，导致数据已成功解码仍被"不支持的图片编码 Fl"拒绝，整库构建中止；且失败构建自动触发 followup、REUSE 只认活动索引，形成每轮全量重跑的无限空转（与 DC24V 文档同一故障模式）。同时任务错误不含文档名，管理员无法定位问题文档。
+
+### 决策
+
+1. **滤镜缩写名归一化**：`Fl→FlateDecode`、`AHx→ASCIIHexDecode`、`A85→ASCII85Decode`、`LZW→LZWDecode`、`RL→RunLengthDecode`、`CCF→CCITTFaxDecode`、`DCT→DCTDecode`，归一化后走既有白名单；`CCF/LZW` 仍属不支持编码。
+2. **图片级失败降级**：单张图片解码失败（含不支持编码、损坏数据、SMask 失败）跳过该图片并记录 `PDF_IMAGE_SKIPPED: 第N页…` parser_warning，文档其余文本与图片继续；结构性问题（加密、损坏文件、页数超限）仍整体失败。文本完整性不再被单张图片劫持。
+3. **同文档同错误重试上限**：文档处理失败时查询历史（`count_document_build_failures`：同 KB + 同文档 + 同 error_code 的 FAILED 计数），达到 2 次后该文档在当轮构建中标记 `SKIPPED`（含文件名与原因），其余文档继续，构建可成功；跳过清单写入任务 `metadata.skipped_documents`。`_finalize_index` 容忍 SKIPPED（要求至少 1 份 READY），`document_count` 只计 READY。文档级确定性失败（如 DOCX 浮动版式）从"瘫痪整库"变为"缺一份 + 显式告警"。
+4. **可观测性**：`list_documents` 以 LATERAL join 附带最近一次构建的 `last_build_status/last_build_error/last_build_version`；文档页对 SKIPPED 文档显示告警（需重新处理+原因）；构建详情失败时显示 `current_document`。
+
+### 影响
+
+`index_document.status` 新增 `SKIPPED` 值（VARCHAR 列，无迁移）。解析器修订号不升级：既有 READY 结果未受本缺陷影响（带缩写滤镜的 PDF 从未成功入库），修复只影响此前失败的文档。跳过文档进入成品索引的语义为"部分索引"：激活后检索不覆盖该文档，由告警驱动人工修复重传。若全部文档被跳过，构建失败（"索引存在未完成文档"）。
+

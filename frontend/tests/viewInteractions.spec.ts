@@ -736,6 +736,22 @@ describe("view interactions", () => {
     expect(upload).not.toHaveBeenCalled();
   });
 
+  it("documents: warns about documents skipped by repeated build failures", async () => {
+    const wrapper = await mountView("documents");
+    await flushPromises();
+
+    const target = adminStore.documents[0]!;
+    target.last_build_status = "SKIPPED";
+    target.last_build_error = "manual.pdf: PDF 解析失败";
+    target.last_build_version = 7;
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("多次处理失败被跳过");
+    expect(wrapper.text()).toContain("操作手册");
+    expect(wrapper.text()).toContain("manual.pdf: PDF 解析失败");
+    expect(wrapper.text()).toContain("构建 v7");
+  });
+
   it("support review: manages document attributes in one workspace", async () => {
     const wrapper = await mountView("support-review");
     await flushPromises();

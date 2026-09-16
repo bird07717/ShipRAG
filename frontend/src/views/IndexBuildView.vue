@@ -277,6 +277,12 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
           show-icon
           class="detail-alert"
         />
+        <p
+          v-if="detailIndex.error_message && detailTask?.metadata?.current_document"
+          class="failed-document"
+        >
+          失败时正在处理文档：{{ detailTask.metadata.current_document }}
+        </p>
 
         <h4 class="section-label">构建信息</h4>
         <el-descriptions :column="1" border size="small">
@@ -486,6 +492,12 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
 
 .detail-alert {
   margin-top: 14px;
+}
+
+.failed-document {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--el-color-danger);
 }
 
 .detail-actions {

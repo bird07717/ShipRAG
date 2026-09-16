@@ -70,6 +70,20 @@ class _PdfImage:
     zone: str
 
 
+# PDF 规范为内联图像定义的滤镜缩写名（Fl=FlateDecode 等）。部分生成器
+# （WPS 导出、扫描仪固件）违规地在 XObject 字典中也使用缩写；pdfminer 能
+# 按缩写正常解压数据，但滤镜名需要归一化后才能与本模块的全名白名单匹配。
+_FILTER_ABBREVIATIONS = {
+    "AHx": "ASCIIHexDecode",
+    "A85": "ASCII85Decode",
+    "LZW": "LZWDecode",
+    "Fl": "FlateDecode",
+    "RL": "RunLengthDecode",
+    "CCF": "CCITTFaxDecode",
+    "DCT": "DCTDecode",
+}
+
+
 def _pdf_name(value: Any) -> str:
     """Normalise pdfminer PSLiteral/PSName/str colour and filter names."""
     name = getattr(value, "name", None)
@@ -169,7 +183,10 @@ def _decode_pdf_image(image: dict[str, Any]) -> tuple[bytes, str, int, int]:
     if not isinstance(stream, PDFStream):
         raise PdfParseError("PDF_IMAGE_DECODE_FAILED: 图片对象不是可解码流")
     try:
-        filters = [_pdf_name(name) for name, _ in stream.get_filters()]
+        filters = [
+            _FILTER_ABBREVIATIONS.get(_pdf_name(name), _pdf_name(name))
+            for name, _ in stream.get_filters()
+        ]
         data = stream.get_data()
     except Exception as exc:
         raise PdfParseError("PDF_IMAGE_DECODE_FAILED: 图片流无法读取") from exc
@@ -277,8 +294,9 @@ def parse_pdf(data: bytes, *, max_pages: int) -> ParsedDocument:
 
     Headers/footers (repeated logos and running text) are removed before
     anything else; the remaining text lines and raster images are emitted in
-    page reading order. Undecodable images fail the whole document instead of
-    silently publishing incomplete content.
+    page reading order. A single undecodable image is skipped with a
+    parser_warning instead of failing the document; structural problems
+    (encrypted/corrupt files, page limits) still fail the parse.
     """
     warnings: list[str] = []
     try:
@@ -294,11 +312,12 @@ def parse_pdf(data: bytes, *, max_pages: int) -> ParsedDocument:
         if page_count > max_pages:
             raise PdfParseError("PDF 页数超过限制")
         try:
-            all_lines, page_images, skipped_count = _collect_page_content(pdf)
+            all_lines, page_images, skipped_count, decode_warnings = _collect_page_content(pdf)
         except PdfParseError:
             raise
         except Exception as exc:
             raise PdfParseError("PDF 页面内容提取失败") from exc
+        warnings.extend(decode_warnings)
 
     removed_line_ids, removed_image_digests, zone_warnings = _remove_running_content(
         all_lines, page_images, page_count
@@ -419,10 +438,11 @@ def parse_pdf(data: bytes, *, max_pages: int) -> ParsedDocument:
 
 def _collect_page_content(
     pdf: Any,
-) -> tuple[list[_PdfLine], list[_PdfImage], int]:
+) -> tuple[list[_PdfLine], list[_PdfImage], int, list[str]]:
     all_lines: list[_PdfLine] = []
     page_images: list[_PdfImage] = []
     skipped_count = 0
+    decode_warnings: list[str] = []
     for page_number, page in enumerate(pdf.pages, start=1):
         page_height = float(page.height)
         for raw_line in page.extract_text_lines():
@@ -453,7 +473,16 @@ def _collect_page_content(
             if width < _MIN_IMAGE_EDGE or height_px < _MIN_IMAGE_EDGE:
                 skipped_count += 1
                 continue
-            data, mime_type, decoded_width, decoded_height = _decode_pdf_image(image)
+            try:
+                data, mime_type, decoded_width, decoded_height = _decode_pdf_image(image)
+            except PdfParseError as exc:
+                # 单张图片解码失败只降级该图片（文本与其余图片不受影响），
+                # 由 parser_warning 暴露给管理员；不再中止整份文档/整库构建。
+                decode_warnings.append(
+                    f"PDF_IMAGE_SKIPPED: 第{page_number}页图片无法解码已跳过（{exc}）"
+                )
+                skipped_count += 1
+                continue
             page_images.append(
                 _PdfImage(
                     digest=hashlib.sha256(data).hexdigest(),
@@ -467,7 +496,7 @@ def _collect_page_content(
                     zone=_zone(float(image["top"]), float(image["bottom"]), page_height),
                 )
             )
-    return all_lines, page_images, skipped_count
+    return all_lines, page_images, skipped_count, decode_warnings
 
 
 def _remove_running_content(

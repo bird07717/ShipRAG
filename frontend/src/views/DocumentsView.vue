@@ -45,6 +45,10 @@ const batchSummary = computed(() => {
   return `已上传 ${done} 份文档`;
 });
 
+const skippedDocuments = computed(() =>
+  store.documents.filter((item) => item.last_build_status === "SKIPPED"),
+);
+
 const processingState = computed(() => {
   const building = store.buildingCount;
   if (building) return { label: `处理中 · ${building} 个构建`, type: "warning" as const };
@@ -269,6 +273,22 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         <small>Profile 属性待上线前不影响 RAG</small>
       </button>
     </section>
+
+    <el-alert
+      v-if="skippedDocuments.length"
+      type="warning"
+      show-icon
+      :closable="false"
+      class="skipped-documents-alert"
+      title="以下文档在最近的索引构建中多次处理失败被跳过，未进入当前索引；请修复或替换源文件后重新上传并触发构建"
+    >
+      <ul class="skipped-documents-list">
+        <li v-for="doc in skippedDocuments" :key="doc.id">
+          <b>{{ doc.display_name || doc.filename }}</b>
+          <span>（构建 v{{ doc.last_build_version ?? "-" }}）：{{ doc.last_build_error || "未知原因" }}</span>
+        </li>
+      </ul>
+    </el-alert>
 
     <div class="panel">
       <div class="panel-body toolbar-row">
@@ -892,6 +912,27 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
   margin: 12px 0 0;
   font-size: 13px;
   color: var(--text-secondary);
+}
+
+.skipped-documents-alert {
+  margin-bottom: 16px;
+}
+
+.skipped-documents-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.skipped-documents-list li {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.skipped-documents-list b {
+  font-weight: 600;
 }
 
 .upload-dropzone {

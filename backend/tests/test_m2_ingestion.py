@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi import UploadFile
+from minio import Minio
 from pydantic import SecretStr, ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -23,6 +24,7 @@ from app.ingestion.chunker import build_chunks, build_parent_chunks
 from app.ingestion.embedding import FakeEmbeddingProvider, SiliconFlowEmbeddingProvider
 from app.ingestion.models import EmbeddingInput, ParsedElement
 from app.ingestion.parser import normalize_text, parse_docx
+from app.ingestion.pipeline import IndexPipeline
 from app.ingestion.repository import (
     BuildReference,
     DocumentCreateResult,
@@ -522,6 +524,9 @@ class _RepositoryResult:
     def scalar_one_or_none(self) -> Any:
         return self.scalar
 
+    def scalar(self) -> Any:
+        return self.scalar
+
     def __iter__(self) -> Any:
         return iter(self.rows)
 
@@ -547,6 +552,9 @@ class _RepositoryEngine:
         self.connection = _RepositoryConnection(results)
 
     def begin(self) -> _RepositoryConnection:
+        return self.connection
+
+    def connect(self) -> _RepositoryConnection:
         return self.connection
 
 
@@ -934,3 +942,139 @@ def test_image_chunk_search_text_excludes_caption() -> None:
     assert image_chunks[0].chunk_type == "IMAGE"
     assert "接口细节图" in image_chunks[0].content
     assert "接口细节图" not in image_chunks[0].search_text
+
+
+class _FailureCountRepository:
+    """Test double answering only the failure-count query."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        self.queries: list[tuple[UUID, UUID, str]] = []
+
+    async def count_document_build_failures(
+        self, knowledge_id: UUID, document_id: UUID, error_code: str
+    ) -> int:
+        self.queries.append((knowledge_id, document_id, error_code))
+        return self.count
+
+
+def _skip_threshold_pipeline() -> IndexPipeline:
+    return IndexPipeline(
+        cast(AsyncEngine, object()),
+        cast(Minio, object()),
+        Settings(_env_file=None, app_env="test", m2_embedding_provider="fake"),
+        embedding_provider=FakeEmbeddingProvider(1024),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failures,expected", [(0, False), (1, False), (2, True), (5, True)])
+async def test_skip_threshold_reached_after_two_same_error_failures(
+    failures: int, expected: bool
+) -> None:
+    pipeline = _skip_threshold_pipeline()
+    repository = _FailureCountRepository(failures)
+    pipeline.repository = repository  # type: ignore[assignment]
+    kb_id, document_id = uuid4(), uuid4()
+    document = {"document_id": str(document_id), "filename": "bad.pdf"}
+
+    result = await pipeline._should_skip_repeated_failure(kb_id, document, RuntimeError("boom"))
+
+    assert result is expected
+    assert repository.queries == [(kb_id, document_id, "RuntimeError")]
+
+
+@pytest.mark.asyncio
+async def test_finalize_index_allows_skipped_documents_and_counts_ready_only() -> None:
+    engine = _RepositoryEngine(
+        [
+            _RepositoryResult(row={"ready_count": 2, "skipped_count": 1, "total_count": 3}),
+            _RepositoryResult(row={"documents": 2, "elements": 41, "chunks": 12}),
+        ]
+    )
+    pipeline = IndexPipeline(
+        cast(AsyncEngine, engine),
+        cast(Minio, object()),
+        Settings(_env_file=None, app_env="test", m2_embedding_provider="fake"),
+        embedding_provider=FakeEmbeddingProvider(1024),
+    )
+
+    counts = await pipeline._finalize_index(uuid4(), uuid4(), uuid4(), activate_on_success=False)
+
+    assert counts == (2, 41, 12)
+    assert "status = 'READY'" in engine.connection.executed[1]
+
+
+@pytest.mark.asyncio
+async def test_finalize_index_rejects_index_without_ready_documents() -> None:
+    engine = _RepositoryEngine(
+        [_RepositoryResult(row={"ready_count": 0, "skipped_count": 1, "total_count": 1})]
+    )
+    pipeline = IndexPipeline(
+        cast(AsyncEngine, engine),
+        cast(Minio, object()),
+        Settings(_env_file=None, app_env="test", m2_embedding_provider="fake"),
+        embedding_provider=FakeEmbeddingProvider(1024),
+    )
+
+    with pytest.raises(ValueError, match="索引存在未完成文档"):
+        await pipeline._finalize_index(uuid4(), uuid4(), uuid4(), activate_on_success=False)
+
+
+@pytest.mark.asyncio
+async def test_count_document_build_failures_queries_by_kb_document_and_error() -> None:
+    knowledge_id, document_id = uuid4(), uuid4()
+    engine = _RepositoryEngine([_RepositoryResult(scalar=2)])
+    repository = IngestionRepository(
+        cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
+    )
+
+    count = await repository.count_document_build_failures(
+        knowledge_id, document_id, "PdfParseError"
+    )
+
+    assert count == 2
+    sql = engine.connection.executed[0]
+    assert "i.kb_id = :kb_id" in sql
+    assert "idoc.document_id = :document_id" in sql
+    assert "idoc.error_code = :error_code" in sql
+    assert "idoc.status = 'FAILED'" in sql
+
+
+@pytest.mark.asyncio
+async def test_list_documents_returns_last_build_status_for_alerts() -> None:
+    knowledge_id, document_id = uuid4(), uuid4()
+    now = datetime.now(UTC)
+    engine = _RepositoryEngine(
+        [
+            _RepositoryResult(row={"id": knowledge_id, "name": "测试库", "status": "ENABLED"}),
+            _RepositoryResult(
+                rows=[
+                    {
+                        "id": document_id,
+                        "kb_id": knowledge_id,
+                        "filename": "bad.pdf",
+                        "display_name": "坏文档",
+                        "file_hash": "b" * 64,
+                        "file_size": 2048,
+                        "status": "STORED",
+                        "created_at": now,
+                        "updated_at": now,
+                        "last_build_status": "SKIPPED",
+                        "last_build_error": "bad.pdf: PDF 解析失败",
+                        "last_build_version": 7,
+                    }
+                ]
+            ),
+        ]
+    )
+    repository = IngestionRepository(
+        cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test")
+    )
+
+    documents = await repository.list_documents(knowledge_id)
+
+    assert documents[0]["last_build_status"] == "SKIPPED"
+    assert documents[0]["last_build_error"] == "bad.pdf: PDF 解析失败"
+    assert documents[0]["last_build_version"] == 7
+    assert "LATERAL" in engine.connection.executed[1]

@@ -50,6 +50,9 @@ export interface DocumentItem {
   status: string;
   created_at: string;
   updated_at: string;
+  last_build_status?: string | null;
+  last_build_error?: string | null;
+  last_build_version?: number | null;
 }
 
 export interface BuildRequestResult {

@@ -39,6 +39,11 @@ from app.ingestion.repository import BuildReference, IngestionRepository
 
 DOCX_PARSER_NAME = "mammoth+ooxml"
 
+# 同一文档以同一错误连续导致构建失败的容许次数：达到上限后该文档在
+# 本轮构建中被跳过（SKIPPED），其余文档继续，避免坏文档拖垮整库并
+# 造成 followup 无限空转。
+_MAX_SAME_ERROR_RETRIES = 2
+
 
 @dataclass(frozen=True, slots=True)
 class IndexBuildResult:
@@ -80,12 +85,25 @@ class IndexPipeline:
         try:
             for position, document in enumerate(documents, start=1):
                 doc_metadata = document.get("metadata") or {}
-                if doc_metadata.get("build_mode") == "REUSE" and prev_index_id is not None:
-                    await self._reuse_document(
-                        index, document, prev_index_id, task_id, position, len(documents)
+                try:
+                    if doc_metadata.get("build_mode") == "REUSE" and prev_index_id is not None:
+                        await self._reuse_document(
+                            index, document, prev_index_id, task_id, position, len(documents)
+                        )
+                    else:
+                        await self._process_document(
+                            index, document, task_id, position, len(documents)
+                        )
+                except Exception as exc:
+                    # 同一文档同一错误已让两次构建失败时不再重试整库，
+                    # 跳过该文档让其余文档完成；跳过清单由
+                    # _mark_document_skipped 写入任务元数据，并通过文档页
+                    # 告警提示重新处理。
+                    if not await self._should_skip_repeated_failure(kb_id, document, exc):
+                        raise
+                    await self._mark_document_skipped(
+                        index, document, task_id, exc, position, len(documents)
                     )
-                else:
-                    await self._process_document(index, document, task_id, position, len(documents))
             counts = await self._finalize_index(
                 index_id,
                 kb_id,
@@ -1011,6 +1029,7 @@ class IndexPipeline:
                 text(
                     """
                     SELECT count(*) FILTER (WHERE status = 'READY') AS ready_count,
+                           count(*) FILTER (WHERE status = 'SKIPPED') AS skipped_count,
                            count(*) AS total_count
                     FROM index_document WHERE index_id = :index_id
                     """
@@ -1018,13 +1037,19 @@ class IndexPipeline:
                 {"index_id": index_id},
             )
             statuses = status_result.mappings().one()
-            if statuses["ready_count"] != statuses["total_count"]:
+            # SKIPPED 文档（重试上限后跳过）允许存在于成品索引；但索引必须
+            # 至少有一份成功文档，且不允许残留 QUEUED/FAILED 等未处理状态。
+            if (
+                statuses["ready_count"] + statuses["skipped_count"] != statuses["total_count"]
+                or statuses["ready_count"] == 0
+            ):
                 raise ValueError("索引存在未完成文档")
             counts_result = await connection.execute(
                 text(
                     """
                     SELECT
-                      (SELECT count(*) FROM index_document WHERE index_id = :index_id) AS documents,
+                      (SELECT count(*) FROM index_document
+                       WHERE index_id = :index_id AND status = 'READY') AS documents,
                       (SELECT count(*) FROM document_element
                        WHERE index_id = :index_id) AS elements,
                       (SELECT count(*) FROM document_chunk WHERE index_id = :index_id) AS chunks
@@ -1156,6 +1181,81 @@ class IndexPipeline:
                     ),
                 },
             )
+
+    async def _should_skip_repeated_failure(
+        self, kb_id: UUID, document: dict[str, Any], exc: Exception
+    ) -> bool:
+        error_code = type(exc).__name__[:100]
+        failures = await self.repository.count_document_build_failures(
+            kb_id, UUID(str(document["document_id"])), error_code
+        )
+        return failures >= _MAX_SAME_ERROR_RETRIES
+
+    async def _mark_document_skipped(
+        self,
+        index: dict[str, Any],
+        document: dict[str, Any],
+        task_id: UUID,
+        exc: Exception,
+        position: int,
+        total: int,
+    ) -> None:
+        index_document_id = UUID(str(document["index_document_id"]))
+        error_code = type(exc).__name__[:100]
+        error_message = f"{document['filename']}: {exc}"[:500]
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE index_document
+                    SET status = 'SKIPPED', error_code = :error_code,
+                        error_message = :error_message, finished_at = now()
+                    WHERE id = :index_document_id
+                    """
+                ),
+                {
+                    "index_document_id": index_document_id,
+                    "error_code": error_code,
+                    "error_message": error_message,
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE task_record
+                    SET metadata = metadata || jsonb_build_object(
+                        'skipped_documents',
+                        COALESCE(metadata->'skipped_documents', '[]'::jsonb)
+                            || :skipped::jsonb
+                    ), updated_at = now()
+                    WHERE id = :task_id
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "skipped": json.dumps(
+                        [
+                            {
+                                "document_id": str(document["document_id"]),
+                                "filename": str(document["filename"]),
+                                "error": str(exc)[:500],
+                            }
+                        ],
+                        ensure_ascii=False,
+                    ),
+                },
+            )
+        await self._update_task(
+            task_id,
+            "RUNNING",
+            "PARSING",
+            max(1, round(position / total * 90)),
+            metadata={
+                "current_document": str(document["filename"]),
+                "current_document_position": position,
+                "total_documents": total,
+            },
+        )
 
     async def _mark_failed(self, index_id: UUID, task_id: UUID, exc: Exception) -> None:
         error_code = type(exc).__name__[:100]
