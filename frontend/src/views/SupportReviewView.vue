@@ -92,6 +92,14 @@ watch(() => store.selectedKnowledgeId, () => { lastCheck.value = null; });
 <template>
   <div class="support-review">
     <el-alert
+      title="Support Profile 已冻结（ADR-0021）：实际运行均为 RAG_ONLY，Profile 不再参与在线问答。"
+      description="本页仅用于维护历史兼容数据；重新发布 Profile 不会改变任何在线回答。"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="phase-alert"
+    />
+    <el-alert
       title="Profile 仅保留标准问题、别名（Alias）和路由描述，用于高置信快速命中；低匹配或歧义时自动使用 RAG。"
       type="success"
       :closable="false"

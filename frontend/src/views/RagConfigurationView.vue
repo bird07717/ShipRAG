@@ -7,16 +7,14 @@ import type { ExecutionPolicy } from "@/types/admin";
 const rag = useRagAdminStore();
 const activePolicy = ref<ExecutionPolicy>("RAG_ONLY");
 const policies: Array<{ value: ExecutionPolicy; label: string; description: string }> = [
-  { value: "SUPPORT_WITH_RAG_FALLBACK", label: "Support + RAG 兜底", description: "控制 Support 文档级检索及其单轮 Generic RAG 兜底。" },
-  { value: "RAG_ONLY", label: "RAG only", description: "直接进入 Generic RAG 的检索配置。" },
+  { value: "RAG_ONLY", label: "RAG only", description: "RAG V2 文档级检索：每查询一次批量 Embedding，走 Chunk/文档卡片混合召回与 RRF 融合，再按文档整体重排。" },
+  { value: "SUPPORT_WITH_RAG_FALLBACK", label: "Support + RAG 兜底（已冻结）", description: "遗留策略配置：按 ADR-0021 已冻结，仅历史兼容保留。" },
 ];
 
 const fields = [
-  { key: "vector_top_k", label: "向量召回 Top K" },
-  { key: "bm25_top_k", label: "BM25 召回 Top K" },
-  { key: "fusion_top_k", label: "RRF 融合 Top K" },
-  { key: "rerank_top_n", label: "Rerank Top N" },
-  { key: "context_max_chunks", label: "上下文最大片段数" },
+  { key: "vector_top_k", label: "向量召回 Top K（每查询）" },
+  { key: "bm25_top_k", label: "BM25 召回 Top K（每查询）" },
+  { key: "fusion_top_k", label: "RRF 融合候选上限（Chunk）" },
 ] as const;
 type FieldKey = (typeof fields)[number]["key"];
 
@@ -24,8 +22,6 @@ const form = reactive<Record<FieldKey, number>>({
   vector_top_k: 10,
   bm25_top_k: 10,
   fusion_top_k: 20,
-  rerank_top_n: 10,
-  context_max_chunks: 8,
 });
 
 const currentPolicy = computed(() => policies.find((item) => item.value === activePolicy.value)!);
@@ -66,7 +62,7 @@ onMounted(() => void load());
       show-icon
     />
     <el-alert
-      title="配置按引擎路由（Engine Routing）策略生效。知识库选择哪种策略，就在每次新请求中使用该策略的检索参数；会话仍固定在创建时的索引版本。"
+      title="RAG V2 为文档级检索：Rerank 候选数量与隐藏全文上下文预算由环境变量控制，不在此调整；会话固定在创建时的索引版本。"
       type="warning"
       :closable="false"
       show-icon

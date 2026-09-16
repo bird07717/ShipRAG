@@ -135,7 +135,9 @@ const traceDetail = {
   ...traceSummary,
   retrieval_result: { hits: 2 },
   rerank_result: {},
-  selected_context: [{ document: "a.docx", section_path: ["1"], content: "ctx", score: 0.9 }],
+  selected_context: [
+    { document_key: "a.docx", document_id: "doc-1", content_sha256: "abc123def4567890abc123def4567890" },
+  ],
   prompt: "PROMPT",
   answer: "答案内容",
   sources: [{ source_id: "S1", document: "a.docx", section_path: ["1", "2"], page: null }],
@@ -826,9 +828,9 @@ describe("view interactions", () => {
 
     expect(adminStore.playgroundTrace?.answer).toBe("答案内容");
     expect(wrapper.text()).toContain("答案内容");
-    expect(wrapper.text()).toContain("Sources · 1");
+    expect(wrapper.text()).toContain("隐藏上下文候选文档 · 1");
     expect(wrapper.text()).toContain("a.docx");
-    expect(wrapper.text()).toContain("Score 0.90");
+    expect(wrapper.text()).toContain("abc123def456…");
   });
 
   it("logs: opens full traces and renders the latency timeline", async () => {

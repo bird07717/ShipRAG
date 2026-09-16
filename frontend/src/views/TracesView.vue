@@ -102,15 +102,20 @@ onMounted(() => {
 watch(() => store.selectedKnowledgeId, () => void loadTraces());
 
 const LATENCY_STEPS: Array<{ key: string; label: string }> = [
-  { key: "query_rewrite_ms", label: "Query Rewrite" },
-  { key: "query_embedding_ms", label: "Embedding" },
-  { key: "bm25_retrieval_ms", label: "Vector / BM25 Search" },
-  { key: "vector_retrieval_ms", label: "Vector Search" },
-  { key: "fusion_ms", label: "Fusion" },
-  { key: "rerank_ms", label: "Rerank" },
-  { key: "context_expansion_ms", label: "Context Expansion" },
-  { key: "prompt_ms", label: "Prompt Build" },
-  { key: "llm_ms", label: "LLM Generation" },
+  { key: "v2_query_interpreter_ms", label: "查询理解（LLM 1）" },
+  { key: "v2_document_retrieval_ms", label: "检索与文档级重排" },
+  { key: "v2_document_context_ms", label: "全文上下文构建" },
+  { key: "v2_answer_generator_ms", label: "答案生成（LLM 2）" },
+  { key: "prepare_turn_ms", label: "轮次准备" },
+  { key: "query_rewrite_ms", label: "Query Rewrite（遗留）" },
+  { key: "query_embedding_ms", label: "Embedding（遗留）" },
+  { key: "bm25_retrieval_ms", label: "Vector / BM25 Search（遗留）" },
+  { key: "vector_retrieval_ms", label: "Vector Search（遗留）" },
+  { key: "fusion_ms", label: "Fusion（遗留）" },
+  { key: "rerank_ms", label: "Rerank（遗留）" },
+  { key: "context_expansion_ms", label: "Context Expansion（遗留）" },
+  { key: "prompt_ms", label: "Prompt Build（遗留）" },
+  { key: "llm_ms", label: "LLM Generation（遗留）" },
   { key: "total_ms", label: "Total" },
 ];
 
@@ -158,6 +163,35 @@ type SupportTrace = {
 const supportTrace = computed(() => {
   const trace = activeTraceDetail.value?.retrieval_result;
   return trace && trace.support_version === 1 ? (trace as SupportTrace) : null;
+});
+
+type V2Generation = {
+  pipeline?: string;
+  status?: string;
+  query_interpreter?: { status?: string; reason?: string; latency_ms?: number };
+  retrieval?: { degradations?: string[]; document_rerank?: { status?: string; reason?: string } };
+  context?: { document_count?: number; image_count?: number; estimated_tokens?: number; mode?: string };
+  answer?: {
+    response_kind?: string;
+    basis?: string;
+    used_document_count?: number;
+    used_image_count?: number;
+    public_leak_repair_count?: number;
+    unsupported_parameter_count?: number;
+  };
+};
+
+const v2Generation = computed(() => {
+  const snapshot = activeTraceDetail.value?.runtime_snapshot as
+    | { generation?: V2Generation }
+    | undefined;
+  const generation = snapshot?.generation;
+  return generation?.pipeline === "V2" ? generation : null;
+});
+
+const v2Degradations = computed(() => {
+  const items = v2Generation.value?.retrieval?.degradations ?? [];
+  return items.filter(Boolean);
 });
 
 const citationWarning = computed(() => {
@@ -405,8 +439,48 @@ async function selectTrace(traceId: string): Promise<void> {
           />
           <h4 class="section-label">回答（Answer）</h4>
           <p class="detail-answer">{{ activeTraceDetail.answer || "（无答案）" }}</p>
+          <section v-if="v2Generation" class="support-trace">
+            <h4>RAG V2 生成详情</h4>
+            <dl>
+              <dt>查询理解</dt>
+              <dd>
+                {{ v2Generation.query_interpreter?.status ?? "—" }}
+                <template v-if="v2Generation.query_interpreter?.reason">
+                  （{{ v2Generation.query_interpreter.reason }}）
+                </template>
+              </dd>
+              <dt>文档级重排</dt>
+              <dd>
+                {{ v2Generation.retrieval?.document_rerank?.status ?? "—" }}
+                <template v-if="v2Generation.retrieval?.document_rerank?.reason">
+                  （{{ v2Generation.retrieval?.document_rerank?.reason }}）
+                </template>
+              </dd>
+              <dt>检索降级</dt>
+              <dd>{{ v2Degradations.length ? v2Degradations.join("；") : "无" }}</dd>
+              <dt>隐藏上下文</dt>
+              <dd>
+                {{ v2Generation.context?.document_count ?? 0 }} 份文档 ·
+                {{ v2Generation.context?.image_count ?? 0 }} 张图片 ·
+                约 {{ v2Generation.context?.estimated_tokens ?? 0 }} tokens
+              </dd>
+              <dt>回答形式</dt>
+              <dd>
+                {{ v2Generation.answer?.response_kind ?? "—" }} / {{ v2Generation.answer?.basis ?? "—" }}
+                · 采用 {{ v2Generation.answer?.used_document_count ?? 0 }} 份文档、{{ v2Generation.answer?.used_image_count ?? 0 }} 张图片
+              </dd>
+              <dt>合规修复</dt>
+              <dd>
+                {{ v2Generation.answer?.public_leak_repair_count ?? 0 }} 次
+                <template v-if="v2Generation.answer?.unsupported_parameter_count">
+                  · 未支持参数观察 {{ v2Generation.answer.unsupported_parameter_count }} 项
+                </template>
+              </dd>
+            </dl>
+          </section>
+
           <section v-if="supportTrace" class="support-trace">
-            <h4>技术支持决策（Technical Support）</h4>
+            <h4>技术支持决策（Technical Support · 遗留）</h4>
             <dl>
               <dt>聚焦文档</dt><dd class="mono">{{ supportTrace.focus_document_id ?? "—" }}</dd>
               <dt>支持模式</dt><dd>{{ supportTrace.support_mode ?? "—" }}</dd>
@@ -426,6 +500,9 @@ async function selectTrace(traceId: string): Promise<void> {
               <small v-if="source.page != null"> · 第 {{ source.page }} 页</small>
             </li>
           </ul>
+          <p v-else-if="v2Generation" class="muted detail-empty">
+            （无公开来源：RAG V2 不公开引用与原文，候选详情见上方生成详情与运行快照）
+          </p>
           <p v-else class="muted detail-empty">（答案未引用任何来源）</p>
 
           <div v-if="detailUsage" class="usage-row">
@@ -453,11 +530,11 @@ async function selectTrace(traceId: string): Promise<void> {
             <el-collapse-item title="检索（Retrieval）" name="retrieval">
               <CodeBlock :code="store.formatJson(activeTraceDetail.retrieval_result)" max-height="280px" />
             </el-collapse-item>
-            <el-collapse-item title="重排序（Rerank）" name="rerank">
+            <el-collapse-item title="重排序（Rerank · 遗留）" name="rerank">
               <CodeBlock :code="store.formatJson(activeTraceDetail.rerank_result)" max-height="280px" />
             </el-collapse-item>
-            <el-collapse-item title="提示词（Prompt）" name="prompt">
-              <CodeBlock :code="activeTraceDetail.prompt ?? '(empty)'" max-height="280px" />
+            <el-collapse-item v-if="activeTraceDetail.prompt" title="提示词（Prompt · 遗留）" name="prompt">
+              <CodeBlock :code="activeTraceDetail.prompt" max-height="280px" />
             </el-collapse-item>
             <el-collapse-item title="原始 JSON（Raw JSON）" name="raw">
               <CodeBlock :code="store.formatJson(activeTraceDetail)" />

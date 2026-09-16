@@ -659,10 +659,10 @@ watch(
           </el-tab-pane>
 
           <!-- 4. Escalations -->
-          <el-tab-pane label="升级记录" name="escalations">
+          <el-tab-pane label="升级记录（遗留）" name="escalations">
             <div class="tab-toolbar">
               <span class="muted tab-hint">
-                触发升级人工的轮次（只读记录，处理线下进行）
+                触发升级人工的轮次（只读记录，处理线下进行）。升级响应仅来自已冻结的 Support 链路（ADR-0021），新轮次不会产生升级记录；此页签仅用于查询历史数据。
               </span>
               <el-button :icon="Refresh" :loading="loadingEscalations" @click="loadEscalations">
                 刷新

@@ -46,21 +46,17 @@ const menuGroups: MenuGroup[] = [
   {
     label: "知识管理",
     items: [
-      { key: "knowledge", label: "知识库", subtitle: "知识域与目录管理", icon: Notebook },
+      { key: "knowledge", label: "知识库", subtitle: "知识域、目录与 Assistant 上线管理", icon: Notebook },
       { key: "documents", label: "文档管理", subtitle: "文档上传、内容与切片检查", icon: Files },
+      { key: "indexes", label: "索引管理", subtitle: "技术构建、快照与回收诊断", icon: Box },
     ],
   },
   {
-    label: "运行与验证",
+    label: "问答与调优",
     items: [
-      { key: "engine-routing", label: "引擎路由", subtitle: "统一配置新会话的问答引擎策略", icon: Operation },
-      { key: "support-chat", label: "问答测试", subtitle: "通过统一 Gateway 验证真实对外能力", icon: ChatDotRound },
-    ],
-  },
-  {
-    label: "支持管理",
-    items: [
-      { key: "support-review", label: "配置审核", subtitle: "审核自动生成的 Support Profile 草稿", icon: Notebook },
+      { key: "support-chat", label: "问答测试", subtitle: "通过统一 Gateway 验证 RAG V2 真实对外能力", icon: ChatDotRound },
+      { key: "engine-routing", label: "引擎路由", subtitle: "知识库执行策略与就绪检查（当前仅 RAG_ONLY 在线）", icon: Operation },
+      { key: "playground", label: "调试台", subtitle: "RAG V2 检索、上下文与答案调试", icon: Operation },
     ],
   },
   {
@@ -71,10 +67,9 @@ const menuGroups: MenuGroup[] = [
     ],
   },
   {
-    label: "高级工具",
+    label: "遗留能力（Support · 已冻结）",
     items: [
-      { key: "indexes", label: "索引管理", subtitle: "技术构建、快照与回收诊断", icon: Box },
-      { key: "playground", label: "调试台", subtitle: "检索、Prompt 与答案调试", icon: Operation },
+      { key: "support-review", label: "配置审核", subtitle: "Support Profile 草稿审核与发布（已冻结，仅历史兼容）", icon: Notebook },
     ],
   },
 ];
@@ -229,8 +224,8 @@ const indexStats = computed(() => {
         <div class="page-body">
           <section v-if="activeView === 'dashboard'" class="panel index-note">
             <div class="index-note-text">
-              <h3>双链路知识发布</h3>
-              <p>RAG 技术构建生成候选索引，经管理员明确切换后供新会话使用；Support Profile 经人工审核后独立发布。既有会话始终使用各自冻结的版本。</p>
+              <h3>RAG V2 知识发布</h3>
+              <p>RAG 技术构建生成候选索引，经管理员明确切换后供新会话使用；文档理解卡片在索引构建后自动生成。Support Profile 已冻结（ADR-0021），不再参与在线问答。</p>
             </div>
             <div class="index-stats">
               <div class="index-stat">

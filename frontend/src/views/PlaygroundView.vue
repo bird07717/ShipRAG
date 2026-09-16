@@ -5,30 +5,20 @@ import { Operation } from "@element-plus/icons-vue";
 import { useAdminStore } from "@/composables/adminStore";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
-import SourceCitation from "@/components/ui/SourceCitation.vue";
-import RetrievalChunk from "@/components/ui/RetrievalChunk.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
 
 const store = useAdminStore();
 
-interface SourceLike {
-  source_id?: string;
-  document?: string;
-  section_path?: string | string[];
-  page?: number | string | null;
-}
-
 interface ContextLike {
+  document_key?: string;
+  document_id?: string;
+  content_sha256?: string;
   document?: string;
   document_name?: string;
   section_path?: string | string[];
   content?: string;
   chunk_text?: string;
   score?: number;
-}
-
-function asSources(value: unknown): SourceLike[] {
-  return Array.isArray(value) ? (value as SourceLike[]) : [];
 }
 
 function asContexts(value: unknown): ContextLike[] {
@@ -40,16 +30,14 @@ function sectionText(path: string | string[] | undefined): string {
   return Array.isArray(path) ? path.join(" / ") : String(path);
 }
 
-const sources = computed(() => asSources(store.playgroundTrace?.sources));
 const contexts = computed(() => asContexts(store.playgroundTrace?.selected_context));
 
 const latencyMs = computed(() => store.playgroundTrace?.latency?.total_ms);
 
 const paramLabels: Record<string, string> = {
-  vector_top_k: "Vector Top K",
-  bm25_top_k: "BM25 Top K",
-  fusion_top_k: "Fusion Top K",
-  rerank_top_n: "Rerank Top N",
+  vector_top_k: "向量召回 Top K（每查询）",
+  bm25_top_k: "BM25 召回 Top K（每查询）",
+  fusion_top_k: "RRF 融合候选上限（Chunk）",
 };
 </script>
 
@@ -102,42 +90,33 @@ const paramLabels: Record<string, string> = {
             <el-tabs>
               <el-tab-pane label="回答（Answer）">
                 <p class="answer-text">{{ store.playgroundTrace.answer || "（无答案）" }}</p>
-
-                <template v-if="sources.length">
-                  <h4 class="section-label">Sources · {{ sources.length }}</h4>
-                  <div class="source-list">
-                    <SourceCitation
-                      v-for="(source, index) in sources"
-                      :key="source.source_id ?? index"
-                      :index="source.source_id ?? index + 1"
-                      :document="source.document ?? '未知文档'"
-                      :section="sectionText(source.section_path)"
-                      :page="source.page"
-                    />
-                  </div>
-                </template>
+                <el-alert
+                  class="v2-context-note"
+                  title="RAG V2 以完整文档作为模型隐藏上下文"
+                  description="公开答案不交付原文、候选列表或来源元数据；下方仅显示进入上下文的候选文档标识与内容摘要（SHA-256）。"
+                  type="info"
+                  :closable="false"
+                  show-icon
+                />
 
                 <template v-if="contexts.length">
-                  <h4 class="section-label">Retrieved Context · {{ contexts.length }}</h4>
-                  <div class="chunk-list">
-                    <RetrievalChunk
-                      v-for="(chunk, index) in contexts"
-                      :key="index"
-                      :score="chunk.score"
-                      :document="chunk.document ?? chunk.document_name ?? '未知文档'"
-                      :section="sectionText(chunk.section_path)"
-                      :content="chunk.content ?? chunk.chunk_text ?? ''"
-                    />
+                  <h4 class="section-label">隐藏上下文候选文档 · {{ contexts.length }}</h4>
+                  <div class="context-doc-list">
+                    <div v-for="(doc, index) in contexts" :key="doc.document_id ?? index" class="context-doc">
+                      <div class="context-doc-main">
+                        <b>{{ doc.document_key ?? doc.document ?? doc.document_name ?? "未知文档" }}</b>
+                        <small v-if="sectionText(doc.section_path)">{{ sectionText(doc.section_path) }}</small>
+                      </div>
+                      <span v-if="doc.content_sha256" class="mono context-sha">{{ doc.content_sha256.slice(0, 12) }}…</span>
+                    </div>
                   </div>
                 </template>
               </el-tab-pane>
 
-              <el-tab-pane label="检索（Retrieval）">
+              <el-tab-pane label="检索与上下文（Retrieval）">
                 <div class="retrieval-sections">
-                  <h4 class="section-label">向量 / BM25 检索（Vector / BM25 Retrieval）</h4>
+                  <h4 class="section-label">查询理解 / 检索 / 文档级重排 / 上下文</h4>
                   <CodeBlock :code="store.formatJson(store.playgroundTrace.retrieval_result)" max-height="300px" />
-                  <h4 class="section-label">重排序（Rerank）</h4>
-                  <CodeBlock :code="store.formatJson(store.playgroundTrace.rerank_result)" max-height="300px" />
                   <h4 class="section-label">引用来源（Citations）</h4>
                   <CodeBlock :code="store.formatJson(store.playgroundTrace.citation_result)" max-height="300px" />
                 </div>
@@ -188,7 +167,7 @@ const paramLabels: Record<string, string> = {
         </div>
         <div class="form-section">
           <h4>检索参数</h4>
-          <p class="desc">双路召回与融合重排的候选数量</p>
+          <p class="desc">多查询混合召回与 RRF 融合的候选数量；Rerank 与上下文预算由环境变量控制</p>
           <div class="param-list">
             <div v-for="(_value, key) in store.playgroundOptions" :key="key" class="param-row">
               <label>{{ paramLabels[key] ?? key }}</label>
@@ -242,10 +221,49 @@ const paramLabels: Record<string, string> = {
   font-weight: 600;
 }
 
-.source-list,
-.chunk-list {
+.v2-context-note {
+  margin-top: 12px;
+}
+
+.context-doc-list {
   display: grid;
   gap: 8px;
+}
+
+.context-doc {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+
+.context-doc-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.context-doc-main b {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-doc-main small {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.context-sha {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
 }
 
 .retrieval-sections .section-label:first-child {

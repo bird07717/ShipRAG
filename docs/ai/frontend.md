@@ -67,3 +67,15 @@
 - `AnswerContent.vue` 渲染正文、表格、图片、引用、澄清及建议；Markdown 经 DOMPurify 消毒。`ReviewImage.vue` 按可见范围用管理凭据读取图片并释放 Blob URL，不使用外部响应中的任意 URL；资产过期显示不可用。
 - 文档详情增加 `DocumentPreview.vue`，按所选索引顺序展示解析文本、表格和图片，保留首行以便核对，原元素/切片 JSON 入口继续保留。回答详情的引用检查使用历史索引；索引缺失时提示去文档页选版本，不静默替换为当前索引。
 - 记录视图和详情按知识库/请求 ID 绑定；换库取消旧列表读取并忽略晚到结果，关闭详情后忽略晚到的读写/复测结果。复测的服务端结果仍保留，可重新打开查看；测试流量不混入外部 Assistant 记录。
+
+## V5 后管理台与 RAG V2 对齐（2026-09-16）
+
+侧边栏按 RAG 优先重组为：概览 / 知识管理（含索引管理）/ 问答与调优（问答测试、引擎路由、调试台）/ 运维 / 遗留能力（Support · 已冻结，仅 `support-review`）。视图键（hash）未变，旧深链映射不受影响；概览横幅改为"RAG V2 知识发布"。
+
+- `EngineRoutingView` 默认策略为 `RAG_ONLY`，`SUPPORT_WITH_RAG_FALLBACK` 选项与 Support 就绪卡片标注"已冻结（ADR-0021）"但保留可用（后端网关仍可执行该策略，前端不单独禁用）。
+- `RagConfigurationView` 只保留 `vector_top_k`、`bm25_top_k`、`fusion_top_k` 三个 V2 实际消费的参数；`rerank_top_n`、`context_max_chunks` 已从界面移除（后端 PATCH 为部分更新，兼容缺省）。Rerank 数量与全文上下文预算由环境变量控制，界面只作说明。
+- `DemoChat` 的模式标签收敛为 V2 五种 `answer_mode`；legacy 模式（`DOCUMENT_EXPLANATION`、`STEP_GUIDANCE` 等）与 `DOC_DELIVERED` 专用渲染分支已删除，未知值仍按原文兜底显示。
+- `PlaygroundView` 结果面板按 V2 文档级语义展示：`selected_context` 渲染为"隐藏上下文候选文档"（document_key + 内容 SHA-256 前缀），不再按 chunk 分数/正文渲染；`SourceCitation`、`RetrievalChunk` 组件因此删除。`playgroundOptions` 已移除 `rerank_top_n`。
+- `TracesView` 时间线包含 V2 各阶段耗时（`v2_query_interpreter_ms` 等）并保留 legacy 键（标注"遗留"，按存在与否自过滤）；详情新增"RAG V2 生成详情"段（查询理解、文档级重排、检索降级、隐藏上下文、合规修复），Support 决策段标注"遗留"；Prompt 折叠面板仅在存在时显示。
+- `LogsView` 的"升级记录"页签标注"（遗留）"并说明其仅来自已冻结 Support 链路，保留历史查询能力。
+- `SupportReviewView` 顶部有 ADR-0021 冻结横幅，发布/重生成流程保留；`DocumentsView` 上传与空态文案不再宣传 Support Profile 审核，改为说明 RAG 文档卡片自动生成。

@@ -73,11 +73,6 @@ const modeLabels: Record<string, string> = {
   PRODUCT_GENERAL: "通用知识",
   UNCONFIRMED: "无法确认",
   OUT_OF_SCOPE: "范围外",
-  DOCUMENT_EXPLANATION: "文档解释",
-  STEP_GUIDANCE: "步骤指导",
-  GENERAL_OPERATION_GUIDANCE: "通用操作",
-  DIAGNOSTIC_ASSISTANCE: "受限诊断",
-  NEED_MORE_INFORMATION: "需要补充信息",
 };
 const modeTones: Record<string, string> = {
   PRODUCT_KNOWLEDGE: "success",
@@ -356,7 +351,7 @@ onMounted(async () => {
 
 <template>
   <div class="demo-page">
-    <PageHeader title="问答测试（DemoChat）" description="通过统一 Gateway 验证当前知识库的真实对外问答能力。">
+    <PageHeader title="问答测试（DemoChat）" description="通过统一 Gateway 验证当前知识库的 RAG V2 真实对外问答能力。">
       <template #actions>
         <el-button :disabled="!visibleMessages.length" @click="clearChat">新会话</el-button>
       </template>
@@ -380,7 +375,7 @@ onMounted(async () => {
         </el-select>
       </div>
       <span class="muted context-hint">
-        实际执行引擎由 Engine Routing 决定；切换知识库将开始新会话
+        当前执行 RAG V2 链路（Support 优先模式已冻结）；切换知识库将开始新会话
       </span>
     </div>
 
@@ -435,19 +430,9 @@ onMounted(async () => {
                 <span v-if="msg.support_mode" class="mode-tag" :class="modeTone(msg.support_mode)">
                   {{ modeLabel(msg.support_mode) }}
                 </span>
-                <span v-if="msg.response_type === 'DOC_DELIVERED' || msg.response_type === 'DOCUMENT_DELIVERED'" class="mode-tag neutral">
-                  已提供完整文档
-                </span>
               </div>
               <div class="bubble ai-bubble">
                 <template v-if="msg.content">
-                  <!-- eslint-disable vue/no-v-html -- DOMPurify 消毒后的 Markdown 输出 -->
-                  <div
-                    v-if="(msg.response_type === 'DOC_DELIVERED' || msg.response_type === 'DOCUMENT_DELIVERED') && msg.text"
-                    class="text-block document-title-answer"
-                    v-html="renderMarkdown(msg.text)"
-                  ></div>
-                  <!-- eslint-enable vue/no-v-html -->
                   <div
                     v-for="(block, i) in msg.content"
                     :key="`${msg.id}-${i}`"

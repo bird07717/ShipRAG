@@ -156,7 +156,7 @@ export const adminStore = reactive({
 
   /* playground */
   question: "如何配置数据库？",
-  playgroundOptions: { vector_top_k: 10, bm25_top_k: 10, fusion_top_k: 20, rerank_top_n: 10 },
+  playgroundOptions: { vector_top_k: 10, bm25_top_k: 10, fusion_top_k: 20 },
   playgroundTrace: null as RagTrace | null,
 
   /* ---------- derived ---------- */
