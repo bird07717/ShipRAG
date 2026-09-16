@@ -31,6 +31,20 @@ async def test_v2_history_uses_explicit_complete_pairs_and_ignores_support_focus
             text("UPDATE message SET focus_epoch=99 WHERE id=:user_id"),
             {"user_id": records.messages[0]},
         )
+        await connection.execute(
+            text(
+                "UPDATE rag_trace SET retrieval_result=CAST(:result AS jsonb) "
+                "WHERE trace_id=:trace_id"
+            ),
+            {
+                "trace_id": records.trace,
+                "result": (
+                    '{"doc_routing":{"generation":{"answer":{"used_document_ids":["'
+                    + str(records.document)
+                    + '"]}}}}'
+                ),
+            },
+        )
 
     history, diagnostics = await _load_v2(records)
 
@@ -42,6 +56,7 @@ async def test_v2_history_uses_explicit_complete_pairs_and_ignores_support_focus
     ]
     assert diagnostics["strategy"] == "v2_complete_rounds"
     assert diagnostics["selected_message_ids"] == [str(item) for item in records.messages]
+    assert diagnostics["previous_document_ids"] == [str(records.document)]
     assert all("message_id" not in item for item in history)
 
 
@@ -109,6 +124,37 @@ async def test_v2_begin_turn_preserves_support_focus_state(records) -> None:  # 
         ("USER", 0),
         ("ASSISTANT", 0),
     ]
+
+
+async def test_v2_previous_evidence_seed_is_index_and_knowledge_bound(
+    records,  # noqa: F811
+) -> None:
+    index_id = await _insert_active_index(records.engine, records.kb)
+    async with records.engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO index_document "
+                "(id, index_id, document_id, source_hash, status) "
+                "VALUES (:id, :index_id, :document_id, :source_hash, 'READY')"
+            ),
+            {
+                "id": uuid4(),
+                "index_id": index_id,
+                "document_id": records.document,
+                "source_hash": "0" * 64,
+            },
+        )
+
+    repository = RagRepository(records.engine, Settings(_env_file=None, app_env="test"))
+    seeds = await repository.get_document_retrieval_seeds(
+        knowledge_id=records.kb,
+        index_id=index_id,
+        document_ids=(records.document, records.other_document),
+    )
+
+    assert [item["document_id"] for item in seeds] == [str(records.document)]
+    assert seeds[0]["document"] == "原文档"
+    assert seeds[0]["candidate_source"] == "PREVIOUS_EVIDENCE"
 
 
 async def test_v2_progress_and_terminal_trace_keep_only_hashed_context(

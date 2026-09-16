@@ -106,6 +106,7 @@ class RagV2Pipeline:
             turn=turn,
             question=question,
             interpretation=query_outcome.interpretation,
+            previous_document_ids=turn.previous_document_ids,
             embedding_selector=self.embedding_selector,
             rerank_factory=self.rerank_factory,
         )

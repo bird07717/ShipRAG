@@ -268,6 +268,14 @@ class RagRepository:
                 resolved_conversation_id,
                 assistant_message_id if reuse_messages else None,
             )
+            previous_document_ids: list[UUID] = []
+            for value in history_diagnostics.get("previous_document_ids") or []:
+                try:
+                    document_id = UUID(str(value))
+                except (TypeError, ValueError):
+                    continue
+                if document_id not in previous_document_ids:
+                    previous_document_ids.append(document_id)
 
             llm_result = await connection.execute(
                 text(
@@ -537,6 +545,7 @@ class RagRepository:
             ),
             history=history,
             history_diagnostics=history_diagnostics,
+            previous_document_ids=tuple(previous_document_ids[:3]),
             rerank=ModelSnapshot(
                 provider=str(rerank_row["provider"]),
                 model_name=str(rerank_row["model_name"]),
@@ -571,7 +580,8 @@ class RagRepository:
         result = await connection.execute(
             text("""
             SELECT a.id, a.content AS answer, COALESCE(ar.status, a.status) AS status,
-                   u.id AS user_id, u.content AS question, u.status AS user_status
+                   u.id AS user_id, u.content AS question, u.status AS user_status,
+                   previous_trace.used_document_ids
             FROM (
                 SELECT * FROM message
                 WHERE conversation_id = :conversation_id AND role = 'ASSISTANT'
@@ -587,6 +597,16 @@ class RagRepository:
               ON u.id = COALESCE(a.rag_user_message_id, ar.user_message_id)
              AND u.conversation_id = a.conversation_id AND u.role = 'USER'
              AND u.sequence_no < a.sequence_no
+            LEFT JOIN LATERAL (
+                SELECT retrieval_result #>
+                           '{doc_routing,generation,answer,used_document_ids}'
+                           AS used_document_ids
+                FROM rag_trace
+                WHERE message_id = a.id AND conversation_id = a.conversation_id
+                  AND engine = 'RAG' AND status = 'COMPLETED'
+                ORDER BY finished_at DESC NULLS LAST, created_at DESC, id DESC
+                LIMIT 1
+            ) previous_trace ON true
             ORDER BY a.sequence_no DESC
         """),
             {
@@ -601,6 +621,89 @@ class RagRepository:
             max_messages=self.settings.m3_history_max_messages,
             token_budget=self.settings.m3_history_token_budget,
         )
+
+    async def get_document_retrieval_seeds(
+        self,
+        *,
+        knowledge_id: UUID,
+        index_id: UUID,
+        document_ids: tuple[UUID, ...],
+    ) -> list[dict[str, Any]]:
+        """Load lightweight, index-bound metadata for follow-up soft candidates."""
+
+        if not document_ids:
+            return []
+        async with self.engine.connect() as connection:
+            rows = list(
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT d.id AS document_id, d.display_name AS document,
+                                   card.document_type, card.card_payload,
+                                   ARRAY(
+                                       SELECT c.content
+                                       FROM document_chunk c
+                                       WHERE c.kb_id = :knowledge_id
+                                         AND c.index_id = :index_id
+                                         AND c.document_id = d.id
+                                       ORDER BY c.sequence_no, c.id
+                                       LIMIT 3
+                                   ) AS representative_texts
+                            FROM document_source d
+                            JOIN index_document idoc
+                              ON idoc.document_id = d.id AND idoc.index_id = :index_id
+                             AND idoc.status = 'READY'
+                            LEFT JOIN LATERAL (
+                                SELECT rdc.document_type, rdc.card_payload
+                                FROM rag_document_card rdc
+                                WHERE rdc.knowledge_id = :knowledge_id
+                                  AND rdc.index_id = :index_id
+                                  AND rdc.document_id = d.id
+                                  AND rdc.generation_status = 'READY'
+                                  AND rdc.schema_version = :schema_version
+                                  AND rdc.review_status <> 'REJECTED'
+                                ORDER BY (rdc.review_status = 'CONFIRMED') DESC,
+                                         rdc.updated_at DESC, rdc.id DESC
+                                LIMIT 1
+                            ) card ON true
+                            WHERE d.kb_id = :knowledge_id AND d.status = 'STORED'
+                              AND d.id = ANY(CAST(:document_ids AS uuid[]))
+                            """
+                        ),
+                        {
+                            "knowledge_id": knowledge_id,
+                            "index_id": index_id,
+                            "document_ids": list(document_ids),
+                            "schema_version": DOCUMENT_CARD_SCHEMA_VERSION,
+                        },
+                    )
+                ).mappings()
+            )
+        order = {document_id: index for index, document_id in enumerate(document_ids)}
+        seeds: list[dict[str, Any]] = []
+        for row in rows:
+            payload = row.get("card_payload")
+            card = dict(payload) if isinstance(payload, dict) else {}
+            seeds.append(
+                {
+                    "document_id": str(row["document_id"]),
+                    "document": str(row["document"]),
+                    "score": 0.0,
+                    "chunk_ids": [],
+                    "representative_texts": [
+                        str(value) for value in row.get("representative_texts") or [] if value
+                    ],
+                    "card": {
+                        "document_type": str(row.get("document_type") or ""),
+                        "summary": str(card.get("summary") or "")[:500],
+                        "tasks": [str(value)[:160] for value in card.get("tasks") or []][:12],
+                    },
+                    "candidate_source": "PREVIOUS_EVIDENCE",
+                }
+            )
+        seeds.sort(key=lambda item: order.get(UUID(str(item["document_id"])), len(order)))
+        return seeds
 
     async def vector_search(
         self,

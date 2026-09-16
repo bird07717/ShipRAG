@@ -62,8 +62,11 @@ def _round(
 
 
 def test_selects_recent_explicit_complete_rounds_without_focus_state() -> None:
+    previous_document_id = "7777ff1b-efe0-4a12-a1dc-9bdf3532042b"
+    latest = _round(3)
+    latest["used_document_ids"] = [previous_document_id]
     history, diagnostics = select_complete_round_history(
-        [_round(3), _round(2), _round(1)],
+        [latest, _round(2), _round(1)],
         max_rounds=2,
         max_messages=10,
         token_budget=2_000,
@@ -78,6 +81,7 @@ def test_selects_recent_explicit_complete_rounds_without_focus_state() -> None:
     assert diagnostics["strategy"] == "v2_complete_rounds"
     assert diagnostics["selected_message_ids"] == ["u2", "a2", "u3", "a3"]
     assert diagnostics["round_count"] == 2
+    assert diagnostics["previous_document_ids"] == [previous_document_id]
     assert diagnostics["boundary"] == "ROUND_LIMIT"
 
 
@@ -142,18 +146,18 @@ def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> 
 
     assert "不是 VAU，现在问 PDC 怎么检查" in prompt
     assert "旧回答中的参数可能是错的" in prompt
-    assert "历史助手回答只用于理解指代" in prompt
-    assert "都不是产品事实证据" in prompt
-    assert "补充文档只能展开其中某一步" in prompt
-    assert "used_document_keys 必须列出答案实际采用事实的全部文档" in prompt
-    assert "每张图片分别使用一个完整标记" in prompt
+    assert "历史助手回答只用于指代" in prompt
+    assert "均不是产品事实" in prompt
+    assert "多文档时先找主任务文档" in prompt
+    assert "used_document_keys 只列实际采用事实的全部文档" in prompt
+    assert "每张图片使用一个完整" in prompt
     payload = json.loads(prompt)
     assert payload["conversation_relation"] == "CORRECTION"
     assert payload["active_task"] == "检查 PDC"
     assert "answer_depth" not in payload
     assert "最小充分回答" in prompt
-    assert "即使用户没有说“完整、详细、全部”" in prompt
-    assert "不要因为上下文提供了图片就全部使用" in prompt
+    assert "操作题给完成任务必需的连续步骤" in prompt
+    assert "按需选择而非全部返回" in prompt
 
 
 @pytest.mark.asyncio
@@ -183,10 +187,14 @@ async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up(
     prompt = json.loads(provider.prompt)
     assert "answer_depth" not in prompt["output_example"]
     assert any("不决定回答篇幅" in rule for rule in prompt["rules"])
-    assert prompt["immediate_previous_round"] == {
-        "user_request": "请完整展示更换 PSU 电源板的步骤",
-        "assistant_answer_untrusted": "需要拆下 3359 核心板及底板。",
-    }
+    assert prompt["recent_completed_rounds"] == [
+        {
+            "user_request": "请完整展示更换 PSU 电源板的步骤",
+            "assistant_answer_untrusted": "需要拆下 3359 核心板及底板。",
+        }
+    ]
+    assert "recent_completed_history" not in prompt
+    assert "immediate_previous_round" not in prompt
     assert outcome.interpretation.relation == "FOLLOW_UP"
     assert outcome.interpretation.active_task == "更换 VDR600 PSU 电源板并拆装 3359 核心板"
     trace = outcome.trace_dict()

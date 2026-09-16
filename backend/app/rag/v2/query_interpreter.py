@@ -86,12 +86,10 @@ def _history_window(history: list[dict[str, str]], max_rounds: int) -> list[dict
     return history[-(max_rounds * 2) :]
 
 
-def _immediate_previous_round(
-    history: list[dict[str, str]], max_rounds: int
-) -> dict[str, str] | None:
+def _completed_rounds(history: list[dict[str, str]], max_rounds: int) -> list[dict[str, str]]:
     window = _history_window(history, max_rounds)
-    for index in range(len(window) - 2, -1, -1):
-        item = window[index]
+    rounds: list[dict[str, str]] = []
+    for index, item in enumerate(window):
         if item.get("role") != "USER" or not item.get("content", "").strip():
             continue
         assistant = next(
@@ -104,11 +102,13 @@ def _immediate_previous_round(
         )
         if assistant is None:
             continue
-        return {
-            "user_request": item["content"],
-            "assistant_answer_untrusted": assistant["content"],
-        }
-    return None
+        rounds.append(
+            {
+                "user_request": item["content"],
+                "assistant_answer_untrusted": assistant["content"],
+            }
+        )
+    return rounds
 
 
 async def interpret_query(
@@ -127,8 +127,7 @@ async def interpret_query(
     prompt = json.dumps(
         {
             "current_question": question,
-            "recent_completed_history": _history_window(history, max_rounds),
-            "immediate_previous_round": _immediate_previous_round(history, max_rounds),
+            "recent_completed_rounds": _completed_rounds(history, max_rounds),
             "knowledge_base": {
                 "name": knowledge_name,
                 "scope": scope_description,
@@ -144,19 +143,23 @@ async def interpret_query(
             },
             "rules": [
                 "把当前问题还原为可独立检索的问题，不决定回答篇幅或公开形式。",
-                "历史助手回答只用于理解指代，不得当作产品事实。",
                 (
-                    "先判断 relation：独立新任务为 NEW_TASK，承接上一轮为 FOLLOW_UP，"
-                    "纠正上一轮对象或条件为 CORRECTION。"
+                    "先判断 current_question 能否脱离历史独立确定设备、部件、任务和阶段。"
+                    "不能独立确定且最近用户请求提供了这些信息时，必须是 FOLLOW_UP；"
+                    "修正最近任务的对象或条件时是 CORRECTION。"
                 ),
                 (
-                    "短追问省略设备或任务时，必须从 immediate_previous_round.user_request "
-                    "继承最近的设备、部件和操作目标；不得从历史助手回答新增任务事实。"
+                    "例如“断电后等多久”“下一步呢”“为什么”“用哪个端口”等省略任务对象"
+                    "的追问，必须继承最近一轮 user_request；历史助手回答只可帮助理解指代，"
+                    "不得成为产品事实或新增任务来源。"
                 ),
                 (
-                    "FOLLOW_UP/CORRECTION 应输出简短 active_task，并让 resolved_question "
-                    "同时包含该任务和当前所问属性；新问题明确给出其他设备或操作时必须 "
-                    "NEW_TASK，不得继承。"
+                    "只有 current_question 自身已明确给出可独立理解的新对象或新目标时才是"
+                    " NEW_TASK；不要因为追问很短或出现通用工程词就误判为新任务。"
+                ),
+                (
+                    "FOLLOW_UP/CORRECTION 必须输出简短 active_task，并让 resolved_question "
+                    "同时包含继承任务和当前所问属性；NEW_TASK 不得携带旧任务。"
                 ),
                 "必须保留当前所问属性的技术含义，不得把地址、目录、路径或参数互相替换。",
                 f"search_queries 最多 {variant_limit} 条，只补充有助召回的同义表达。",

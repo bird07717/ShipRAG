@@ -238,6 +238,32 @@ class _MultiDocumentRepository(_Repository):
         return self._cards()
 
 
+class _SoftSeedRepository(_Repository):
+    def __init__(self, candidate: RetrievalCandidate, seed: RetrievalCandidate) -> None:
+        super().__init__(candidate)
+        self.seed = seed
+        self.seed_calls = 0
+
+    async def get_document_retrieval_seeds(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.seed_calls += 1
+        assert kwargs["document_ids"] == (self.seed.document_id,)
+        return [
+            {
+                "document_id": str(self.seed.document_id),
+                "document": self.seed.document,
+                "score": 0.0,
+                "chunk_ids": [],
+                "representative_texts": [self.seed.content],
+                "card": {
+                    "document_type": "PROCEDURE",
+                    "summary": self.seed.content,
+                    "tasks": [self.seed.document],
+                },
+                "candidate_source": "PREVIOUS_EVIDENCE",
+            }
+        ]
+
+
 @pytest.mark.asyncio
 async def test_v2_generate_uses_two_llms_and_one_batched_embedding_request() -> None:
     candidate = _candidate()
@@ -999,6 +1025,80 @@ async def test_v2_follow_up_task_anchor_reaches_search_and_document_rerank() -> 
     assert "当前任务：更换 PSU 电源板并拆装 3359 核心板" in provider.query
     assert "用户当前问题：操作时使用哪个端口？" in provider.query
     assert any(item["sources"] == ["CONTEXT_ANCHOR"] for item in trace["queries"])
+
+
+@pytest.mark.asyncio
+async def test_v2_follow_up_adds_previous_evidence_as_soft_rerank_candidate() -> None:
+    current = replace(
+        _candidate(),
+        chunk_id=uuid4(),
+        document_id=uuid4(),
+        document="当前检索到的相似文档",
+        content="其他部件断电后检查",
+    )
+    previous = replace(
+        _candidate(),
+        chunk_id=uuid4(),
+        document_id=uuid4(),
+        document="检查 LRU 通讯线缆",
+        content="LRU 断电后等待规定时间再检查线缆",
+    )
+    repository = _SoftSeedRepository(current, previous)
+    repository.turn = replace(_turn(), previous_document_ids=(previous.document_id,))
+
+    candidates, trace = await retrieve_documents(
+        repository,
+        settings=Settings(_env_file=None, app_env="test"),
+        turn=repository.turn,
+        question="断电后要等待多久？",
+        interpretation=QueryInterpretation(
+            resolved_question="检查 LRU 通讯线缆时断电后要等待多久",
+            search_queries=[],
+            key_constraints=[],
+            scope="IN_SCOPE",
+            relation="FOLLOW_UP",
+            active_task="检查 LRU 通讯线缆",
+        ),
+        previous_document_ids=repository.turn.previous_document_ids,
+        embedding_selector=lambda _turn: FakeEmbeddingProvider(1024),
+        rerank_factory=lambda _settings, _snapshot: _ReverseRerankProvider(),
+    )
+
+    assert repository.seed_calls == 1
+    assert candidates[0].document_id == previous.document_id
+    assert trace["previous_evidence"] == {
+        "applied": True,
+        "requested_document_ids": [str(previous.document_id)],
+        "loaded_document_ids": [str(previous.document_id)],
+        "selected_document_ids": [str(previous.document_id)],
+    }
+
+
+@pytest.mark.asyncio
+async def test_v2_new_task_does_not_inherit_previous_evidence() -> None:
+    current = _candidate()
+    previous = replace(_candidate(), document_id=uuid4(), document="上一轮文档")
+    repository = _SoftSeedRepository(current, previous)
+    repository.turn = replace(_turn(), previous_document_ids=(previous.document_id,))
+
+    _, trace = await retrieve_documents(
+        repository,
+        settings=Settings(_env_file=None, app_env="test"),
+        turn=repository.turn,
+        question="如何配置 VAU 图像？",
+        interpretation=QueryInterpretation(
+            resolved_question="如何配置 VAU 图像",
+            scope="IN_SCOPE",
+            relation="NEW_TASK",
+        ),
+        previous_document_ids=repository.turn.previous_document_ids,
+        embedding_selector=lambda _turn: FakeEmbeddingProvider(1024),
+        rerank_factory=lambda _settings, _snapshot: _ReverseRerankProvider(),
+    )
+
+    assert repository.seed_calls == 0
+    assert trace["previous_evidence"]["applied"] is False
+    assert trace["previous_evidence"]["requested_document_ids"] == []
 
 
 def test_v2_valid_image_evidence_implies_its_owning_document() -> None:

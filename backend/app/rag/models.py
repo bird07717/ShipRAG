@@ -39,6 +39,7 @@ class Turn:
     llm: ModelSnapshot
     history: list[dict[str, str]]
     history_diagnostics: dict[str, Any] = field(default_factory=dict)
+    previous_document_ids: tuple[UUID, ...] = ()
     rerank: ModelSnapshot | None = None
     # Enabled EMBEDDING row snapshot at turn start.  Query-side embedding
     # prefers it when it matches the active index; None falls back to env.

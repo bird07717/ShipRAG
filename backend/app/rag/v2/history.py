@@ -21,7 +21,7 @@ def select_complete_round_history(
     sequence adjacency or legacy conversational state is inferred.
     """
 
-    selected: list[tuple[list[dict[str, str]], list[str]]] = []
+    selected: list[tuple[list[dict[str, str]], list[str], list[str]]] = []
     excluded: list[dict[str, str]] = []
     used_tokens = 0
     boundary: str | None = None
@@ -46,22 +46,31 @@ def select_complete_round_history(
             excluded.append({"message_id": assistant_id, "reason": boundary})
             break
 
+        raw_document_ids = row.get("used_document_ids")
+        used_document_ids = (
+            [str(value) for value in raw_document_ids if str(value).strip()][:3]
+            if isinstance(raw_document_ids, list)
+            else []
+        )
         selected.append(
             (
                 pair,
                 [str(row["user_id"]), assistant_id],
+                used_document_ids,
             )
         )
         used_tokens += pair_tokens
 
     chronological = list(reversed(selected))
-    history = [message for pair, _ids in chronological for message in pair]
-    selected_ids = [message_id for _pair, ids in chronological for message_id in ids]
+    history = [message for pair, _ids, _documents in chronological for message in pair]
+    selected_ids = [message_id for _pair, ids, _documents in chronological for message_id in ids]
+    previous_document_ids = selected[0][2] if selected else []
     return history, {
         "strategy": "v2_complete_rounds",
         "selected_message_ids": selected_ids,
         "round_count": len(selected),
         "estimated_tokens": used_tokens,
+        "previous_document_ids": previous_document_ids,
         "boundary": boundary,
         "excluded": excluded,
     }

@@ -61,6 +61,12 @@ def _document_rerank_text(
             chunk = chunks_by_id.get(str(raw_chunk_id))
             if chunk is not None and chunk.content.strip():
                 lines.append("相关片段：" + chunk.content.strip())
+    representative_texts = item.get("representative_texts")
+    if isinstance(representative_texts, list):
+        for value in representative_texts[:3]:
+            cleaned = str(value).strip()
+            if cleaned:
+                lines.append("文档片段：" + cleaned)
     return "\n".join(lines)
 
 
@@ -112,6 +118,7 @@ async def retrieve_documents(
     turn: Turn,
     question: str,
     interpretation: QueryInterpretation,
+    previous_document_ids: tuple[UUID, ...] = (),
     embedding_selector: EmbeddingSelector,
     rerank_factory: RerankFactory,
 ) -> tuple[list[DocumentCandidate], dict[str, Any]]:
@@ -212,6 +219,39 @@ async def retrieve_documents(
     else:
         raw_documents = []
 
+    inherited_requested = (
+        previous_document_ids
+        if interpretation.relation in {"FOLLOW_UP", "CORRECTION"} and interpretation.active_task
+        else ()
+    )
+    inherited_loaded: list[str] = []
+    if inherited_requested:
+        existing_ids = {str(item.get("document_id") or "") for item in raw_documents}
+        missing_ids = tuple(
+            document_id
+            for document_id in inherited_requested
+            if str(document_id) not in existing_ids
+        )
+        if missing_ids:
+            try:
+                seeds = await repository.get_document_retrieval_seeds(
+                    knowledge_id=turn.knowledge_id,
+                    index_id=turn.index_id,
+                    document_ids=missing_ids,
+                )
+            except Exception as exc:
+                degradations.append(
+                    "PREVIOUS_EVIDENCE_" + str(getattr(exc, "code", type(exc).__name__))[:80]
+                )
+            else:
+                for seed in seeds:
+                    seed_document_id = str(seed.get("document_id") or "")
+                    if not seed_document_id or seed_document_id in existing_ids:
+                        continue
+                    existing_ids.add(seed_document_id)
+                    inherited_loaded.append(seed_document_id)
+                    raw_documents.append(seed)
+
     chunks_by_id: dict[str, RetrievalCandidate] = {}
     for batch in batches:
         for chunk in (*batch.chunk_vector, *batch.chunk_bm25):
@@ -293,12 +333,21 @@ async def retrieve_documents(
         )
 
     candidates = candidates[: settings.m3_rag_full_document_limit]
+    inherited_selected = [
+        str(item.document_id) for item in candidates if item.document_id in set(inherited_requested)
+    ]
     return candidates, {
         "query_count": len(queries),
         "query_hashes": [hashlib.sha256(item.text.encode()).hexdigest() for item in queries],
         "queries": [item.trace_dict() for item in queries],
         "candidate_document_ids": [str(item.document_id) for item in candidates],
         "candidate_count": len(candidates),
+        "previous_evidence": {
+            "applied": bool(inherited_requested),
+            "requested_document_ids": [str(value) for value in inherited_requested],
+            "loaded_document_ids": inherited_loaded,
+            "selected_document_ids": inherited_selected,
+        },
         "degradations": list(dict.fromkeys(degradations)),
         "document_rerank": document_rerank,
     }

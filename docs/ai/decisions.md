@@ -484,7 +484,7 @@ LLM 1、LLM 2 和其他结构化工具调用默认关闭内部思考。LLM 2 及
 
 RAG V2 不读取或写入 `focus_document_id`、`focus_index_id`、`focus_epoch`、待选文档或 `rag_issue`，也不实施 `rag_case`。会话上下文使用显式关联且成功完成的最近完整问答轮次，按轮次和 Token 裁剪；旧 Assistant 回答可用于还原指代，不能成为产品事实依据。每轮重新检索，换题不会被旧焦点锁定。
 
-短追问和纠正由 LLM 1 显式输出 `relation` 与 `active_task`；任务只从最近完整轮次的用户请求继承，不从旧助手回答建立产品事实。任务锚点参与本轮查询召回、文档级 Rerank 和 LLM 2 选证；明确换题使用 `NEW_TASK`，不携带旧任务锚点。有效 V2 的准备阶段只冻结轮次和参数，不执行 legacy 预检索；本轮所有去重查询只批量嵌入一次，候选只由 V2 文档检索产生，避免两套检索结果交叉污染。
+短追问和纠正由 LLM 1 显式输出 `relation` 与 `active_task`；LLM 1 只接收一份按轮次组织的成功历史，任务只从最近完整轮次的用户请求继承，不从旧助手回答建立产品事实。任务锚点参与本轮查询召回、文档级 Rerank 和 LLM 2 选证。为降低短追问重新检索漂移，`FOLLOW_UP/CORRECTION` 且存在任务锚点时，最近成功回答实际使用的最多 3 份文档可作为零初始分软候选加入本轮文档级 Rerank；服务器仍校验同知识库、同冻结索引、`document_source.status='STORED'` 与 `index_document.status='READY'`。软候选不加分、不锁定、不保证进入前 1～3 份全文，明确换题 `NEW_TASK` 完全不继承，因此该机制不是旧焦点的恢复。有效 V2 的准备阶段只冻结轮次和参数，不执行 legacy 预检索；本轮所有去重查询只批量嵌入一次，避免两套检索结果交叉污染。
 
 V5 后 RAG V2 是开发、staging 和 Production Compose 的唯一代码路径，不再存在 `M3_RAG_PIPELINE_MODE`。V2 内部降级使用原问题、词法候选或有界通用回答，不跳转到已删除的旧路由。旧首轮、焦点、Query Rewrite、Query/Response Planner、六策略和 RAG 原文交付已物理删除；回滚只能使用旧 Git 提交或旧镜像。
 
@@ -568,4 +568,3 @@ PDF 直接解析入库，不做 PDF→DOCX 转换：pdf2docx/LibreOffice 转换�
 ### 影响
 
 `index_document.status` 新增 `SKIPPED` 值（VARCHAR 列，无迁移）。解析器修订号不升级：既有 READY 结果未受本缺陷影响（带缩写滤镜的 PDF 从未成功入库），修复只影响此前失败的文档。跳过文档进入成品索引的语义为"部分索引"：激活后检索不覆盖该文档，由告警驱动人工修复重传。若全部文档被跳过，构建失败（"索引存在未完成文档"）。
-
