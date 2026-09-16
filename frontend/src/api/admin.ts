@@ -185,10 +185,11 @@ export const adminApi = {
     knowledgeId: string,
     file: File,
     idempotencyKey: string = randomUUID(),
+    requestBuild = true,
   ) => {
     const data = new FormData();
     data.append("file", file);
-    data.append("request_build", "true");
+    data.append("request_build", requestBuild ? "true" : "false");
     return apiRequest(`/knowledge-bases/${knowledgeId}/documents`, {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey },

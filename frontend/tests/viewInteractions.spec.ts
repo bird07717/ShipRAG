@@ -627,59 +627,111 @@ describe("view interactions", () => {
     );
   });
 
-  it("documents: upload failure surfaces the error inside the drawer", async () => {
+  async function pickFiles(wrapper: ReturnType<typeof mount>, files: File[]) {
+    const input = wrapper.find('input[type="file"]');
+    Object.defineProperty(input.element, "files", { value: files, configurable: true });
+    await input.trigger("change");
+    await flushPromises();
+  }
+
+  function uploadButton(wrapper: ReturnType<typeof mount>) {
+    return wrapper.findAll("button").find((button) => button.text().includes("开始上传"));
+  }
+
+  it("documents: upload failure keeps the failed item in the queue", async () => {
     const wrapper = await mountView("documents");
     adminStore.uploadDrawerOpen = true;
     await flushPromises();
 
-    const input = wrapper.find('input[type="file"]');
-    Object.defineProperty(input.element, "files", {
-      value: [new File(["stub"], "manual.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })],
-      configurable: true,
-    });
-    await input.trigger("change");
-    await flushPromises();
+    await pickFiles(wrapper, [
+      new File(["stub"], "manual.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
+    ]);
     expect(wrapper.text()).toContain("manual.docx");
 
-    const uploadButton = wrapper.findAll("button")
-      .find((button) => button.text().includes("开始上传"));
-    expect(uploadButton).toBeTruthy();
-
+    const build = vi.spyOn(adminApi, "buildIndex");
     vi.spyOn(adminApi, "uploadDocument").mockRejectedValue(new Error("上传通道异常"));
-    await uploadButton!.trigger("click");
+    await uploadButton(wrapper)!.trigger("click");
     await flushPromises();
 
     expect(wrapper.text()).toContain("上传通道异常");
-    expect(wrapper.text()).toContain("manual.docx");
+    expect(wrapper.text()).toContain("已上传 0 份，失败 1 份");
     expect(adminStore.uploadDrawerOpen).toBe(true);
-    expect(uploadButton!.attributes("disabled")).toBeUndefined();
+    expect(build).not.toHaveBeenCalled();
   });
 
-  it("documents: upload success clears the pending file and closes the drawer", async () => {
+  it("documents: upload success marks the item done and triggers one build", async () => {
     const wrapper = await mountView("documents");
     adminStore.uploadDrawerOpen = true;
     await flushPromises();
 
-    const input = wrapper.find('input[type="file"]');
-    Object.defineProperty(input.element, "files", {
-      value: [new File(["stub"], "manual.pdf", { type: "application/pdf" })],
-      configurable: true,
+    await pickFiles(wrapper, [new File(["stub"], "manual.pdf", { type: "application/pdf" })]);
+    const upload = vi.spyOn(adminApi, "uploadDocument").mockResolvedValue({} as never);
+    const build = vi.spyOn(adminApi, "buildIndex").mockResolvedValue({
+      requested: true, coalesced: false, index_id: "idx-2", task_id: "task-2", rebuild_required: false,
     });
-    await input.trigger("change");
+    await uploadButton(wrapper)!.trigger("click");
     await flushPromises();
 
-    const uploadSpy = vi.spyOn(adminApi, "uploadDocument").mockResolvedValue({} as never);
-    const uploadButton = wrapper.findAll("button")
-      .find((button) => button.text().includes("开始上传"));
-    await uploadButton!.trigger("click");
-    await flushPromises();
-
-    expect(uploadSpy).toHaveBeenCalledWith(
-      "kb-1",
-      expect.any(File),
-      expect.stringMatching(/^[0-9a-f-]{36}$/),
+    expect(upload).toHaveBeenCalledWith(
+      "kb-1", expect.any(File), expect.stringMatching(/^[0-9a-f-]{36}$/), false,
     );
-    expect(adminStore.uploadDrawerOpen).toBe(false);
+    expect(build).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("已上传 1 份文档");
+  });
+
+  it("documents: batches multiple files, isolates failures and builds once", async () => {
+    const wrapper = await mountView("documents");
+    adminStore.uploadDrawerOpen = true;
+    await flushPromises();
+
+    await pickFiles(wrapper, [
+      new File(["good"], "good.docx"),
+      new File(["bad"], "bad.docx"),
+    ]);
+    const upload = vi.spyOn(adminApi, "uploadDocument").mockImplementation(
+      async (_kb: string, file: File) => {
+        if (file.name === "bad.docx") throw new Error("源文档哈希已存在");
+        return {} as never;
+      },
+    );
+    const build = vi.spyOn(adminApi, "buildIndex").mockResolvedValue({
+      requested: true, coalesced: false, index_id: "idx-2", task_id: "task-2", rebuild_required: false,
+    });
+    expect(uploadButton(wrapper)!.text()).toContain("2");
+    await uploadButton(wrapper)!.trigger("click");
+    await flushPromises();
+
+    expect(upload).toHaveBeenCalledTimes(2);
+    expect(upload).toHaveBeenLastCalledWith("kb-1", expect.any(File), expect.any(String), false);
+    expect(build).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("已上传 1 份，失败 1 份");
+    expect(wrapper.text()).toContain("源文档哈希已存在");
+  });
+
+  it("documents: rejects unsupported and oversized files before upload", async () => {
+    const wrapper = await mountView("documents");
+    adminStore.uploadDrawerOpen = true;
+    await flushPromises();
+
+    const oversized = new File(["stub"], "huge.docx");
+    Object.defineProperty(oversized, "size", { value: 52_428_801 });
+    const duplicate = new File(["stub"], "virus.exe");
+    await pickFiles(wrapper, [
+      new File(["stub"], "virus.exe"),
+      oversized,
+      duplicate,
+      duplicate,
+    ]);
+    await flushPromises();
+
+    const upload = vi.spyOn(adminApi, "uploadDocument");
+    expect(wrapper.text()).toContain("virus.exe");
+    expect(wrapper.text()).toContain("仅支持 .docx / .pdf 文件");
+    expect(wrapper.text()).toContain("huge.docx");
+    expect(wrapper.text()).toContain("文件超过大小上限");
+    expect(wrapper.text()).toContain("上传队列（2）");
+    expect(uploadButton(wrapper)!.attributes("disabled")).toBeDefined();
+    expect(upload).not.toHaveBeenCalled();
   });
 
   it("support review: manages document attributes in one workspace", async () => {

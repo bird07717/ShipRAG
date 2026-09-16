@@ -2,7 +2,6 @@ import { reactive } from "vue";
 import { ElMessageBox, ElNotification } from "element-plus";
 
 import { adminApi, ApiRequestError } from "@/api/admin";
-import { randomUUID } from "@/utils/uuid";
 import type {
   DocumentItem,
   DocumentProfileContext,
@@ -682,17 +681,9 @@ export const adminStore = reactive({
     if (!this.error) this.notice = "知识库删除任务已提交；完成后将弹出提醒";
   },
 
-  async upload(file: File, idempotencyKey: string = randomUUID()): Promise<void> {
-    if (!this.selectedKnowledgeId) return;
-    const knowledgeId = this.selectedKnowledgeId;
-    await this.run(async () => {
-      await adminApi.uploadDocument(knowledgeId, file, idempotencyKey);
-      await Promise.all([
-        this.loadKnowledgeBases(),
-        this.loadKnowledgeDetails(),
-      ]);
-    }, "文档已上传，RAG 候选索引构建已提交；构建完成后需明确设为当前索引，Profile 请在 Profile Review 审核");
-    if (!this.error) this.uploadDrawerOpen = false;
+  async uploadFile(file: File, idempotencyKey: string, requestBuild: boolean): Promise<void> {
+    if (!this.selectedKnowledgeId) throw new Error("未选择知识库");
+    await adminApi.uploadDocument(this.selectedKnowledgeId, file, idempotencyKey, requestBuild);
   },
 
   async renameDocument(document: DocumentItem): Promise<void> {

@@ -446,17 +446,12 @@ describe("adminStore", () => {
     });
   });
 
-  it("uploads a document for the selected knowledge base", async () => {
+  it("uploads a single document without triggering a build", async () => {
     stubApi();
     adminStore.selectedKnowledgeId = "kb-1";
     const upload = vi.spyOn(adminApi, "uploadDocument").mockResolvedValue(undefined);
-    adminStore.uploadDrawerOpen = true;
-    await adminStore.upload(new File(["x"], "a.docx"));
-    expect(upload).toHaveBeenCalledWith("kb-1", expect.any(File), expect.any(String));
-    expect(adminStore.uploadDrawerOpen).toBe(false);
-    expect(adminStore.notice).toBe(
-      "文档已上传，RAG 候选索引构建已提交；构建完成后需明确设为当前索引，Profile 请在 Profile Review 审核",
-    );
+    await adminStore.uploadFile(new File(["x"], "a.docx"), "key-1", false);
+    expect(upload).toHaveBeenCalledWith("kb-1", expect.any(File), "key-1", false);
   });
 
   it("submits document-attribute generation from the knowledge entry", async () => {

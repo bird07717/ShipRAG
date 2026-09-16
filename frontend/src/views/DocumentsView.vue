@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { Document, Search, UploadFilled } from "@element-plus/icons-vue";
+import { CircleCheckFilled, CircleCloseFilled, Document, Loading, Search, UploadFilled } from "@element-plus/icons-vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 import { randomUUID } from "@/utils/uuid";
@@ -16,11 +16,34 @@ import StatusBadge from "@/components/ui/StatusBadge.vue";
 
 const store = useAdminStore();
 
-const pendingFile = ref<File | null>(null);
-const pendingUploadKey = ref("");
+type UploadItem = {
+  key: string;
+  file: File;
+  status: "PENDING" | "UPLOADING" | "DONE" | "FAILED" | "REJECTED";
+  error: string;
+};
+
+/* 与后端 m2_docx_max_bytes / m2_pdf_max_bytes 保持同步 */
+const DOCX_MAX_BYTES = 52_428_800;
+const PDF_MAX_BYTES = 104_857_600;
+
 const fileInput = ref<HTMLInputElement | null>(null);
+const queue = ref<UploadItem[]>([]);
 const uploading = ref(false);
 const uploadError = ref("");
+const autoBuild = ref(true);
+
+const pendingItems = computed(() =>
+  queue.value.filter((item) => item.status === "PENDING" || item.status === "FAILED"),
+);
+const batchSummary = computed(() => {
+  if (uploading.value || !queue.value.length) return "";
+  const done = queue.value.filter((item) => item.status === "DONE").length;
+  const failed = queue.value.filter((item) => item.status === "FAILED").length;
+  if (!done && !failed) return "";
+  if (failed) return `已上传 ${done} 份，失败 ${failed} 份；失败项保留在队列中，可再次点击开始上传重试`;
+  return `已上传 ${done} 份文档`;
+});
 
 const processingState = computed(() => {
   const building = store.buildingCount;
@@ -132,29 +155,78 @@ function profileTagType(status: DocumentProfileStatus): "success" | "warning" | 
   return status === "FAILED" ? "danger" : "info";
 }
 
+function validateFile(file: File): string {
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  if (extension !== "docx" && extension !== "pdf") return "仅支持 .docx / .pdf 文件";
+  const limit = extension === "pdf" ? PDF_MAX_BYTES : DOCX_MAX_BYTES;
+  if (file.size > limit) return "文件超过大小上限";
+  return "";
+}
+
+function addFile(file: File): void {
+  uploadError.value = "";
+  if (queue.value.some((item) => item.file.name === file.name && item.file.size === file.size)) {
+    return;
+  }
+  const error = validateFile(file);
+  queue.value.push({
+    key: randomUUID(),
+    file,
+    status: error ? "REJECTED" : "PENDING",
+    error,
+  });
+}
+
 function pickFile(event: Event): void {
   const input = event.target as HTMLInputElement;
-  pendingFile.value = input.files?.[0] ?? null;
-  pendingUploadKey.value = pendingFile.value ? randomUUID() : "";
-  uploadError.value = "";
+  for (const file of Array.from(input.files ?? [])) addFile(file);
+  input.value = "";
 }
 
 function openPicker(): void {
   fileInput.value?.click();
 }
 
+function removeItem(item: UploadItem): void {
+  if (uploading.value) return;
+  queue.value = queue.value.filter((entry) => entry.key !== item.key);
+}
+
+function clearQueue(): void {
+  if (uploading.value) return;
+  queue.value = [];
+}
+
+function closeUploadDrawer(): void {
+  if (uploading.value) return;
+  store.uploadDrawerOpen = false;
+}
+
 async function confirmUpload(): Promise<void> {
-  if (!pendingFile.value || uploading.value) return;
+  const items = [...pendingItems.value];
+  if (!items.length || uploading.value) return;
   uploading.value = true;
   uploadError.value = "";
   try {
-    await store.upload(pendingFile.value, pendingUploadKey.value || randomUUID());
-    if (store.error) {
-      uploadError.value = store.error;
-    } else {
-      pendingFile.value = null;
-      pendingUploadKey.value = "";
-      if (fileInput.value) fileInput.value.value = "";
+    for (const item of items) {
+      item.status = "UPLOADING";
+      try {
+        await store.uploadFile(item.file, item.key, false);
+        item.status = "DONE";
+        item.error = "";
+      } catch (cause) {
+        item.status = "FAILED";
+        item.error = cause instanceof Error ? cause.message : "上传失败";
+      }
+    }
+    if (queue.value.some((item) => item.status === "DONE")) {
+      await store.run(async () => {
+        await Promise.all([store.loadKnowledgeBases(), store.loadKnowledgeDetails()]);
+      });
+      if (autoBuild.value) {
+        await store.buildIndex();
+        if (store.error) uploadError.value = store.error;
+      }
     }
   } catch (cause) {
     uploadError.value = cause instanceof Error ? cause.message : "上传失败，请稍后重试";
@@ -318,7 +390,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         v-else
         :icon="Document"
         title="暂无文档"
-        description="上传 Word 文档后会自动完成解析、切片（Chunk）和向量化（Embedding）；候选索引构建成功后需明确切换，Support Profile 仍需单独审核发布。"
+        description="上传 Word / PDF 文档后会自动完成解析、切片（Chunk）和向量化（Embedding）；候选索引构建成功后需明确切换，Support Profile 仍需单独审核发布。"
       >
         <template #action>
           <el-button
@@ -342,27 +414,69 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
       <div class="form-section">
         <h4>选择文件</h4>
         <p class="desc">
-          当前知识库：{{ store.selectedKnowledge?.name ?? "未选择" }}。仅支持 .docx / .pdf
-          文件。上传后系统会自动构建 RAG 候选索引，构建完成后需明确切换；Support Profile 草稿将在 Profile Review 中单独审核发布。
+          当前知识库：{{ store.selectedKnowledge?.name ?? "未选择" }}。支持一次选择多份 .docx /
+          .pdf 文件，队列上传结束后统一触发一次 RAG 候选索引构建，构建完成后需明确切换；Support
+          Profile 草稿将在 Profile Review 中单独审核发布。
         </p>
         <button type="button" class="upload-dropzone" @click="openPicker">
           <el-icon :size="22"><UploadFilled /></el-icon>
-          <template v-if="pendingFile">
-            <b>{{ pendingFile.name }}</b>
-            <small>{{ formatSize(pendingFile.size) }} · 点击重新选择</small>
-          </template>
-          <template v-else>
-            <b>点击选择 .docx / .pdf 文件</b>
-            <small>单文件上传；完全相同的文件会被拒绝，修订文件将作为新的候选文档</small>
-          </template>
+          <b>点击选择 .docx / .pdf 文件（可多选）</b>
+          <small>完全相同的文件会被拒绝，修订文件将作为新的候选文档</small>
         </button>
         <input
           ref="fileInput"
           type="file"
           accept=".docx,.pdf"
+          multiple
           class="hidden-input"
           @change="pickFile"
         />
+        <div v-if="queue.length" class="upload-queue">
+          <div class="upload-queue-head">
+            <span>上传队列（{{ queue.length }}）</span>
+            <el-button
+              link
+              type="danger"
+              size="small"
+              :disabled="uploading"
+              @click="clearQueue"
+            >
+              清空列表
+            </el-button>
+          </div>
+          <ul>
+            <li
+              v-for="item in queue"
+              :key="item.key"
+              :class="`upload-item upload-item--${item.status.toLowerCase()}`"
+            >
+              <el-icon v-if="item.status === 'DONE'"><CircleCheckFilled /></el-icon>
+              <el-icon v-else-if="item.status === 'FAILED' || item.status === 'REJECTED'"><CircleCloseFilled /></el-icon>
+              <el-icon v-else-if="item.status === 'UPLOADING'" class="is-loading"><Loading /></el-icon>
+              <el-icon v-else><Document /></el-icon>
+              <div class="upload-item-main">
+                <b>{{ item.file.name }}</b>
+                <small>
+                  {{ formatSize(item.file.size) }}<template v-if="item.error"> · {{ item.error }}</template>
+                </small>
+              </div>
+              <el-button
+                v-if="item.status !== 'UPLOADING'"
+                link
+                type="danger"
+                size="small"
+                :disabled="uploading"
+                @click="removeItem(item)"
+              >
+                移除
+              </el-button>
+            </li>
+          </ul>
+        </div>
+        <p v-if="batchSummary" class="upload-summary">{{ batchSummary }}</p>
+        <el-checkbox v-model="autoBuild" :disabled="uploading">
+          上传完成后自动触发一次索引构建
+        </el-checkbox>
         <el-alert
           v-if="uploadError"
           class="upload-error"
@@ -374,14 +488,14 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
       </div>
       <template #footer>
         <div class="drawer-footer">
-          <el-button @click="store.uploadDrawerOpen = false">取消</el-button>
+          <el-button :disabled="uploading" @click="closeUploadDrawer">取消</el-button>
           <el-button
             type="primary"
-            :disabled="!pendingFile || uploading"
+            :disabled="!pendingItems.length"
             :loading="uploading"
             @click="confirmUpload"
           >
-            开始上传
+            {{ uploading ? "上传中…" : `开始上传（${pendingItems.length}）` }}
           </el-button>
         </div>
       </template>
@@ -699,6 +813,81 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
 
 .upload-error {
   margin-top: 12px;
+}
+
+.upload-queue {
+  margin-top: 12px;
+}
+
+.upload-queue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.upload-queue ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.upload-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+}
+
+.upload-item .el-icon {
+  flex-shrink: 0;
+}
+
+.upload-item--DONE .el-icon {
+  color: var(--el-color-success);
+}
+
+.upload-item--FAILED .el-icon,
+.upload-item--REJECTED .el-icon {
+  color: var(--el-color-danger);
+}
+
+.upload-item--UPLOADING .el-icon {
+  color: var(--el-color-primary);
+}
+
+.upload-item-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.upload-item-main b {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-item-main small {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.upload-summary {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
 }
 
 .upload-dropzone {
