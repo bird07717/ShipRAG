@@ -19,6 +19,8 @@ const store = useAdminStore();
 const pendingFile = ref<File | null>(null);
 const pendingUploadKey = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
+const uploading = ref(false);
+const uploadError = ref("");
 
 const processingState = computed(() => {
   const building = store.buildingCount;
@@ -134,6 +136,7 @@ function pickFile(event: Event): void {
   const input = event.target as HTMLInputElement;
   pendingFile.value = input.files?.[0] ?? null;
   pendingUploadKey.value = pendingFile.value ? randomUUID() : "";
+  uploadError.value = "";
 }
 
 function openPicker(): void {
@@ -141,12 +144,22 @@ function openPicker(): void {
 }
 
 async function confirmUpload(): Promise<void> {
-  if (!pendingFile.value) return;
-  await store.upload(pendingFile.value, pendingUploadKey.value || randomUUID());
-  if (!store.error) {
-    pendingFile.value = null;
-    pendingUploadKey.value = "";
-    if (fileInput.value) fileInput.value.value = "";
+  if (!pendingFile.value || uploading.value) return;
+  uploading.value = true;
+  uploadError.value = "";
+  try {
+    await store.upload(pendingFile.value, pendingUploadKey.value || randomUUID());
+    if (store.error) {
+      uploadError.value = store.error;
+    } else {
+      pendingFile.value = null;
+      pendingUploadKey.value = "";
+      if (fileInput.value) fileInput.value.value = "";
+    }
+  } catch (cause) {
+    uploadError.value = cause instanceof Error ? cause.message : "上传失败，请稍后重试";
+  } finally {
+    uploading.value = false;
   }
 }
 
@@ -350,11 +363,24 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
           class="hidden-input"
           @change="pickFile"
         />
+        <el-alert
+          v-if="uploadError"
+          class="upload-error"
+          type="error"
+          :title="uploadError"
+          show-icon
+          :closable="false"
+        />
       </div>
       <template #footer>
         <div class="drawer-footer">
           <el-button @click="store.uploadDrawerOpen = false">取消</el-button>
-          <el-button type="primary" :disabled="!pendingFile" @click="confirmUpload">
+          <el-button
+            type="primary"
+            :disabled="!pendingFile || uploading"
+            :loading="uploading"
+            @click="confirmUpload"
+          >
             开始上传
           </el-button>
         </div>
@@ -669,6 +695,10 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
 
 .hidden-input {
   display: none;
+}
+
+.upload-error {
+  margin-top: 12px;
 }
 
 .upload-dropzone {

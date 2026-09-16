@@ -627,6 +627,61 @@ describe("view interactions", () => {
     );
   });
 
+  it("documents: upload failure surfaces the error inside the drawer", async () => {
+    const wrapper = await mountView("documents");
+    adminStore.uploadDrawerOpen = true;
+    await flushPromises();
+
+    const input = wrapper.find('input[type="file"]');
+    Object.defineProperty(input.element, "files", {
+      value: [new File(["stub"], "manual.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })],
+      configurable: true,
+    });
+    await input.trigger("change");
+    await flushPromises();
+    expect(wrapper.text()).toContain("manual.docx");
+
+    const uploadButton = wrapper.findAll("button")
+      .find((button) => button.text().includes("开始上传"));
+    expect(uploadButton).toBeTruthy();
+
+    vi.spyOn(adminApi, "uploadDocument").mockRejectedValue(new Error("上传通道异常"));
+    await uploadButton!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("上传通道异常");
+    expect(wrapper.text()).toContain("manual.docx");
+    expect(adminStore.uploadDrawerOpen).toBe(true);
+    expect(uploadButton!.attributes("disabled")).toBeUndefined();
+  });
+
+  it("documents: upload success clears the pending file and closes the drawer", async () => {
+    const wrapper = await mountView("documents");
+    adminStore.uploadDrawerOpen = true;
+    await flushPromises();
+
+    const input = wrapper.find('input[type="file"]');
+    Object.defineProperty(input.element, "files", {
+      value: [new File(["stub"], "manual.pdf", { type: "application/pdf" })],
+      configurable: true,
+    });
+    await input.trigger("change");
+    await flushPromises();
+
+    const uploadSpy = vi.spyOn(adminApi, "uploadDocument").mockResolvedValue({} as never);
+    const uploadButton = wrapper.findAll("button")
+      .find((button) => button.text().includes("开始上传"));
+    await uploadButton!.trigger("click");
+    await flushPromises();
+
+    expect(uploadSpy).toHaveBeenCalledWith(
+      "kb-1",
+      expect.any(File),
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+    );
+    expect(adminStore.uploadDrawerOpen).toBe(false);
+  });
+
   it("support review: manages document attributes in one workspace", async () => {
     const wrapper = await mountView("support-review");
     await flushPromises();
