@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { ElMessageBox } from "element-plus";
 
 import { adminApi, ApiRequestError } from "@/api/admin";
-import { streamChat } from "@/api/chat";
-import type { ChatDoneEvent } from "@/api/chat";
+import { fetchImageBlobUrl, streamChat } from "@/api/chat";
+import type { ChatContentBlock, ChatDoneEvent } from "@/api/chat";
 import type { KnowledgeAssistantConfig } from "@/types/admin";
 import { renderMarkdown } from "@/utils/markdown";
 import { useAdminStore } from "@/composables/adminStore";
@@ -26,6 +26,8 @@ const testedQuestion = ref("");
 const answer = ref("");
 const result = ref<ChatDoneEvent | null>(null);
 const testError = ref("");
+// 与 DemoChat 相同的按块渲染语义：图片块按 asset_id 懒加载预签名内容。
+const imageUrls = reactive<Record<string, string>>({});
 let mounted = true;
 let controller: AbortController | undefined;
 
@@ -39,9 +41,28 @@ const validation = computed(() => {
   if (config.value?.assistant_online && values.length !== 3) return "已上线知识库须保留三条推荐问题";
   return "";
 });
-const contentText = computed(() => result.value?.content
-  ?.filter((block) => (block.type === "text" || block.type === "table") && block.text && block.text !== result.value?.answer)
-  .map((block) => block.text).join("\n\n") ?? "");
+function isTextBlock(block: ChatContentBlock): boolean {
+  return block.type === "text" || block.type === "table";
+}
+
+function hasImage(block: ChatContentBlock): boolean {
+  return block.type === "image" && !!block.image_asset_id && !!imageUrls[block.image_asset_id];
+}
+
+function loadTrialImages(event: ChatDoneEvent): void {
+  for (const block of event.content) {
+    const assetId = block.image_asset_id;
+    if (block.type === "image" && assetId && !imageUrls[assetId]) {
+      fetchImageBlobUrl(assetId)
+        .then((url) => {
+          imageUrls[assetId] = url;
+        })
+        .catch(() => {
+          imageUrls[assetId] = "";
+        });
+    }
+  }
+}
 
 function report(cause: unknown): void {
   error.value = cause instanceof Error ? cause.message : "操作失败，请重试";
@@ -154,7 +175,7 @@ async function tryQuestion(question: string): Promise<void> {
     await streamChat(props.knowledgeId, question.trim(), undefined, {
       onTrace: () => {},
       onDelta: (text) => { if (current()) answer.value += text; },
-      onDone: (event) => { if (current()) { result.value = event; answer.value = event.answer; } },
+      onDone: (event) => { if (current()) { result.value = event; answer.value = event.answer; loadTrialImages(event); } },
       onError: (message) => { if (current()) testError.value = message; },
     }, {}, signal);
   } catch (cause) { if (current()) testError.value = cause instanceof Error ? cause.message : "试问失败"; }
@@ -246,8 +267,24 @@ onUnmounted(() => { mounted = false; controller?.abort(); });
         type="error"
         :closable="false"
       />
-      <div class="markdown-body" v-html="renderMarkdown(answer)" />
-      <div v-if="contentText" class="markdown-body" v-html="renderMarkdown(contentText)" />
+      <!-- done 后按 content 块渲染（与 DemoChat 同语义）：文本片段不与
+           answer 重复渲染，图片块按预签名内容显示；流式期间与无 content
+           的回退路径仍显示累积 answer。 -->
+      <template v-if="result?.content?.length">
+        <div v-for="(block, index) in result.content" :key="index" class="content-block">
+          <div
+            v-if="isTextBlock(block)"
+            class="markdown-body"
+            v-html="renderMarkdown(block.text || '')"
+          />
+          <div v-else-if="block.type === 'image'" class="trial-image">
+            <img v-if="hasImage(block)" :src="imageUrls[block.image_asset_id!]" alt="文档图片" />
+            <div v-else class="image-placeholder">图片加载中...</div>
+            <small v-if="block.caption" class="image-caption">{{ block.caption }}</small>
+          </div>
+        </div>
+      </template>
+      <div v-else class="markdown-body" v-html="renderMarkdown(answer)" />
       <div v-for="(section, index) in result?.sections ?? []" :key="index">
         <b>{{ section.title }}</b><div class="markdown-body" v-html="renderMarkdown(section.content)" />
       </div>
@@ -265,4 +302,9 @@ onUnmounted(() => { mounted = false; controller?.abort(); });
 .settings-header h4 { margin: 0; }
 .question-row { width: 100%; }
 .trial-result { border-top: 1px solid var(--border-subtle); padding-top: 16px; overflow-wrap: anywhere; }
+.content-block { margin: 4px 0; }
+.trial-image { margin: 8px 0; display: grid; gap: 4px; justify-items: start; }
+.trial-image img { max-width: 100%; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+.image-placeholder { color: var(--text-tertiary); font-size: 13px; }
+.image-caption { color: var(--text-tertiary); font-size: 12px; }
 </style>

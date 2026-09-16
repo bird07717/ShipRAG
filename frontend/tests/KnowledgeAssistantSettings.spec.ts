@@ -119,6 +119,39 @@ describe("knowledge Assistant settings", () => {
     await flushPromises();
   });
 
+  it("renders image-bearing answers as content blocks without duplicating text", async () => {
+    let callbacks!: chat.ChatStreamCallbacks;
+    let finish!: () => void;
+    vi.spyOn(chat, "streamChat").mockImplementation(async (_id, _question, _conversation, cb) => {
+      callbacks = cb;
+      await new Promise<void>((resolve) => { finish = resolve; });
+    });
+    const image = vi.spyOn(chat, "fetchImageBlobUrl").mockResolvedValue("blob:image-url");
+    const wrapper = editor("kb-b");
+    await flushPromises();
+    await button(wrapper, "试问").trigger("click");
+    callbacks.onDone({
+      conversation_id: "c1", message_id: "m1", trace_id: "t1",
+      answer: "第一步断电第二步开盖",
+      response_type: "ANSWERED",
+      content: [
+        { type: "text", text: "第一步断电" },
+        { type: "image", image_asset_id: "asset-1", caption: "内部结构" },
+        { type: "text", text: "第二步开盖" },
+      ],
+      references: [], usage: {}, latency_ms: 10,
+    } as chat.ChatDoneEvent);
+    finish();
+    await flushPromises();
+
+    expect(image).toHaveBeenCalledWith("asset-1");
+    expect(wrapper.find("img").attributes("src")).toBe("blob:image-url");
+    expect(wrapper.text()).toContain("内部结构");
+    // 文本片段只渲染一次：块渲染生效时不再叠加完整 answer。
+    expect(wrapper.text().match(/第一步断电/g)).toHaveLength(1);
+    expect(wrapper.text().match(/第二步开盖/g)).toHaveLength(1);
+  });
+
   it("does not publish after cancelling confirmation", async () => {
     vi.mocked(ElMessageBox.confirm).mockRejectedValue("cancel");
     const publish = vi.spyOn(adminApi, "setKnowledgeAssistantPublication");
