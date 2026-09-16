@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { Document, Search, UploadFilled } from "@element-plus/icons-vue";
 
 import { useAdminStore } from "@/composables/adminStore";
+import { randomUUID } from "@/utils/uuid";
 import type {
   DocumentProfileStatus,
   ProfileQualityStatus,
@@ -132,7 +133,7 @@ function profileTagType(status: DocumentProfileStatus): "success" | "warning" | 
 function pickFile(event: Event): void {
   const input = event.target as HTMLInputElement;
   pendingFile.value = input.files?.[0] ?? null;
-  pendingUploadKey.value = pendingFile.value ? crypto.randomUUID() : "";
+  pendingUploadKey.value = pendingFile.value ? randomUUID() : "";
 }
 
 function openPicker(): void {
@@ -141,7 +142,7 @@ function openPicker(): void {
 
 async function confirmUpload(): Promise<void> {
   if (!pendingFile.value) return;
-  await store.upload(pendingFile.value, pendingUploadKey.value || crypto.randomUUID());
+  await store.upload(pendingFile.value, pendingUploadKey.value || randomUUID());
   if (!store.error) {
     pendingFile.value = null;
     pendingUploadKey.value = "";

@@ -8,6 +8,7 @@ import AnswerContent from "@/components/AnswerContent.vue";
 import DocumentPreview from "@/components/DocumentPreview.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
 import { useAdminStore } from "@/composables/adminStore";
+import { randomUUID } from "@/utils/uuid";
 
 const props = defineProps<{ knowledgeId: string; requestId: string }>();
 const emit = defineEmits<{ changed: [] }>();
@@ -80,7 +81,7 @@ async function retest() {
   if (!review || dirty.value || testing.value) return;
   testing.value = true; error.value = "";
   try {
-    const run = await reviewsApi.retest(props.knowledgeId, review.id, review.revision, crypto.randomUUID());
+    const run = await reviewsApi.retest(props.knowledgeId, review.id, review.revision, randomUUID());
     if (alive && detail.value) detail.value.retests = [run, ...detail.value.retests.filter((item) => item.id !== run.id)];
   } catch (cause) { if (alive) error.value = message(cause); }
   finally { if (alive) testing.value = false; }

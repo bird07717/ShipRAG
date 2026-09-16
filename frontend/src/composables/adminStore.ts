@@ -2,6 +2,7 @@ import { reactive } from "vue";
 import { ElMessageBox, ElNotification } from "element-plus";
 
 import { adminApi, ApiRequestError } from "@/api/admin";
+import { randomUUID } from "@/utils/uuid";
 import type {
   DocumentItem,
   DocumentProfileContext,
@@ -681,7 +682,7 @@ export const adminStore = reactive({
     if (!this.error) this.notice = "知识库删除任务已提交；完成后将弹出提醒";
   },
 
-  async upload(file: File, idempotencyKey: string = crypto.randomUUID()): Promise<void> {
+  async upload(file: File, idempotencyKey: string = randomUUID()): Promise<void> {
     if (!this.selectedKnowledgeId) return;
     const knowledgeId = this.selectedKnowledgeId;
     await this.run(async () => {

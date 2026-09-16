@@ -48,6 +48,7 @@ import type {
   TaskSubmission,
   TraceSummary,
 } from "@/types/admin";
+import { randomUUID } from "@/utils/uuid";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -183,7 +184,7 @@ export const adminApi = {
   uploadDocument: (
     knowledgeId: string,
     file: File,
-    idempotencyKey: string = crypto.randomUUID(),
+    idempotencyKey: string = randomUUID(),
   ) => {
     const data = new FormData();
     data.append("file", file);
@@ -218,7 +219,7 @@ export const adminApi = {
     ),
   discardPendingKnowledgeProfiles: (knowledgeId: string) =>
     apiRequest<{ discarded_count: number }>(`/knowledge-bases/${knowledgeId}/profiles/discard-pending`, { method: "POST" }),
-  rebuildKnowledgeProfiles: (knowledgeId: string, idempotencyKey: string = crypto.randomUUID()) =>
+  rebuildKnowledgeProfiles: (knowledgeId: string, idempotencyKey: string = randomUUID()) =>
     apiRequest<TaskSubmission>(`/knowledge-bases/${knowledgeId}/profiles/rebuild`, {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey },
@@ -236,7 +237,7 @@ export const adminApi = {
   buildIndex: (knowledgeId: string) =>
     apiRequest<BuildRequestResult>(`/knowledge-bases/${knowledgeId}/indexes/build`, {
       method: "POST",
-      headers: { "Idempotency-Key": crypto.randomUUID() },
+      headers: { "Idempotency-Key": randomUUID() },
       body: JSON.stringify({ reason: "MANUAL", activate_on_success: false }),
     }),
   activateIndex: (indexId: string) =>
