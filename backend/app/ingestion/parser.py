@@ -297,7 +297,16 @@ def parse_docx(data: bytes) -> ParsedDocument:
 
     if not elements:
         raise DocxParseError("DOCX 未解析出可入库内容")
-    referenced = sum(node.tag in (f"{A}blip", f"{V}imagedata") for node in _content_nodes(root))
+    # 与提取侧对称：只统计带 relationship id 的图片引用。WPS/部分 Word
+    # 版本会写入无 r:id 的空壳 <v:imagedata o:title=""/>（合法 OOXML 噪声，
+    # 不引用任何资源），提取侧本就跳过它们，计数侧若只看标签名会把
+    # 正常文档误判为丢图。
+    referenced = sum(
+        1
+        for node in _content_nodes(root)
+        if node.tag in (f"{A}blip", f"{V}imagedata")
+        and (node.attrib.get(f"{R}embed") or node.attrib.get(f"{R}id"))
+    )
     extracted = sum(element.element_type == "IMAGE" for element in elements)
     if referenced > extracted:
         raise DocxParseError("IMAGE_EXTRACTION_INCOMPLETE: 文档图片未完整提取")

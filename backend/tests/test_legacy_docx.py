@@ -212,3 +212,42 @@ async def test_queued_reuse_uses_pdf_revision_for_pdf_documents():
     assert parameters["content_revision"] == CONTENT_REVISION_PDF
     assert parameters["content_revision"] != CONTENT_REVISION_DOCX
     pipeline._process_document.assert_awaited_once_with(index, document, task, 1, 1)
+
+
+def test_empty_shell_imagedata_does_not_fail_the_completeness_guard():
+    """WPS/部分 Word 写入的无 r:id 空壳 <v:imagedata o:title=""/> 不引用任何
+    资源，提取侧会跳过；引用守卫必须同样忽略它们，否则正常文档被误判丢图
+    （生产实例：B2 VDR MIC SWITCH Fail 报警检查步骤说明-中文.docx，7 引用
+    计数 vs 3 实图，其中 4 个为空壳）。"""
+    source = BytesIO()
+    document = Document()
+    document.add_picture(BytesIO(make_text_image()))
+    document.save(source)
+    source.seek(0)
+    result = BytesIO()
+    with ZipFile(source) as zin, ZipFile(result, "w") as zout:
+        root = ET.fromstring(zin.read("word/document.xml"))
+        blip = root.find(f".//{A}blip")
+        rid = blip.attrib[f"{R}embed"]
+        shells = '<w:r><w:pict><v:shape><v:imagedata o:title=""/></v:shape></w:pict></w:r>' * 2
+        xml = (
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            'xmlns:v="urn:schemas-microsoft-com:vml" '
+            'xmlns:o="urn:schemas-microsoft-com:office:office" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+            'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+            "<w:body><w:p><w:r><w:t>麦克风自检步骤</w:t></w:r>"
+            f'<w:r><w:pict><v:shape><v:imagedata r:id="{rid}"/></v:shape></w:pict></w:r>'
+            f"{shells}</w:p></w:body></w:document>"
+        )
+        for entry in zin.infolist():
+            zout.writestr(
+                entry,
+                xml.encode() if entry.filename == "word/document.xml" else zin.read(entry.filename),
+            )
+    parsed = parse_docx(result.getvalue())
+    images = [e for e in parsed.elements if e.element_type == "IMAGE"]
+    texts = [e for e in parsed.elements if e.element_type == "TEXT"]
+    assert len(images) == 1
+    assert len(texts) == 1
+    assert texts[0].content == "麦克风自检步骤"
