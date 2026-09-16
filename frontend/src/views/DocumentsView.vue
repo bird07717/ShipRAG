@@ -165,9 +165,13 @@ function validateFile(file: File): string {
 
 function addFile(file: File): void {
   uploadError.value = "";
-  if (queue.value.some((item) => item.file.name === file.name && item.file.size === file.size)) {
-    return;
-  }
+  const duplicate = queue.value.some(
+    (item) =>
+      item.file.name === file.name &&
+      item.file.size === file.size &&
+      item.file.lastModified === file.lastModified,
+  );
+  if (duplicate) return;
   const error = validateFile(file);
   queue.value.push({
     key: randomUUID(),
@@ -219,7 +223,7 @@ async function confirmUpload(): Promise<void> {
         item.error = cause instanceof Error ? cause.message : "上传失败";
       }
     }
-    if (queue.value.some((item) => item.status === "DONE")) {
+    if (items.some((item) => item.status === "DONE")) {
       await store.run(async () => {
         await Promise.all([store.loadKnowledgeBases(), store.loadKnowledgeDetails()]);
       });
@@ -851,16 +855,16 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
   flex-shrink: 0;
 }
 
-.upload-item--DONE .el-icon {
+.upload-item--done .el-icon {
   color: var(--el-color-success);
 }
 
-.upload-item--FAILED .el-icon,
-.upload-item--REJECTED .el-icon {
+.upload-item--failed .el-icon,
+.upload-item--rejected .el-icon {
   color: var(--el-color-danger);
 }
 
-.upload-item--UPLOADING .el-icon {
+.upload-item--uploading .el-icon {
   color: var(--el-color-primary);
 }
 

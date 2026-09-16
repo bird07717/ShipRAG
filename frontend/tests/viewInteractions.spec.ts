@@ -655,6 +655,7 @@ describe("view interactions", () => {
 
     expect(wrapper.text()).toContain("上传通道异常");
     expect(wrapper.text()).toContain("已上传 0 份，失败 1 份");
+    expect(wrapper.find(".upload-item--failed").exists()).toBe(true);
     expect(adminStore.uploadDrawerOpen).toBe(true);
     expect(build).not.toHaveBeenCalled();
   });
@@ -677,6 +678,7 @@ describe("view interactions", () => {
     );
     expect(build).toHaveBeenCalledTimes(1);
     expect(wrapper.text()).toContain("已上传 1 份文档");
+    expect(wrapper.find(".upload-item--done").exists()).toBe(true);
   });
 
   it("documents: batches multiple files, isolates failures and builds once", async () => {
