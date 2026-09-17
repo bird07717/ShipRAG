@@ -46,7 +46,7 @@ Vue 管理台 / 业务后端
 ### 问答
 
 1. `/api/v1/chat*` 或 `/api/v1/assistant/chat/stream` 接收请求；后者使用独立服务凭据并要求 `X-External-User-ID`。
-2. 对外 Assistant 先检查知识库独立的 `assistant_online` 发布状态、知识库/会话归属及当前策略完整就绪态；未上线知识库不进入对外列表，也不能通过已知资源 ID 绕过。随后 Gateway 读取知识库的 `engine_runtime_policy` 和会话模式：`RAG_ONLY` 直入 RAG；`SUPPORT_WITH_RAG_FALLBACK` 先入 Support。
+2. 对外 Assistant 先检查知识库独立的 `assistant_online` 发布状态、知识库/会话归属、当前策略完整就绪态，以及活动索引内全部有效文档的 RAG 文档理解是否已人工确认；未上线或未完成确认的知识库不能进入问答。随后 Gateway 读取知识库的 `engine_runtime_policy` 和会话模式：`RAG_ONLY` 直入 RAG；`SUPPORT_WITH_RAG_FALLBACK` 先入 Support。
 3. RAG 只有 V2 主路径：准备阶段冻结轮次和运行参数；LLM 1 根据当前问题和最近完整轮次判断新任务、追问或纠正，并产生有界查询。查询一次批量 Embedding 后，以冻结索引的 Chunk/文档卡片聚合文档；RRF 候选经 Rerank Provider 做一次文档级排序，将前 1～3 份完整有序元素作为隐藏上下文交给 LLM 2 生成答案和选择图片，排序服务失败时保持 RRF 顺序。公开结果不交付原文、候选列表、来源元数据或文档总数。旧首轮、焦点、Query Rewrite、双 Planner 和六策略实现已删除；Support 代码冻结保留，但当前运行策略为 `RAG_ONLY`。
 4. 策略允许且 Support 返回指定回退类型时，Gateway 复用消息上下文调用 RAG，并建立父子 Trace 关联。
 5. 内部管理聊天流（经 Gateway）按 SSE 发送 `status`、`trace`、`message`、可选 `fallback` 和终态 `done`/`error`。对外 Assistant 流不是原样透传：它先发送 `accepted`，随后按需要发送 `progress`、`context`、`delta`，并以 `complete` 或 `error` 结束；上游长时间无帧时每 15 秒发送 SSE 注释心跳 `: ping`。两套接口的字段和事件名不能混用。
@@ -61,7 +61,7 @@ Vue 管理台 / 业务后端
 - 知识库后台可维护状态、RAG/Support 发布状态和 Assistant 对外上线状态彼此独立；新知识库默认不对 Assistant 上线。管理台按库保存推荐问题并确认上下线，使用管理凭据和配置修订检查；Assistant 欢迎接口只消费已上线库的保存值，保持外部契约。
 - 聊天会话会冻结使用的索引/发布版本，避免在线版本切换改变既有会话语义。
 - RAG 索引自动激活与 Support Profile 人工审核发布彼此独立。
-- RAG 文档卡片绑定知识库、冻结索引和文档，使用索引冻结的 Embedding 模型；显示名称查询时联接 `document_source`。卡片生成/审核是管理能力；V2 使用有效卡片参与文档级召回，标题可按解决问题需要出现在答案正文。
+- RAG 文档卡片绑定知识库、冻结索引和文档，使用索引冻结的 Embedding 模型；显示名称查询时联接 `document_source`。V2 使用有效卡片参与文档级召回；Assistant 上线和持续对外可用还要求活动索引中每份 `READY/STORED` 文档均存在当前结构版本、生成成功且人工确认为 `CONFIRMED` 的卡片。该门禁不改变管理 Chat 的内部调试能力。
 - 生产运行时容器采用只读根文件系统与 `/tmp` tmpfs；部署细节见 [`environment.md`](environment.md)。
 
 ## RAG V2 实施状态

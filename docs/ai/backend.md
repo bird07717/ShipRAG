@@ -38,6 +38,8 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 索引构建的文档级熔断（ADR-0022）：文档处理失败时按（同 KB + 同 `document_id` + 同 `error_code`）统计历史 FAILED 的 `index_document` 行数，达到 2 次后该文档在当轮构建中标为 `SKIPPED`（错误信息带文件名），其余文档继续、构建可成功；跳过清单写入任务 `metadata.skipped_documents`。`_finalize_index` 容忍 SKIPPED 但要求至少 1 份 READY，`knowledge_index.document_count` 只计 READY。`list_documents` 以 LATERAL join 附带每份文档最近一次构建的 `last_build_status/last_build_error/last_build_version` 供前端告警。注意 `_mark_failed` 仍会把未轮到的文档批量标为同一错误——判断"哪份文档失败"必须看任务 `metadata.current_document` 或 SKIPPED/首个 FAILED 行，不能读批量标记的 error_message。
 
+构建重试与中止的人工决策（ADR-0024，2026-09-17 实施）：构建失败、worker 崩溃回收（`mark_abandoned_index_build_failed`）和协作取消都不再自动排 followup——`create_followup_build_if_needed` 已删除，`rebuild_required` 在失败/取消时重新置位并由管理台"待重建"徽标提示，重试由管理员经 `POST /indexes/{id}/retry` 触发（白名单 FAILED/CANCELLED），熔断计数由手动重试推进。INDEX_BUILD 接入协作取消：`POST /tasks/{id}/cancel` 白名单含 INDEX_BUILD，取消是任务行终态转换，构建循环在文档边界轮询（`_update_task` 带 `status IN ('QUEUED','RUNNING')` 守卫防进度心跳覆盖终态），排队期取消在管线入口短路零模型消耗，激活事务开始后不中断；索引与未处理文档落 `CANCELLED` 终态（迁移 `0047` 同时补上 `index_document` 的 `SKIPPED` 约束值），CANCELLED 与 FAILED 同权可删可重试，且不进失败计数。单索引删除与 GC 改为标记 DELETING 后按 `indexes/{index_id}/` 前缀整清 MinIO 对象（不依赖资产记录，含硬崩溃孤儿）再删数据库行；文档原件与 `document_source` 不受索引删除影响。任务记录保留：`task_record_retention_days=90`（0=永久）由周期 GC 修剪终态超期记录，每库保底最新 10 条。
+
 维护 Worker 启动时及每 15 分钟还会执行陈旧 Assistant 请求自动恢复（`app/tasks/assistant_recovery.py`）：超过 `ASSISTANT_REQUEST_STALE_SECONDS`（默认 600，必须大于轮次时限，0 禁用）仍 `RUNNING` 的 `assistant_request` 及关联消息/Trace 用与手动 `app.assistant.recovery` 相同的单语句收口为失败，被 `CONVERSATION_BUSY` 锁死的会话因此自愈；Redis 哨兵键防止多 Worker 重复注册周期链。保留期任务仍不删除 `RUNNING`。
 
 问答轮次准入闸门位于 `app/common/turn_gate.py`：管理 `/api/v1/chat`、`/chat/stream` 和对外 Assistant 流在预留请求/调用模型前获取每进程信号量（按事件循环隔离），超过 `CHAT_TURN_CONCURRENCY_LIMIT`（默认 64，0 禁用）的轮次在等待 `CHAT_TURN_WAIT_SECONDS` 后快速失败 503 `SERVICE_BUSY`；Assistant 路径在预留幂等请求前判定，容量拒绝不消耗幂等键，信号量随流收口释放。管理端复测（answer retest）不走该闸门，由其每标记单运行的唯一索引约束。
@@ -93,7 +95,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - `include_images` 默认 `true`。Gateway 在同步/流式直入 RAG 及 Support 回退 RAG 时传递该参数；RAG 在结果保存前过滤图片块及交付来源中的图片 ID，不改变用于检索、重排和文档问答的图片证据。Support 原有图片控制保持不变。新 Assistant 请求保存过滤后的公开终态，历史与幂等重放沿用该快照。
 - Assistant 历史消息优先采用 `message.response_payload` 的公开答案和内容块；显式空 `content` 不得回退到内部 `content_blocks`。没有公开内容快照的旧记录才读取内部块，并递归移除 `url`/`download_url`；历史读取和旧终态重放均执行同一地址过滤，不回写原记录、不重新调用模型。修复前已经保存的错误带图结果不会按新规则追溯重算，重新验证需使用新幂等键。
 - 对外 Assistant 只列出 `assistant_online=true` 且知识库本身启用的项目；欢迎语、问答、会话和图片入口都执行同一上线边界及知识库归属检查。新知识库默认不对外，迁移前已经启用的知识库保持原可见性。
-- Assistant 列表的 `ready` 按知识库当前执行策略使用完整 Gateway 就绪条件计算；Chat 在预留幂等请求前再次执行同一策略就绪检查。已上线但依赖异常的知识库可以保留在列表中，但必须返回 `ready=false`。
+- Assistant 列表的 `ready` 按知识库当前执行策略和 RAG 文档理解审核状态计算；活动索引中全部 `READY/STORED` 文档必须具有当前结构版本、生成成功且 `CONFIRMED` 的卡片。Chat 在预留幂等请求前再次执行同一检查。已上线后若切换索引、增加文档或显式重生成卡片造成缺失、失败、过期、拒绝或待确认，列表保留该知识库但返回 `ready=false`，欢迎语和问答返回 409，直至全部重新确认。
 - 对外 Assistant 与管理端 DemoChat 的就绪态欢迎语使用同一简洁用户侧文案，不暴露知识库名称、描述或文档数量。Assistant 的三条快捷问题读取当前知识库的 `assistant_suggestions`，与 Profile 标准问题独立维护；DemoChat 现有快捷问题仍从文档目录生成。未就绪时 Assistant 只返回通用准备中文案，DemoChat 保留管理员侧索引/上传指引。欢迎语、列表、管理上线和 Chat 共享 Gateway 的策略就绪判断。
 - Assistant Chat 会在创建 `StreamingResponse` 前完成会话权限、知识库及 Active Index 可用性、策略、幂等和同会话并发检查；这些前置失败保持 HTTP JSON 错误，`accepted` 后的生成期失败才使用 SSE `error`。
 - Assistant Chat 的已预留请求由专用流响应持有；ASGI 发送失败或客户端断连时会在响应收口阶段幂等地将仍为 `RUNNING` 的请求及其关联消息/Trace 标记为取消，正常终态与幂等重放不会被改写。进程强制终止等无法执行收口的情况仍由遗留请求恢复命令处理。
@@ -129,10 +131,10 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 - 管理凭据下新增 `PATCH /api/v1/knowledge-bases/{id}`，请求只含公开 `description` 和必填 `expected_updated_at`；空白说明归一化为 `null`，过期版本返回 409 `KNOWLEDGE_BASE_UPDATE_CONFLICT` 及当前更新时间，删除中拒绝修改。成功返回完整 `KnowledgeBaseResponse`。该操作不创建任务、不改 Active Index/Chunk、不触发重建；外部 Assistant API 没有新增管理入口。
 - 管理凭据下提供 `GET /api/v1/knowledge-bases/{id}/assistant-config`（配置及 `ready`/`blockers`）、`PUT` 同路径（`revision`、`suggestions`）和 `PUT /api/v1/knowledge-bases/{id}/assistant-publication`（`revision`、`assistant_online`）。成功写入返回 `knowledge_id`、`assistant_online`、`suggestions` 和新 `revision`；外部 `/assistant/*` 不增加管理接口，公开欢迎响应结构不变。
-- 每条推荐问题去除首尾空白后为 4 至 200 字，最多三条，NFKC、忽略大小写/空白及末尾问号后不得重复。下线库可保存 0～3 条，线上库必须保留三条；上线检查完整性和当前执行策略的就绪条件。缺失问题或运行未就绪返回 409，文本校验失败返回 422。
+- 每条推荐问题去除首尾空白后为 4 至 200 字，最多三条，NFKC、忽略大小写/空白及末尾问号后不得重复。下线库可保存 0～3 条，线上库必须保留三条；上线检查完整性、当前执行策略，以及活动索引全部 RAG 文档理解已确认。缺失问题或任一运行/审核条件未就绪返回 409，文本校验失败返回 422。
 - `AssistantConfiguration` 在同一事务内锁定知识库、检查修订和执行写入；上线就绪检查复用该事务连接。冲突返回 409 `ASSISTANT_CONFIG_CONFLICT`，需重新加载；下线不查询运行就绪，问题保存不隐式切换上线状态。删除中的知识库拒绝配置写入。
 - 不建立审批状态机或冻结运行版本；管理员通过管理 Chat 试问后确认上线，修改线上问题立即生效。索引、模型和 Profile 调整后由管理员重新试问；需要检查期间停止对外时先下线。下线阻止后续入口访问，不承诺撤回已经发送或缓存的内容，也不主动中断已建立的流。
-- 使用方法：管理台“知识库”→ 点击目标库 → “Assistant 上线与推荐问题”→ 填写并保存 → 分别试问并人工检查 → “检查就绪”→ “确认上线”。正式部署前执行 Alembic `upgrade head` 至 `0043`，再更新后端和前端。
+- 使用方法：管理台“文档”→ 对活动索引生成/补齐 RAG 理解并逐份确认 → 管理 Chat 试问 → “知识库”→ “Assistant 上线与推荐问题”→ 填写并保存三条问题 → “检查就绪”→ “确认上线”。正式部署前执行 Alembic `upgrade head` 至 `0046`，再更新后端和前端。
 
 
 ## Assistant 回答优化（管理侧）

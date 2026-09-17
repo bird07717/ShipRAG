@@ -546,6 +546,7 @@ PDF 直接解析入库，不做 PDF→DOCX 转换：pdf2docx/LibreOffice 转换�
 ### 影响
 
 准入闸门、自动恢复、监控指标与文档均以 RAG_ONLY 为前提；Support 代码与测试保持可编译可回归，但不作为容量或时限验收对象。V5 将原 `app.rag.doc_router` 的共享决策代码移至 `app.support.document_routing_policy`，RAG 不再导入；这属于冻结和隔离，不代表删除 Support 数据、接口或数据库字段。
+
 ## ADR-0022：图片级解码失败降级为跳过告警，同文档同错误构建重试上限 2 次
 
 - 状态：已接受（2026-09-16 实施）
@@ -568,3 +569,49 @@ PDF 直接解析入库，不做 PDF→DOCX 转换：pdf2docx/LibreOffice 转换�
 ### 影响
 
 `index_document.status` 新增 `SKIPPED` 值（VARCHAR 列，无迁移）。解析器修订号不升级：既有 READY 结果未受本缺陷影响（带缩写滤镜的 PDF 从未成功入库），修复只影响此前失败的文档。跳过文档进入成品索引的语义为"部分索引"：激活后检索不覆盖该文档，由告警驱动人工修复重传。若全部文档被跳过，构建失败（"索引存在未完成文档"）。
+
+## ADR-0023：Assistant 上线要求活动索引的 RAG 文档理解全部确认
+
+- 状态：已接受（2026-09-17 本地实施）
+- 日期：2026-09-17
+- 影响范围：Assistant 管理发布、公开知识库就绪态、欢迎语与问答前置检查
+- 关联模块：`backend/app/gateway/repository.py`、`assistant/configuration.py`、`KnowledgeAssistantSettings.vue`
+- 扩展：ADR-0009 的“当前策略就绪”上线条件
+
+### 背景
+
+RAG V2 同时使用 Chunk 和文档理解卡片进行文档级召回。索引可正常检索不代表自动生成的卡片已经过人工核对；如果允许卡片缺失、失败、过期、拒绝或仍为 `AUTO` 的知识库直接对外，会把未审核的文档路由元数据带入正式 Assistant。
+
+### 决策
+
+Assistant 上线与持续对外可用必须满足活动索引中全部有效文档的 RAG 文档理解已确认。有效文档定义为同知识库、活动索引中 `index_document.status='READY'` 且 `document_source.status='STORED'` 的文档；合格卡片必须匹配当前 Schema，且为 `generation_status='READY'`、`review_status='CONFIRMED'`。零份有效文档同样不满足门禁。
+
+该条件并入 `assistant_runtime_blockers`，由管理发布、公开知识库列表、欢迎语和 Chat 统一复用。它不并入通用 `get_readiness()` 或引擎策略更新，因此管理员仍可在独立 DemoChat 中生成、审核和验证未上线内容。已上线后发生状态漂移时不自动改写 `assistant_online`，而是动态返回 `ready=false` 并拒绝新欢迎语/问答；全部确认后自动恢复，避免隐藏的发布状态写入和额外状态机。
+
+### 取舍与实施
+
+该门禁提高正式对外文档选择的可控性，但新增知识库、切换索引和显式重生成卡片都必须完成逐份确认，运营步骤增加。Assistant 列表当前按库计算完整就绪态，新增聚合查询仍保持线性查询规模；知识库扩展到数十个或列表频率显著上升时按既有已知问题评估批量快照或短缓存。外部 API 路径和字段不变，仅扩展 `ready` 语义；无新迁移或环境变量，依赖既有 `0046` 卡片结构。
+
+## ADR-0024：索引构建重试与中止改为人工决策，删除按对象前缀整清
+
+- 状态：已接受（2026-09-17 实施，待生产部署）
+- 日期：2026-09-17
+- 影响范围：索引构建管线、任务取消、索引状态机、GC 与单索引删除、任务记录保留
+- 关联模块：`backend/app/ingestion/pipeline.py`、`tasks/ingestion.py`、`tasks/recovery.py`、`services/ingestion.py`、`ingestion/repository.py`、`api/ingestion.py`、`tasks/repository.py`、迁移 `0047`、`frontend/src/views/IndexBuildView.vue`
+- 取代：自动 followup 重试机制（原 `create_followup_build_if_needed` 三处触发点全部移除）
+
+### 背景
+
+自动 followup 在 REUSE 只认活动索引的机制下意味着每轮全额模型成本，且管理员无知情权：VDR600 三轮全量空转、51% 构建无法停止是两次实际损失。构建运行中没有任何中止手段，坏文档只能烧完整库；失败索引的删除依赖资产记录逐个清理，硬崩溃遗留的无记录孤儿对象（v43 事故实证）无法回收。
+
+### 决策
+
+1. **失败即停**：构建失败（含 worker 崩溃后的孤儿回收）不再自动排 followup。`rebuild_required` 在失败/取消时重新置位，作为唯一"待重建"事实源由管理台徽标持续提示；重试由管理员通过索引管理页"重建"按钮触发（后端 `POST /indexes/{id}/retry` 原有端点，白名单扩至 `CANCELLED`）。ADR-0022 的同文档同错误 2 次跳过熔断保留，计数由手动重试推进，第 3 次构建自动跳过坏文档完成其余。
+2. **运行可中止**：INDEX_BUILD 接入既有协作取消（`POST /tasks/{id}/cancel` 白名单扩容）。取消是任务行终态转换，构建循环在文档边界轮询（`_update_task` 带 `status IN ('QUEUED','RUNNING')` 守卫，进度心跳不会把 CANCELLED 擦回 RUNNING）；排队期取消在管线入口短路，不消耗模型调用；激活事务一旦开始不中断。索引与未处理文档落 `CANCELLED` 终态（迁移 `0047` 同时补上 ADR-0022 遗漏的 `index_document` `SKIPPED` 约束值——该路径此前从未执行，一触发即会撞 CHECK 约束崩溃）。
+3. **CANCELLED 与 FAILED 同权**：可删除（GC 保留策略同样适用）、可重试；CANCELLED 文档不进失败计数（计数器过滤 `status='FAILED'`），手动重建不被取消历史惩罚。冻结会话无风险——取消的构建从未激活，不可能被指针引用。
+4. **删除按前缀整清**：图片对象键结构 `indexes/{index_id}/documents/...` 天然按索引前缀组织，单索引删除与 GC 改为标记 DELETING 后按前缀扫删全部对象再删数据库行。不依赖资产记录，硬崩溃孤儿一并清除；中途失败索引停留 DELETING 由 GC 自愈重试。文档原件与 `document_source` 不受索引删除影响。
+5. **任务记录保留**：`task_record_retention_days=90`（0=永久），周期 GC 扫描修剪终态超期记录，每库保底最新 10 条，活动记录绝不动。
+
+### 取舍与实施
+
+瞬态故障（如 embedding 短暂不可用）不再自愈，需人工点一次重试——管理台有失败通知与徽标，可预测成本优于自动空转。手动重试推进熔断计数意味着跳过坏文档需要管理员点两次"重建"，按钮文案明确提示该语义。"停止"的粒度是文档边界：正在处理的文档（OCR 重的可能分钟级）会完成，其余立即停止。二期候选：REUSE 来源放开到 CANCELLED 索引实现真断点续跑（同哈希同修订才复用，构造上安全），需单独立 ADR 评估"只信生产验证结果"不变量的放宽。

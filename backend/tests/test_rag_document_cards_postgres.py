@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.common.errors import ApiError
 from app.core.config import Settings
+from app.gateway.repository import GatewayRepository
 from app.ingestion.embedding import FakeEmbeddingProvider
 from app.ingestion.repository import IngestionRepository
 from app.rag.document_card_repository import DocumentCardRepository
@@ -272,6 +273,35 @@ async def test_readiness_and_document_soft_delete_remove_cards() -> None:
                 )
                 == 0
             )
+
+
+async def test_assistant_gate_requires_every_active_document_card_to_be_confirmed() -> None:
+    async with _fixture() as (engine, knowledge_id, index_id, document_ids):
+        settings = _settings()
+        cards = DocumentCardRepository(engine, settings)
+        gateway = GatewayRepository(engine, settings)
+
+        assert await gateway._assistant_rag_understanding_blockers(knowledge_id) == [
+            "RAG 文档理解未全部确认：已确认 0/2 份；缺失 2 份"
+        ]
+
+        for document_id in document_ids:
+            await _save(cards, knowledge_id, index_id, document_id)
+        assert await gateway._assistant_rag_understanding_blockers(knowledge_id) == [
+            "RAG 文档理解未全部确认：已确认 0/2 份；待人工确认 2 份"
+        ]
+
+        for document_id in document_ids:
+            card = await cards.get_card(knowledge_id, index_id, document_id)
+            assert card is not None
+            await cards.review_card(
+                knowledge_id=knowledge_id,
+                index_id=index_id,
+                document_id=document_id,
+                expected_revision=card["revision"],
+                review_status="CONFIRMED",
+            )
+        assert await gateway._assistant_rag_understanding_blockers(knowledge_id) == []
 
 
 async def test_online_card_search_is_scoped_and_excludes_rejected_cards() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -405,8 +406,16 @@ class DocumentCardRepository:
         assert card is not None
         return card
 
-    async def readiness(self, knowledge_id: UUID, index_id: UUID) -> dict[str, Any]:
-        async with self.engine.connect() as connection:
+    async def readiness(
+        self,
+        knowledge_id: UUID,
+        index_id: UUID,
+        *,
+        connection: AsyncConnection | None = None,
+    ) -> dict[str, Any]:
+        async with (
+            self.engine.connect() if connection is None else nullcontext(connection)
+        ) as connection:
             row = (
                 (
                     await connection.execute(

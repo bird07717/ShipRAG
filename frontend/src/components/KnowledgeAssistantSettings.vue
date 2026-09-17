@@ -197,7 +197,7 @@ onUnmounted(() => { mounted = false; controller?.abort(); });
         <el-button :disabled="busy || testing" @click="reload">重新加载配置</el-button>
       </div>
     </div>
-    <p class="muted">维护该知识库的三条快捷提问，试问检查回答后确认上线。已上线时保存立即生效。</p>
+    <p class="muted">维护该知识库的三条快捷提问。活动索引中的 RAG 文档理解须全部人工确认，试问检查回答后才能上线；已上线时保存立即生效。</p>
     <el-alert
       v-if="error"
       :title="error"

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.gateway.models import ChatEngine, ConversationMode, ExecutionPolicy, ResolvedPolicy
+from app.rag.document_card_repository import DocumentCardRepository
 from app.rag.model_providers import environment_api_key
 
 _DEFAULT_FALLBACK_CONDITIONS = ("NO_MATCH",)
@@ -287,6 +288,69 @@ class GatewayRepository:
         blockers.extend(str(item) for item in readiness["rag"]["blockers"])
         return list(dict.fromkeys(blockers))
 
+    async def _assistant_rag_understanding_blockers(
+        self,
+        knowledge_id: UUID,
+        *,
+        connection: AsyncConnection | None = None,
+    ) -> list[str]:
+        """Require every active-index document to have a confirmed current card.
+
+        This is an Assistant publication/runtime boundary only.  Internal RAG
+        preview remains available while administrators generate and review the
+        cards needed to satisfy this gate.
+        """
+        async with (
+            self.engine.connect() if connection is None else nullcontext(connection)
+        ) as connection:
+            index_id = await connection.scalar(
+                text(
+                    "SELECT COALESCE(rag_active_index_id, active_index_id) "
+                    "FROM knowledge_base WHERE id = :knowledge_id"
+                ),
+                {"knowledge_id": knowledge_id},
+            )
+            if index_id is None:
+                return ["RAG 文档理解没有可确认文档"]
+            readiness = await DocumentCardRepository(self.engine, self.settings).readiness(
+                knowledge_id,
+                UUID(str(index_id)),
+                connection=connection,
+            )
+
+        counts = {
+            key: int(readiness[key] or 0)
+            for key in (
+                "expected_count",
+                "confirmed_count",
+                "missing_count",
+                "failed_count",
+                "stale_count",
+                "rejected_count",
+                "auto_count",
+            )
+        }
+        if counts["expected_count"] == 0:
+            return ["RAG 文档理解没有可确认文档"]
+        if counts["confirmed_count"] == counts["expected_count"]:
+            return []
+
+        details: list[str] = []
+        for key, label in (
+            ("missing_count", "缺失"),
+            ("failed_count", "生成失败"),
+            ("stale_count", "已过期"),
+            ("rejected_count", "已拒绝"),
+            ("auto_count", "待人工确认"),
+        ):
+            if counts[key]:
+                details.append(f"{label} {counts[key]} 份")
+        suffix = f"；{'，'.join(details)}" if details else ""
+        return [
+            "RAG 文档理解未全部确认："
+            f"已确认 {counts['confirmed_count']}/{counts['expected_count']} 份{suffix}"
+        ]
+
     async def assistant_runtime_blockers(
         self,
         knowledge_id: UUID,
@@ -306,7 +370,11 @@ class GatewayRepository:
                 knowledge_id=knowledge_id, conversation_id=conversation_id, connection=connection
             )
             readiness = await self.get_readiness(knowledge_id, connection=connection)
-        return self._policy_blockers(policy.policy, readiness)
+        blockers = self._policy_blockers(policy.policy, readiness)
+        blockers.extend(
+            await self._assistant_rag_understanding_blockers(knowledge_id, connection=connection)
+        )
+        return list(dict.fromkeys(blockers))
 
     async def update_policy(
         self, knowledge_id: UUID, execution_policy: ExecutionPolicy

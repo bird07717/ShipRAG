@@ -275,7 +275,7 @@ curl -sS "${SHIPDEMO_BASE_URL}/api/v1/assistant/knowledge-bases" \
 | `items[].knowledge_id` | UUID string | 是 | 知识库唯一标识。 | 保存为字符串，供欢迎语、问答和资源接口使用。 |
 | `items[].name` | string | 是 | 知识库名称。 | 用于页面展示。 |
 | `items[].description` | string/null | 否 | 对外公开的知识库专业范围说明；管理员修改后，后续列表查询返回新值。 | 用于选库和范围展示；为空时隐藏，不要长期缓存。 |
-| `items[].ready` | boolean | 是 | 当前运行策略所需索引、模型、Prompt 等依赖是否完整就绪。 | 仅允许选择 `true` 的知识库。 |
+| `items[].ready` | boolean | 是 | 当前索引、模型及平台侧内容理解审核等上线前置条件是否完整就绪。 | 仅允许选择 `true` 的知识库。 |
 
 失败响应示例：
 

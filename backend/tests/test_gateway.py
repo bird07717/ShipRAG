@@ -64,12 +64,14 @@ class _AssistantReadinessRepository(GatewayRepository):
         row: dict[str, Any] | None,
         *,
         blockers: list[str] | None = None,
+        understanding_blockers: list[str] | None = None,
     ) -> None:
         super().__init__(
             _AssistantReadinessEngine(row),  # type: ignore[arg-type]
             None,  # type: ignore[arg-type]
         )
         self.blockers = blockers or []
+        self.understanding_blockers = understanding_blockers or []
 
     async def resolve_policy(
         self, *, knowledge_id: UUID, conversation_id: UUID | None
@@ -87,6 +89,12 @@ class _AssistantReadinessRepository(GatewayRepository):
             "support": {"ready": True, "blockers": []},
             "rag": {"ready": not self.blockers, "blockers": self.blockers},
         }
+
+    async def _assistant_rag_understanding_blockers(
+        self, knowledge_id: UUID, *, connection: Any = None
+    ) -> list[str]:
+        del knowledge_id, connection
+        return self.understanding_blockers
 
 
 class _AssistantCatalogResult:
@@ -142,6 +150,12 @@ class _AssistantCatalogRepository(GatewayRepository):
             "support": {"ready": True, "blockers": []},
             "rag": {"ready": self.ready, "blockers": blockers},
         }
+
+    async def _assistant_rag_understanding_blockers(
+        self, knowledge_id: UUID, *, connection: Any = None
+    ) -> list[str]:
+        del knowledge_id, connection
+        return [] if self.ready else ["RAG 文档理解未全部确认"]
 
 
 class FakeSupport:
@@ -329,6 +343,26 @@ async def test_assistant_readiness_rejects_policy_runtime_blockers() -> None:
 
     assert raised.value.code == "KNOWLEDGE_BASE_NOT_READY"
     assert raised.value.details == {"blockers": ["LLM 模型未启用"]}
+
+
+async def test_assistant_readiness_requires_confirmed_rag_understanding() -> None:
+    repository = _AssistantReadinessRepository(
+        {
+            "status": "ENABLED",
+            "assistant_online": True,
+            "active_index_id": uuid4(),
+            "index_status": "ACTIVE",
+        },
+        understanding_blockers=["RAG 文档理解未全部确认：已确认 1/2 份；待人工确认 1 份"],
+    )
+
+    with pytest.raises(ApiError) as raised:
+        await repository.ensure_assistant_knowledge_base_ready(knowledge_id=uuid4())
+
+    assert raised.value.code == "KNOWLEDGE_BASE_NOT_READY"
+    assert raised.value.details == {
+        "blockers": ["RAG 文档理解未全部确认：已确认 1/2 份；待人工确认 1 份"]
+    }
 
 
 async def test_assistant_catalog_filters_publication_and_uses_full_readiness() -> None:

@@ -53,6 +53,7 @@ describe("knowledge Assistant settings", () => {
     expect(publish).toHaveBeenCalledWith("kb-a", 1, true);
     expect(wrapper.text()).toContain("知识库已对外上线");
     expect(wrapper.emitted("changed")?.at(-1)?.[0]).toMatchObject({ knowledge_id: "kb-a", assistant_online: true });
+    expect(wrapper.text()).toContain("RAG 文档理解须全部人工确认");
   });
 
   it("blocks incomplete and duplicate questions but permits offline without runtime readiness", async () => {
