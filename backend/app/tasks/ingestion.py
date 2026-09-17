@@ -121,7 +121,7 @@ async def _run_index_task(index_id: UUID, task_id: UUID) -> dict[str, int | str]
         try:
             result = await pipeline.run(index_id, task_id)
         except Exception:
-            # ADR-0023：构建失败不再自动重试。rebuild_required 已由
+            # ADR-0024：构建失败不再自动重试。rebuild_required 已由
             # _mark_failed 重新置位，管理台以“待重建”提示，由管理员
             # 决定处置（修复文档后重建，或删除失败索引）。
             raise

@@ -41,7 +41,7 @@ DOCX_PARSER_NAME = "mammoth+ooxml"
 
 # 同一文档以同一错误连续导致构建失败的容许次数：达到上限后该文档在
 # 本轮构建中被跳过（SKIPPED），其余文档继续，避免坏文档拖垮整库。
-# 构建失败不再自动重试（ADR-0023）：失败计数由管理员手动重建推进，
+# 构建失败不再自动重试（ADR-0024）：失败计数由管理员手动重建推进，
 # 第 3 次构建起自动跳过该文档并完成其余文档。
 _MAX_SAME_ERROR_RETRIES = 2
 
@@ -80,7 +80,7 @@ class IndexPipeline:
     async def run(self, index_id: UUID, task_id: UUID) -> IndexBuildResult:
         index = await self._load_index(index_id)
         kb_id = UUID(str(index["kb_id"]))
-        # 协作取消（ADR-0023）：排队期被取消的任务在这里短路，索引与
+        # 协作取消（ADR-0024）：排队期被取消的任务在这里短路，索引与
         # 文档状态直接落 CANCELLED，不消耗任何模型调用。
         if await self._task_cancelled(task_id):
             await self._mark_cancelled(index_id)
@@ -1348,7 +1348,7 @@ class IndexPipeline:
         async with self.engine.begin() as connection:
             # 构建失败后知识库内容与活动索引不一致：重新置位
             # rebuild_required，管理台以“待重建”徽标持续提示，由管理员
-            # 决定修复文档后重建（ADR-0023：失败不自动重试）。
+            # 决定修复文档后重建（ADR-0024：失败不自动重试）。
             await connection.execute(
                 text(
                     """

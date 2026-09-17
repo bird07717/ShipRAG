@@ -519,6 +519,65 @@ async def test_retry_index_accepts_cancelled_index() -> None:
         assert task["status"] == "QUEUED"
 
 
+class _PointerRestoreRepository:
+    """Simulates delete_index returning False: a live pointer appeared and
+    the repository restored the index instead of destroying protected data."""
+
+    async def get_index(self, index_id: UUID) -> dict[str, Any]:
+        return {"id": str(index_id), "status": "DEPRECATED"}
+
+    async def release_frozen_conversation_references(self, index_id: UUID) -> int:
+        return 0
+
+    async def mark_index_deleting(self, index_id: UUID) -> dict[str, Any] | None:
+        return {"id": str(index_id), "status": "DELETING"}
+
+    async def get_index_deletion_blockers(self, index_id: UUID) -> dict[str, Any]:
+        return {
+            "status": "DEPRECATED",
+            "active_index_pointer_count": 0,
+            "rag_active_pointer_count": 1,
+            "support_active_pointer_count": 0,
+            "support_active_release_count": 0,
+            "open_release_count": 0,
+            "active_task_count": 0,
+            "frozen_conversation_count": 0,
+        }
+
+    async def delete_index(self, index_id: UUID) -> bool:
+        return False
+
+
+class _ListingMinio:
+    def __init__(self) -> None:
+        self.removed: list[str] = []
+
+    def list_objects(self, bucket: str, prefix: str | None = None, recursive: bool = False):
+        return ["indexes/keep/me.png"]
+
+    def remove_object(self, bucket: str, object_key: str) -> None:
+        self.removed.append(object_key)
+
+
+async def test_delete_blocked_by_pointer_keeps_minio_objects_intact() -> None:
+    """删除被指针恢复拦下时，MinIO 对象必须原封不动——前缀扫删只在
+    数据库行物理删除成功之后执行，否则被保护的索引会丢掉全部图片。"""
+    from app.common.errors import ApiError
+    from app.services.ingestion import IngestionService
+
+    minio = _ListingMinio()
+    service = IngestionService(
+        cast(Any, _PointerRestoreRepository()),
+        cast(Any, minio),
+        Settings(_env_file=None, app_env="test", m2_embedding_provider="fake"),
+    )
+
+    with pytest.raises(ApiError):
+        await service.delete_index(uuid4(), force=False)
+
+    assert minio.removed == []
+
+
 async def test_prune_terminal_tasks_respects_window_and_floor() -> None:
     """终态超期记录被修剪；每库最新 10 条保底；活动记录绝不动。"""
     async with _knowledge_base() as (engine, knowledge_id):
@@ -585,3 +644,37 @@ async def test_prune_terminal_tasks_respects_window_and_floor() -> None:
             engine, "SELECT status FROM task_record WHERE id = :id", id=active_id
         )
         assert active["status"] == "RUNNING"
+
+
+async def test_recovery_settles_cancelled_task_whose_worker_died() -> None:
+    """取消请求落地后执行进程死亡：索引与文档按取消语义落 CANCELLED，
+    rebuild_required 置位，任务行保持终态——不留僵尸 BUILDING 索引。"""
+    async with _knowledge_base() as (engine, knowledge_id):
+        index_id = await _create_index(engine, knowledge_id, 1, "BUILDING")
+        task_id = await _create_task(
+            engine,
+            task_type="INDEX_BUILD",
+            knowledge_id=knowledge_id,
+            index_id=index_id,
+            status="CANCELLED",
+        )
+        repository = IngestionRepository(engine, _settings())
+
+        settled = await repository.mark_abandoned_index_build_failed(
+            index_id, task_id, rq_status="missing"
+        )
+
+        assert settled is True
+        index = await _fetch_one(
+            engine,
+            "SELECT status, error_code FROM knowledge_index WHERE id = :id",
+            id=index_id,
+        )
+        assert index["status"] == "CANCELLED"
+        assert index["error_code"] == "CANCELLED"
+        task = await _fetch_one(engine, "SELECT status FROM task_record WHERE id = :id", id=task_id)
+        assert task["status"] == "CANCELLED"  # 任务终态不被改写
+        kb = await _fetch_one(
+            engine, "SELECT rebuild_required FROM knowledge_base WHERE id = :id", id=knowledge_id
+        )
+        assert kb["rebuild_required"] is True

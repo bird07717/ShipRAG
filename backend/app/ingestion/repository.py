@@ -1699,11 +1699,11 @@ class IngestionRepository:
             result = await connection.execute(
                 text(
                     """
-                    SELECT t.id AS task_id, t.index_id, i.kb_id
+                    SELECT t.id AS task_id, t.index_id, i.kb_id, t.status AS task_status
                     FROM task_record t
                     JOIN knowledge_index i ON i.id = t.index_id
                     WHERE t.task_type = 'INDEX_BUILD'
-                      AND t.status IN ('QUEUED', 'RUNNING')
+                      AND t.status IN ('QUEUED', 'RUNNING', 'CANCELLED')
                       AND i.status = 'BUILDING'
                     ORDER BY t.created_at
                     """
@@ -1736,10 +1736,47 @@ class IngestionRepository:
             state = state_result.mappings().one_or_none()
             if (
                 state is None
-                or state["task_status"] not in {"QUEUED", "RUNNING"}
+                or state["task_status"] not in {"QUEUED", "RUNNING", "CANCELLED"}
                 or state["index_status"] != "BUILDING"
             ):
                 return False
+            # 任务行已是 CANCELLED（管理员请求取消后执行进程死亡，构建
+            # 循环没来得及在文档边界收尾）：索引按取消语义落 CANCELLED
+            # 而不是 FAILED，任务行保持终态不动。
+            if state["task_status"] == "CANCELLED":
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE index_document
+                        SET status = 'CANCELLED', error_code = 'CANCELLED',
+                            error_message = '用户中止构建', finished_at = now()
+                        WHERE index_id = :index_id AND status NOT IN ('READY', 'SKIPPED')
+                        """
+                    ),
+                    {"index_id": index_id},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE knowledge_index
+                        SET status = 'CANCELLED', error_code = 'CANCELLED',
+                            error_message = '用户中止构建', finished_at = now()
+                        WHERE id = :index_id AND status = 'BUILDING'
+                        """
+                    ),
+                    {"index_id": index_id},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE knowledge_base
+                        SET rebuild_required = true, updated_at = now()
+                        WHERE id = (SELECT kb_id FROM knowledge_index WHERE id = :index_id)
+                        """
+                    ),
+                    {"index_id": index_id},
+                )
+                return True
             parameters = {
                 "index_id": index_id,
                 "task_id": task_id,
@@ -1769,7 +1806,7 @@ class IngestionRepository:
                 parameters,
             )
             # 中断的构建同样意味着知识库内容与活动索引不一致：置位
-            # rebuild_required 让管理台持续提示待重建（ADR-0023：不自动
+            # rebuild_required 让管理台持续提示待重建（ADR-0024：不自动
             # 重试，由管理员决定处置）。
             await connection.execute(
                 text(

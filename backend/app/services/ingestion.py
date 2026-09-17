@@ -408,15 +408,17 @@ class IngestionService:
                 marked = await self.repository.mark_index_deleting(index_id)
                 if marked is None:
                     continue
-            # 先按前缀清理 MinIO 对象（含硬崩溃遗留的孤儿），再物理删除
-            # 数据库行；中途失败则索引停留在 DELETING，下一轮 GC 重试。
-            await self._remove_index_objects(index_id)
             deleted = await self.repository.delete_index(index_id)
             if not deleted:
                 # A pointer appeared after the DELETING mark; the repository
                 # restored the index instead of destroying protected data.
+                # MinIO objects must still be intact for that restore.
                 skipped_ids.append(str(index_id))
                 continue
+            # 数据库行已物理删除后按前缀整清 MinIO 对象：记录资产与硬
+            # 崩溃遗留的孤儿一并清除。顺序不能颠倒——先扫对象会在指针
+            # 恢复路径上留下无图片的僵尸索引。
+            await self._remove_index_objects(index_id)
             deleted_ids.append(str(index_id))
 
         return {
@@ -462,14 +464,15 @@ class IngestionService:
                 blockers = await self.repository.get_index_deletion_blockers(index_id)
                 self._raise_index_delete_blocked(blockers)
 
-        # 前缀整删先于数据库删除：按 indexes/{index_id}/ 前缀清除全部
-        # 图片对象（含无记录孤儿），失败时索引停留 DELETING 由 GC 自愈。
-        await self._remove_index_objects(index_id)
         deleted = await self.repository.delete_index(index_id)
         if not deleted:
             self._raise_index_delete_blocked(
                 await self.repository.get_index_deletion_blockers(index_id)
             )
+        # 数据库行删除成功后才按前缀整清 MinIO 对象：若删除被指针恢复
+        # 拦下（delete 返回 False），对象必须原封不动留给被保护的索引。
+        # 该索引下的记录资产与历史孤儿对象（无 DB 行）一并清除。
+        await self._remove_index_objects(index_id)
         return {
             "deleted_index_ids": [str(index_id)],
             "deleted_count": 1,
@@ -558,9 +561,12 @@ class IngestionService:
         Image objects are keyed ``indexes/{index_id}/documents/...`` so a
         prefix sweep removes both recorded assets and any orphan a previous
         crash left behind — deletion no longer depends on asset rows.  The
-        sweep runs before the DB delete: if it fails midway the index stays
-        DELETING and the next GC pass retries; already-removed objects are
-        idempotent no-ops.
+        sweep must only run AFTER the DB row is physically gone: if the
+        repository restores the index instead of deleting it (a live
+        pointer appeared), the objects must stay intact for the protected
+        index.  A crash between the DB delete and this sweep leaves objects
+        behind; they are inert (no rows reference them) and can be cleaned
+        by a future bucket reconciliation pass.
         """
         prefix = f"indexes/{index_id}/"
 
