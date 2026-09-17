@@ -215,6 +215,11 @@ class Settings(BaseSettings):
     # Failed-request log retention; 0 disables pruning (keep forever).
     request_error_log_retention_days: int = 30
 
+    # Terminal task-record retention; 0 disables pruning (keep forever).
+    # SUCCEEDED/FAILED/CANCELLED rows older than the window are pruned by the
+    # periodic GC sweep, keeping a small per-KB floor of newest records.
+    task_record_retention_days: int = 90
+
     siliconflow_embedding_model: str = "Qwen/Qwen3-VL-Embedding-8B"
     siliconflow_rerank_model: str = "Qwen/Qwen3-VL-Reranker-8B"
     siliconflow_ocr_model: str = "deepseek-ai/DeepSeek-OCR"
@@ -296,6 +301,13 @@ class Settings(BaseSettings):
     def validate_request_error_log_retention_days(cls, value: int) -> int:
         if not 0 <= value <= 3_650:
             raise ValueError("request error log retention days must be between 0 and 3650")
+        return value
+
+    @field_validator("task_record_retention_days")
+    @classmethod
+    def validate_task_record_retention_days(cls, value: int) -> int:
+        if not 0 <= value <= 3_650:
+            raise ValueError("task record retention days must be between 0 and 3650")
         return value
 
     @field_validator("rq_index_job_timeout_seconds")

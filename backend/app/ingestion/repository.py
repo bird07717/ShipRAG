@@ -1250,33 +1250,6 @@ class IngestionRepository:
             {"kb_id": knowledge_id},
         )
 
-    async def create_followup_build_if_needed(self, knowledge_id: UUID) -> BuildReference | None:
-        async with self.engine.begin() as connection:
-            kb_result = await connection.execute(
-                text("SELECT rebuild_required FROM knowledge_base WHERE id = :id FOR UPDATE"),
-                {"id": knowledge_id},
-            )
-            rebuild_required = kb_result.scalar_one_or_none()
-            if rebuild_required is not True:
-                return None
-            building_result = await connection.execute(
-                text(
-                    """
-                    SELECT id FROM knowledge_index
-                    WHERE kb_id = :kb_id AND status = 'BUILDING'
-                    """
-                ),
-                {"kb_id": knowledge_id},
-            )
-            if building_result.scalar_one_or_none() is not None:
-                return None
-            return await self._create_build_locked(
-                connection,
-                knowledge_id,
-                "DOCUMENT_CHANGED",
-                activate_on_success=False,
-            )
-
     async def get_active_index_id(self, knowledge_id: UUID) -> UUID | None:
         async with self.engine.connect() as connection:
             result = await connection.execute(
@@ -1700,8 +1673,8 @@ class IngestionRepository:
             failed = failed_result.mappings().one_or_none()
             if failed is None:
                 raise ApiError("INDEX_NOT_FOUND", "索引不存在", 404)
-            if failed["status"] != "FAILED":
-                raise ApiError("INDEX_NOT_READY", "只有 FAILED 索引可以重试", 409)
+            if failed["status"] not in ("FAILED", "CANCELLED"):
+                raise ApiError("INDEX_NOT_READY", "只有 FAILED 或 CANCELLED 索引可以重试", 409)
             if failed["kb_status"] != "ENABLED":
                 raise ApiError("FORBIDDEN", "知识库已停用", 403)
             return await self._request_build_locked(
@@ -1791,6 +1764,19 @@ class IngestionRepository:
                     SET status = 'FAILED', error_code = :error_code,
                         error_message = :error_message, finished_at = now()
                     WHERE id = :index_id AND status = 'BUILDING'
+                    """
+                ),
+                parameters,
+            )
+            # 中断的构建同样意味着知识库内容与活动索引不一致：置位
+            # rebuild_required 让管理台持续提示待重建（ADR-0023：不自动
+            # 重试，由管理员决定处置）。
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_base
+                    SET rebuild_required = true, updated_at = now()
+                    WHERE id = (SELECT kb_id FROM knowledge_index WHERE id = :index_id)
                     """
                 ),
                 parameters,
@@ -1897,7 +1883,7 @@ class IngestionRepository:
     async def find_deletable_indexes(
         self, retention_count: int, retention_days: int
     ) -> list[GarbageCollectionItem]:
-        """Find DEPRECATED or FAILED indexes that exceed the retention policy."""
+        """Find DEPRECATED, FAILED or CANCELLED indexes that exceed the retention policy."""
         async with self.engine.connect() as connection:
             result = await connection.execute(
                 text(
@@ -1908,7 +1894,7 @@ class IngestionRepository:
                                    PARTITION BY kb_id ORDER BY version DESC
                                ) AS rn
                         FROM knowledge_index
-                        WHERE status IN ('DEPRECATED', 'FAILED')
+                        WHERE status IN ('DEPRECATED', 'FAILED', 'CANCELLED')
                     )
                     SELECT id, kb_id, version, status
                     FROM ranked

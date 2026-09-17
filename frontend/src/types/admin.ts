@@ -77,6 +77,7 @@ export interface GarbageCollectionResult {
   skipped_count?: number;
   purged_conversation_ids?: string[];
   purged_conversation_count?: number;
+  pruned_task_count?: number;
   released_conversation_count?: number;
 }
 

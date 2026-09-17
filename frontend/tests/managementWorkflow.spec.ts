@@ -127,4 +127,109 @@ describe("RAG index operations workspace", () => {
     expect(wrapper.text()).toContain("已处理 5/12 份文档");
     expect(wrapper.text()).not.toContain("0 份文档 · 0 个切片");
   });
+
+  it("stops a running build cooperatively through the task cancel API", async () => {
+    adminStore.indexes = [{ ...index, status: "BUILDING" }];
+    adminStore.latestIndexTasks = {
+      [index.id]: {
+        id: "task-building", status: "RUNNING", stage: "PARSING", progress: 10, attempt: 1,
+        index_id: index.id, error_code: null, error_message: null,
+        metadata: { total_documents: 3, current_document_position: 1 },
+        created_at: index.created_at, updated_at: index.created_at,
+      },
+    };
+    const cancel = vi.spyOn(adminApi, "cancelTask").mockResolvedValue({
+      ...adminStore.latestIndexTasks[index.id]!,
+      task_type: "INDEX_BUILD",
+      status: "CANCELLED",
+      kb_id: "kb-1",
+      document_id: null,
+      started_at: index.created_at,
+      finished_at: index.finished_at,
+    } as const);
+
+    const wrapper = mount(IndexBuildView, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+
+    const button = wrapper.findAll("button").find((b) => b.text() === "停止");
+    expect(button).toBeDefined();
+    await button!.trigger("click");
+    await flushPromises();
+
+    expect(cancel).toHaveBeenCalledWith("task-building");
+    expect(adminStore.notice).toContain("已请求停止构建");
+  });
+
+  it("retries a cancelled index through an explicit confirmation", async () => {
+    const { ElMessageBox } = await import("element-plus");
+    const confirm = vi.spyOn(ElMessageBox, "confirm").mockResolvedValue({
+      action: "confirm",
+    } as never);
+    adminStore.indexes = [{ ...index, status: "CANCELLED" }];
+    const retry = vi.spyOn(adminApi, "retryIndex").mockResolvedValue({
+      requested: true,
+      coalesced: false,
+      index_id: "idx-3",
+      task_id: "task-retry",
+      rebuild_required: false,
+    });
+    const loadDetails = vi.spyOn(adminApi, "listIndexes").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listKnowledgeBases").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listDocuments").mockResolvedValue([]);
+
+    const wrapper = mount(IndexBuildView, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+
+    const button = wrapper.findAll("button").find((b) => b.text() === "重建");
+    expect(button).toBeDefined();
+    await button!.trigger("click");
+    await flushPromises();
+
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("自动跳过该文档"),
+      "重建索引",
+      expect.objectContaining({ confirmButtonText: "提交重建" }),
+    );
+    expect(retry).toHaveBeenCalledWith(index.id);
+    expect(adminStore.notice).toContain("完成后需明确设为当前 RAG 索引");
+    expect(loadDetails).toHaveBeenCalled();
+  });
+
+  it("offers deletion for cancelled and failed indexes like deprecated ones", async () => {
+    adminStore.indexes = [
+      { ...index, id: "idx-cancelled", status: "CANCELLED" },
+      { ...index, id: "idx-failed", status: "FAILED" },
+    ];
+
+    const wrapper = mount(IndexBuildView, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+
+    const deleteButtons = wrapper.findAll("button").filter((b) => b.text() === "删除");
+    expect(deleteButtons).toHaveLength(2);
+  });
+
+  it("surfaces the rebuild-required badge when documents diverge from the active index", async () => {
+    adminStore.knowledgeBases = [
+      {
+        id: "kb-1",
+        name: "产品库",
+        description: null,
+        status: "ENABLED",
+        assistant_online: false,
+        runtime_state: "UPDATING",
+        active_index_id: "idx-2",
+        building_index_id: null,
+        rebuild_required: true,
+        document_count: 2,
+        active_chunk_count: 10,
+        created_at: index.created_at,
+        updated_at: index.created_at,
+      },
+    ];
+
+    const wrapper = mount(IndexBuildView, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("文档有变更待重建");
+  });
 });

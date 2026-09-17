@@ -968,6 +968,54 @@ export const adminStore = reactive({
     }, "RAG 候选索引构建已提交；完成后需明确设为当前索引，Profile 将在后台单独生成");
   },
 
+  async retryIndexBuild(indexId: string): Promise<void> {
+    /* ADR-0023：失败/取消的索引由管理员手动重建。同一文档同一错误
+     * 失败 2 次后，下一次构建会自动跳过该文档并完成其余文档。 */
+    let confirmed = true;
+    try {
+      await ElMessageBox.confirm(
+        "将基于当前文档重新创建一次构建。" +
+          "同一文档以同一错误连续失败 2 次后，此次构建将自动跳过该文档并完成其余文档。",
+        "重建索引",
+        { type: "warning", confirmButtonText: "提交重建", cancelButtonText: "取消" },
+      );
+    } catch {
+      confirmed = false;
+    }
+    if (!confirmed) return;
+    await this.runAction(`retry-index:${indexId}`, async () => {
+      const build = await adminApi.retryIndex(indexId);
+      if (build.task_id) {
+        this.trackTask(
+          { task_id: build.task_id, task_type: "INDEX_BUILD", status: "QUEUED", replayed: false },
+          {
+            successMessage: "RAG 候选索引重建已完成，请检查后设为当前索引",
+            knowledgeId: this.selectedKnowledgeId,
+          },
+        );
+      }
+      await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
+    });
+    if (!this.error) {
+      this.notice = "重建已提交；完成后需明确设为当前 RAG 索引";
+    }
+  },
+
+  async cancelIndexBuild(indexId: string): Promise<void> {
+    /* 协作停止：后端把任务行落 CANCELLED，构建循环在文档边界轮询到
+     * 后收尾——正在处理的文档会完成，其余文档停止，索引落 CANCELLED。 */
+    const task = this.latestIndexTasks[indexId];
+    if (!task) {
+      this.error = "未找到该构建的任务记录，无法停止";
+      return;
+    }
+    await this.runAction(`task-cancel:${task.id}`, async () => {
+      const cancelled = await adminApi.cancelTask(task.id);
+      this.syncPolledTask(cancelled);
+      this.notice = "已请求停止构建；正在处理的文档完成后即停止";
+    });
+  },
+
   async refreshProfileDrafts(indexId: string): Promise<void> {
     await this.runAction(`refresh-profile:${indexId}`, async () => {
       const submission = await adminApi.refreshProfileDrafts(indexId);

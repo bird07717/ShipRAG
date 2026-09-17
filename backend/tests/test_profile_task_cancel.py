@@ -77,7 +77,6 @@ async def test_post_build_profile_task_is_linked_to_completed_rag_task(
             document_count=1,
             element_count=1,
             chunk_count=1,
-            followup_build=None,
         ),
         build_task_id,
     )

@@ -18,7 +18,7 @@ from app.ingestion.image_understanding import (
 )
 from app.ingestion.model_config import load_build_models
 from app.ingestion.pipeline import IndexBuildResult, IndexPipeline
-from app.ingestion.repository import BuildReference, IngestionRepository
+from app.ingestion.repository import IngestionRepository
 from app.tasks.repository import TaskRecordRepository
 
 logger = logging.getLogger(__name__)
@@ -41,11 +41,6 @@ def enqueue_index_build(settings: Settings, index_id: UUID, task_id: UUID) -> No
         connection.close()
 
 
-def _enqueue_followup(settings: Settings, followup: BuildReference | None) -> None:
-    if followup is not None and followup.index_id is not None and followup.task_id is not None:
-        enqueue_index_build(settings, followup.index_id, followup.task_id)
-
-
 async def _submit_post_build_profile(
     settings: Settings,
     resources: AppResources,
@@ -57,9 +52,6 @@ async def _submit_post_build_profile(
     Profile generation is best-effort: it never creates an index-bound
     candidate and a queue/model failure never fails the completed RAG build.
     """
-    if result.followup_build is not None:
-        return
-
     index = await IngestionRepository(resources.database, settings).get_index(result.index_id)
     knowledge_id = UUID(str(index["kb_id"]))
     try:
@@ -90,8 +82,6 @@ async def _submit_post_build_rag_cards(
     task_id: UUID,
 ) -> None:
     """Queue index-bound RAG cards without affecting build success."""
-    if result.followup_build is not None:
-        return
     try:
         from app.rag.document_card_repository import DocumentCardRepository
         from app.rag.document_card_service import DocumentCardService
@@ -131,16 +121,20 @@ async def _run_index_task(index_id: UUID, task_id: UUID) -> dict[str, int | str]
         try:
             result = await pipeline.run(index_id, task_id)
         except Exception:
-            repository = IngestionRepository(resources.database, settings)
-            index = await repository.get_index(index_id)
-            followup = await repository.create_followup_build_if_needed(UUID(str(index["kb_id"])))
-            _enqueue_followup(settings, followup)
+            # ADR-0023：构建失败不再自动重试。rebuild_required 已由
+            # _mark_failed 重新置位，管理台以“待重建”提示，由管理员
+            # 决定处置（修复文档后重建，或删除失败索引）。
             raise
+        if result.cancelled:
+            return {
+                "index_id": str(result.index_id),
+                "cancelled": True,
+            }
         await _submit_post_build_profile(settings, resources, result, task_id)
         await _submit_post_build_rag_cards(settings, resources, result, task_id)
-        _enqueue_followup(settings, result.followup_build)
         return {
             "index_id": str(result.index_id),
+            "cancelled": False,
             "document_count": result.document_count,
             "element_count": result.element_count,
             "chunk_count": result.chunk_count,

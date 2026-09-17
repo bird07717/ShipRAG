@@ -632,7 +632,6 @@ async def test_submit_post_build_profile_refreshes_when_intent_present() -> None
                 document_count=1,
                 element_count=1,
                 chunk_count=1,
-                followup_build=None,
             ),
             build_task_id,
         )
@@ -678,7 +677,6 @@ async def test_submit_post_build_profile_generates_without_intent() -> None:
                 document_count=1,
                 element_count=1,
                 chunk_count=1,
-                followup_build=None,
             ),
             build_task_id,
         )
@@ -732,7 +730,6 @@ async def test_submit_post_build_profile_generation_failure_never_fails_build(
                 document_count=1,
                 element_count=1,
                 chunk_count=1,
-                followup_build=None,
             ),
             build_task_id,
         )
@@ -748,67 +745,6 @@ async def test_submit_post_build_profile_generation_failure_never_fails_build(
         assert profile_task is not None
         assert profile_task["status"] == "FAILED"
         assert profile_task["error_code"] == "RuntimeError"
-
-
-async def test_submit_post_build_profile_defers_when_followup_build_exists() -> None:
-    from app.ingestion.repository import BuildReference
-
-    async with _knowledge_base() as (engine, knowledge_id, document_id):
-        assert document_id is not None
-        index_id = await _create_index(engine, knowledge_id, 1, "READY")
-        await _create_release(engine, knowledge_id, index_id)
-        build_task_id = await _create_task(
-            engine,
-            task_type="INDEX_BUILD",
-            knowledge_id=knowledge_id,
-            index_id=index_id,
-            status="SUCCEEDED",
-            metadata={"profile_refresh_after_build": True},
-        )
-        followup_index_id = await _create_index(engine, knowledge_id, 2, "BUILDING")
-        followup_task_id = await _create_task(
-            engine,
-            task_type="INDEX_BUILD",
-            knowledge_id=knowledge_id,
-            index_id=followup_index_id,
-        )
-        settings = _settings()
-
-        class _Resources:
-            database = engine
-
-        # A follow-up build supersedes this one: profile generation is
-        # deferred to the follow-up's completion instead of running twice.
-        await _submit_post_build_profile(
-            settings,
-            _Resources(),  # type: ignore[arg-type]
-            IndexBuildResult(
-                index_id=index_id,
-                document_count=1,
-                element_count=1,
-                chunk_count=1,
-                followup_build=BuildReference(
-                    requested=True,
-                    coalesced=False,
-                    index_id=followup_index_id,
-                    task_id=followup_task_id,
-                    rebuild_required=True,
-                ),
-            ),
-            build_task_id,
-        )
-
-        profile_tasks = await _fetch_one(
-            engine,
-            "SELECT count(*) AS total FROM task_record "
-            "WHERE kb_id = :kb_id AND task_type = 'DOCUMENT_PROFILE_GENERATE'",
-            kb_id=knowledge_id,
-        )
-        assert profile_tasks["total"] == 0
-        followup_task = await _task(engine, followup_task_id)
-        assert "profile_task_id" not in (followup_task["metadata"] or {})
-        build_task = await _task(engine, build_task_id)
-        assert "profile_task_id" not in (build_task["metadata"] or {"profile_task_id": None})
 
 
 async def test_service_rebuild_enqueue_failure_fails_task() -> None:

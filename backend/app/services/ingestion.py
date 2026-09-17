@@ -389,6 +389,11 @@ class IngestionService:
             self.settings.trace_full_retention_days,
             self.settings.trace_summary_retention_days,
         )
+        pruned_task_count = 0
+        if self.settings.task_record_retention_days > 0:
+            pruned_task_count = await TaskRecordRepository(
+                self.repository.engine
+            ).prune_terminal_tasks(self.settings.task_record_retention_days)
         stuck = await self.repository.find_deleting_indexes()
         deletable = await self.repository.find_deletable_indexes(retention_count, retention_days)
         if kb_id is not None:
@@ -403,15 +408,15 @@ class IngestionService:
                 marked = await self.repository.mark_index_deleting(index_id)
                 if marked is None:
                     continue
-            image_assets = await self.repository.list_image_assets_for_index(index_id)
+            # 先按前缀清理 MinIO 对象（含硬崩溃遗留的孤儿），再物理删除
+            # 数据库行；中途失败则索引停留在 DELETING，下一轮 GC 重试。
+            await self._remove_index_objects(index_id)
             deleted = await self.repository.delete_index(index_id)
             if not deleted:
                 # A pointer appeared after the DELETING mark; the repository
                 # restored the index instead of destroying protected data.
                 skipped_ids.append(str(index_id))
                 continue
-            for asset in image_assets:
-                await self._remove_minio_object(asset["minio_bucket"], asset["minio_object_key"])
             deleted_ids.append(str(index_id))
 
         return {
@@ -422,6 +427,7 @@ class IngestionService:
             "purged_conversation_ids": purged_conversation_ids[:100],
             "purged_conversation_count": len(purged_conversation_ids),
             "trace_retention": trace_retention,
+            "pruned_task_count": pruned_task_count,
         }
 
     async def delete_index(self, index_id: UUID, *, force: bool = False) -> dict[str, Any]:
@@ -456,14 +462,14 @@ class IngestionService:
                 blockers = await self.repository.get_index_deletion_blockers(index_id)
                 self._raise_index_delete_blocked(blockers)
 
-        image_assets = await self.repository.list_image_assets_for_index(index_id)
+        # 前缀整删先于数据库删除：按 indexes/{index_id}/ 前缀清除全部
+        # 图片对象（含无记录孤儿），失败时索引停留 DELETING 由 GC 自愈。
+        await self._remove_index_objects(index_id)
         deleted = await self.repository.delete_index(index_id)
         if not deleted:
             self._raise_index_delete_blocked(
                 await self.repository.get_index_deletion_blockers(index_id)
             )
-        for asset in image_assets:
-            await self._remove_minio_object(asset["minio_bucket"], asset["minio_object_key"])
         return {
             "deleted_index_ids": [str(index_id)],
             "deleted_count": 1,
@@ -545,3 +551,28 @@ class IngestionService:
 
     async def _remove_minio_object(self, bucket: str, object_key: str) -> None:
         await asyncio.to_thread(self.minio.remove_object, bucket, object_key)
+
+    async def _remove_index_objects(self, index_id: UUID) -> None:
+        """Remove every image object stored under the index's MinIO prefix.
+
+        Image objects are keyed ``indexes/{index_id}/documents/...`` so a
+        prefix sweep removes both recorded assets and any orphan a previous
+        crash left behind — deletion no longer depends on asset rows.  The
+        sweep runs before the DB delete: if it fails midway the index stays
+        DELETING and the next GC pass retries; already-removed objects are
+        idempotent no-ops.
+        """
+        prefix = f"indexes/{index_id}/"
+
+        def _sweep() -> int:
+            removed = 0
+            for obj in self.minio.list_objects(
+                self.settings.minio_image_bucket, prefix=prefix, recursive=True
+            ):
+                self.minio.remove_object(self.settings.minio_image_bucket, obj.object_name)
+                removed += 1
+            return removed
+
+        removed = await asyncio.to_thread(_sweep)
+        if removed:
+            logger.info("Removed %s MinIO image object(s) under %s", removed, prefix)

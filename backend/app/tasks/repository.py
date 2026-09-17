@@ -198,6 +198,39 @@ class TaskRecordRepository:
             )
             return (result.rowcount or 0) > 0
 
+    async def prune_terminal_tasks(self, retention_days: int, *, per_kb_floor: int = 10) -> int:
+        """Delete terminal task records past the retention window.
+
+        SUCCEEDED/FAILED/CANCELLED rows older than ``retention_days`` are
+        pruned by the periodic GC sweep; the newest ``per_kb_floor`` terminal
+        rows of every knowledge base survive the window so recent history
+        stays inspectable even for dormant KBs.  Active (QUEUED/RUNNING) rows
+        are never touched.  Returns the number of deleted rows.
+        """
+        async with self.engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    DELETE FROM task_record
+                    WHERE status IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+                      AND finished_at < now() - INTERVAL '1 day' * :retention_days
+                      AND id NOT IN (
+                          SELECT id FROM (
+                              SELECT t.id, row_number() OVER (
+                                  PARTITION BY t.kb_id ORDER BY t.created_at DESC
+                              ) AS rn
+                              FROM task_record t
+                              WHERE t.status IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+                                AND t.kb_id IS NOT NULL
+                          ) ranked
+                          WHERE ranked.rn <= :per_kb_floor
+                      )
+                    """
+                ),
+                {"retention_days": retention_days, "per_kb_floor": per_kb_floor},
+            )
+            return int(result.rowcount or 0)
+
     async def list_active_by_type(self, task_type: str) -> list[dict[str, Any]]:
         """Active tasks of one type, for orphan reconciliation at worker start."""
         async with self.engine.connect() as connection:

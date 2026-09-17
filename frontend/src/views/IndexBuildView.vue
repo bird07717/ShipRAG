@@ -42,6 +42,23 @@ function canRollback(index: KnowledgeIndex): boolean {
   return index.status === "DEPRECATED" || (index.status === "ACTIVE" && !isRagActive(index));
 }
 
+function canRetry(index: KnowledgeIndex): boolean {
+  return index.status === "FAILED" || index.status === "CANCELLED";
+}
+
+function canDelete(index: KnowledgeIndex): boolean {
+  return (
+    index.status === "DEPRECATED" || index.status === "FAILED" || index.status === "CANCELLED"
+  );
+}
+
+function activeBuildTaskId(index: KnowledgeIndex): string | null {
+  if (index.status !== "BUILDING") return null;
+  const task = store.latestIndexTasks[index.id];
+  if (!task) return null;
+  return task.status === "QUEUED" || task.status === "RUNNING" ? task.id : null;
+}
+
 async function activateRag(index: KnowledgeIndex): Promise<void> {
   try {
     await ElMessageBox.confirm(
@@ -77,10 +94,15 @@ const detailTask = computed<IndexTask | undefined>(() => {
 
 const detailStageIndex = computed(() => {
   const stage = detailTask.value?.stage ?? "";
-  if (detailIndex.value?.status === "ACTIVE" || detailIndex.value?.status === "READY") {
+  if (
+    detailIndex.value?.status === "ACTIVE" ||
+    detailIndex.value?.status === "READY"
+  ) {
     return PIPELINE_STAGES.length;
   }
-  if (detailIndex.value?.status === "FAILED") return -1;
+  if (detailIndex.value?.status === "FAILED" || detailIndex.value?.status === "CANCELLED") {
+    return -1;
+  }
   const idx = PIPELINE_STAGES.indexOf(stage);
   return idx >= 0 ? idx : 0;
 });
@@ -124,6 +146,9 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
               :value="kb.id"
             />
           </el-select>
+          <el-tag v-if="store.selectedKnowledge?.rebuild_required" type="warning" effect="plain">
+            文档有变更待重建
+          </el-tag>
           <span class="muted candidate-note">这里只处理 RAG 技术构建、任务诊断和回收；技术支持（Support）审核请前往 Profile 审核（Profile Review）。</span>
           <div class="spacer" />
           <el-button :disabled="!store.selectedKnowledgeId" @click="store.gcIndexes()">
@@ -170,7 +195,7 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
         <el-table-column label="耗时" width="80">
           <template #default="scope">{{ formatDuration(scope.row) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="180" align="right">
+        <el-table-column label="操作" width="250" align="right">
           <template #default="scope">
             <el-button
               v-if="canActivate(scope.row)"
@@ -191,7 +216,25 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
               回滚 RAG
             </el-button>
             <el-button
-              v-if="scope.row.status === 'DEPRECATED' || scope.row.status === 'FAILED'"
+              v-if="activeBuildTaskId(scope.row)"
+              link
+              type="danger"
+              :loading="store.isActionLoading(`task-cancel:${activeBuildTaskId(scope.row)}`)"
+              @click.stop="store.cancelIndexBuild(scope.row.id)"
+            >
+              停止
+            </el-button>
+            <el-button
+              v-if="canRetry(scope.row)"
+              link
+              type="primary"
+              :loading="store.isActionLoading(`retry-index:${scope.row.id}`)"
+              @click.stop="store.retryIndexBuild(scope.row.id)"
+            >
+              重建
+            </el-button>
+            <el-button
+              v-if="canDelete(scope.row)"
               link
               type="danger"
               @click.stop="store.deleteIndex(scope.row.id)"
@@ -339,12 +382,30 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
             回滚 RAG 到此版本
           </el-button>
           <el-button
-            v-if="detailIndex.status === 'DEPRECATED' || detailIndex.status === 'FAILED'"
+            v-if="activeBuildTaskId(detailIndex)"
+            type="danger"
+            plain
+            :loading="store.isActionLoading(`task-cancel:${activeBuildTaskId(detailIndex)}`)"
+            @click="store.cancelIndexBuild(detailIndex.id)"
+          >
+            停止构建
+          </el-button>
+          <el-button
+            v-if="canRetry(detailIndex)"
+            type="primary"
+            plain
+            :loading="store.isActionLoading(`retry-index:${detailIndex.id}`)"
+            @click="store.retryIndexBuild(detailIndex.id)"
+          >
+            重建
+          </el-button>
+          <el-button
+            v-if="canDelete(detailIndex)"
             type="danger"
             plain
             @click="store.deleteIndex(detailIndex.id)"
           >
-            删除
+            删除此索引版本
           </el-button>
         </div>
       </template>

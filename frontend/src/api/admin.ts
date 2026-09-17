@@ -243,6 +243,8 @@ export const adminApi = {
     }),
   activateIndex: (indexId: string) =>
     apiRequest<KnowledgeIndex>(`/indexes/${indexId}/activate`, { method: "POST" }),
+  retryIndex: (indexId: string) =>
+    apiRequest<BuildRequestResult>(`/indexes/${indexId}/retry`, { method: "POST" }),
   gcIndexes: (knowledgeId: string) =>
     apiRequest<GarbageCollectionResult>(`/knowledge-bases/${knowledgeId}/indexes/gc`, {
       method: "POST",

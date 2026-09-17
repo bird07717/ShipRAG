@@ -329,6 +329,7 @@ class GarbageCollectionResponse(BaseModel):
     skipped_count: int = 0
     purged_conversation_ids: list[str] = []
     purged_conversation_count: int = 0
+    pruned_task_count: int = 0
     released_conversation_count: int = 0
 
 

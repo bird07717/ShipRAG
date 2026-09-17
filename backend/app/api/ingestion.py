@@ -507,12 +507,15 @@ async def cancel_task(
 
     Cancellation is a database state transition: the worker polls
     task_record.status between documents and stops scheduling new work, so
-    in-flight documents finish and the task settles as CANCELLED.  Only
-    bounded per-document generators support this today; other task types keep
-    running and would misreport their real outcome.
+    in-flight documents finish and the task settles as CANCELLED.  For
+    INDEX_BUILD the index and its unprocessed documents settle as CANCELLED
+    too — a terminal state the admin can delete or retry like FAILED.
+    Only bounded per-document generators support this today; other task
+    types keep running and would misreport their real outcome.
     """
     task = await repository.get_task(task_id)
     if task["task_type"] not in {
+        "INDEX_BUILD",
         "DOCUMENT_PROFILE_GENERATE",
         "RAG_DOCUMENT_CARD_GENERATE",
     }:

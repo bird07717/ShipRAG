@@ -567,6 +567,11 @@ class _FakeMinio:
         assert object_key.endswith("source.docx")
         self.uploaded = source.read(length)
 
+    def list_objects(
+        self, bucket: str, prefix: str | None = None, recursive: bool = False
+    ) -> list[Any]:
+        return []
+
     def remove_object(self, bucket: str, object_key: str) -> None:
         raise AssertionError(f"unexpected removal: {bucket}/{object_key}")
 
@@ -575,6 +580,11 @@ class _RecordingMinio:
     def __init__(self, *, fail_object_key: str | None = None) -> None:
         self.fail_object_key = fail_object_key
         self.removed: list[tuple[str, str]] = []
+
+    def list_objects(
+        self, bucket: str, prefix: str | None = None, recursive: bool = False
+    ) -> list[Any]:
+        return []
 
     def remove_object(self, bucket: str, object_key: str) -> None:
         self.removed.append((bucket, object_key))

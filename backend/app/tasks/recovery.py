@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime
 from uuid import UUID
@@ -14,7 +13,6 @@ from app.common.errors import ApiError
 from app.core.config import Settings
 from app.core.resources import AppResources
 from app.ingestion.repository import IngestionRepository
-from app.tasks.ingestion import enqueue_index_build
 from app.tasks.repository import TaskRecordRepository
 
 logger = logging.getLogger(__name__)
@@ -88,23 +86,10 @@ async def reconcile_abandoned_index_builds(
                     index_id,
                     status_name,
                 )
-                knowledge_id = UUID(str(task["kb_id"]))
-                await _trigger_followup_build(settings, repository, knowledge_id)
         return recovered
     finally:
         if resources is not None:
             await resources.close()
-
-
-async def _trigger_followup_build(
-    settings: Settings,
-    repository: IngestionRepository,
-    knowledge_id: UUID,
-) -> None:
-    followup = await repository.create_followup_build_if_needed(knowledge_id)
-    if followup is None or followup.index_id is None or followup.task_id is None:
-        return
-    await asyncio.to_thread(enqueue_index_build, settings, followup.index_id, followup.task_id)
 
 
 def _age_seconds(row: dict[str, object], column: str) -> float | None:

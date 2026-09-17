@@ -7,7 +7,7 @@ import pytest
 from rq.job import JobStatus
 
 from app.core.config import Settings
-from app.ingestion.repository import BuildReference, IngestionRepository
+from app.ingestion.repository import IngestionRepository
 from app.tasks import recovery
 
 
@@ -19,8 +19,6 @@ class _RecoveryRepository:
         self.task_status = "RUNNING"
         self.index_status = "BUILDING"
         self.error_code: str | None = None
-        self.followup: BuildReference | None = None
-        self.followup_calls: list[Any] = []
 
     async def list_running_index_build_tasks(self) -> list[dict[str, Any]]:
         if self.task_status not in {"QUEUED", "RUNNING"} or self.index_status != "BUILDING":
@@ -37,10 +35,6 @@ class _RecoveryRepository:
         self.index_status = "FAILED"
         self.error_code = "ABANDONED_JOB"
         return True
-
-    async def create_followup_build_if_needed(self, knowledge_id: Any) -> BuildReference | None:
-        self.followup_calls.append(knowledge_id)
-        return self.followup
 
     async def retry(self) -> bool:
         return self.index_status == "FAILED"
@@ -71,7 +65,8 @@ async def test_worker_restart_reconciles_abandoned_build_and_allows_retry(
     assert repository.task_status == "FAILED"
     assert repository.index_status == "FAILED"
     assert repository.error_code == "ABANDONED_JOB"
-    assert repository.followup_calls == [repository.kb_id]
+    # ADR-0023：中断构建只标记 FAILED，不再自动排 followup；重建由
+    # 管理员通过 rebuild_required 徽标提示后手动触发。
     assert await repository.retry() is True
 
 
@@ -93,7 +88,6 @@ async def test_worker_restart_also_reconciles_job_failed_before_task_started(
     assert recovered == 1
     assert repository.task_status == "FAILED"
     assert repository.index_status == "FAILED"
-    assert repository.followup_calls == [repository.kb_id]
 
 
 @pytest.mark.asyncio
@@ -116,26 +110,27 @@ async def test_recovery_does_not_touch_job_held_by_worker(
     assert recovered == 0
     assert repository.task_status == "RUNNING"
     assert repository.index_status == "BUILDING"
-    assert repository.followup_calls == []
 
 
 @pytest.mark.asyncio
-async def test_worker_restart_triggers_followup_build_when_rebuild_required(
+async def test_worker_restart_does_not_auto_requeue_abandoned_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """ADR-0023：中断构建只标记 FAILED，不自动排任何重建任务。
+
+    rebuild_required 徽标是唯一提示；重建由管理员手动触发。
+    """
     repository = _RecoveryRepository()
-    followup = BuildReference(True, False, uuid4(), uuid4(), False)
-    repository.followup = followup
 
-    enqueued: list[tuple[Any, Any, Any]] = []
+    enqueued: list[tuple[Any, Any]] = []
 
-    def fake_enqueue(settings: Any, index_id: Any, task_id: Any) -> None:
-        enqueued.append((settings, index_id, task_id))
+    def fail_if_enqueued(*args: Any, **kwargs: Any) -> None:
+        enqueued.append((args, kwargs))
 
     settings = Settings(_env_file=None, app_env="test")
     monkeypatch.setattr(recovery, "_held_job_ids", lambda _: set())
     monkeypatch.setattr(recovery, "_job_status", lambda *_: JobStatus.FAILED)
-    monkeypatch.setattr(recovery, "enqueue_index_build", fake_enqueue)
+    monkeypatch.setattr("app.tasks.ingestion.enqueue_index_build", fail_if_enqueued)
 
     recovered = await recovery.reconcile_abandoned_index_builds(
         settings,
@@ -144,7 +139,5 @@ async def test_worker_restart_triggers_followup_build_when_rebuild_required(
     )
 
     assert recovered == 1
-    assert repository.followup_calls == [repository.kb_id]
-    assert len(enqueued) == 1
-    assert enqueued[0][1] == followup.index_id
-    assert enqueued[0][2] == followup.task_id
+    assert repository.index_status == "FAILED"
+    assert enqueued == []

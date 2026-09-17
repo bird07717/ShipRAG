@@ -35,13 +35,14 @@ from app.ingestion.models import (
 )
 from app.ingestion.parser import parse_docx
 from app.ingestion.parser_pdf import PDF_PARSER_NAME, parse_pdf
-from app.ingestion.repository import BuildReference, IngestionRepository
+from app.ingestion.repository import IngestionRepository
 
 DOCX_PARSER_NAME = "mammoth+ooxml"
 
 # 同一文档以同一错误连续导致构建失败的容许次数：达到上限后该文档在
-# 本轮构建中被跳过（SKIPPED），其余文档继续，避免坏文档拖垮整库并
-# 造成 followup 无限空转。
+# 本轮构建中被跳过（SKIPPED），其余文档继续，避免坏文档拖垮整库。
+# 构建失败不再自动重试（ADR-0023）：失败计数由管理员手动重建推进，
+# 第 3 次构建起自动跳过该文档并完成其余文档。
 _MAX_SAME_ERROR_RETRIES = 2
 
 
@@ -51,7 +52,7 @@ class IndexBuildResult:
     document_count: int
     element_count: int
     chunk_count: int
-    followup_build: BuildReference | None
+    cancelled: bool = False
 
 
 class IndexPipeline:
@@ -79,11 +80,32 @@ class IndexPipeline:
     async def run(self, index_id: UUID, task_id: UUID) -> IndexBuildResult:
         index = await self._load_index(index_id)
         kb_id = UUID(str(index["kb_id"]))
+        # 协作取消（ADR-0023）：排队期被取消的任务在这里短路，索引与
+        # 文档状态直接落 CANCELLED，不消耗任何模型调用。
+        if await self._task_cancelled(task_id):
+            await self._mark_cancelled(index_id)
+            return IndexBuildResult(
+                index_id=index_id,
+                document_count=0,
+                element_count=0,
+                chunk_count=0,
+                cancelled=True,
+            )
         documents = await self._load_documents(index_id)
         await self._update_task(task_id, "RUNNING", "PARSING", 1, increment_attempt=True)
         prev_index_id = await self.repository.get_active_index_id(kb_id)
         try:
             for position, document in enumerate(documents, start=1):
+                # 文档边界轮询取消：正在处理的文档会完成，其余文档停止。
+                if await self._task_cancelled(task_id):
+                    await self._mark_cancelled(index_id)
+                    return IndexBuildResult(
+                        index_id=index_id,
+                        document_count=0,
+                        element_count=0,
+                        chunk_count=0,
+                        cancelled=True,
+                    )
                 doc_metadata = document.get("metadata") or {}
                 try:
                     if doc_metadata.get("build_mode") == "REUSE" and prev_index_id is not None:
@@ -104,19 +126,28 @@ class IndexPipeline:
                     await self._mark_document_skipped(
                         index, document, task_id, exc, position, len(documents)
                     )
+            # 激活事务是最后的机会窗口：一旦进入 _finalize_index 的单个
+            # 事务就不再中断，取消请求若在此时到达将由事务自然完成覆盖。
+            if await self._task_cancelled(task_id):
+                await self._mark_cancelled(index_id)
+                return IndexBuildResult(
+                    index_id=index_id,
+                    document_count=0,
+                    element_count=0,
+                    chunk_count=0,
+                    cancelled=True,
+                )
             counts = await self._finalize_index(
                 index_id,
                 kb_id,
                 task_id,
                 activate_on_success=bool(index["activate_on_success"]),
             )
-            followup = await self.repository.create_followup_build_if_needed(kb_id)
             return IndexBuildResult(
                 index_id=index_id,
                 document_count=counts[0],
                 element_count=counts[1],
                 chunk_count=counts[2],
-                followup_build=followup,
             )
         except Exception as exc:
             await self._mark_failed(index_id, task_id, exc)
@@ -1167,7 +1198,7 @@ class IndexPipeline:
                         attempt = attempt + CASE WHEN :increment_attempt THEN 1 ELSE 0 END,
                         started_at = COALESCE(started_at, now()), updated_at = now(),
                         metadata = COALESCE(metadata || CAST(:metadata AS jsonb), metadata)
-                    WHERE id = :id
+                    WHERE id = :id AND status IN ('QUEUED', 'RUNNING')
                     """
                 ),
                 {
@@ -1257,10 +1288,77 @@ class IndexPipeline:
             },
         )
 
+    async def _task_cancelled(self, task_id: UUID) -> bool:
+        """Cooperative-cancellation probe: request_cancel terminal-marks the
+        task row CANCELLED; the build loop polls it between documents."""
+        async with self.engine.connect() as connection:
+            status = await connection.scalar(
+                text("SELECT status FROM task_record WHERE id = :id"), {"id": task_id}
+            )
+        return str(status) == "CANCELLED"
+
+    async def _mark_cancelled(self, index_id: UUID) -> None:
+        """Settle a cooperatively cancelled build.
+
+        The task row is already CANCELLED (set by request_cancel); here the
+        index and its unprocessed documents settle as CANCELLED — a terminal
+        state the admin can delete or retry like a FAILED index.  CANCELLED
+        documents do not feed the repeated-failure counter (it filters
+        status = 'FAILED'), so a manual rebuild after cancelling is not
+        penalized.  rebuild_required is re-armed so the console keeps
+        surfacing that the knowledge base diverged from its active index.
+        """
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_index
+                    SET status = 'CANCELLED', error_code = 'CANCELLED',
+                        error_message = '用户中止构建', finished_at = now()
+                    WHERE id = :index_id AND status = 'BUILDING'
+                    """
+                ),
+                {"index_id": index_id},
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE index_document
+                    SET status = 'CANCELLED', error_code = 'CANCELLED',
+                        error_message = '用户中止构建', finished_at = now()
+                    WHERE index_id = :index_id AND status NOT IN ('READY', 'SKIPPED')
+                    """
+                ),
+                {"index_id": index_id},
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_base
+                    SET rebuild_required = true, updated_at = now()
+                    WHERE id = (SELECT kb_id FROM knowledge_index WHERE id = :index_id)
+                    """
+                ),
+                {"index_id": index_id},
+            )
+
     async def _mark_failed(self, index_id: UUID, task_id: UUID, exc: Exception) -> None:
         error_code = type(exc).__name__[:100]
         error_message = str(exc)[:500] or "索引构建失败"
         async with self.engine.begin() as connection:
+            # 构建失败后知识库内容与活动索引不一致：重新置位
+            # rebuild_required，管理台以“待重建”徽标持续提示，由管理员
+            # 决定修复文档后重建（ADR-0023：失败不自动重试）。
+            await connection.execute(
+                text(
+                    """
+                    UPDATE knowledge_base
+                    SET rebuild_required = true, updated_at = now()
+                    WHERE id = (SELECT kb_id FROM knowledge_index WHERE id = :index_id)
+                    """
+                ),
+                {"index_id": index_id},
+            )
             await connection.execute(
                 text(
                     """
