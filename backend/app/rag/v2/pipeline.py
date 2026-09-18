@@ -11,6 +11,7 @@ from app.rag.llm import LlmError, LlmProvider
 from app.rag.models import ModelSnapshot, PreparedRag
 from app.rag.response import ChatResult
 from app.rag.v2.answer_generator import (
+    apply_scope_authority,
     build_answer_prompt,
     generate_answer,
     repair_generated_answer,
@@ -87,11 +88,19 @@ class RagV2Pipeline:
             )
             query_usage = dict(query_provider.usage)
         except Exception as exc:
+            fallback, fallback_status, fallback_reason = fallback_interpretation(
+                question,
+                history=turn.history,
+                knowledge_name=turn.knowledge_name or product_name,
+                max_rounds=self.settings.m3_rag_history_max_rounds,
+            )
             query_outcome = QueryInterpretationOutcome(
                 "DEGRADED",
-                fallback_interpretation(question),
+                fallback,
                 round((time.perf_counter() - query_started) * 1000),
                 reason=str(getattr(exc, "code", type(exc).__name__))[:100],
+                history_fallback=fallback_status,
+                history_fallback_reason=fallback_reason,
             )
             query_usage = {}
         finally:
@@ -127,6 +136,9 @@ class RagV2Pipeline:
         )
         timings["v2_document_context_ms"] = round((time.perf_counter() - context_started) * 1000)
         query_trace = query_outcome.trace_dict()
+        query_trace["fallback_retrieval_succeeded"] = bool(
+            query_outcome.history_fallback == "APPLIED" and candidates
+        )
         context_trace = {
             "document_ids": list(context.document_ids),
             "document_count": len(context.document_ids),
@@ -182,6 +194,12 @@ class RagV2Pipeline:
                 thinking_enabled=self.settings.m3_rag_answer_thinking_enabled,
                 thinking_budget=self.settings.m3_rag_answer_thinking_budget,
             )
+            model_response_kind = generated.response_kind
+            generated, scope_authority_applied = apply_scope_authority(
+                generated,
+                interpretation=query_outcome.interpretation,
+                product_name=turn.knowledge_name or product_name,
+            )
             generated = normalize_evidence_bindings(generated, context)
             violations = [
                 *public_leaks(
@@ -206,6 +224,13 @@ class RagV2Pipeline:
                     thinking_enabled=self.settings.m3_rag_answer_thinking_enabled,
                     thinking_budget=self.settings.m3_rag_answer_thinking_budget,
                 )
+                model_response_kind = generated.response_kind
+                generated, repair_scope_authority_applied = apply_scope_authority(
+                    generated,
+                    interpretation=query_outcome.interpretation,
+                    product_name=turn.knowledge_name or product_name,
+                )
+                scope_authority_applied = scope_authority_applied or repair_scope_authority_applied
                 generated = normalize_evidence_bindings(generated, context)
                 violations = [
                     *public_leaks(
@@ -271,6 +296,12 @@ class RagV2Pipeline:
                     "thinking_requested": self.settings.m3_rag_answer_thinking_enabled,
                     "thinking_budget": self.settings.m3_rag_answer_thinking_budget,
                     "response_kind": generated.response_kind,
+                    "scope_authority": {
+                        "interpreted_scope": query_outcome.interpretation.scope,
+                        "model_response_kind": model_response_kind,
+                        "final_response_kind": generated.response_kind,
+                        "conflict_resolved": scope_authority_applied,
+                    },
                     "basis": generated.basis,
                     "used_document_count": len(generated.used_document_keys),
                     "used_document_ids": used_document_ids,

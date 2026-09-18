@@ -52,7 +52,7 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
     assert settings.m3_rag_history_max_rounds == 4
     assert settings.m3_rag_answer_repair_attempts == 1
     assert settings.m3_rag_query_interpreter_max_tokens == 512
-    assert settings.m3_rag_query_interpreter_timeout_seconds == 15.0
+    assert settings.m3_rag_query_interpreter_timeout_seconds == 25.0
     assert settings.m3_rag_query_variant_limit == 3
     assert settings.m3_rag_document_card_top_k == 5
     assert settings.m3_doc_lock_best_floor == 0.70

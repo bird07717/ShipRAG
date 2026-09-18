@@ -141,7 +141,7 @@ class Settings(BaseSettings):
     m3_doc_single_clarify_best_floor: float = 0.65
     m3_rag_scope_max_tokens: int = 800
     m3_rag_query_interpreter_max_tokens: int = 512
-    m3_rag_query_interpreter_timeout_seconds: float = 15.0
+    m3_rag_query_interpreter_timeout_seconds: float = 25.0
     m3_rag_query_variant_limit: int = 3
     m3_rag_document_card_top_k: int = 5
     # Fast-fail ceilings below the turn deadline: a hung upstream request

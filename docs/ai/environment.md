@@ -37,7 +37,7 @@ staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐�
 | `M3_RAG_ANSWER_REPAIR_ATTEMPTS` | `1` | 结构、证据白名单或真实实现信息违规后的最多修复次数。 |
 | `M3_RAG_SCOPE_MAX_TOKENS` | `800` | 每轮知识库名称/公开范围说明的 Prompt 快照估算 Token 上限；只截断运行时副本，不改数据库说明。 |
 | `M3_RAG_QUERY_INTERPRETER_MAX_TOKENS` | `512` | LLM 1 结构化查询理解输出上限。 |
-| `M3_RAG_QUERY_INTERPRETER_TIMEOUT_SECONDS` | `15.0` | LLM 1 单次调用时限。 |
+| `M3_RAG_QUERY_INTERPRETER_TIMEOUT_SECONDS` | `25.0` | LLM 1 单次调用时限；完整超时不重试，进入短追问历史兜底。 |
 | `M3_RAG_QUERY_VARIANT_LIMIT` | `3` | LLM 1 补充检索查询上限。 |
 | `M3_RAG_DOCUMENT_CARD_TOP_K` | `5` | 文档卡片候选上限。 |
 | `M3_TURN_DEADLINE_SECONDS` | `90.0` | 单轮 RAG 总时限；必须大于 Query Interpreter 与 Answer Generator 时限之和。 |

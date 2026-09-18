@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app.rag.llm import FakeLlmProvider
+from app.rag.llm import FakeLlmProvider, LlmError
 from app.rag.v2.answer_generator import build_answer_prompt
 from app.rag.v2.document_context import DocumentContext
 from app.rag.v2.history import select_complete_round_history
@@ -37,6 +37,60 @@ class _CapturingFakeLlmProvider(FakeLlmProvider):
             thinking=thinking,
             thinking_budget=thinking_budget,
         )
+
+
+class _FailOnceLlmProvider(_CapturingFakeLlmProvider):
+    def __init__(self, completion: str, error: LlmError) -> None:
+        super().__init__(completion)
+        self.error = error
+        self.calls = 0
+
+    async def complete(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float | None = None,
+        thinking: bool = False,
+        thinking_budget: int | None = None,
+    ) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            raise self.error
+        return await super().complete(
+            prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+            thinking=thinking,
+            thinking_budget=thinking_budget,
+        )
+
+
+class _AlwaysFailLlmProvider(_CapturingFakeLlmProvider):
+    def __init__(self, error: LlmError) -> None:
+        super().__init__("{}")
+        self.error = error
+        self.calls = 0
+
+    async def complete(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float | None = None,
+        thinking: bool = False,
+        thinking_budget: int | None = None,
+    ) -> str:
+        del system, max_tokens, temperature, timeout_seconds, thinking, thinking_budget
+        self.prompt = prompt
+        self.calls += 1
+        raise self.error
 
 
 def _round(
@@ -158,6 +212,17 @@ def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> 
     assert "最小充分回答" in prompt
     assert "操作题给完成任务必需的连续步骤" in prompt
     assert "按需选择而非全部返回" in prompt
+    assert payload["trusted_product_profile"] == {
+        "name": "VDR600",
+        "description": "VDR600 技术支持",
+    }
+    assert "product" not in payload
+    assert "scope" not in payload
+    assert "IN_SCOPE 不得返回 OUT_OF_SCOPE" in prompt
+    assert "文档没有覆盖时不能据此拒答" in prompt
+    assert "使用专业通用知识继续回答" in prompt
+    assert "正式产品分类或型号定位" in prompt
+    assert "只回答产品技术部分" in prompt
 
 
 @pytest.mark.asyncio
@@ -187,6 +252,9 @@ async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up(
     prompt = json.loads(provider.prompt)
     assert "answer_depth" not in prompt["output_example"]
     assert any("不决定回答篇幅" in rule for rule in prompt["rules"])
+    assert any("可信产品档案" in rule for rule in prompt["rules"])
+    assert any("该产品本身是什么" in rule for rule in prompt["rules"])
+    assert any("无关创作或闲聊素材" in rule for rule in prompt["rules"])
     assert prompt["recent_completed_rounds"] == [
         {
             "user_request": "请完整展示更换 PSU 电源板的步骤",
@@ -203,3 +271,92 @@ async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up(
     assert trace["active_task_chars"] == len(outcome.interpretation.active_task)
     assert trace["active_task_sha256"]
     assert outcome.interpretation.active_task not in json.dumps(trace, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_query_interpreter_timeout_inherits_elliptical_short_follow_up() -> None:
+    provider = _AlwaysFailLlmProvider(
+        LlmError("UPSTREAM_TIMEOUT", "模型服务响应超时", retryable=True)
+    )
+
+    outcome = await interpret_query(
+        provider,
+        question="操作时使用哪个端口？",
+        history=[
+            {"role": "USER", "content": "请完整展示更换 PSU 电源板的步骤"},
+            {"role": "ASSISTANT", "content": "需要拆下 3359 核心板及底板。"},
+        ],
+        knowledge_name="VDR600",
+        scope_description="VDR600 技术支持",
+        max_rounds=4,
+        variant_limit=3,
+        max_tokens=512,
+        timeout_seconds=25,
+    )
+
+    assert provider.calls == 1
+    assert outcome.status == "DEGRADED"
+    assert outcome.interpretation.relation == "FOLLOW_UP"
+    assert outcome.interpretation.active_task == "请完整展示更换 PSU 电源板的步骤"
+    assert "操作时使用哪个端口" in outcome.interpretation.resolved_question
+    trace = outcome.trace_dict()
+    assert trace["llm1_timeout"] is True
+    assert trace["history_fallback_applied"] is True
+    assert trace["history_fallback_rejected"] is False
+    assert trace["history_fallback_reason"] == "SHORT_ELLIPTICAL_FOLLOW_UP"
+
+
+@pytest.mark.asyncio
+async def test_query_interpreter_timeout_does_not_inherit_explicit_new_task() -> None:
+    provider = _AlwaysFailLlmProvider(
+        LlmError("UPSTREAM_TIMEOUT", "模型服务响应超时", retryable=True)
+    )
+
+    outcome = await interpret_query(
+        provider,
+        question="怎么更换 PDC？",
+        history=[
+            {"role": "USER", "content": "如何配置 VAU 图像？"},
+            {"role": "ASSISTANT", "content": "先设置电脑网卡。"},
+        ],
+        knowledge_name="VDR600",
+        scope_description="VDR600 技术支持",
+        max_rounds=4,
+        variant_limit=3,
+        max_tokens=512,
+        timeout_seconds=25,
+    )
+
+    assert outcome.interpretation.relation == "NEW_TASK"
+    assert outcome.interpretation.active_task is None
+    assert outcome.interpretation.resolved_question == "怎么更换 PDC？"
+    trace = outcome.trace_dict()
+    assert trace["history_fallback_applied"] is False
+    assert trace["history_fallback_rejected"] is True
+    assert trace["history_fallback_reason"] == "EXPLICIT_NEW_TASK"
+
+
+@pytest.mark.asyncio
+async def test_query_interpreter_retries_one_immediate_transient_failure() -> None:
+    provider = _FailOnceLlmProvider(
+        '{"resolved_question":"配置 VAU 图像","search_queries":[],"key_constraints":[],'
+        '"scope":"IN_SCOPE","relation":"NEW_TASK","active_task":null}',
+        LlmError("UPSTREAM_UNAVAILABLE", "模型服务暂时不可用", retryable=True),
+    )
+
+    outcome = await interpret_query(
+        provider,
+        question="如何配置 VAU 图像？",
+        history=[],
+        knowledge_name="VDR600",
+        scope_description="VDR600 技术支持",
+        max_rounds=4,
+        variant_limit=3,
+        max_tokens=512,
+        timeout_seconds=25,
+    )
+
+    assert provider.calls == 2
+    assert outcome.status == "PASSED"
+    assert outcome.attempts == 2
+    assert outcome.trace_dict()["history_fallback_applied"] is False

@@ -24,7 +24,7 @@ from app.rag.models import (
 )
 from app.rag.repository import RagRepository, SearchQueryUnsupportedError
 from app.rag.rerank import RerankError
-from app.rag.v2.answer_generator import GeneratedAnswer
+from app.rag.v2.answer_generator import GeneratedAnswer, apply_scope_authority
 from app.rag.v2.document_context import DocumentContext, ImageBinding, build_document_context
 from app.rag.v2.document_retrieval import DocumentCandidate, retrieve_documents
 from app.rag.v2.query_interpreter import QueryInterpretation
@@ -171,6 +171,20 @@ class _UnsupportedLexicalRepository(_Repository):
 
     async def document_card_bm25_search(self, **_kwargs: Any) -> list[DocumentCardCandidate]:
         raise SearchQueryUnsupportedError("PARADEDB_UNSUPPORTED_QUERY_SHAPE")
+
+
+class _EmptyRepository(_Repository):
+    async def bm25_search(self, **_kwargs: Any) -> list[RetrievalCandidate]:
+        return []
+
+    async def vector_search(self, **_kwargs: Any) -> list[RetrievalCandidate]:
+        return []
+
+    async def document_card_bm25_search(self, **_kwargs: Any) -> list[DocumentCardCandidate]:
+        return []
+
+    async def document_card_vector_search(self, **_kwargs: Any) -> list[DocumentCardCandidate]:
+        return []
 
 
 class _ReverseRerankProvider:
@@ -559,6 +573,146 @@ def test_v2_normalizes_non_answer_evidence_bookkeeping(
     assert value.basis == "NONE"
     assert value.used_document_keys == []
     assert value.used_image_keys == []
+
+
+@pytest.mark.parametrize(
+    ("interpreted_scope", "model_kind", "expected_kind", "conflict"),
+    [
+        ("IN_SCOPE", "ANSWER", "ANSWER", False),
+        ("IN_SCOPE", "OUT_OF_SCOPE", "ASK_ONE", True),
+        ("UNCERTAIN", "OUT_OF_SCOPE", "ASK_ONE", True),
+        ("OUT_OF_SCOPE", "ANSWER", "OUT_OF_SCOPE", True),
+        ("OUT_OF_SCOPE", "OUT_OF_SCOPE", "OUT_OF_SCOPE", False),
+    ],
+)
+def test_v2_query_interpreter_is_the_single_scope_authority(
+    interpreted_scope: Literal["IN_SCOPE", "OUT_OF_SCOPE", "UNCERTAIN"],
+    model_kind: Literal["ANSWER", "OUT_OF_SCOPE"],
+    expected_kind: Literal["ANSWER", "ASK_ONE", "OUT_OF_SCOPE"],
+    conflict: bool,
+) -> None:
+    generated = GeneratedAnswer(
+        response_kind=model_kind,
+        basis="GENERAL" if model_kind == "ANSWER" else "NONE",
+        answer="检查供电和告警。" if model_kind == "ANSWER" else "",
+    )
+
+    aligned, applied = apply_scope_authority(
+        generated,
+        interpretation=QueryInterpretation(
+            resolved_question="SC200 是什么",
+            scope=interpreted_scope,
+        ),
+        product_name="SC200",
+    )
+
+    assert aligned.response_kind == expected_kind
+    assert applied is conflict
+    if expected_kind == "ASK_ONE":
+        assert aligned.basis == "NONE"
+        assert aligned.answer
+    if expected_kind == "OUT_OF_SCOPE":
+        assert aligned.used_document_keys == []
+        assert aligned.used_image_keys == []
+
+
+@pytest.mark.asyncio
+async def test_v2_in_scope_without_documents_uses_general_engineering_answer() -> None:
+    repository = _EmptyRepository(_candidate())
+    repository.turn = replace(
+        _turn(),
+        knowledge_name="SC200",
+        scope_description="SC200 产品技术支持，当前资料主要覆盖手轮 FU 标定。",
+    )
+    prepared = PreparedRag(
+        turn=repository.turn,
+        timings={},
+        started_at=time.perf_counter(),
+    )
+    completions = [
+        '{"resolved_question":"SC200 无法启动如何排查","search_queries":[],'
+        '"key_constraints":[],"scope":"IN_SCOPE"}',
+        '{"response_kind":"ANSWER","basis":"GENERAL","answer":"先检查供电、保险和急停状态，'
+        '再查看控制器告警。","used_document_keys":[],"used_image_keys":[],'
+        '"next_suggestions":[]}',
+    ]
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: FakeEmbeddingProvider(1024),
+        llm_factory=lambda _settings, _snapshot: FakeLlmProvider(completions=[completions.pop(0)]),
+    )
+
+    payload = await service._generate_v2(
+        prepared,
+        question="SC200 无法启动怎么检查？",
+        product_name="SC200",
+        scope_description=repository.turn.scope_description,
+        include_images=True,
+    )
+
+    assert payload["response_type"] == "ANSWERED"
+    assert payload["answer_mode"] == "PRODUCT_GENERAL"
+    assert payload["answer"].startswith("先检查供电")
+    assert repository.completed is not None
+    generation = repository.completed["doc_routing"]["generation"]
+    assert generation["context"]["document_count"] == 0
+    assert generation["answer"]["scope_authority"] == {
+        "interpreted_scope": "IN_SCOPE",
+        "model_response_kind": "ANSWER",
+        "final_response_kind": "ANSWER",
+        "conflict_resolved": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_v2_scope_conflict_does_not_spend_a_third_model_call() -> None:
+    repository = _EmptyRepository(_candidate())
+    repository.turn = replace(_turn(), knowledge_name="SC200")
+    prepared = PreparedRag(
+        turn=repository.turn,
+        timings={},
+        started_at=time.perf_counter(),
+    )
+    completions = [
+        '{"resolved_question":"SC200 是什么","search_queries":[],'
+        '"key_constraints":[],"scope":"IN_SCOPE"}',
+        '{"response_kind":"OUT_OF_SCOPE","basis":"NONE","answer":"",'
+        '"used_document_keys":[],"used_image_keys":[],"next_suggestions":[]}',
+    ]
+    llm_calls = 0
+
+    def llm_factory(_settings: Settings, _snapshot: ModelSnapshot) -> FakeLlmProvider:
+        nonlocal llm_calls
+        llm_calls += 1
+        return FakeLlmProvider(completions=[completions.pop(0)])
+
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: FakeEmbeddingProvider(1024),
+        llm_factory=llm_factory,
+    )
+
+    payload = await service._generate_v2(
+        prepared,
+        question="SC200 是什么？",
+        product_name="SC200",
+        scope_description="SC200 产品技术支持",
+        include_images=True,
+    )
+
+    assert llm_calls == 2
+    assert payload["response_type"] == "UNCONFIRMED"
+    assert "SC200 是当前正在讨论的产品" in payload["answer"]
+    assert repository.completed is not None
+    scope_trace = repository.completed["doc_routing"]["generation"]["answer"]["scope_authority"]
+    assert scope_trace == {
+        "interpreted_scope": "IN_SCOPE",
+        "model_response_kind": "OUT_OF_SCOPE",
+        "final_response_kind": "ASK_ONE",
+        "conflict_resolved": True,
+    }
 
 
 @pytest.mark.asyncio

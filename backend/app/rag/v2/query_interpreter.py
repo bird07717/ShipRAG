@@ -2,13 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.rag.llm import LlmProvider
+from app.rag.llm import LlmError, LlmProvider
+
+_SHORT_FOLLOW_UP_HINT = re.compile(
+    r"(哪个|哪一个|哪里|多久|下一步|然后|之后|为什么|怎么办|怎么处理|"
+    r"是否|呢|还要|可以吗|用什么|是多少|什么端口|什么参数|"
+    r"已经|仍然|还是|当前|现在|更换后|操作时)"
+)
+_EXPLICIT_NEW_TASK = re.compile(
+    r"(如何|怎么|怎样).{0,8}(配置|更换|升级|安装|拆卸|检查|排查|设置|"
+    r"启动|关闭|连接|恢复|标定|使用)"
+)
 
 
 class QueryInterpretation(BaseModel):
@@ -54,6 +65,9 @@ class QueryInterpretationOutcome:
     interpretation: QueryInterpretation
     latency_ms: int
     reason: str | None = None
+    attempts: int = 1
+    history_fallback: Literal["NOT_NEEDED", "APPLIED", "REJECTED"] = "NOT_NEEDED"
+    history_fallback_reason: str | None = None
 
     def trace_dict(self) -> dict[str, object]:
         active_task = self.interpretation.active_task or ""
@@ -61,6 +75,11 @@ class QueryInterpretationOutcome:
             "status": self.status,
             "reason": self.reason,
             "latency_ms": self.latency_ms,
+            "attempts": self.attempts,
+            "llm1_timeout": self.reason == "UPSTREAM_TIMEOUT",
+            "history_fallback_applied": self.history_fallback == "APPLIED",
+            "history_fallback_rejected": self.history_fallback == "REJECTED",
+            "history_fallback_reason": self.history_fallback_reason,
             "scope": self.interpretation.scope,
             "resolved_question_chars": len(self.interpretation.resolved_question),
             "search_query_count": len(self.interpretation.search_queries),
@@ -73,12 +92,72 @@ class QueryInterpretationOutcome:
         }
 
 
-def fallback_interpretation(question: str) -> QueryInterpretation:
-    return QueryInterpretation(
-        resolved_question=question.strip(),
-        search_queries=[],
-        key_constraints=[],
-        scope="UNCERTAIN",
+def fallback_interpretation(
+    question: str,
+    *,
+    history: list[dict[str, str]] | None = None,
+    knowledge_name: str = "",
+    max_rounds: int = 4,
+) -> tuple[QueryInterpretation, Literal["APPLIED", "REJECTED"], str]:
+    """Build a conservative no-LLM interpretation after an upstream failure.
+
+    Only an elliptical short follow-up may inherit the latest complete user
+    task. Explicit standalone operations keep the original question, so this
+    fallback does not recreate the retired focus/query-planner state machine.
+    """
+
+    clean_question = " ".join(question.split())
+    rounds = _completed_rounds(history or [], max_rounds)
+    if not rounds:
+        return (
+            QueryInterpretation(resolved_question=clean_question),
+            "REJECTED",
+            "NO_COMPLETE_HISTORY",
+        )
+
+    latest = rounds[-1]
+    if len(clean_question) > 60:
+        return (
+            QueryInterpretation(resolved_question=clean_question),
+            "REJECTED",
+            "QUESTION_NOT_SHORT",
+        )
+    if knowledge_name.strip() and knowledge_name.casefold() in clean_question.casefold():
+        return (
+            QueryInterpretation(resolved_question=clean_question),
+            "REJECTED",
+            "EXPLICIT_PRODUCT",
+        )
+    if _EXPLICIT_NEW_TASK.search(clean_question):
+        return (
+            QueryInterpretation(resolved_question=clean_question),
+            "REJECTED",
+            "EXPLICIT_NEW_TASK",
+        )
+
+    previous_answer = latest["assistant_answer_untrusted"]
+    assistant_requested_condition = len(clean_question) <= 20 and any(
+        marker in previous_answer for marker in ("请补充", "请确认", "哪个", "哪一", "？")
+    )
+    if not _SHORT_FOLLOW_UP_HINT.search(clean_question) and not assistant_requested_condition:
+        return (
+            QueryInterpretation(resolved_question=clean_question),
+            "REJECTED",
+            "NO_FOLLOW_UP_SIGNAL",
+        )
+
+    active_task = latest["user_request"][:1_000]
+    return (
+        QueryInterpretation(
+            resolved_question=f"{active_task}；当前追问：{clean_question}",
+            search_queries=[],
+            key_constraints=[],
+            scope="UNCERTAIN",
+            relation="FOLLOW_UP",
+            active_task=active_task,
+        ),
+        "APPLIED",
+        "SHORT_ELLIPTICAL_FOLLOW_UP",
     )
 
 
@@ -144,6 +223,11 @@ async def interpret_query(
             "rules": [
                 "把当前问题还原为可独立检索的问题，不决定回答篇幅或公开形式。",
                 (
+                    "knowledge_base.name 和 knowledge_base.scope 是管理员维护的可信产品"
+                    "档案。询问该产品本身是什么、用途、组成、原理、使用、维护或故障时，"
+                    "即使档案没有列出对应文档，也属于产品范围。"
+                ),
+                (
                     "先判断 current_question 能否脱离历史独立确定设备、部件、任务和阶段。"
                     "不能独立确定且最近用户请求提供了这些信息时，必须是 FOLLOW_UP；"
                     "修正最近任务的对象或条件时是 CORRECTION。"
@@ -165,7 +249,15 @@ async def interpret_query(
                 f"search_queries 最多 {variant_limit} 条，只补充有助召回的同义表达。",
                 "每条补充查询都应包含已还原的设备或部件名称，避免检索到其他设备的相似操作。",
                 "原始问题由服务器强制参与检索，不需要重复堆砌。",
-                "只有明显与知识库产品无关时才输出 OUT_OF_SCOPE。",
+                (
+                    "只有请求目标明显与知识库产品及其技术原理无关时才输出 OUT_OF_SCOPE；"
+                    "仅把产品名称当作无关创作或闲聊素材，不会让无关任务变成产品问题。"
+                ),
+                (
+                    "如果 current_question 同时包含产品技术任务和写作、娱乐、闲聊等无关"
+                    "附加任务，只保留产品技术任务写入 resolved_question/search_queries，"
+                    "忽略无关部分，并按产品技术任务判断 scope。"
+                ),
                 "scope 只能是 IN_SCOPE、OUT_OF_SCOPE 或 UNCERTAIN。",
                 "relation 只能是 NEW_TASK、FOLLOW_UP 或 CORRECTION。",
                 "只返回符合 Schema 的 JSON。",
@@ -174,24 +266,46 @@ async def interpret_query(
         ensure_ascii=False,
         separators=(",", ":"),
     )
+    attempts = 0
     try:
-        result = await provider.complete_structured(
-            prompt,
-            system="你是企业技术知识库的检索问题解释器，不直接回答用户问题。",
-            schema=QueryInterpretation,
-            max_tokens=max_tokens,
-            temperature=0.0,
-            timeout_seconds=timeout_seconds,
-        )
+        while True:
+            attempts += 1
+            try:
+                result = await provider.complete_structured(
+                    prompt,
+                    system="你是企业技术知识库的检索问题解释器，不直接回答用户问题。",
+                    schema=QueryInterpretation,
+                    max_tokens=max_tokens,
+                    temperature=0.0,
+                    timeout_seconds=timeout_seconds,
+                )
+                break
+            except LlmError as exc:
+                # Immediate connection/429/5xx failures may be transient and
+                # return quickly. A full timeout is never retried here because
+                # it would consume most of the turn deadline.
+                if attempts == 1 and exc.code == "UPSTREAM_UNAVAILABLE" and exc.retryable:
+                    continue
+                raise
     except Exception as exc:
+        fallback, fallback_status, fallback_reason = fallback_interpretation(
+            question,
+            history=history,
+            knowledge_name=knowledge_name,
+            max_rounds=max_rounds,
+        )
         return QueryInterpretationOutcome(
             "DEGRADED",
-            fallback_interpretation(question),
+            fallback,
             round((time.perf_counter() - started_at) * 1000),
             reason=str(getattr(exc, "code", type(exc).__name__))[:100],
+            attempts=attempts,
+            history_fallback=fallback_status,
+            history_fallback_reason=fallback_reason,
         )
     return QueryInterpretationOutcome(
         "PASSED",
         result.model_copy(update={"search_queries": result.search_queries[:variant_limit]}),
         round((time.perf_counter() - started_at) * 1000),
+        attempts=attempts,
     )
