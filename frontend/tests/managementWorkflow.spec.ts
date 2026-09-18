@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
 import IndexBuildView from "@/views/IndexBuildView.vue";
+import DocumentsView from "@/views/DocumentsView.vue";
 import type { KnowledgeIndex } from "@/types/admin";
 
 const index: KnowledgeIndex = {
@@ -231,5 +232,97 @@ describe("RAG index operations workspace", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("文档有变更待重建");
+  });
+});
+
+describe("RAG document card one-click confirm", () => {
+  const activeIndex = { ...index, id: "idx-1", version: 3, status: "ACTIVE" as const };
+  const readiness = {
+    knowledge_id: "kb-1",
+    index_id: "idx-1",
+    expected_count: 3,
+    ready_count: 3,
+    confirmed_count: 2,
+    auto_count: 1,
+    rejected_count: 0,
+    missing_count: 0,
+    failed_count: 0,
+    stale_count: 0,
+    shadow_ready: true,
+    ready: false,
+    blockers: ["待人工确认 1 份"],
+  };
+
+  beforeEach(() => {
+    adminStore.selectedKnowledgeId = "kb-1";
+    adminStore.knowledgeBases = [
+      {
+        id: "kb-1",
+        name: "产品库",
+        description: "",
+        status: "ENABLED",
+        assistant_online: false,
+        runtime_state: "READY",
+        active_index_id: "idx-1",
+        building_index_id: null,
+        rebuild_required: false,
+        document_count: 3,
+        active_chunk_count: 10,
+        created_at: "2026-08-17T00:00:00Z",
+        updated_at: "2026-08-17T00:00:00Z",
+      },
+    ];
+    adminStore.indexes = [activeIndex];
+    adminStore.ragDocumentCardReadiness = readiness;
+    adminStore.error = "";
+    adminStore.notice = "";
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("confirms pending cards in one click and refreshes readiness", async () => {
+    const { ElMessageBox } = await import("element-plus");
+    const confirm = vi.spyOn(ElMessageBox, "confirm").mockResolvedValue({
+      action: "confirm",
+    } as never);
+    const confirmBatch = vi.spyOn(adminApi, "confirmRagDocumentCards").mockResolvedValue({
+      confirmed_count: 1,
+      readiness: { ...readiness, confirmed_count: 3, auto_count: 0, ready: true, blockers: [] },
+    });
+    const listCards = vi
+      .spyOn(adminApi, "listRagDocumentCards")
+      .mockResolvedValue({ knowledge_id: "kb-1", index_id: "idx-1", index_version: 3, cards: [], readiness });
+
+    const wrapper = mount(DocumentsView, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+
+    const button = wrapper.findAll("button").find((b) => b.text().includes("一键确认待确认"));
+    expect(button).toBeDefined();
+    expect(button!.attributes("disabled")).toBeUndefined();
+    await button!.trigger("click");
+    await flushPromises();
+
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("1 份待确认的 RAG 理解卡片"),
+      "一键确认 RAG 理解",
+      expect.objectContaining({ confirmButtonText: "确认" }),
+    );
+    expect(confirmBatch).toHaveBeenCalledWith("kb-1", "idx-1");
+    expect(listCards).toHaveBeenCalledWith("kb-1", "idx-1");
+    expect(adminStore.ragDocumentCardReadiness?.confirmed_count).toBe(3);
+    expect(adminStore.ragDocumentCardReadiness?.auto_count).toBe(0);
+  });
+
+  it("disables the button when nothing is pending", async () => {
+    adminStore.ragDocumentCardReadiness = { ...readiness, auto_count: 0, confirmed_count: 3 };
+
+    const wrapper = mount(DocumentsView, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+
+    const button = wrapper.findAll("button").find((b) => b.text().includes("一键确认待确认"));
+    expect(button).toBeDefined();
+    expect(button!.attributes("disabled")).toBeDefined();
   });
 });

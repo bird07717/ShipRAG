@@ -944,3 +944,57 @@ async def test_copy_cards_filters_by_build_mode_and_card_state() -> None:
         assert copied == 0
         cards = await repository.list_cards(knowledge_id, new_index_id)
         assert cards == []
+
+
+async def test_post_build_hook_copies_cards_before_requesting_generation(monkeypatch) -> None:
+    """构建后挂钩先复制卡片再提交生成任务；prev 为 None（首次构建）
+    时跳过复制。复制源必须是 pipeline 快照的 prev_index_id。"""
+    from types import SimpleNamespace
+
+    from app.ingestion.pipeline import IndexBuildResult
+    from app.tasks.ingestion import _submit_post_build_rag_cards
+
+    async with _fixture() as (engine, knowledge_id, prev_index_id, document_ids):
+        settings = _settings()
+        resources = SimpleNamespace(database=engine, minio=None)
+        new_index_id = await _create_second_index(engine, knowledge_id)
+        order: list[str] = []
+        copy_calls: list[tuple[UUID, UUID]] = []
+
+        async def fake_copy(self, prev, new):
+            order.append("copy")
+            copy_calls.append((prev, new))
+            return 1
+
+        async def fake_request(
+            self, knowledge_id, *, index_id=None, document_id=None, replace_confirmed=False
+        ):
+            order.append("request")
+            return {
+                "task_id": uuid4(),
+                "task_type": "RAG_DOCUMENT_CARD_GENERATE",
+                "status": "QUEUED",
+                "replayed": False,
+            }
+
+        monkeypatch.setattr(DocumentCardService, "copy_cards", fake_copy)
+        monkeypatch.setattr(DocumentCardService, "request_generation", fake_request)
+
+        first_build = IndexBuildResult(
+            index_id=new_index_id, document_count=1, element_count=1, chunk_count=1
+        )
+        await _submit_post_build_rag_cards(settings, resources, first_build, uuid4())
+        assert order == ["request"]  # prev_index_id=None：首次构建不复制
+        assert copy_calls == []
+
+        order.clear()
+        rebuild = IndexBuildResult(
+            index_id=new_index_id,
+            document_count=1,
+            element_count=1,
+            chunk_count=1,
+            prev_index_id=prev_index_id,
+        )
+        await _submit_post_build_rag_cards(settings, resources, rebuild, uuid4())
+        assert order == ["copy", "request"]
+        assert copy_calls == [(prev_index_id, new_index_id)]

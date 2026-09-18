@@ -441,3 +441,54 @@ def test_confirmed_embedding_change_triggers_fleet_rebuild(
     assert body["rebuilds"] and body["rebuilds"][0]["enqueued"] is True
     assert rebuilds.reasons == ["EMBEDDING_MODEL_CHANGED"]
     assert repository.update_calls[0]["model_name"] == "new-embedding-model"
+
+
+class _CardConfirmServiceStub:
+    def __init__(self) -> None:
+        self.calls: list[tuple[UUID, UUID | None]] = []
+
+    async def confirm_auto_cards(
+        self, knowledge_id: UUID, *, index_id: UUID | None = None
+    ) -> dict[str, Any]:
+        self.calls.append((knowledge_id, index_id))
+        return {
+            "confirmed_count": 3,
+            "readiness": {
+                "knowledge_id": str(knowledge_id),
+                "index_id": str(index_id or uuid4()),
+                "expected_count": 3,
+                "ready_count": 3,
+                "confirmed_count": 3,
+                "auto_count": 0,
+                "rejected_count": 0,
+                "missing_count": 0,
+                "failed_count": 0,
+                "stale_count": 0,
+                "shadow_ready": True,
+                "ready": True,
+                "blockers": [],
+            },
+        }
+
+
+def test_rag_document_card_confirm_batch_endpoint(client: TestClient) -> None:
+    from app.api.rag_document_cards import get_document_card_service
+
+    knowledge_id = uuid4()
+    index_id = uuid4()
+    service = _CardConfirmServiceStub()
+    client.app.dependency_overrides[get_document_card_service] = lambda: service
+    try:
+        response = client.post(
+            f"/api/v1/knowledge-bases/{knowledge_id}/rag-document-cards/confirm-batch",
+            headers={"Authorization": "Bearer test-token"},
+            json={"index_id": str(index_id)},
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_document_card_service, None)
+
+    assert response.status_code == 200
+    body: dict[str, Any] = response.json()
+    assert body["confirmed_count"] == 3
+    assert body["readiness"]["ready"] is True
+    assert service.calls == [(knowledge_id, index_id)]
