@@ -80,3 +80,4 @@
 - `LogsView` 的"升级记录"页签标注"（遗留）"并说明其仅来自已冻结 Support 链路，保留历史查询能力。
 - `SupportReviewView` 顶部有 ADR-0021 冻结横幅，发布/重生成流程保留；`DocumentsView` 上传与空态文案不再宣传 Support Profile 审核，改为说明 RAG 文档卡片自动生成。
 - `IndexBuildView` 索引管理页（ADR-0024，2026-09-17）：工具栏在 `rebuild_required` 时显示"文档有变更待重建"徽标；BUILDING 条目且任务活动时显示"停止"按钮（接 `cancelTask`，协作取消、文档边界生效）；FAILED/CANCELLED 条目显示"重建"按钮（接 `retryIndex`，确认框提示"同一文档同一错误失败 2 次后将自动跳过"）和"删除"按钮（CANCELLED 与 FAILED/DEPRECATED 同权）。重建后不自动激活——沿用全局 staged 候选语义，完成后需手动"设为当前 RAG"。删除按钮文案在详情抽屉为"删除此索引版本"，避免误以为删除文档。
+- `DocumentsView` 工具栏（ADR-0025，2026-09-18）：readiness 计数旁新增"一键确认待确认（N）"按钮（`confirmRagDocumentCards` action，N 为 `auto_count`，为 0 时禁用），确认框说明只影响待确认卡片，完成后以响应携带的 readiness 与刷新后的卡片列表更新页面；REJECTED/FAILED/缺失仍由 blockers 展示。新增文档重建时，未变更文档的卡片经后端复制保留审核状态，页面仅需确认新增部分。

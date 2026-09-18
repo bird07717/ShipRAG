@@ -615,3 +615,25 @@ Assistant 上线与持续对外可用必须满足活动索引中全部有效文�
 ### 取舍与实施
 
 瞬态故障（如 embedding 短暂不可用）不再自愈，需人工点一次重试——管理台有失败通知与徽标，可预测成本优于自动空转。手动重试推进熔断计数意味着跳过坏文档需要管理员点两次"重建"，按钮文案明确提示该语义。"停止"的粒度是文档边界：正在处理的文档（OCR 重的可能分钟级）会完成，其余立即停止。二期候选：REUSE 来源放开到 CANCELLED 索引实现真断点续跑（同哈希同修订才复用，构造上安全），需单独立 ADR 评估"只信生产验证结果"不变量的放宽。
+
+## ADR-0025：RAG 理解卡片跨版本复用与一键确认
+
+- 日期：2026-09-18
+- 状态：已实施（提交 `badeaad`）
+- 影响范围：RAG 文档卡片生成链路、内容指纹语义、文档管理页
+- 关联模块：`backend/app/rag/document_cards.py`（指纹）、`rag/document_card_repository.py`（copy_cards / confirm_auto_cards）、`tasks/ingestion.py`（构建后复制）、`api/rag_document_cards.py`（confirm-batch 端点）、`frontend/src/views/DocumentsView.vue`
+
+### 背景
+
+卡片按 `(index_id, document_id)` 唯一存储，每次构建新索引版本后全量重新生成——即使 32 份文档中 31 份未变更且摄取层已全部 REUSE（分块/向量零模型成本）。生产卡片生成 32/32 LLM 失败证明该环节爆炸半径等于全库文档数。`content_fingerprint` 混入 `index_id`，同内容跨索引指纹必然失配，跨版本复用在指纹层面被锁死。
+
+### 决策
+
+1. **卡片跨版本复制**：构建成功后把 REUSE 文档（摄取层判定的 `build_mode='REUSE'`）的卡片行——含 `routing_embedding` 向量与 `review_status`——从上一版索引复制到新索引；生成任务现有的"指纹匹配即跳过"逻辑据此只为新增/变更文档调用 LLM。复制源取 `IndexBuildResult.prev_index_id`（pipeline 运行时快照），与摄取层 REUSE 判定同源，构建期间人工切换活动指针不会错位。
+2. **指纹语义修正**：`content_fingerprint` 去掉 `index_id`——指纹是内容变更检测，index_id 不是内容。存量卡片指纹失配会在下次生成任务中自愈（跳过不命中 → 重新生成），无需数据迁移。
+3. **审核状态跨版本保留**：CONFIRMED 跨版本保留（老内容不再要求重看），AUTO 留待人工确认，REJECTED 复制后继续挡 readiness（"上次明确拒绝、内容未变"）。FAILED/STALE/过期 `schema_version` 卡片与 REBUILD 文档不复制，留给生成任务。
+4. **一键确认**：`POST .../rag-document-cards/confirm-batch` 单事务把当前索引全部 READY/AUTO 卡片置 CONFIRMED（`revision+1` 保持乐观锁链），REJECTED/FAILED/缺失不动，响应携带最新 readiness。与复用配合后，新增一个文档的确认成本从 N 份降到 1 份。
+
+### 取舍与实施
+
+向量复用依赖 REUSE 三条件（同 embedding 模型/文件哈希/解析器修订）保证维度与语义一致，构造上安全。复制失败只记日志、构建照常成功，卡片任务退化为现状全量生成（天然回滚路径）。确认与生成任务并发时，后完成的 `save_generated` 会把该卡置回 AUTO，前端确认后刷新 readiness 即可发现残余。schema_version 升级发布时旧卡自动失效重新生成，与既有语义一致。
