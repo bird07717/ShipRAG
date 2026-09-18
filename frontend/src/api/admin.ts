@@ -32,6 +32,7 @@ import type {
   EngineRetrievalConfig,
   RagTrace,
   RagDocumentCard,
+  RagDocumentCardBatchConfirm,
   RagDocumentCardList,
   RagDocumentCardPayload,
   RagDocumentCardReadiness,
@@ -172,6 +173,13 @@ export const adminApi = {
       }),
     },
   ),
+  confirmRagDocumentCards: (knowledgeId: string, indexId?: string) =>
+    apiRequest<RagDocumentCardBatchConfirm>(
+      `/knowledge-bases/${knowledgeId}/rag-document-cards/confirm-batch`, {
+        method: "POST",
+        body: JSON.stringify({ index_id: indexId ?? null }),
+      },
+    ),
   renameDocument: (documentId: string, displayName: string) =>
     apiRequest<DocumentItem>(`/documents/${documentId}`, {
       method: "PATCH",

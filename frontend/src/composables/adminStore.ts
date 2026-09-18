@@ -849,6 +849,31 @@ export const adminStore = reactive({
     if (!this.error) this.notice = reviewStatus === "CONFIRMED" ? "卡片已确认" : "卡片已拒绝";
   },
 
+  async confirmRagDocumentCards(): Promise<void> {
+    const knowledgeId = this.selectedKnowledgeId;
+    const indexId = this.activeIndex?.id;
+    const autoCount = this.ragDocumentCardReadiness?.auto_count ?? 0;
+    if (!knowledgeId || !indexId || autoCount === 0) return;
+    try {
+      await ElMessageBox.confirm(
+        `将一键确认当前索引 ${autoCount} 份待确认的 RAG 理解卡片。已拒绝、生成失败或缺失的卡片不受影响。`,
+        "一键确认 RAG 理解",
+        { type: "warning", confirmButtonText: "确认", cancelButtonText: "取消" },
+      );
+    } catch {
+      return;
+    }
+    await this.runAction(`rag-document-card-confirm-batch:${indexId}`, async () => {
+      const result = await adminApi.confirmRagDocumentCards(knowledgeId, indexId);
+      if (this.activeIndex?.id === indexId) this.ragDocumentCardReadiness = result.readiness;
+      const cardList = await adminApi
+        .listRagDocumentCards(knowledgeId, indexId)
+        .catch(() => null);
+      this.ragDocumentCards = cardList?.cards ?? this.ragDocumentCards;
+    });
+    if (!this.error) this.notice = `已确认 ${autoCount} 份 RAG 理解卡片`;
+  },
+
   goToCandidateReview(indexId: string): void {
     /* Documents only shows Profile state; edits happen in the dedicated
      * Support review workspace. Navigate there and preselect the release. */

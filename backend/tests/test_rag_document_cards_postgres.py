@@ -631,3 +631,316 @@ async def test_generation_retry_uses_the_revision_of_each_selected_document(monk
 
 async def _async_value(value):
     return value
+
+
+async def _insert_document(
+    engine: AsyncEngine,
+    knowledge_id: UUID,
+    index_id: UUID,
+    position: int,
+    *,
+    build_mode: str,
+) -> UUID:
+    """Insert a document_source plus its index_document row for one index."""
+    document_id = uuid4()
+    digest = hashlib.sha256(f"doc-{position}-{document_id}".encode()).hexdigest()
+    index_document_id = uuid4()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO document_source (
+                    id,kb_id,filename,display_name,minio_bucket,minio_object_key,
+                    file_hash,file_size,mime_type
+                ) VALUES (
+                    :id,:kb,:filename,:name,'bucket',:key,:hash,1,
+                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                )
+                """
+            ),
+            {
+                "id": document_id,
+                "kb": knowledge_id,
+                "filename": f"document-{position}.docx",
+                "name": f"文档 {position}",
+                "key": f"rag-card/{document_id}/source.docx",
+                "hash": digest,
+            },
+        )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO index_document (
+                    id,index_id,document_id,source_hash,status,metadata
+                ) VALUES (:id,:idx,:doc,:hash,'READY',CAST(:metadata AS jsonb))
+                """
+            ),
+            {
+                "id": index_document_id,
+                "idx": index_id,
+                "doc": document_id,
+                "hash": digest,
+                "metadata": json.dumps({"build_mode": build_mode}),
+            },
+        )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO document_element (
+                    id,index_id,index_document_id,document_id,element_type,
+                    sequence_no,content,section_path
+                ) VALUES (:id,:idx,:idoc,:doc,'TEXT',1,:content,'["操作"]')
+                """
+            ),
+            {
+                "id": uuid4(),
+                "idx": index_id,
+                "idoc": index_document_id,
+                "doc": document_id,
+                "content": f"文档 {position} 的配置步骤",
+            },
+        )
+    return document_id
+
+
+async def _create_second_index(engine: AsyncEngine, knowledge_id: UUID, version: int = 2) -> UUID:
+    index_id = uuid4()
+    async with engine.begin() as connection:
+        model_id = await connection.scalar(
+            text("SELECT id FROM model_config WHERE model_type = 'EMBEDDING' LIMIT 1")
+        )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO knowledge_index (
+                    id,kb_id,version,status,embedding_model_id,embedding_model_name,
+                    embedding_dimension,build_reason
+                ) VALUES (:id,:kb,:version,'READY',:model,'test-embedding',1024,'DOCUMENT_CHANGED')
+                """
+            ),
+            {"id": index_id, "kb": knowledge_id, "version": version, "model": model_id},
+        )
+    return index_id
+
+
+async def test_copy_cards_preserve_review_state_and_skip_generation_for_reused(
+    monkeypatch,
+) -> None:
+    """REUSE 文档的卡片跨版本复制（review_status 原样保留），生成任务
+    的指纹跳过逻辑只为新增文档调用 LLM；REJECTED 复制后继续挡 readiness。"""
+    async with _fixture() as (engine, knowledge_id, prev_index_id, document_ids):
+        settings = _settings()
+        repository = DocumentCardRepository(engine, settings)
+        # v1：文档1 CONFIRMED、文档2 REJECTED
+        await _save(repository, knowledge_id, prev_index_id, document_ids[0])
+        await _save(repository, knowledge_id, prev_index_id, document_ids[1])
+        first_card = await repository.get_card(knowledge_id, prev_index_id, document_ids[0])
+        assert first_card is not None
+        await repository.review_card(
+            knowledge_id=knowledge_id,
+            index_id=prev_index_id,
+            document_id=document_ids[0],
+            expected_revision=first_card["revision"],
+            review_status="CONFIRMED",
+        )
+        card = await repository.get_card(knowledge_id, prev_index_id, document_ids[1])
+        assert card is not None
+        await repository.review_card(
+            knowledge_id=knowledge_id,
+            index_id=prev_index_id,
+            document_id=document_ids[1],
+            expected_revision=card["revision"],
+            review_status="REJECTED",
+        )
+
+        new_index_id = await _create_second_index(engine, knowledge_id)
+        # v2：两个旧文档 REUSE（摄取层会复制 element，内容与 v1 一致），
+        # 再新增一个 REBUILD 文档
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO index_document (
+                        id,index_id,document_id,source_hash,status,metadata
+                    ) VALUES (:id,:idx,:doc,
+                        (SELECT file_hash FROM document_source WHERE id=:doc),
+                        'READY',CAST(:metadata AS jsonb))
+                    """
+                ),
+                [
+                    {
+                        "id": uuid4(),
+                        "idx": new_index_id,
+                        "doc": document_ids[0],
+                        "metadata": json.dumps({"build_mode": "REUSE"}),
+                    },
+                    {
+                        "id": uuid4(),
+                        "idx": new_index_id,
+                        "doc": document_ids[1],
+                        "metadata": json.dumps({"build_mode": "REUSE"}),
+                    },
+                ],
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO document_element (
+                        id,index_id,index_document_id,document_id,element_type,
+                        sequence_no,content,section_path
+                    ) SELECT gen_random_uuid(), :idx,
+                        (SELECT id FROM index_document
+                         WHERE index_id=:idx AND document_id=:doc),
+                        :doc,'TEXT',1,:content,'["操作"]'
+                    """
+                ),
+                [
+                    {"idx": new_index_id, "doc": document_ids[0], "content": "文档 1 的配置步骤"},
+                    {"idx": new_index_id, "doc": document_ids[1], "content": "文档 2 的配置步骤"},
+                ],
+            )
+        new_document_id = await _insert_document(
+            engine, knowledge_id, new_index_id, 3, build_mode="REBUILD"
+        )
+
+        copied = await repository.copy_cards(prev_index_id, new_index_id)
+        assert copied == 2
+
+        copied_confirmed = await repository.get_card(knowledge_id, new_index_id, document_ids[0])
+        assert copied_confirmed is not None
+        assert copied_confirmed["review_status"] == "CONFIRMED"
+        assert copied_confirmed["generation_status"] == "READY"
+        assert copied_confirmed["revision"] == 1
+        original = await repository.get_card(knowledge_id, prev_index_id, document_ids[0])
+        assert original is not None
+        assert copied_confirmed["content_fingerprint"] == original["content_fingerprint"]
+        copied_rejected = await repository.get_card(knowledge_id, new_index_id, document_ids[1])
+        assert copied_rejected is not None
+        assert copied_rejected["review_status"] == "REJECTED"
+
+        # 生成任务：只应为新文档调用 LLM（复制的卡片被指纹跳过逻辑命中）
+        task_id = uuid4()
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO task_record (
+                        id,task_type,status,stage,kb_id,index_id,metadata
+                    ) VALUES (
+                        :id,'RAG_DOCUMENT_CARD_GENERATE','RUNNING','GENERATING_CARDS',
+                        :kb,:idx,CAST(:metadata AS jsonb)
+                    )
+                    """
+                ),
+                {
+                    "id": task_id,
+                    "kb": knowledge_id,
+                    "idx": new_index_id,
+                    "metadata": json.dumps(
+                        {"knowledge_id": str(knowledge_id), "index_id": str(new_index_id)}
+                    ),
+                },
+            )
+
+        async def fake_llm_snapshot(_self):
+            return ModelSnapshot(provider="fake", model_name="fake-card-model", parameters={})
+
+        monkeypatch.setattr(SupportRepository, "get_llm", fake_llm_snapshot)
+        monkeypatch.setattr(
+            "app.rag.document_card_service.create_llm_provider",
+            lambda _settings, _snapshot: FakeLlmProvider(
+                completions=[_payload().model_dump_json()]
+            ),
+        )
+        monkeypatch.setattr(
+            "app.rag.document_card_service.create_embedding_provider",
+            lambda _settings, _snapshot: FakeEmbeddingProvider(1024),
+        )
+        monkeypatch.setattr(
+            repository,
+            "embedding_snapshot",
+            lambda _index_id: _async_value(
+                ModelSnapshot(provider="fake", model_name="fake-embedding", parameters={})
+            ),
+        )
+        task = await TaskRecordRepository(engine).get(task_id)
+        assert task is not None
+        result = await DocumentCardService(repository, settings).execute_generation_task(
+            task, TaskRecordRepository(engine)
+        )
+
+        assert result["generated_count"] == 1
+        assert result["failed_count"] == 0
+        readiness = await repository.readiness(knowledge_id, new_index_id)
+        assert readiness["expected_count"] == 3
+        assert readiness["confirmed_count"] == 1
+        assert readiness["rejected_count"] == 1
+        assert readiness["auto_count"] == 1
+        assert readiness["shadow_ready"] is False  # REJECTED 跨版本继续挡
+
+        # 一键确认：只有 AUTO（新文档）被确认，REJECTED 原样保留
+        service = DocumentCardService(repository, settings)
+        confirmed = await service.confirm_auto_cards(knowledge_id, index_id=new_index_id)
+        assert confirmed["confirmed_count"] == 1
+        assert confirmed["readiness"]["confirmed_count"] == 2
+        assert confirmed["readiness"]["rejected_count"] == 1
+        again = await service.confirm_auto_cards(knowledge_id, index_id=new_index_id)
+        assert again["confirmed_count"] == 0  # 幂等
+        new_card = await repository.get_card(knowledge_id, new_index_id, new_document_id)
+        assert new_card is not None
+        assert new_card["review_status"] == "CONFIRMED"
+        assert new_card["revision"] == 2
+
+
+async def test_copy_cards_filters_by_build_mode_and_card_state() -> None:
+    """非 REUSE 文档（build_mode 过滤）与 FAILED 卡片（状态过滤）都不复制。"""
+    async with _fixture() as (engine, knowledge_id, prev_index_id, document_ids):
+        repository = DocumentCardRepository(engine, _settings())
+        await _save(repository, knowledge_id, prev_index_id, document_ids[0])
+        await _save(repository, knowledge_id, prev_index_id, document_ids[1])
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE rag_document_card SET generation_status='FAILED',
+                        error_code='UPSTREAM_UNAVAILABLE'
+                    WHERE index_id=:idx AND document_id=:doc
+                    """
+                ),
+                {"idx": prev_index_id, "doc": document_ids[1]},
+            )
+
+        new_index_id = await _create_second_index(engine, knowledge_id)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO index_document (
+                        id,index_id,document_id,source_hash,status,metadata
+                    ) VALUES (:id,:idx,:doc,
+                        (SELECT file_hash FROM document_source WHERE id=:doc),
+                        'READY',CAST(:metadata AS jsonb))
+                    """
+                ),
+                [
+                    {
+                        # 内容变更：即使旧卡 READY 也不复制
+                        "id": uuid4(),
+                        "idx": new_index_id,
+                        "doc": document_ids[0],
+                        "metadata": json.dumps({"build_mode": "REBUILD"}),
+                    },
+                    {
+                        # REUSE 但旧卡 FAILED：留给生成任务重新生成
+                        "id": uuid4(),
+                        "idx": new_index_id,
+                        "doc": document_ids[1],
+                        "metadata": json.dumps({"build_mode": "REUSE"}),
+                    },
+                ],
+            )
+
+        copied = await repository.copy_cards(prev_index_id, new_index_id)
+        assert copied == 0
+        cards = await repository.list_cards(knowledge_id, new_index_id)
+        assert cards == []

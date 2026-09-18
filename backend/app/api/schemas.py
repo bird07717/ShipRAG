@@ -126,6 +126,17 @@ class RagDocumentCardReviewRequest(BaseModel):
     review_status: Literal["CONFIRMED", "REJECTED"]
 
 
+class RagDocumentCardBatchConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    index_id: UUID | None = None
+
+
+class RagDocumentCardBatchConfirmResponse(BaseModel):
+    confirmed_count: int
+    readiness: RagDocumentCardReadinessResponse
+
+
 class RagDocumentCardResponse(BaseModel):
     id: UUID
     knowledge_id: UUID

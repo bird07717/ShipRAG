@@ -144,6 +144,11 @@ export interface RagDocumentCardReadiness {
   blockers: string[];
 }
 
+export interface RagDocumentCardBatchConfirm {
+  confirmed_count: number;
+  readiness: RagDocumentCardReadiness;
+}
+
 export interface RagDocumentCardList {
   knowledge_id: string;
   index_id: string;

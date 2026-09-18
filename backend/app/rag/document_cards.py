@@ -158,10 +158,15 @@ def build_routing_text(payload: DocumentCardPayload) -> str:
 
 
 def content_fingerprint(document: dict[str, Any]) -> str:
-    """Fingerprint immutable index content; a display-name edit is not stale."""
+    """Fingerprint immutable index content; a display-name edit is not stale.
+
+    The fingerprint deliberately excludes index_id: two index versions of the
+    same document with identical content (the ingestion layer's REUSE copy)
+    must produce the same fingerprint, otherwise cards copied across versions
+    would always look stale to the generation task's skip logic.
+    """
     source = {
         "schema_version": DOCUMENT_CARD_SCHEMA_VERSION,
-        "index_id": str(document["index_id"]),
         "source_hash": str(document.get("source_hash") or ""),
         "content": str(document.get("content") or ""),
         "sections": list(document.get("sections") or []),

@@ -88,9 +88,24 @@ async def _submit_post_build_rag_cards(
 
         index = await IngestionRepository(resources.database, settings).get_index(result.index_id)
         knowledge_id = UUID(str(index["kb_id"]))
-        submission = await DocumentCardService(
+        service = DocumentCardService(
             DocumentCardRepository(resources.database, settings), settings
-        ).request_generation(knowledge_id, index_id=result.index_id)
+        )
+        # 卡片跨版本复用：构建成功后先把 REUSE 文档的卡片行从上一版
+        # 索引复制过来（review_status 原样保留）。生成任务现有的指纹跳
+        # 过逻辑会把这些行视为已就绪，只为新增/变更文档调用 LLM。复制
+        # 源用 pipeline 运行时快照的 prev_index_id，与摄取层 REUSE 判定
+        # 同源，构建期间人工切换活动指针不会造成错位。
+        if result.prev_index_id is not None:
+            copied = await service.copy_cards(result.prev_index_id, result.index_id)
+            if copied:
+                logger.info(
+                    "Reused %d RAG document cards from index %s into %s",
+                    copied,
+                    result.prev_index_id,
+                    result.index_id,
+                )
+        submission = await service.request_generation(knowledge_id, index_id=result.index_id)
         await TaskRecordRepository(resources.database).merge_metadata(
             task_id,
             {

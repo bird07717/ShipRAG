@@ -108,8 +108,13 @@ def test_content_fingerprint_ignores_display_name_but_tracks_frozen_content() ->
     renamed["display_name"] = "新名称"
     changed = deepcopy(document)
     changed["content"] = "修订正文"
+    # 同内容跨索引版本（REUSE 复制）必须同指纹，否则复制来的卡片在
+    # 生成任务的跳过逻辑里永远视为过期。
+    other_index = deepcopy(document)
+    other_index["index_id"] = uuid4()
 
     assert content_fingerprint(document) == content_fingerprint(renamed)
+    assert content_fingerprint(document) == content_fingerprint(other_index)
     assert content_fingerprint(document) != content_fingerprint(changed)
 
 

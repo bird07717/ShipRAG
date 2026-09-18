@@ -61,6 +61,24 @@ class DocumentCardService:
         index = await self.repository.resolve_index(knowledge_id, index_id)
         return await self.repository.readiness(knowledge_id, UUID(str(index["id"])))
 
+    async def confirm_auto_cards(
+        self, knowledge_id: UUID, *, index_id: UUID | None = None
+    ) -> dict[str, Any]:
+        """One-click confirm every READY/AUTO card of the index.
+
+        Returns the confirmed count plus the readiness snapshot so the caller
+        can render remaining blockers (REJECTED / FAILED / missing) without a
+        second round-trip.
+        """
+        index = await self.repository.resolve_index(knowledge_id, index_id)
+        resolved_index_id = UUID(str(index["id"]))
+        confirmed_count = await self.repository.confirm_auto_cards(knowledge_id, resolved_index_id)
+        readiness = await self.repository.readiness(knowledge_id, resolved_index_id)
+        return {"confirmed_count": confirmed_count, "readiness": readiness}
+
+    async def copy_cards(self, prev_index_id: UUID, new_index_id: UUID) -> int:
+        return await self.repository.copy_cards(prev_index_id, new_index_id)
+
     async def request_generation(
         self,
         knowledge_id: UUID,

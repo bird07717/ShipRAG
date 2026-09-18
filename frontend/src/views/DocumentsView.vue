@@ -317,6 +317,17 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
             RAG 理解：{{ store.ragDocumentCardReadiness.confirmed_count }}/{{ store.ragDocumentCardReadiness.expected_count }} 已确认
           </span>
           <el-button
+            :disabled="
+              !store.activeIndex
+                || !store.ragDocumentCardReadiness
+                || store.ragDocumentCardReadiness.auto_count === 0
+            "
+            :loading="Boolean(store.actionLoading[`rag-document-card-confirm-batch:${store.activeIndex?.id ?? ''}`])"
+            @click="store.confirmRagDocumentCards()"
+          >
+            一键确认待确认（{{ store.ragDocumentCardReadiness?.auto_count ?? 0 }}）
+          </el-button>
+          <el-button
             :disabled="!store.activeIndex"
             :loading="Boolean(store.actionLoading[`rag-document-card-generate:${store.activeIndex?.id ?? ''}`]) || ragCardTaskActive"
             @click="store.generateRagDocumentCards()"

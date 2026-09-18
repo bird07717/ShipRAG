@@ -7,6 +7,8 @@ from fastapi import APIRouter, Depends, Query, status
 
 from app.api.dependencies import get_app_settings, get_resources
 from app.api.schemas import (
+    RagDocumentCardBatchConfirmRequest,
+    RagDocumentCardBatchConfirmResponse,
     RagDocumentCardGenerateRequest,
     RagDocumentCardListResponse,
     RagDocumentCardReadinessResponse,
@@ -84,6 +86,18 @@ async def generate_rag_document_cards(
         document_id=payload.document_id,
         replace_confirmed=payload.replace_confirmed,
     )
+
+
+@router.post(
+    "/knowledge-bases/{knowledge_id}/rag-document-cards/confirm-batch",
+    response_model=RagDocumentCardBatchConfirmResponse,
+)
+async def confirm_rag_document_cards(
+    knowledge_id: UUID,
+    payload: RagDocumentCardBatchConfirmRequest,
+    service: Annotated[DocumentCardService, Depends(get_document_card_service)],
+) -> dict[str, Any]:
+    return await service.confirm_auto_cards(knowledge_id, index_id=payload.index_id)
 
 
 @router.put(

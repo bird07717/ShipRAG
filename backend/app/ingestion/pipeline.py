@@ -53,6 +53,10 @@ class IndexBuildResult:
     element_count: int
     chunk_count: int
     cancelled: bool = False
+    # REUSE 摄取的来源索引：卡片跨版本复用（copy_cards）必须与摄取层
+    # 判定 REUSE 的来源一致，不能在任务层重新查询活动索引（构建期间
+    # 指针可能已被人工切换）。
+    prev_index_id: UUID | None = None
 
 
 class IndexPipeline:
@@ -148,6 +152,7 @@ class IndexPipeline:
                 document_count=counts[0],
                 element_count=counts[1],
                 chunk_count=counts[2],
+                prev_index_id=prev_index_id,
             )
         except Exception as exc:
             await self._mark_failed(index_id, task_id, exc)

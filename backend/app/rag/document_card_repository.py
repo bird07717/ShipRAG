@@ -367,6 +367,77 @@ class DocumentCardRepository:
         assert card is not None
         return card
 
+    async def copy_cards(self, prev_index_id: UUID, new_index_id: UUID) -> int:
+        """Copy REUSE documents' cards from the previous index to a new one.
+
+        Only READY cards with the current schema version are copied, and only
+        for documents the ingestion layer marked build_mode=REUSE in the new
+        index (same file hash, parser revision and embedding model).  The
+        generation task's fingerprint-skip logic then treats the copies as
+        settled, so a rebuild after adding one document only generates cards
+        for that document.  review_status is preserved verbatim: CONFIRMED
+        carries across versions, AUTO stays pending human review, REJECTED
+        keeps blocking readiness.
+        """
+        async with self.engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    INSERT INTO rag_document_card (
+                        id, knowledge_id, index_id, document_id, schema_version,
+                        document_type, card_payload, routing_text, routing_embedding,
+                        content_fingerprint, generation_status, review_status, revision,
+                        generator_snapshot, created_at, updated_at
+                    )
+                    SELECT gen_random_uuid(), c.knowledge_id, :new_index_id,
+                           c.document_id, c.schema_version, c.document_type,
+                           c.card_payload, c.routing_text, c.routing_embedding,
+                           c.content_fingerprint, 'READY', c.review_status, 1,
+                           c.generator_snapshot, now(), now()
+                    FROM rag_document_card c
+                    WHERE c.index_id = :prev_index_id
+                      AND c.generation_status = 'READY'
+                      AND c.schema_version = :schema_version
+                      AND c.document_id IN (
+                          SELECT document_id FROM index_document
+                          WHERE index_id = :new_index_id
+                            AND status = 'READY'
+                            AND metadata->>'build_mode' = 'REUSE'
+                      )
+                    ON CONFLICT (index_id, document_id) DO NOTHING
+                    """
+                ),
+                {
+                    "prev_index_id": prev_index_id,
+                    "new_index_id": new_index_id,
+                    "schema_version": DOCUMENT_CARD_SCHEMA_VERSION,
+                },
+            )
+            return int(result.rowcount or 0)
+
+    async def confirm_auto_cards(self, knowledge_id: UUID, index_id: UUID) -> int:
+        """Batch-confirm every READY/AUTO card of the index in one transaction.
+
+        REJECTED / FAILED / STALE / PENDING cards are left untouched so the
+        readiness blockers keep reporting them honestly.  revision is bumped
+        to keep the optimistic-lock chain intact for later single-card edits.
+        """
+        async with self.engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE rag_document_card
+                    SET review_status = 'CONFIRMED', revision = revision + 1,
+                        updated_at = now()
+                    WHERE knowledge_id = :knowledge_id AND index_id = :index_id
+                      AND generation_status = 'READY' AND review_status = 'AUTO'
+                    RETURNING id
+                    """
+                ),
+                {"knowledge_id": knowledge_id, "index_id": index_id},
+            )
+            return len(result.all())
+
     async def review_card(
         self,
         *,
