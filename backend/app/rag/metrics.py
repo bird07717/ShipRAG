@@ -61,12 +61,21 @@ class MetricsRepository:
         mode: str,
         start: datetime,
         end: datetime,
+        *,
+        engine: str | None = None,
+        source: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
         clauses = ["mode = :mode", "created_at >= :start", "created_at < :end"]
         parameters: dict[str, Any] = {"mode": mode, "start": start, "end": end}
         if knowledge_id is not None:
             clauses.append("kb_id = :kb_id")
             parameters["kb_id"] = knowledge_id
+        if engine is not None:
+            clauses.append("engine = :engine")
+            parameters["engine"] = engine
+        if source is not None:
+            clauses.append("source = :source")
+            parameters["source"] = source
         return " AND ".join(clauses), parameters
 
     async def overview(
@@ -76,9 +85,18 @@ class MetricsRepository:
         mode: str = "CHAT",
         created_from: datetime | None = None,
         created_to: datetime | None = None,
+        engine: str | None = None,
+        source: str | None = None,
     ) -> dict[str, Any]:
         start, end = self.resolve_range(created_from, created_to)
-        where, parameters = self._filters(knowledge_id, mode, start, end)
+        where, parameters = self._filters(
+            knowledge_id,
+            mode,
+            start,
+            end,
+            engine=engine,
+            source=source,
+        )
         query = f"""
             SELECT
                 count(*) AS total,
@@ -91,7 +109,15 @@ class MetricsRepository:
                 count(*) FILTER (
                     WHERE response_type IN ('DOC_DELIVERED', 'DOCUMENT_DELIVERED')
                 ) AS doc_delivered,
-                count(*) FILTER (WHERE response_type IS NOT NULL) AS with_response_type,
+                count(*) FILTER (
+                    WHERE response_type = 'ANSWERED' AND answer_mode = 'PRODUCT_KNOWLEDGE'
+                ) AS product_knowledge,
+                count(*) FILTER (
+                    WHERE response_type = 'ANSWERED' AND answer_mode = 'PRODUCT_EXPLAINED'
+                ) AS product_explained,
+                count(*) FILTER (
+                    WHERE response_type = 'ANSWERED' AND answer_mode = 'PRODUCT_GENERAL'
+                ) AS product_general,
                 count(DISTINCT user_id) AS unique_users,
                 count(*) FILTER (
                     WHERE citation_result ->> 'citation_missing' = 'true'
@@ -120,23 +146,50 @@ class MetricsRepository:
         async with self.engine.connect() as connection:
             result = await connection.execute(text(query), parameters)
             row = dict(result.mappings().one())
-        answered_base = int(row["with_response_type"])
-        no_answer = int(row["unconfirmed"]) + int(row["out_of_scope"])
+        answered = int(row["answered"])
+        unconfirmed = int(row["unconfirmed"])
+        out_of_scope = int(row["out_of_scope"])
+        doc_delivered = int(row["doc_delivered"])
+        product_knowledge = int(row["product_knowledge"])
+        product_explained = int(row["product_explained"])
+        product_general = int(row["product_general"])
+        answer_basis_traces = product_knowledge + product_explained + product_general
+        direct_answers = answered + doc_delivered
+        in_scope = direct_answers + unconfirmed
+        classified = in_scope + out_of_scope
         return {
-            "range": {"from": start.isoformat(), "to": end.isoformat(), "mode": mode},
+            "range": {
+                "from": start.isoformat(),
+                "to": end.isoformat(),
+                "mode": mode,
+                "engine": engine,
+                "source": source,
+            },
             "total_traces": int(row["total"]),
             "completed": int(row["completed"]),
             "failed": int(row["failed"]),
             "cancelled": int(row["cancelled"]),
             "response_type_counts": {
-                "ANSWERED": int(row["answered"]),
-                "UNCONFIRMED": int(row["unconfirmed"]),
-                "OUT_OF_SCOPE": int(row["out_of_scope"]),
-                "DOC_DELIVERED": int(row["doc_delivered"]),
+                "ANSWERED": answered,
+                "UNCONFIRMED": unconfirmed,
+                "OUT_OF_SCOPE": out_of_scope,
+                "DOC_DELIVERED": doc_delivered,
             },
-            "classified_traces": answered_base,
-            "no_answer_rate": _rate(no_answer, answered_base),
-            "doc_delivered_rate": _rate(int(row["doc_delivered"]), answered_base),
+            "answer_mode_counts": {
+                "PRODUCT_KNOWLEDGE": product_knowledge,
+                "PRODUCT_EXPLAINED": product_explained,
+                "PRODUCT_GENERAL": product_general,
+            },
+            "answer_basis_traces": answer_basis_traces,
+            "product_knowledge_rate": _rate(product_knowledge, answer_basis_traces),
+            "product_explained_rate": _rate(product_explained, answer_basis_traces),
+            "product_general_rate": _rate(product_general, answer_basis_traces),
+            "classified_traces": classified,
+            "in_scope_traces": in_scope,
+            "direct_answer_rate": _rate(direct_answers, in_scope),
+            "needs_information_rate": _rate(unconfirmed, in_scope),
+            "out_of_scope_rate": _rate(out_of_scope, classified),
+            "doc_delivered_rate": _rate(doc_delivered, classified),
             "failure_rate": _rate(int(row["failed"]), int(row["total"])),
             "citation_missing_rate": _rate(int(row["citation_missing"]), int(row["completed"])),
             "rerank_degraded_rate": _rate(int(row["rerank_degraded"]), int(row["total"])),
@@ -163,9 +216,18 @@ class MetricsRepository:
         granularity: str = "day",
         created_from: datetime | None = None,
         created_to: datetime | None = None,
+        engine: str | None = None,
+        source: str | None = None,
     ) -> list[dict[str, Any]]:
         start, end = self.resolve_range(created_from, created_to)
-        where, parameters = self._filters(knowledge_id, mode, start, end)
+        where, parameters = self._filters(
+            knowledge_id,
+            mode,
+            start,
+            end,
+            engine=engine,
+            source=source,
+        )
         trunc = "hour" if granularity == "hour" else "day"
         parameters["trunc"] = trunc
         query = f"""
@@ -194,13 +256,9 @@ class MetricsRepository:
             rows = [dict(row) for row in result.mappings()]
         points: list[dict[str, Any]] = []
         for row in rows:
-            classified = (
-                int(row["answered"])
-                + int(row["unconfirmed"])
-                + int(row["out_of_scope"])
-                + int(row["doc_delivered"])
-            )
-            no_answer = int(row["unconfirmed"]) + int(row["out_of_scope"])
+            direct_answers = int(row["answered"]) + int(row["doc_delivered"])
+            in_scope = direct_answers + int(row["unconfirmed"])
+            classified = in_scope + int(row["out_of_scope"])
             points.append(
                 {
                     "bucket": row["bucket"].isoformat(),
@@ -210,7 +268,9 @@ class MetricsRepository:
                     "unconfirmed": int(row["unconfirmed"]),
                     "out_of_scope": int(row["out_of_scope"]),
                     "doc_delivered": int(row["doc_delivered"]),
-                    "no_answer_rate": _rate(no_answer, classified),
+                    "direct_answer_rate": _rate(direct_answers, in_scope),
+                    "needs_information_rate": _rate(int(row["unconfirmed"]), in_scope),
+                    "out_of_scope_rate": _rate(int(row["out_of_scope"]), classified),
                     "p95_ms": int(row["p95_ms"]),
                     "llm_tokens": int(row["llm_tokens"]),
                     "rerank_tokens": int(row["rerank_tokens"]),
@@ -535,6 +595,7 @@ class MetricsRepository:
                             SELECT COALESCE(error ->> 'code', 'UNKNOWN') AS code, count(*) AS count
                             FROM rag_trace
                             WHERE error ->> 'code' IS NOT NULL
+                              AND source = 'ASSISTANT_API'
                               AND created_at >= :start AND created_at < :end{kb_clause}
                             GROUP BY 1
                             ORDER BY count DESC
@@ -554,7 +615,7 @@ class MetricsRepository:
                                    count(*) AS count
                             FROM request_error_log
                             WHERE created_at >= :start AND created_at < :end
-                              AND (path LIKE '/api/v1/chat%' OR path LIKE '/api/v1/assistant%')
+                              AND path LIKE '/api/v1/assistant%'
                             GROUP BY 1, 2
                             ORDER BY count DESC
                             LIMIT 8
@@ -654,7 +715,7 @@ class MetricsRepository:
                                    count(*) AS count
                             FROM request_error_log
                             WHERE created_at >= :start AND created_at < :end
-                              AND (path LIKE '/api/v1/chat%' OR path LIKE '/api/v1/assistant%')
+                              AND path LIKE '/api/v1/assistant%'
                               AND error_code IN (
                                   'CONVERSATION_BUSY', 'REQUEST_IN_PROGRESS', 'SERVICE_BUSY'
                               )

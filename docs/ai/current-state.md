@@ -1,6 +1,14 @@
 # 当前项目状态
 
-> 本文记录当前有效状态，不是任务流水账。项目文档、本地代码和抽样真实模型验证更新至 2026-09-18；生产状态最近核对于 2026-09-17 的 SC200 Trace 只读诊断。
+> 本文记录当前有效状态，不是任务流水账。项目文档与本地代码更新至 2026-09-20，抽样真实模型验证更新至 2026-09-18；生产状态最近核对于 2026-09-17 的 SC200 Trace 只读诊断。
+
+## Dashboard 回答结果指标收口（2026-09-20，本地已实施，未部署）
+
+- 原“无答案率”把正常 `OUT_OF_SCOPE` 拒答和 `UNCONFIRMED` 相加，且概览、趋势、下钻的分母、时间与来源不一致；Dashboard 还展示冻结 Support 的文档交付、澄清、升级和 Profile 待办。现改为直接回答率、待补充信息率、范围外请求率和独立失败率，外部拒答不再记作负向无答案；`UNCONFIRMED` 明确只表示需要更多条件或低信息输入，不自动归因为知识库缺口。
+- 回答结果卡片、趋势、待补充列表和柱形下钻统一过滤 `source=ASSISTANT_API`、`engine=RAG` 和同一个近 7 天窗口；列表额外要求 `COMPLETED/UNCONFIRMED`。管理指标 overview/timeseries 新增可选 `engine`、`source` 过滤及三项新比例字段，移除旧 `no_answer_rate`；前后端类型、Schema、API 测试和运营手册同步。Assistant TOP Trace/HTTP 错误同时收窄到外部 Assistant 路径，避免混入内部 Chat。
+- Dashboard 新增回答依据分布：独立聚合 `PRODUCT_KNOWLEDGE`、`PRODUCT_EXPLAINED`、`PRODUCT_GENERAL`，分母只取这三类已分类回答。RAG V2 的既有内部 Trace 新增三类确定性 `diagnostic_reason`：`LOW_INFORMATION`、`SCOPE_CONFLICT`、`NEEDS_KEY_CONDITION`，管理 Trace 显示中文含义和原始输入门禁码。同步/流式、管理 Chat/Assistant 共用 `_generate_v2()` 的完成持久化入口，因此记录口径一致。
+- 本轮观测增强没有修改范围判定、Prompt、检索、生成、`response_type`、回答正文或公开 Assistant/SSE 契约，没有新增数据库迁移和环境变量，也不回填历史 Trace。三类原因不能覆盖证据不足和检索误判；精确知识库缺口仍需人工结合候选与文档判断。
+- 完整门禁 `bash scripts/check.sh` 退出码 0：Ruff/格式、Mypy（139 个源文件）、后端 836 项、摄取/RAG V2/管理三项 fake smoke、累计覆盖率 81%、前端 23 个文件 176 项、覆盖率 91.42%、ESLint、类型检查和生产构建全部通过，仅有既有 Vite 大包警告。本轮未运行 Golden Set、真实模型、浏览器人工验收或生产部署。
 
 ## RAG 产品内扩展与双模型范围一致性（2026-09-18，本地已实施，未部署）
 

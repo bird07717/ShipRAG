@@ -47,15 +47,22 @@ async def metrics_overview(
     repository: Annotated[MetricsRepository, Depends(get_metrics_repository)],
     knowledge_id: Annotated[UUID | None, Query()] = None,
     mode: Annotated[Literal["CHAT", "PLAYGROUND"], Query()] = "CHAT",
+    engine: Annotated[Literal["SUPPORT", "RAG"] | None, Query()] = None,
+    source: Annotated[
+        Literal["ASSISTANT_API", "INTERNAL_CHAT", "PLAYGROUND"] | None,
+        Query(),
+    ] = None,
     created_from: Annotated[str | None, Query(alias="from")] = None,
     created_to: Annotated[str | None, Query(alias="to")] = None,
 ) -> dict[str, Any]:
-    # Defaults to the last 7 days. Denominators exclude rows whose
-    # response_type is NULL (pre-0014 history and failed turns), so rates
-    # stay meaningful across the backfill boundary.
+    # Defaults to the last 7 days. Quality-rate denominators use only the
+    # explicit RAG response categories, excluding failed and unclassified
+    # history so traffic composition cannot masquerade as answer quality.
     return await repository.overview(
         knowledge_id=knowledge_id,
         mode=mode,
+        engine=engine,
+        source=source,
         created_from=_parse_datetime(created_from),
         created_to=_parse_datetime(created_to),
     )
@@ -66,6 +73,11 @@ async def metrics_timeseries(
     repository: Annotated[MetricsRepository, Depends(get_metrics_repository)],
     knowledge_id: Annotated[UUID | None, Query()] = None,
     mode: Annotated[Literal["CHAT", "PLAYGROUND"], Query()] = "CHAT",
+    engine: Annotated[Literal["SUPPORT", "RAG"] | None, Query()] = None,
+    source: Annotated[
+        Literal["ASSISTANT_API", "INTERNAL_CHAT", "PLAYGROUND"] | None,
+        Query(),
+    ] = None,
     granularity: Annotated[Literal["day", "hour"], Query()] = "day",
     created_from: Annotated[str | None, Query(alias="from")] = None,
     created_to: Annotated[str | None, Query(alias="to")] = None,
@@ -74,6 +86,8 @@ async def metrics_timeseries(
         knowledge_id=knowledge_id,
         mode=mode,
         granularity=granularity,
+        engine=engine,
+        source=source,
         created_from=_parse_datetime(created_from),
         created_to=_parse_datetime(created_to),
     )

@@ -38,8 +38,20 @@ class _StubMetricsRepository:
                 "OUT_OF_SCOPE": 5,
                 "DOC_DELIVERED": 10,
             },
+            "answer_mode_counts": {
+                "PRODUCT_KNOWLEDGE": 30,
+                "PRODUCT_EXPLAINED": 20,
+                "PRODUCT_GENERAL": 10,
+            },
+            "answer_basis_traces": 60,
+            "product_knowledge_rate": 0.5,
+            "product_explained_rate": 0.3333,
+            "product_general_rate": 0.1667,
             "classified_traces": 95,
-            "no_answer_rate": 0.2632,
+            "in_scope_traces": 90,
+            "direct_answer_rate": 0.7778,
+            "needs_information_rate": 0.2222,
+            "out_of_scope_rate": 0.0526,
             "doc_delivered_rate": 0.1053,
             "failure_rate": 0.05,
             "citation_missing_rate": 0.02,
@@ -65,7 +77,9 @@ class _StubMetricsRepository:
                 "unconfirmed": 2,
                 "out_of_scope": 0,
                 "doc_delivered": 1,
-                "no_answer_rate": 0.2,
+                "direct_answer_rate": 0.8182,
+                "needs_information_rate": 0.1818,
+                "out_of_scope_rate": 0.0,
                 "p95_ms": 3000,
                 "llm_tokens": 900,
                 "rerank_tokens": 40,
@@ -279,6 +293,19 @@ async def test_assistant_metrics_read_assistant_request_with_knowledge_filter() 
     assert "FROM support_idempotency" not in idempotency_sql
     assert "knowledge_id = :kb_id" in idempotency_sql
     assert parameters["kb_id"] == knowledge_id
+    turn_error_sql, _ = next(
+        call
+        for call in engine.connection.calls
+        if "FROM rag_trace" in call[0] and "error ->> 'code' IS NOT NULL" in call[0]
+    )
+    assert "source = 'ASSISTANT_API'" in turn_error_sql
+    http_error_sql, _ = next(
+        call
+        for call in engine.connection.calls
+        if "FROM request_error_log" in call[0] and "GROUP BY 1, 2" in call[0]
+    )
+    assert "path LIKE '/api/v1/assistant%'" in http_error_sql
+    assert "/api/v1/chat" not in http_error_sql
 
 
 @pytest.mark.asyncio
@@ -325,16 +352,21 @@ class TestMetricsApi:
             response = client.get(
                 "/api/v1/metrics/overview"
                 "?knowledge_id=00000000-0000-0000-0000-000000000002"
-                "&from=2026-08-14T00:00:00&to=2026-08-21T00:00:00",
+                "&from=2026-08-14T00:00:00&to=2026-08-21T00:00:00"
+                "&engine=RAG&source=ASSISTANT_API",
                 headers=AUTH,
             )
             assert response.status_code == 200
             body = response.json()
-            assert body["no_answer_rate"] == 0.2632
+            assert body["direct_answer_rate"] == 0.7778
+            assert body["answer_mode_counts"]["PRODUCT_KNOWLEDGE"] == 30
+            assert body["product_general_rate"] == 0.1667
             assert body["tokens"]["llm_total"] == 10000
             call = stub.calls["overview"]
             assert str(call["knowledge_id"]) == "00000000-0000-0000-0000-000000000002"
             assert call["created_from"] == datetime(2026, 8, 14, 0, 0)
+            assert call["engine"] == "RAG"
+            assert call["source"] == "ASSISTANT_API"
         finally:
             client.app.dependency_overrides.clear()
 
@@ -442,7 +474,7 @@ class TestMetricsApi:
             assert response.status_code == 200
             body = response.json()
             assert body[0]["bucket"] == "2026-08-20T00:00:00"
-            assert body[0]["no_answer_rate"] == 0.2
+            assert body[0]["needs_information_rate"] == 0.1818
             assert stub.calls["timeseries"]["granularity"] == "hour"
         finally:
             client.app.dependency_overrides.clear()
@@ -599,7 +631,9 @@ def _overview_row(**overrides: Any) -> dict[str, Any]:
         "unconfirmed": 3,
         "out_of_scope": 1,
         "doc_delivered": 2,
-        "with_response_type": 11,
+        "product_knowledge": 2,
+        "product_explained": 2,
+        "product_general": 1,
         "unique_users": 4,
         "citation_missing": 2,
         "rerank_degraded": 1,
@@ -656,9 +690,20 @@ class TestMetricsAggregation:
 
         assert result["total_traces"] == 10
         assert result["classified_traces"] == 11
-        # (unconfirmed 3 + out_of_scope 1) / classified 11
-        assert result["no_answer_rate"] == round(4 / 11, 4)
+        assert result["in_scope_traces"] == 10
+        assert result["direct_answer_rate"] == 0.7
+        assert result["needs_information_rate"] == 0.3
+        assert result["out_of_scope_rate"] == round(1 / 11, 4)
         assert result["doc_delivered_rate"] == round(2 / 11, 4)
+        assert result["answer_mode_counts"] == {
+            "PRODUCT_KNOWLEDGE": 2,
+            "PRODUCT_EXPLAINED": 2,
+            "PRODUCT_GENERAL": 1,
+        }
+        assert result["answer_basis_traces"] == 5
+        assert result["product_knowledge_rate"] == 0.4
+        assert result["product_explained_rate"] == 0.4
+        assert result["product_general_rate"] == 0.2
         assert result["failure_rate"] == 0.1
         assert result["citation_missing_rate"] == round(2 / 9, 4)
         assert result["rerank_degraded_rate"] == 0.1
@@ -670,28 +715,43 @@ class TestMetricsAggregation:
         row = _overview_row(
             total=0,
             completed=0,
-            with_response_type=0,
+            answered=0,
             unconfirmed=0,
             out_of_scope=0,
             doc_delivered=0,
+            product_knowledge=0,
+            product_explained=0,
+            product_general=0,
             failed=0,
             citation_missing=0,
             rerank_degraded=0,
         )
         result = await MetricsRepository(_FakeEngine([row])).overview()  # type: ignore[arg-type]
-        assert result["no_answer_rate"] == 0.0
+        assert result["direct_answer_rate"] == 0.0
+        assert result["needs_information_rate"] == 0.0
+        assert result["out_of_scope_rate"] == 0.0
+        assert result["product_knowledge_rate"] == 0.0
+        assert result["product_explained_rate"] == 0.0
+        assert result["product_general_rate"] == 0.0
         assert result["failure_rate"] == 0.0
 
     async def test_overview_applies_filters_to_query(self) -> None:
         engine = _FakeEngine([_overview_row()])
         await MetricsRepository(engine).overview(  # type: ignore[arg-type]
-            knowledge_id="kb-1", mode="PLAYGROUND"
+            knowledge_id="kb-1",
+            mode="CHAT",
+            engine="RAG",
+            source="ASSISTANT_API",
         )
         sql, params = engine.connection.queries[0]
         assert "kb_id = :kb_id" in sql
         assert "mode = :mode" in sql
+        assert "engine = :engine" in sql
+        assert "source = :source" in sql
         assert params["kb_id"] == "kb-1"
-        assert params["mode"] == "PLAYGROUND"
+        assert params["mode"] == "CHAT"
+        assert params["engine"] == "RAG"
+        assert params["source"] == "ASSISTANT_API"
 
     async def test_timeseries_builds_points_and_rates(self) -> None:
         rows = [
@@ -712,7 +772,9 @@ class TestMetricsAggregation:
         assert len(result) == 1
         point = result[0]
         assert point["bucket"] == "2026-08-20T00:00:00+00:00"
-        assert point["no_answer_rate"] == round(3 / 9, 4)
+        assert point["direct_answer_rate"] == round(6 / 8, 4)
+        assert point["needs_information_rate"] == round(2 / 8, 4)
+        assert point["out_of_scope_rate"] == round(1 / 9, 4)
         assert point["queries"] == 10
         assert point["p95_ms"] == 900
 

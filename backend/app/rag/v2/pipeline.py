@@ -9,7 +9,7 @@ from typing import Any
 from app.core.config import Settings
 from app.rag.llm import LlmError, LlmProvider
 from app.rag.models import ModelSnapshot, PreparedRag
-from app.rag.response import ChatResult
+from app.rag.response import ChatResult, TraceDiagnosticReason
 from app.rag.v2.answer_generator import (
     apply_scope_authority,
     build_answer_prompt,
@@ -283,37 +283,46 @@ class RagV2Pipeline:
             question=question,
             context=context,
         )
+        diagnostic_reason: str | None = None
+        if scope_authority_applied:
+            diagnostic_reason = TraceDiagnosticReason.SCOPE_CONFLICT.value
+        elif generated.response_kind == "ASK_ONE":
+            diagnostic_reason = TraceDiagnosticReason.NEEDS_KEY_CONDITION.value
+
+        generation_trace: dict[str, Any] = {
+            "pipeline": "V2",
+            "query_interpreter": query_trace,
+            "retrieval": retrieval_trace,
+            "context": context_trace,
+            "answer": {
+                "thinking_requested": self.settings.m3_rag_answer_thinking_enabled,
+                "thinking_budget": self.settings.m3_rag_answer_thinking_budget,
+                "response_kind": generated.response_kind,
+                "scope_authority": {
+                    "interpreted_scope": query_outcome.interpretation.scope,
+                    "model_response_kind": model_response_kind,
+                    "final_response_kind": generated.response_kind,
+                    "conflict_resolved": scope_authority_applied,
+                },
+                "basis": generated.basis,
+                "used_document_count": len(generated.used_document_keys),
+                "used_document_ids": used_document_ids,
+                "used_image_count": len(generated.used_image_keys),
+                "public_leak_repair_count": repair_count,
+                "parameter_observations": observed_parameters,
+                "unsupported_parameter_count": sum(
+                    item["status"] == "UNSUPPORTED" for item in observed_parameters
+                ),
+                "answer_sha256": hashlib.sha256(result.answer.encode("utf-8")).hexdigest(),
+            },
+        }
+        if diagnostic_reason is not None:
+            generation_trace["diagnostic_reason"] = diagnostic_reason
 
         return RagV2Result(
             result=result,
             usage={"pipeline": "V2", "query_interpreter": query_usage, "answer": answer_usage},
-            trace={
-                "pipeline": "V2",
-                "query_interpreter": query_trace,
-                "retrieval": retrieval_trace,
-                "context": context_trace,
-                "answer": {
-                    "thinking_requested": self.settings.m3_rag_answer_thinking_enabled,
-                    "thinking_budget": self.settings.m3_rag_answer_thinking_budget,
-                    "response_kind": generated.response_kind,
-                    "scope_authority": {
-                        "interpreted_scope": query_outcome.interpretation.scope,
-                        "model_response_kind": model_response_kind,
-                        "final_response_kind": generated.response_kind,
-                        "conflict_resolved": scope_authority_applied,
-                    },
-                    "basis": generated.basis,
-                    "used_document_count": len(generated.used_document_keys),
-                    "used_document_ids": used_document_ids,
-                    "used_image_count": len(generated.used_image_keys),
-                    "public_leak_repair_count": repair_count,
-                    "parameter_observations": observed_parameters,
-                    "unsupported_parameter_count": sum(
-                        item["status"] == "UNSUPPORTED" for item in observed_parameters
-                    ),
-                    "answer_sha256": hashlib.sha256(result.answer.encode("utf-8")).hexdigest(),
-                },
-            },
+            trace=generation_trace,
             timings=timings,
             next_suggestions=generated.next_suggestions,
         )

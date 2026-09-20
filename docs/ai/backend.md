@@ -17,6 +17,8 @@
 
 路由模块位于 `app/api/`；请求/响应模型集中在 `schemas.py`。应用统一输出携带 `request_id` 的错误体，且会收敛用户聊天路径上的服务端错误信息。流式聊天使用 SSE，而非 WebSocket。
 
+管理指标 `/metrics/overview` 与 `/metrics/timeseries` 支持按 `engine`、`source`、知识库及时间范围过滤。RAG 回答结果口径为：直接回答率=`(ANSWERED + 遗留 DOC_DELIVERED) / 产品范围内已分类轮次`，待补充信息率=`UNCONFIRMED / 产品范围内已分类轮次`，范围外请求率=`OUT_OF_SCOPE / 全部已分类轮次`；`OUT_OF_SCOPE` 不再计作无答案，失败率独立计算。Overview 另按 `answer_mode` 聚合 `PRODUCT_KNOWLEDGE`、`PRODUCT_EXPLAINED`、`PRODUCT_GENERAL`，三者之和是回答依据分布的独立分母，不混入欢迎语、遗留文档交付或未分类历史。Dashboard 固定使用外部 `ASSISTANT_API`、`RAG` 和同一个近 7 天窗口，趋势、待补充列表和下钻使用相同过滤条件。`UNCONFIRMED` 只说明需要更多条件或输入信息不足，不能单独证明知识库覆盖缺口。
+
 ## 模块关系
 
 | 模块 | 职责 |
@@ -125,6 +127,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - LLM 2 在回答操作前后、下一步或失败追问时，必须检查所有与当前任务直接相关的候选；主任务文档定义必需动作，补充文档只能展开某一步，不能替代主任务文档中的其他并列动作。实际采用事实的文档全部写入内部证据键。图片输出兼容单个或成组 `[IMG:...]` 标记，只按正文标记顺序映射白名单图片；模型仅在 `used_image_keys` 声明但未在正文定位的图片不会追加到回答末尾，公开 `image_count` 以实际图片块为准。句末标点必须位于关联文字末尾、图片之前，模型误把标点放到标记后时由公开组装层确定性前移。未声明、无效或异常图片标记只被清除，不产生图片，也不会泄漏到公开文本。该兼容不增加模型调用。
 - `document_source.status='STORED'` 已统一应用于向量、BM25 和按 Chunk ID 读取，避免已软删除文档成为 V2 全文候选；全文加载还会再次校验知识库归属。V2 准备 Trace 不保存 legacy Chunk Prompt，`selected_context` 只记录候选标识与内容 SHA-256；生成 Trace 记录全文包/答案 SHA-256、数量、预算和耗时，不复制正文。
 - 管理试问和 Assistant 的有效 V2 路径均进入 `_generate_v2()`；管理端额外信息只从 Trace 取得。最终答案发布前只检测 Prompt 标记、内部服务主机、未经本轮证据支持的相对管理路径和对象存储字段，证据 D/I key 仍做归属白名单校验；不因标题、文件名、技术编号、产品私网 URL 或普通产品 API 直接失败。IP、版本、带单位数值和端口只写入 `runtime_snapshot.generation.answer.parameter_observations`，按文档、用户输入或无来源分类，不参与回答拒绝或修复。Assistant Facade 以公开字段白名单移除模型用量、检索/重排诊断、候选分数、管理 URL 和 MinIO 位置；欢迎语和外部响应不公开文档总数。
+- RAG V2 在既有 `runtime_snapshot.generation` 中写入内部 `diagnostic_reason`：确定性低信息门禁为 `LOW_INFORMATION`，LLM 1 与 LLM 2 范围结果被服务端归一化为 `SCOPE_CONFLICT`，无范围冲突且最终 `ASK_ONE` 为 `NEEDS_KEY_CONDITION`。原始 `input_guard` 继续保留；Prompt 提取拦截不会误标为低信息。该字段只供管理 Trace 与运营归因，不改变 `response_type`、回答正文、外部 Assistant/SSE 契约，不回填历史记录，也不能自动等同于知识库缺口或检索误判。
 - V2 不恢复 `rag_issue`、不消费待选文档，也不读写 RAG 焦点。`begin_turn` 使用独立的完整轮次选择器：只接受 `message.rag_user_message_id` 或 `assistant_request.user_message_id` 显式关联且双方成功完成的轮次，按最近连续轮次、消息数和 Token 预算裁剪；失败、取消、运行中、无法配对及当前复用轮次排除。最近成功轮次还从其已完成 RAG Trace 读取实际 `used_document_ids`，仅供上述追问软候选；这不是会话焦点，也不授权跨库/跨索引加载。历史 Prompt 不携带消息 ID；任务正文和检索查询在 Trace 中只保存长度、来源与 SHA-256，完整上下文只保存文档 ID/内部别名和内容哈希。共享焦点字段仍被 Support/Gateway 使用，不能删列。
 - V5 后代码和所有环境默认只有 V2，不存在 `auto/legacy/v2` 模式分派。旧首轮、焦点、Query Rewrite、Query/Response Planner、六策略与 RAG 原文交付已物理删除；回滚只能部署旧 Git 提交或旧镜像。数据库 Prompt 行只供管理和历史查看，RAG 就绪不再要求 Active Prompt；两个运行时 Prompt 由代码只读展示。具体删除边界见 [V2 执行计划](../technical/rag-full-document-generation-v2-execution-plan.md)。
 

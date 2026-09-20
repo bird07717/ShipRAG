@@ -23,6 +23,14 @@ class ResponseType(str, Enum):
     DOC_DELIVERED = "DOC_DELIVERED"
 
 
+class TraceDiagnosticReason(str, Enum):
+    """Internal-only deterministic reasons for non-standard RAG outcomes."""
+
+    LOW_INFORMATION = "LOW_INFORMATION"
+    SCOPE_CONFLICT = "SCOPE_CONFLICT"
+    NEEDS_KEY_CONDITION = "NEEDS_KEY_CONDITION"
+
+
 TECHNICAL_DISCLAIMER = "本回答仅供参考，请结合现场情况和正式资料核验，必要时联系海兰信专业人员。"
 OUT_OF_SCOPE_MESSAGE = (
     "我只能回答与本产品、产品使用及相关原理有关的问题。请换一个与产品相关的问题。"

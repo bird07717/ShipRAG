@@ -691,6 +691,8 @@ class MetricsRange(BaseModel):
     from_: str = Field(alias="from")
     to: str
     mode: str = "CHAT"
+    engine: Literal["SUPPORT", "RAG"] | None = None
+    source: Literal["ASSISTANT_API", "INTERNAL_CHAT", "PLAYGROUND"] | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -709,8 +711,16 @@ class MetricsOverviewResponse(BaseModel):
     failed: int
     cancelled: int
     response_type_counts: dict[str, int]
+    answer_mode_counts: dict[str, int]
+    answer_basis_traces: int
+    product_knowledge_rate: float
+    product_explained_rate: float
+    product_general_rate: float
     classified_traces: int
-    no_answer_rate: float
+    in_scope_traces: int
+    direct_answer_rate: float
+    needs_information_rate: float
+    out_of_scope_rate: float
     doc_delivered_rate: float
     failure_rate: float
     citation_missing_rate: float
@@ -728,7 +738,9 @@ class MetricsTimeseriesPoint(BaseModel):
     unconfirmed: int
     out_of_scope: int
     doc_delivered: int
-    no_answer_rate: float
+    direct_answer_rate: float
+    needs_information_rate: float
+    out_of_scope_rate: float
     p95_ms: int
     llm_tokens: int
     rerank_tokens: int

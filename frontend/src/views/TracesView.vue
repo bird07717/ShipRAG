@@ -168,6 +168,8 @@ const supportTrace = computed(() => {
 type V2Generation = {
   pipeline?: string;
   status?: string;
+  diagnostic_reason?: "LOW_INFORMATION" | "SCOPE_CONFLICT" | "NEEDS_KEY_CONDITION";
+  input_guard?: string;
   query_interpreter?: { status?: string; reason?: string; latency_ms?: number };
   retrieval?: { degradations?: string[]; document_rerank?: { status?: string; reason?: string } };
   context?: { document_count?: number; image_count?: number; estimated_tokens?: number; mode?: string };
@@ -179,6 +181,12 @@ type V2Generation = {
     public_leak_repair_count?: number;
     unsupported_parameter_count?: number;
   };
+};
+
+const DIAGNOSTIC_REASON_LABELS: Record<string, string> = {
+  LOW_INFORMATION: "输入信息不足",
+  SCOPE_CONFLICT: "范围判断冲突（已按查询理解收口）",
+  NEEDS_KEY_CONDITION: "缺少关键条件",
 };
 
 const v2Generation = computed(() => {
@@ -442,6 +450,16 @@ async function selectTrace(traceId: string): Promise<void> {
           <section v-if="v2Generation" class="support-trace">
             <h4>RAG V2 生成详情</h4>
             <dl>
+              <template v-if="v2Generation.diagnostic_reason">
+                <dt>诊断原因</dt>
+                <dd>
+                  {{ DIAGNOSTIC_REASON_LABELS[v2Generation.diagnostic_reason] ?? v2Generation.diagnostic_reason }}
+                </dd>
+              </template>
+              <template v-if="v2Generation.input_guard">
+                <dt>输入门禁</dt>
+                <dd>{{ v2Generation.input_guard }}</dd>
+              </template>
               <dt>查询理解</dt>
               <dd>
                 {{ v2Generation.query_interpreter?.status ?? "—" }}

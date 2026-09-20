@@ -143,6 +143,22 @@ const traceDetail = {
   sources: [{ source_id: "S1", document: "a.docx", section_path: ["1", "2"], page: null }],
   citation_result: {},
   model_usage: {},
+  runtime_snapshot: {
+    generation: {
+      pipeline: "V2",
+      diagnostic_reason: "NEEDS_KEY_CONDITION",
+      query_interpreter: { status: "PASSED" },
+      retrieval: { degradations: [], document_rerank: { status: "PASSED" } },
+      context: { document_count: 1, image_count: 0, estimated_tokens: 120, mode: "FULL" },
+      answer: {
+        response_kind: "ASK_ONE",
+        basis: "NONE",
+        used_document_count: 0,
+        used_image_count: 0,
+        public_leak_repair_count: 0,
+      },
+    },
+  },
 };
 
 const model = {
@@ -854,6 +870,8 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("时间线（Timeline）");
     expect(wrapper.text()).toContain("LLM Generation");
     expect(wrapper.text()).toContain("答案内容");
+    expect(wrapper.text()).toContain("诊断原因");
+    expect(wrapper.text()).toContain("缺少关键条件");
   });
 
   it("logs: applies the retired RAG errors deep-link state", async () => {

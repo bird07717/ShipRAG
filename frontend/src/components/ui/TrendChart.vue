@@ -5,7 +5,7 @@ export interface TrendPoint {
   bucket: string;
   label: string;
   queries: number;
-  noAnswerRate: number;
+  needsInformationRate: number;
 }
 
 const props = defineProps<{ points: TrendPoint[] }>();
@@ -23,7 +23,7 @@ const layout = computed(() => {
   const barWidth = Math.max(3, (plotWidth - gap * (count - 1)) / count);
   const step = barWidth + gap;
   const maxQueries = Math.max(...points.map((p) => p.queries), 1);
-  const maxRate = Math.max(...points.map((p) => p.noAnswerRate), 0.01);
+  const maxRate = Math.max(...points.map((p) => p.needsInformationRate), 0.01);
   // "nice" ceiling for the query axis (1/2/5 × 10^n)
   const niceMax = niceCeiling(maxQueries);
   const gridCount = 4;
@@ -46,7 +46,7 @@ const layout = computed(() => {
   const linePoints = points
     .map((point, index) => {
       const x = margin.left + index * step + barWidth / 2;
-      const y = margin.top + plotHeight - (point.noAnswerRate / maxRate) * plotHeight;
+      const y = margin.top + plotHeight - (point.needsInformationRate / maxRate) * plotHeight;
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     })
     .join(" ");
@@ -87,14 +87,14 @@ const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
   <div class="trend-chart">
     <div class="legend">
       <span class="legend-item"><i class="swatch bar" />查询量</span>
-      <span class="legend-item"><i class="swatch line" />无答案率</span>
+      <span class="legend-item"><i class="swatch line" />待补充信息率</span>
       <span class="legend-hint">点击柱形查看该时段链路追踪（Trace）</span>
     </div>
     <svg
       :viewBox="`0 0 ${layout.width} ${layout.height}`"
       class="chart-svg"
       role="img"
-      aria-label="查询量与无答案率趋势图"
+      aria-label="查询量与待补充信息率趋势图"
     >
       <!-- gridlines + query axis labels (left) -->
       <g v-for="line in layout.gridlines" :key="line.value">
@@ -123,7 +123,7 @@ const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
       <g v-for="(bar, index) in layout.bars" :key="bar.point.bucket" class="bar-group">
         <title>
           {{
-            `${bar.point.label}：${bar.point.queries} 次查询，无答案率 ${percent(bar.point.noAnswerRate)}`
+            `${bar.point.label}：${bar.point.queries} 次查询，待补充信息率 ${percent(bar.point.needsInformationRate)}`
           }}
         </title>
         <rect

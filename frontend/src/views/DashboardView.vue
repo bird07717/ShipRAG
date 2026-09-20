@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { Box, ChatDotRound, Clock, Files, Notebook, Warning } from "@element-plus/icons-vue";
+import { Box, ChatDotRound, Clock, Files, Warning } from "@element-plus/icons-vue";
 
 import { adminApi } from "@/api/admin";
 import { useAdminStore } from "@/composables/adminStore";
@@ -13,17 +13,15 @@ import type {
   AssistantMetrics,
   MetricsOverview,
   MetricsTimeseriesPoint,
-  SupportMetrics,
   TraceSummary,
 } from "@/types/admin";
 
 const store = useAdminStore();
 
 const overview = ref<MetricsOverview | null>(null);
-const supportMetrics = ref<SupportMetrics | null>(null);
 const assistantMetrics = ref<AssistantMetrics | null>(null);
 const timeseries = ref<MetricsTimeseriesPoint[]>([]);
-const noAnswerTraces = ref<TraceSummary[]>([]);
+const unconfirmedTraces = ref<TraceSummary[]>([]);
 const metricsError = ref("");
 const metricsLoading = ref(false);
 const refreshing = ref(false);
@@ -34,6 +32,10 @@ const drilldownLoading = ref(false);
 
 const lastRefreshedAt = ref<Date | null>(null);
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
+const QUALITY_WINDOW_DAYS = 7;
+const QUALITY_ENGINE = "RAG" as const;
+const QUALITY_SOURCE = "ASSISTANT_API" as const;
 
 const lastRefreshedLabel = computed(() =>
   lastRefreshedAt.value
@@ -67,6 +69,12 @@ const qualityErrorTone = computed(() =>
     : ("default" as const),
 );
 
+const directAnswerCount = computed(
+  () =>
+    (overview.value?.response_type_counts.ANSWERED ?? 0) +
+    (overview.value?.response_type_counts.DOC_DELIVERED ?? 0),
+);
+
 // Bucket span inferred from the first two points (day granularity is what
 // we request; hour would come back as 1h gaps). Falls back to 1 day.
 const bucketSpanMs = computed(() => {
@@ -86,7 +94,7 @@ const chartPoints = computed<TrendPoint[]>(() => {
       ? point.bucket.slice(5, 13).replace("T", " ")
       : point.bucket.slice(5, 10),
     queries: point.queries,
-    noAnswerRate: point.no_answer_rate,
+    needsInformationRate: point.needs_information_rate,
   }));
 });
 
@@ -127,19 +135,25 @@ async function loadMetrics() {
   // the 60s auto-refresh swaps data in place so the dashboard never blinks.
   if (lastLoadedKb.value !== knowledgeId) {
     overview.value = null;
-    supportMetrics.value = null;
     assistantMetrics.value = null;
     timeseries.value = [];
-    noAnswerTraces.value = [];
+    unconfirmedTraces.value = [];
   }
   lastLoadedKb.value = knowledgeId;
-  const params = { knowledgeId: knowledgeId || undefined };
+  const to = new Date();
+  const from = new Date(to.getTime() - QUALITY_WINDOW_DAYS * 86_400_000);
+  const qualityParams = {
+    knowledgeId: knowledgeId || undefined,
+    from: from.toISOString(),
+    to: to.toISOString(),
+    engine: QUALITY_ENGINE,
+    source: QUALITY_SOURCE,
+  };
   const results = await Promise.allSettled([
-    adminApi.getMetricsOverview(params),
-    adminApi.getMetricsTimeseries(params),
-    adminApi.listNoAnswerTraces(knowledgeId || undefined),
-    adminApi.getSupportMetrics(params),
-    adminApi.getAssistantMetrics(params),
+    adminApi.getMetricsOverview(qualityParams),
+    adminApi.getMetricsTimeseries(qualityParams),
+    adminApi.listUnconfirmedTraces(knowledgeId || undefined, qualityParams),
+    adminApi.getAssistantMetrics({ knowledgeId: knowledgeId || undefined }),
   ]);
   if (store.selectedKnowledgeId !== knowledgeId) return;
   // Shape guards prevent an unexpected gateway payload from crashing the dashboard.
@@ -154,21 +168,15 @@ async function loadMetrics() {
     timeseries.value = results[1].value;
   }
   if (results[2].status === "fulfilled" && Array.isArray(results[2].value)) {
-    noAnswerTraces.value = results[2].value;
+    unconfirmedTraces.value = results[2].value;
   }
   if (
     results[3].status === "fulfilled" &&
     results[3].value &&
-    typeof results[3].value.support_turns === "number"
+    Array.isArray(results[3].value?.sources) &&
+    typeof results[3].value?.idempotency?.assistant_protected === "number"
   ) {
-    supportMetrics.value = results[3].value;
-  }
-  if (
-    results[4].status === "fulfilled" &&
-    Array.isArray(results[4].value?.sources) &&
-    typeof results[4].value?.idempotency?.assistant_protected === "number"
-  ) {
-    assistantMetrics.value = results[4].value;
+    assistantMetrics.value = results[3].value;
   }
   if (overview.value === null || results.some((result) => result.status === "rejected")) {
     metricsError.value = "部分质量指标暂时无法加载，请稍后重试；其他管理功能不受影响。";
@@ -204,6 +212,8 @@ async function openBucketDrilldown(point: TrendPoint) {
     drilldownTraces.value = await adminApi.listTraces(store.selectedKnowledgeId || undefined, {
       from: point.bucket,
       to: bucketEnd.toISOString(),
+      engine: QUALITY_ENGINE,
+      source: QUALITY_SOURCE,
       limit: 100,
     });
   } finally {
@@ -322,45 +332,77 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
       :closable="false"
       show-icon
     />
-    <div v-else-if="overview" class="metric-grid">
-      <MetricCard
-        label="无答案率（近 7 天）"
-        :value="percent(overview.no_answer_rate)"
-        :context="`UNCONFIRMED + OUT_OF_SCOPE / ${overview.classified_traces}`"
-        :icon="Warning"
-      />
-      <MetricCard
-        label="文档交付"
-        :value="percent(supportMetrics?.document_delivery_rate ?? overview.doc_delivered_rate)"
-        :context="supportMetrics ? `${supportMetrics.document_delivered} 次完整文档交付` : `零 LLM 快路径`"
-        :icon="Notebook"
-      />
-      <MetricCard
-        label="失败率"
-        :value="percent(overview.failure_rate)"
-        :context="`失败 ${overview.failed} / ${overview.total_traces} · 升级 ${supportMetrics?.escalation_required ?? 0} 次`"
-        :icon="Clock"
-        :tone="qualityErrorTone"
-      />
-      <MetricCard
-        label="P95 延迟"
-        :value="`${overview.latency.p95_ms.toLocaleString()} ms`"
-        :context="`P50 ${overview.latency.p50_ms.toLocaleString()} ms · 查询 ${overview.total_traces.toLocaleString()} 次`"
-        :icon="Box"
-      />
-      <MetricCard
-        label="澄清率"
-        :value="percent(supportMetrics?.clarification_rate ?? 0)"
-        :context="`后续成功 ${percent(supportMetrics?.clarification_resolution_rate ?? 0)}`"
-        :icon="ChatDotRound"
-      />
+    <div v-else-if="overview" class="quality-block">
+      <p class="quality-scope">质量统计范围：外部 Assistant API · RAG · 近 7 天</p>
+      <div class="metric-grid">
+        <MetricCard
+          label="直接回答率"
+          :value="percent(overview.direct_answer_rate)"
+          :context="`直接回答 ${directAnswerCount} / 产品范围内 ${overview.in_scope_traces}`"
+          :icon="ChatDotRound"
+        />
+        <MetricCard
+          label="待补充信息率"
+          :value="percent(overview.needs_information_rate)"
+          :context="`待补充 ${overview.response_type_counts.UNCONFIRMED ?? 0} / 产品范围内 ${overview.in_scope_traces}`"
+          :icon="Warning"
+        />
+        <MetricCard
+          label="范围外请求率"
+          :value="percent(overview.out_of_scope_rate)"
+          :context="`范围外 ${overview.response_type_counts.OUT_OF_SCOPE ?? 0} / 已分类 ${overview.classified_traces}`"
+          :icon="Files"
+        />
+        <MetricCard
+          label="失败率"
+          :value="percent(overview.failure_rate)"
+          :context="`失败 ${overview.failed} / 请求 ${overview.total_traces}`"
+          :icon="Clock"
+          :tone="qualityErrorTone"
+        />
+        <MetricCard
+          label="P95 延迟"
+          :value="`${overview.latency.p95_ms.toLocaleString()} ms`"
+          :context="`P50 ${overview.latency.p50_ms.toLocaleString()} ms · 请求 ${overview.total_traces.toLocaleString()} 次`"
+          :icon="Box"
+        />
+      </div>
     </div>
+
+    <section v-if="overview" class="panel">
+      <header class="panel-header">
+        <div>
+          <h3>回答依据分布</h3>
+          <span class="sub">外部 Assistant API · RAG · 近 7 天 · 仅统计带 PRODUCT_* 依据分类的回答</span>
+        </div>
+      </header>
+      <div class="metric-grid basis-grid">
+        <MetricCard
+          label="文档知识"
+          :value="percent(overview.product_knowledge_rate)"
+          :context="`${overview.answer_mode_counts.PRODUCT_KNOWLEDGE ?? 0} / ${overview.answer_basis_traces} 条已分类回答`"
+          :icon="Files"
+        />
+        <MetricCard
+          label="文档 + 通用解释"
+          :value="percent(overview.product_explained_rate)"
+          :context="`${overview.answer_mode_counts.PRODUCT_EXPLAINED ?? 0} / ${overview.answer_basis_traces} 条已分类回答`"
+          :icon="ChatDotRound"
+        />
+        <MetricCard
+          label="通用工程扩展"
+          :value="percent(overview.product_general_rate)"
+          :context="`${overview.answer_mode_counts.PRODUCT_GENERAL ?? 0} / ${overview.answer_basis_traces} 条已分类回答`"
+          :icon="Box"
+        />
+      </div>
+    </section>
 
     <section v-if="chartPoints.length" class="panel">
       <header class="panel-header">
         <div>
-          <h3>查询量与无答案率</h3>
-          <span class="sub">最近 7 天 · 点击柱形下钻该时段的链路追踪</span>
+          <h3>查询量与待补充信息率</h3>
+          <span class="sub">外部 Assistant API · RAG · 最近 7 天 · 点击柱形下钻同范围链路</span>
         </div>
       </header>
       <TrendChart :points="chartPoints" @select="openBucketDrilldown" />
@@ -374,8 +416,7 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
               <h3>管理待办</h3>
               <span class="sub">
                 处理中 {{ store.buildingCount }} · RAG
-                {{ store.activeIndex ? `在线 v${store.activeIndex.version}` : "未就绪" }} ·
-                {{ store.knowledgeProfileSummary?.online_count ?? 0 }} 项 Profile 已上线
+                {{ store.activeIndex ? `在线 v${store.activeIndex.version}` : "未就绪" }}
               </span>
             </div>
           </template>
@@ -389,15 +430,6 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
               <strong class="state-text">{{ store.activeIndex ? `v${store.activeIndex.version}` : "未就绪" }}</strong>
               <small>技术构建完成后由管理员明确切换</small>
             </button>
-            <button type="button" @click="store.navigate('support-review')">
-              <span>Profile 属性</span>
-              <strong class="state-text">
-                {{ store.knowledgeProfileSummary?.online_count ?? 0 }} 项已上线
-              </strong>
-              <small>
-                {{ store.knowledgeProfileSummary?.pending_count ? `${store.knowledgeProfileSummary.pending_count} 项待上线` : "RAG 始终可用" }}
-              </small>
-            </button>
           </div>
         </el-collapse-item>
       </el-collapse>
@@ -406,14 +438,14 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
     <section class="panel">
       <header class="panel-header">
         <div>
-          <h3>未回答问题</h3>
-          <span class="sub">知识库覆盖缺口 — 无答案问题下钻，点击行查看链路追踪（Trace）归因</span>
+          <h3>待补充信息的问题</h3>
+          <span class="sub">仅表示回答需要更多条件，不直接等同于知识库覆盖缺口；点击查看 Trace 归因</span>
         </div>
       </header>
       <el-table
-        v-if="noAnswerTraces.length"
+        v-if="unconfirmedTraces.length"
         class="clickable-table"
-        :data="noAnswerTraces"
+        :data="unconfirmedTraces"
         @row-click="(row: any) => store.openTrace(row.trace_id)"
       >
         <el-table-column
@@ -437,8 +469,8 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
       <EmptyState
         v-else
         :icon="Warning"
-        title="近期没有无答案问题"
-        description="当回答被判为未确认（UNCONFIRMED）时，问题会出现在这里，用于定位知识库覆盖缺口。"
+        title="近 7 天没有待补充信息的问题"
+        description="外部 Assistant 的 RAG 回答被判为需要补充条件（UNCONFIRMED）时，会出现在这里。"
       />
     </section>
 
@@ -587,7 +619,7 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
 
 .workflow-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   padding: 16px 18px;
 }
@@ -623,6 +655,20 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: var(--space-content-gap);
+}
+
+.basis-grid {
+  padding: 0 18px 18px;
+}
+
+.quality-block {
+  display: grid;
+  gap: 8px;
+}
+
+.quality-scope {
+  color: var(--text-tertiary);
+  font-size: 12px;
 }
 
 .assistant-user-table {

@@ -594,14 +594,28 @@ export interface MetricsLatencySummary {
 }
 
 export interface MetricsOverview {
-  range: { from: string; to: string; mode: string };
+  range: {
+    from: string;
+    to: string;
+    mode: string;
+    engine?: "SUPPORT" | "RAG" | null;
+    source?: "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND" | null;
+  };
   total_traces: number;
   completed: number;
   failed: number;
   cancelled: number;
   response_type_counts: Record<string, number>;
+  answer_mode_counts: Record<string, number>;
+  answer_basis_traces: number;
+  product_knowledge_rate: number;
+  product_explained_rate: number;
+  product_general_rate: number;
   classified_traces: number;
-  no_answer_rate: number;
+  in_scope_traces: number;
+  direct_answer_rate: number;
+  needs_information_rate: number;
+  out_of_scope_rate: number;
   doc_delivered_rate: number;
   failure_rate: number;
   citation_missing_rate: number;
@@ -624,7 +638,9 @@ export interface MetricsTimeseriesPoint {
   unconfirmed: number;
   out_of_scope: number;
   doc_delivered: number;
-  no_answer_rate: number;
+  direct_answer_rate: number;
+  needs_information_rate: number;
+  out_of_scope_rate: number;
   p95_ms: number;
   llm_tokens: number;
   rerank_tokens: number;

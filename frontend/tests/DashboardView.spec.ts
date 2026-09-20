@@ -14,8 +14,16 @@ const overview: MetricsOverview = {
   failed: 10,
   cancelled: 0,
   response_type_counts: { ANSWERED: 60, UNCONFIRMED: 40, OUT_OF_SCOPE: 5, DOC_DELIVERED: 5 },
+  answer_mode_counts: { PRODUCT_KNOWLEDGE: 30, PRODUCT_EXPLAINED: 20, PRODUCT_GENERAL: 10 },
+  answer_basis_traces: 60,
+  product_knowledge_rate: 0.5,
+  product_explained_rate: 0.3333,
+  product_general_rate: 0.1667,
   classified_traces: 110,
-  no_answer_rate: 0.4091,
+  in_scope_traces: 105,
+  direct_answer_rate: 0.619,
+  needs_information_rate: 0.381,
+  out_of_scope_rate: 0.0455,
   doc_delivered_rate: 0.0455,
   failure_rate: 0.0833,
   citation_missing_rate: 0.02,
@@ -33,7 +41,9 @@ const dailyPoint: MetricsTimeseriesPoint = {
   unconfirmed: 5,
   out_of_scope: 1,
   doc_delivered: 2,
-  no_answer_rate: 0.3,
+  direct_answer_rate: 0.7368,
+  needs_information_rate: 0.2632,
+  out_of_scope_rate: 0.05,
   p95_ms: 2200,
   llm_tokens: 800,
   rerank_tokens: 40,
@@ -63,16 +73,36 @@ describe("DashboardView metrics", () => {
   it("renders overview cards, trend chart and drilldown from metrics", async () => {
     vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
     vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([dailyPoint]);
-    vi.spyOn(adminApi, "listNoAnswerTraces").mockResolvedValue([trace]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([trace]);
     adminStore.selectedKnowledgeId = "kb-1";
 
     const wrapper = mount(DashboardView, { global: { plugins: [ElementPlus] } });
     await flushPromises();
 
-    expect(adminApi.getMetricsOverview).toHaveBeenCalledWith({ knowledgeId: "kb-1" });
-    expect(adminApi.listNoAnswerTraces).toHaveBeenCalledWith("kb-1");
+    expect(adminApi.getMetricsOverview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        knowledgeId: "kb-1",
+        engine: "RAG",
+        source: "ASSISTANT_API",
+        from: expect.any(String),
+        to: expect.any(String),
+      }),
+    );
+    expect(adminApi.listUnconfirmedTraces).toHaveBeenCalledWith(
+      "kb-1",
+      expect.objectContaining({ engine: "RAG", source: "ASSISTANT_API" }),
+    );
     expect(wrapper.text()).toContain("120"); // total queries
-    expect(wrapper.text()).toContain("40.9%"); // no-answer rate
+    expect(wrapper.text()).toContain("61.9%"); // direct-answer rate
+    expect(wrapper.text()).toContain("38.1%"); // needs-information rate
+    expect(wrapper.text()).toContain("4.5%"); // out-of-scope rate
+    expect(wrapper.text()).toContain("回答依据分布");
+    expect(wrapper.text()).toContain("文档知识");
+    expect(wrapper.text()).toContain("50.0%");
+    expect(wrapper.text()).toContain("文档 + 通用解释");
+    expect(wrapper.text()).toContain("33.3%");
+    expect(wrapper.text()).toContain("通用工程扩展");
+    expect(wrapper.text()).toContain("16.7%");
     expect(wrapper.text()).toContain("2,500 ms"); // p95
     expect(wrapper.find("svg.chart-svg").exists()).toBe(true);
     expect(wrapper.text()).toContain("如何配置？"); // drilldown question
@@ -82,7 +112,7 @@ describe("DashboardView metrics", () => {
   it("opens a bucket drilldown dialog with that bucket's traces on bar click", async () => {
     vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
     vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([dailyPoint]);
-    vi.spyOn(adminApi, "listNoAnswerTraces").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
     const listTraces = vi
       .spyOn(adminApi, "listTraces")
       .mockResolvedValue([trace]);
@@ -99,6 +129,8 @@ describe("DashboardView metrics", () => {
     expect(listTraces).toHaveBeenCalledWith(undefined, {
       from: "2026-08-20T00:00:00Z",
       to: "2026-08-21T00:00:00.000Z",
+      engine: "RAG",
+      source: "ASSISTANT_API",
       limit: 100,
     });
     expect(wrapper.text()).toContain("如何配置？"); // dialog lists the trace
@@ -110,7 +142,7 @@ describe("DashboardView metrics", () => {
       { ...dailyPoint, bucket: "2026-08-20T05:00:00Z" },
       { ...dailyPoint, bucket: "2026-08-20T06:00:00Z" },
     ]);
-    vi.spyOn(adminApi, "listNoAnswerTraces").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
 
     const wrapper = mount(DashboardView, { global: { plugins: [ElementPlus] } });
     await flushPromises();
@@ -122,7 +154,7 @@ describe("DashboardView metrics", () => {
   it("degrades to a current, implementation-neutral warning when metrics are unavailable", async () => {
     vi.spyOn(adminApi, "getMetricsOverview").mockRejectedValue(new Error("404"));
     vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
-    vi.spyOn(adminApi, "listNoAnswerTraces").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
 
     const wrapper = mount(DashboardView, { global: { plugins: [ElementPlus] } });
     await flushPromises();
@@ -137,7 +169,7 @@ describe("DashboardView metrics", () => {
     // e.g. a gateway returning a JSON error array
     vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue([] as never);
     vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([dailyPoint]);
-    vi.spyOn(adminApi, "listNoAnswerTraces").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
 
     const wrapper = mount(DashboardView, { global: { plugins: [ElementPlus] } });
     await flushPromises();

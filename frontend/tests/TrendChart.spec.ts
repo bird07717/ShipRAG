@@ -4,9 +4,9 @@ import { describe, expect, it } from "vitest";
 import TrendChart, { type TrendPoint } from "@/components/ui/TrendChart.vue";
 
 const points: TrendPoint[] = [
-  { bucket: "2026-08-19T00:00:00Z", label: "08-19", queries: 10, noAnswerRate: 0.2 },
-  { bucket: "2026-08-20T00:00:00Z", label: "08-20", queries: 30, noAnswerRate: 0.5 },
-  { bucket: "2026-08-21T00:00:00Z", label: "08-21", queries: 0, noAnswerRate: 0 },
+  { bucket: "2026-08-19T00:00:00Z", label: "08-19", queries: 10, needsInformationRate: 0.2 },
+  { bucket: "2026-08-20T00:00:00Z", label: "08-20", queries: 30, needsInformationRate: 0.5 },
+  { bucket: "2026-08-21T00:00:00Z", label: "08-21", queries: 0, needsInformationRate: 0 },
 ];
 
 describe("TrendChart", () => {
@@ -23,7 +23,7 @@ describe("TrendChart", () => {
     const wrapper = mount(TrendChart, { props: { points } });
     expect(wrapper.findAll("line.gridline").length).toBeGreaterThan(1);
     expect(wrapper.text()).toContain("查询量");
-    expect(wrapper.text()).toContain("无答案率");
+    expect(wrapper.text()).toContain("待补充信息率");
     expect(wrapper.find("polyline.rate-line").exists()).toBe(true);
   });
 
@@ -32,7 +32,7 @@ describe("TrendChart", () => {
       bucket: `2026-08-${String(i + 1).padStart(2, "0")}T00:00:00Z`,
       label: `08-${String(i + 1).padStart(2, "0")}`,
       queries: i,
-      noAnswerRate: 0.1,
+      needsInformationRate: 0.1,
     }));
     const wrapper = mount(TrendChart, { props: { points: dense } });
     const labels = wrapper.findAll("text.axis-label.bottom");

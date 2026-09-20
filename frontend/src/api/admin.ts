@@ -294,19 +294,48 @@ export const adminApi = {
     const query = search.toString();
     return apiRequest<TraceSummary[]>(`/traces${query ? `?${query}` : ""}`, init);
   },
-  listNoAnswerTraces: (knowledgeId?: string, limit = 20) => {
+  listUnconfirmedTraces: (
+    knowledgeId?: string,
+    filters: {
+      from?: string;
+      to?: string;
+      engine?: "SUPPORT" | "RAG";
+      source?: "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND";
+      limit?: number;
+    } = {},
+  ) => {
     const search = new URLSearchParams({
       response_type: "UNCONFIRMED",
       mode: "CHAT",
-      limit: String(limit),
+      status: "COMPLETED",
+      limit: String(filters.limit ?? 20),
     });
     if (knowledgeId) search.set("knowledge_id", knowledgeId);
+    if (filters.from) search.set("from", filters.from);
+    if (filters.to) search.set("to", filters.to);
+    if (filters.engine) search.set("engine", filters.engine);
+    if (filters.source) search.set("source", filters.source);
     return apiRequest<TraceSummary[]>(`/traces?${search.toString()}`);
   },
-  getMetricsOverview: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
+  getMetricsOverview: (
+    params: {
+      knowledgeId?: string;
+      from?: string;
+      to?: string;
+      engine?: "SUPPORT" | "RAG";
+      source?: "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND";
+    } = {},
+  ) =>
     apiRequest<MetricsOverview>(`/metrics/overview${buildMetricsQuery(params)}`),
   getMetricsTimeseries: (
-    params: { knowledgeId?: string; from?: string; to?: string; granularity?: string } = {},
+    params: {
+      knowledgeId?: string;
+      from?: string;
+      to?: string;
+      granularity?: string;
+      engine?: "SUPPORT" | "RAG";
+      source?: "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND";
+    } = {},
   ) => apiRequest<MetricsTimeseriesPoint[]>(`/metrics/timeseries${buildMetricsQuery(params)}`),
   getMetricsLatency: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
     apiRequest<MetricsLatency>(`/metrics/latency${buildMetricsQuery(params)}`),

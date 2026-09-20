@@ -204,7 +204,7 @@ describe("admin API", () => {
       },
       { signal: new AbortController().signal },
     );
-    await adminApi.listNoAnswerTraces();
+    await adminApi.listUnconfirmedTraces();
     await adminApi.getMetricsOverview();
     await adminApi.getMetricsTimeseries({
       knowledgeId: "kb-1",
@@ -270,12 +270,19 @@ describe("metrics API", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await adminApi.getMetricsOverview({ knowledgeId: "kb-1", from: "2026-08-14" });
+    await adminApi.getMetricsOverview({
+      knowledgeId: "kb-1",
+      from: "2026-08-14",
+      engine: "RAG",
+      source: "ASSISTANT_API",
+    });
     const url = String(fetchMock.mock.calls[0]?.[0]);
     // regression: previously emitted ?knowledgeId=... which the backend ignored
     expect(url).toContain("knowledge_id=kb-1");
     expect(url).not.toContain("knowledgeId");
     expect(url).toContain("from=2026-08-14");
+    expect(url).toContain("engine=RAG");
+    expect(url).toContain("source=ASSISTANT_API");
   });
 
   it("omits the query string when no filters are set", async () => {
@@ -286,15 +293,26 @@ describe("metrics API", () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("?");
   });
 
-  it("scopes unanswered traces to the selected knowledge base", async () => {
+  it("scopes unconfirmed traces to the quality window and external RAG", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
     vi.stubGlobal("fetch", fetchMock);
 
-    await adminApi.listNoAnswerTraces("kb-1", 25);
+    await adminApi.listUnconfirmedTraces("kb-1", {
+      from: "2026-09-13T00:00:00Z",
+      to: "2026-09-20T00:00:00Z",
+      engine: "RAG",
+      source: "ASSISTANT_API",
+      limit: 25,
+    });
 
     const url = String(fetchMock.mock.calls[0]?.[0]);
     expect(url).toContain("knowledge_id=kb-1");
     expect(url).toContain("response_type=UNCONFIRMED");
+    expect(url).toContain("status=COMPLETED");
+    expect(url).toContain("engine=RAG");
+    expect(url).toContain("source=ASSISTANT_API");
+    expect(url).toContain("from=2026-09-13T00%3A00%3A00Z");
+    expect(url).toContain("to=2026-09-20T00%3A00%3A00Z");
     expect(url).toContain("limit=25");
   });
 

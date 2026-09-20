@@ -23,6 +23,7 @@ from app.rag.response import (
     ChatResult,
     ContentBlock,
     ResponseType,
+    TraceDiagnosticReason,
     build_plain_answer,
 )
 from app.rag.scope import DEFAULT_PRODUCT_SCOPE
@@ -36,6 +37,13 @@ _META_ACK_PATTERN = re.compile(r"^(?:换一?个(?:问题|话题)|算了|先?不�
 _META_ACK_MESSAGE = "好的，请问您想了解什么？我将基于产品文档为您解答。"
 _LOW_INFORMATION_MESSAGE = "请补充具体的设备、故障现象或操作目标，我会继续协助排查。"
 _KEYBOARD_ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
+_LOW_INFORMATION_GUARDS = {
+    "EMPTY",
+    "SYMBOL_ONLY",
+    "SINGLE_CHARACTER",
+    "REPEATED_CHARACTER",
+    "KEYBOARD_SEQUENCE",
+}
 
 
 def _elapsed_ms(started_at: float) -> int:
@@ -268,6 +276,8 @@ class RagService:
                     "pipeline": "V2",
                     "input_guard": prepared.input_guard_reason,
                 }
+                if prepared.input_guard_reason in _LOW_INFORMATION_GUARDS:
+                    v2_trace["diagnostic_reason"] = TraceDiagnosticReason.LOW_INFORMATION.value
                 timings = dict(prepared.timings)
             else:
                 try:
