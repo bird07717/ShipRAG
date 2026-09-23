@@ -641,3 +641,24 @@ Assistant 上线与持续对外可用必须满足活动索引中全部有效文�
 ### 取舍与实施
 
 向量复用依赖 REUSE 三条件（同 embedding 模型/文件哈希/解析器修订）保证维度与语义一致，构造上安全。复制失败只记日志、构建照常成功，卡片任务退化为现状全量生成（天然回滚路径）。确认与生成任务并发时，后完成的 `save_generated` 会把该卡置回 AUTO，前端确认后刷新 readiness 即可发现残余。schema_version 升级发布时旧卡自动失效重新生成，与既有语义一致。
+
+## ADR-0026：在既有双 LLM 中增加保守的 Knowledge/Conversation 二路由
+
+- 日期：2026-09-23
+- 状态：已接受（本地实施，定向 Golden 已验证）
+- 影响范围：RAG V2 Query Interpreter、第二阶段生成、技术历史、Trace 与管理指标
+- 关联模块：`backend/app/rag/v2/query_interpreter.py`、`conversation_answer.py`、`pipeline.py`、`history.py`、`rag/repository.py`、`rag/metrics.py`
+
+### 背景
+
+纯寒暄已经能在 LLM 前确定性短路，但“同意联系专业人员检查”“谢谢”“你能做什么”“把刚才回答压缩成三点”等输入既不适合继续扩充关键词规则，也不应被强制注入文档并回答成新的技术问题。新增第三次模型调用或复杂多意图状态机会扩大时延、故障面和维护成本。
+
+### 决策
+
+保留两阶段模型结构，不新增第三个模型阶段。Query Interpreter 在原结构化职责末尾增加必填二值 `response_path`：`KNOWLEDGE` 完整复用既有检索、文档上下文与技术 LLM 2；`CONVERSATION` 跳过 Embedding、检索、Rerank 和文档加载，改用同一 LLM 快照及独立的短回答 Prompt。Conversation 只覆盖确认/同意、致谢/反馈、结束、能力介绍，以及不新增事实地改写、压缩或总结最近技术回答；只要包含新事实、判断、原因、步骤、参数、诊断、安全建议、服务事实或混合技术任务，均为 Knowledge。只有 `scope=IN_SCOPE` 且不携带检索查询/约束时，Conversation 才能生效；`OUT_OF_SCOPE`、`UNCERTAIN`、结构化字段缺失/无效或字段冲突均由服务端保守回退 Knowledge，继续沿用既有范围收口。沿用现有结构化输出修复和瞬态重试，因此异常情况下实际供应商请求次数仍可能超过两次，但不会增加新的语义处理层。
+
+纯寒暄等既有确定性门禁保持零模型调用。Conversation LLM 2 不得产生引用、图片、链接或声称检索文档；模型、结构化或公开输出失败时使用固定简短回应，不回跳 RAG。路径写入 `citation_result`、终态/进度 Trace、Usage 和 `message.rag_history_context`；Conversation 轮次保留在审计与运营总量，但排除技术历史、技术质量和 RAG 延迟样本。外部 Assistant/SSE 响应结构不变，无数据库迁移或新模型配置。
+
+### 取舍与实施
+
+LLM 1 增加了一个二值判断，因此不能声称对其零影响，也不会减少 LLM 1 调用次数；收益是避免非知识输入被迫构造检索意图，并节省后续检索、重排和文档上下文成本。误判为 Knowledge 主要增加成本，误判为 Conversation 会损害正确性，因此所有服务端兜底向 Knowledge 倾斜。第一版不承接开放域闲聊、一般工程常识或厂商服务事实。2026-09-23 定向真实 Assistant Golden 最终统一复跑 8/8：三个范围外冲突全部恢复为 `OUT_OF_SCOPE`，两个纯寒暄命中零模型门禁，致谢、能力介绍和同意联系海兰信三个用例均为 Conversation 且检索 `SKIPPED`；完整 55 案例/77 轮技术集仍待复跑后才能建立生产基线。

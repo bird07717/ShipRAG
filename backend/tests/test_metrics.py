@@ -797,7 +797,9 @@ class TestMetricsAggregation:
         assert "source = :source" in sql
         assert "COALESCE(citation_result ->> 'shortcut', '') <> 'GREETING'" not in sql
         assert "NOT IN ('GREETING', 'META_ACK')" in sql
-        assert "FILTER (WHERE citation_result ->> 'shortcut' IS NULL)" in sql
+        assert "citation_result ->> 'shortcut' IS NULL" in sql
+        assert "citation_result ->> 'response_path'" in sql
+        assert "<> 'CONVERSATION'" in sql
         assert params["kb_id"] == "kb-1"
         assert params["mode"] == "CHAT"
         assert params["engine"] == "RAG"
@@ -829,7 +831,9 @@ class TestMetricsAggregation:
         assert point["queries"] == 10
         assert point["p95_ms"] == 900
         sql, _ = engine.connection.queries[0]
-        assert "FILTER (WHERE citation_result ->> 'shortcut' IS NULL)" in sql
+        assert "citation_result ->> 'shortcut' IS NULL" in sql
+        assert "citation_result ->> 'response_path'" in sql
+        assert "<> 'CONVERSATION'" in sql
         assert "NOT IN ('GREETING', 'META_ACK')" in sql
 
     async def test_latency_maps_stages(self) -> None:

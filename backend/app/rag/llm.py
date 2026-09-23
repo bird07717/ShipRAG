@@ -166,6 +166,7 @@ class FakeLlmProvider:
                         "scope": "IN_SCOPE",
                         "relation": "NEW_TASK",
                         "active_task": None,
+                        "response_path": "KNOWLEDGE",
                     }
                 )
             document_keys = list(data.get("available_document_keys") or [])

@@ -339,7 +339,7 @@ async def test_complete_turn_patches_doc_routing() -> None:
         llm=ModelSnapshot("zhipu", "glm", {}),
         history=[],
     )
-    routing = {"generation": {"input_guard": "GREETING"}}
+    routing = {"generation": {"input_guard": "GREETING", "response_path": "CONVERSATION"}}
 
     await repo.complete_turn(
         turn,
@@ -357,7 +357,11 @@ async def test_complete_turn_patches_doc_routing() -> None:
     assert json.loads(str(params["doc_routing"]))["generation"]["input_guard"] == "GREETING"
     _, message_params = connection.executed[0]
     assert message_params is not None
-    assert json.loads(str(message_params["history_context"])) == {"input_guard": "GREETING"}
+    assert json.loads(str(message_params["history_context"])) == {
+        "input_guard": "GREETING",
+        "response_path": "CONVERSATION",
+    }
+    assert "- 'input_guard' - 'response_path'" in connection.executed[0][0]
 
 
 async def test_complete_turn_without_routing_leaves_trace_untouched() -> None:

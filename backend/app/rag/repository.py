@@ -585,7 +585,11 @@ class RagRepository:
                    COALESCE(
                        a.rag_history_context #>> '{input_guard}',
                        previous_trace.input_guard_reason
-                   ) AS input_guard_reason
+                   ) AS input_guard_reason,
+                   COALESCE(
+                       a.rag_history_context #>> '{response_path}',
+                       previous_trace.response_path
+                   ) AS response_path
             FROM (
                 SELECT * FROM message
                 WHERE conversation_id = :conversation_id AND role = 'ASSISTANT'
@@ -608,7 +612,11 @@ class RagRepository:
                        COALESCE(
                            retrieval_result #>> '{doc_routing,generation,input_guard}',
                            citation_result ->> 'shortcut'
-                       ) AS input_guard_reason
+                       ) AS input_guard_reason,
+                       COALESCE(
+                           retrieval_result #>> '{doc_routing,generation,response_path}',
+                           citation_result ->> 'response_path'
+                       ) AS response_path
                 FROM rag_trace
                 WHERE message_id = a.id AND conversation_id = a.conversation_id
                   AND engine = 'RAG' AND status = 'COMPLETED'
@@ -1070,13 +1078,17 @@ class RagRepository:
             input_guard = doc_routing["generation"].get("input_guard")
             if isinstance(input_guard, str) and input_guard:
                 history_context["input_guard"] = input_guard
+            response_path = doc_routing["generation"].get("response_path")
+            if response_path in {"KNOWLEDGE", "CONVERSATION"}:
+                history_context["response_path"] = response_path
         async with self.engine.begin() as connection:
             message_result = await connection.execute(
                 text(
                     """
                     UPDATE message SET content = :answer, sources = CAST(:sources AS jsonb),
                         rag_history_context = (
-                            COALESCE(rag_history_context, '{}'::jsonb) - 'input_guard'
+                            COALESCE(rag_history_context, '{}'::jsonb)
+                            - 'input_guard' - 'response_path'
                         ) || CAST(:history_context AS jsonb),
                         status = 'COMPLETED', updated_at = now()
                     WHERE id = :message_id

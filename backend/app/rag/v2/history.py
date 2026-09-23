@@ -31,6 +31,9 @@ def select_complete_round_history(
 
     for row in rounds:
         assistant_id = str(row["id"])
+        if row.get("response_path") == "CONVERSATION":
+            excluded.append({"message_id": assistant_id, "reason": "NON_TECHNICAL_CONVERSATION"})
+            continue
         if row.get("input_guard_reason") in _NON_TECHNICAL_INPUT_GUARDS:
             excluded.append({"message_id": assistant_id, "reason": "NON_TECHNICAL_SHORTCUT"})
             continue

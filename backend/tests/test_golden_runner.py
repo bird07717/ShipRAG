@@ -114,6 +114,36 @@ def test_v2_hidden_trace_evidence_replaces_delivery_contract_assertions() -> Non
     assert problems == []
 
 
+def test_v2_trace_expectations_cover_shortcut_and_conversation_routes() -> None:
+    runner = _runner()
+
+    assert (
+        runner.v2_trace_expectation_problems(
+            {"runtime_snapshot": {"generation": {"pipeline": "V2", "input_guard": "GREETING"}}},
+            {"trace_input_guard": "GREETING"},
+        )
+        == []
+    )
+    assert (
+        runner.v2_trace_expectation_problems(
+            {
+                "runtime_snapshot": {
+                    "generation": {
+                        "pipeline": "V2",
+                        "response_path": "CONVERSATION",
+                        "retrieval": {"status": "SKIPPED"},
+                    }
+                }
+            },
+            {
+                "trace_response_path": "CONVERSATION",
+                "trace_retrieval_status": "SKIPPED",
+            },
+        )
+        == []
+    )
+
+
 @pytest.mark.parametrize(
     "answer",
     [

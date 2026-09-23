@@ -16,6 +16,12 @@ from app.rag.v2.answer_generator import (
     generate_answer,
     repair_generated_answer,
 )
+from app.rag.v2.conversation_answer import (
+    CONVERSATION_FALLBACK_MESSAGE,
+    build_conversation_prompt,
+    build_conversation_result,
+    generate_conversation_answer,
+)
 from app.rag.v2.document_context import build_document_context
 from app.rag.v2.document_retrieval import EmbeddingSelector, RerankFactory, retrieve_documents
 from app.rag.v2.query_interpreter import (
@@ -58,6 +64,124 @@ class RagV2Pipeline:
         self.llm_factory = llm_factory
         self.embedding_selector = embedding_selector
         self.rerank_factory = rerank_factory
+
+    async def _run_conversation_path(
+        self,
+        prepared: PreparedRag,
+        *,
+        question: str,
+        product_name: str,
+        scope_description: str,
+        query_usage: dict[str, Any],
+        query_trace: dict[str, Any],
+        timings: dict[str, int],
+    ) -> RagV2Result:
+        turn = prepared.turn
+        retrieval_trace = {"status": "SKIPPED", "reason": "CONVERSATION_ROUTE"}
+        context_trace = {
+            "document_ids": [],
+            "document_count": 0,
+            "image_count": 0,
+            "estimated_tokens": 0,
+            "mode": "NONE",
+            "content_sha256": hashlib.sha256(b"").hexdigest(),
+        }
+        await self.repository.save_v2_progress(
+            turn,
+            generation={
+                "pipeline": "V2",
+                "status": "ANSWER_PENDING",
+                "response_path": "CONVERSATION",
+                "query_interpreter": query_trace,
+                "retrieval": retrieval_trace,
+                "context": context_trace,
+            },
+            selected_context=[],
+            timings=timings,
+        )
+
+        prompt = build_conversation_prompt(
+            question=question,
+            history=turn.history,
+            product_name=turn.knowledge_name or product_name,
+            scope_description=turn.scope_description or scope_description,
+        )
+        answer_started = time.perf_counter()
+        answer_provider: LlmProvider | None = None
+        answer_usage: dict[str, Any] = {}
+        fallback_reason: str | None = None
+        try:
+            answer_provider = self.llm_factory(self.settings, turn.llm)
+            generated = await generate_conversation_answer(
+                answer_provider,
+                prompt=prompt,
+                timeout_seconds=min(20.0, self.settings.m3_rag_answer_timeout_seconds),
+            )
+            answer_usage = dict(answer_provider.usage)
+            visible_input = "\n".join(
+                [
+                    question,
+                    turn.knowledge_name or product_name,
+                    turn.scope_description or scope_description,
+                    *(item.get("content", "") for item in turn.history[-2:]),
+                ]
+            )
+            violations = public_leaks(generated.answer, (), allowed_text=visible_input)
+            if (
+                "[IMG:" in generated.answer.upper()
+                or "HTTP://" in generated.answer.upper()
+                or "HTTPS://" in generated.answer.upper()
+            ):
+                violations.append("conversation_output_contract")
+            if violations:
+                raise LlmError(
+                    "V2_CONVERSATION_OUTPUT_INVALID",
+                    "对话回答不符合公开输出约束",
+                    retryable=False,
+                    detail=",".join(violations)[:500],
+                )
+            result = build_conversation_result(generated.answer)
+        except LlmError as exc:
+            fallback_reason = str(getattr(exc, "code", type(exc).__name__))[:100]
+            result = build_conversation_result(CONVERSATION_FALLBACK_MESSAGE)
+            if answer_provider is not None:
+                answer_usage = dict(answer_provider.usage)
+        finally:
+            if answer_provider is not None:
+                await answer_provider.aclose()
+        timings["v2_answer_generator_ms"] = round((time.perf_counter() - answer_started) * 1000)
+
+        answer_trace: dict[str, Any] = {
+            "status": "DEGRADED" if fallback_reason else "PASSED",
+            "response_kind": "ANSWER",
+            "basis": "CONVERSATION",
+            "used_document_count": 0,
+            "used_image_count": 0,
+            "answer_sha256": hashlib.sha256(result.answer.encode("utf-8")).hexdigest(),
+            "fallback_applied": fallback_reason is not None,
+        }
+        if fallback_reason is not None:
+            answer_trace["fallback_reason"] = fallback_reason
+
+        return RagV2Result(
+            result=result,
+            usage={
+                "pipeline": "V2",
+                "response_path": "CONVERSATION",
+                "query_interpreter": query_usage,
+                "conversation_answer": answer_usage,
+            },
+            trace={
+                "pipeline": "V2",
+                "response_path": "CONVERSATION",
+                "query_interpreter": query_trace,
+                "retrieval": retrieval_trace,
+                "context": context_trace,
+                "answer": answer_trace,
+            },
+            timings=timings,
+            next_suggestions=[],
+        )
 
     async def run(
         self,
@@ -108,6 +232,35 @@ class RagV2Pipeline:
                 await query_provider.aclose()
         timings["v2_query_interpreter_ms"] = round((time.perf_counter() - query_started) * 1000)
 
+        requested_path = query_outcome.interpretation.response_path
+        scope_conflict = (
+            requested_path == "CONVERSATION" and query_outcome.interpretation.scope != "IN_SCOPE"
+        )
+        knowledge_signal_conflict = requested_path == "CONVERSATION" and bool(
+            query_outcome.interpretation.search_queries
+            or query_outcome.interpretation.key_constraints
+        )
+        route_conflict = scope_conflict or knowledge_signal_conflict
+        response_path = "KNOWLEDGE" if route_conflict else requested_path
+        query_trace = query_outcome.trace_dict()
+        query_trace["response_path"] = response_path
+        if route_conflict:
+            query_trace["model_response_path"] = requested_path
+            query_trace["route_fallback_reason"] = (
+                "NON_IN_SCOPE_CONVERSATION" if scope_conflict else "KNOWLEDGE_SIGNALS_PRESENT"
+            )
+
+        if response_path == "CONVERSATION":
+            return await self._run_conversation_path(
+                prepared,
+                question=question,
+                product_name=product_name,
+                scope_description=scope_description,
+                query_usage=query_usage,
+                query_trace=query_trace,
+                timings=timings,
+            )
+
         retrieval_started = time.perf_counter()
         candidates, retrieval_trace = await retrieve_documents(
             self.repository,
@@ -135,7 +288,6 @@ class RagV2Pipeline:
             ),
         )
         timings["v2_document_context_ms"] = round((time.perf_counter() - context_started) * 1000)
-        query_trace = query_outcome.trace_dict()
         query_trace["fallback_retrieval_succeeded"] = bool(
             query_outcome.history_fallback == "APPLIED" and candidates
         )
@@ -164,6 +316,7 @@ class RagV2Pipeline:
             generation={
                 "pipeline": "V2",
                 "status": "ANSWER_PENDING",
+                "response_path": "KNOWLEDGE",
                 "query_interpreter": query_trace,
                 "retrieval": retrieval_trace,
                 "context": context_trace,
@@ -271,6 +424,7 @@ class RagV2Pipeline:
         finally:
             await answer_provider.aclose()
         timings["v2_answer_generator_ms"] = round((time.perf_counter() - answer_started) * 1000)
+        result.citation_result["response_path"] = "KNOWLEDGE"
 
         document_id_by_key = dict(zip(context.document_keys, context.document_ids, strict=True))
         used_document_ids = [
@@ -291,6 +445,7 @@ class RagV2Pipeline:
 
         generation_trace: dict[str, Any] = {
             "pipeline": "V2",
+            "response_path": "KNOWLEDGE",
             "query_interpreter": query_trace,
             "retrieval": retrieval_trace,
             "context": context_trace,
@@ -321,7 +476,12 @@ class RagV2Pipeline:
 
         return RagV2Result(
             result=result,
-            usage={"pipeline": "V2", "query_interpreter": query_usage, "answer": answer_usage},
+            usage={
+                "pipeline": "V2",
+                "response_path": "KNOWLEDGE",
+                "query_interpreter": query_usage,
+                "answer": answer_usage,
+            },
             trace=generation_trace,
             timings=timings,
             next_suggestions=generated.next_suggestions,

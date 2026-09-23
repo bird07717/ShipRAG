@@ -218,6 +218,35 @@ def v2_trace_hits(
     )
 
 
+def v2_trace_expectation_problems(
+    trace: dict[str, Any], expected: dict[str, Any]
+) -> list[str]:
+    generation = (trace.get("runtime_snapshot") or {}).get("generation") or {}
+    problems: list[str] = []
+
+    expected_path = expected.get("trace_response_path")
+    if expected_path is not None and generation.get("response_path") != expected_path:
+        problems.append(
+            "V2 Trace 回答路径不符: "
+            f"{generation.get('response_path')}，期望 {expected_path}"
+        )
+
+    expected_guard = expected.get("trace_input_guard")
+    if expected_guard is not None and generation.get("input_guard") != expected_guard:
+        problems.append(
+            "V2 Trace 输入短路不符: "
+            f"{generation.get('input_guard')}，期望 {expected_guard}"
+        )
+
+    expected_retrieval = expected.get("trace_retrieval_status")
+    actual_retrieval = (generation.get("retrieval") or {}).get("status")
+    if expected_retrieval is not None and actual_retrieval != expected_retrieval:
+        problems.append(
+            f"V2 Trace 检索状态不符: {actual_retrieval}，期望 {expected_retrieval}"
+        )
+    return problems
+
+
 async def observe_trace(
     client: httpx.AsyncClient,
     *,
@@ -529,6 +558,9 @@ async def main() -> int:
                             hits = hidden_hits
                             evidence_mode = "V2_TRACE"
                             observation_problems.extend(trace_problems)
+                            observation_problems.extend(
+                                v2_trace_expectation_problems(trace, expected)
+                            )
                 passed, problems = evaluate(expected, hits)
                 problems = list(problems)
                 problems += observation_problems

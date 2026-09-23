@@ -146,6 +146,7 @@ const traceDetail = {
   runtime_snapshot: {
     generation: {
       pipeline: "V2",
+      response_path: "KNOWLEDGE",
       diagnostic_reason: "NEEDS_KEY_CONDITION",
       query_interpreter: { status: "PASSED" },
       retrieval: { degradations: [], document_rerank: { status: "PASSED" } },
@@ -873,6 +874,8 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("答案内容");
     expect(wrapper.text()).toContain("诊断原因");
     expect(wrapper.text()).toContain("缺少关键条件");
+    expect(wrapper.text()).toContain("回答路径");
+    expect(wrapper.text()).toContain("知识检索");
   });
 
   it("logs: applies the retired RAG errors deep-link state", async () => {

@@ -6,6 +6,7 @@ import pytest
 
 from app.rag.llm import FakeLlmProvider, LlmError
 from app.rag.v2.answer_generator import build_answer_prompt
+from app.rag.v2.conversation_answer import build_conversation_prompt
 from app.rag.v2.document_context import DocumentContext
 from app.rag.v2.history import select_complete_round_history
 from app.rag.v2.query_interpreter import QueryInterpretation, interpret_query
@@ -101,6 +102,7 @@ def _round(
     linked: bool = True,
     answer: str | None = None,
     input_guard_reason: str | None = None,
+    response_path: str | None = None,
 ) -> dict[str, object]:
     return {
         "id": f"a{number}",
@@ -110,6 +112,7 @@ def _round(
         "status": status,
         "user_status": user_status,
         "input_guard_reason": input_guard_reason,
+        "response_path": response_path,
         # These legacy fields deliberately disagree. V2 must ignore them.
         "focus_epoch": number,
         "user_epoch": number + 100,
@@ -201,6 +204,28 @@ def test_keeps_low_information_shortcut_for_condition_followup() -> None:
     assert diagnostics["excluded"] == []
 
 
+def test_skips_conversation_path_and_keeps_previous_technical_evidence() -> None:
+    previous_document_id = "7777ff1b-efe0-4a12-a1dc-9bdf3532042b"
+    technical = _round(2)
+    technical["used_document_ids"] = [previous_document_id]
+
+    history, diagnostics = select_complete_round_history(
+        [_round(3, response_path="CONVERSATION"), technical, _round(1)],
+        max_rounds=2,
+        max_messages=10,
+        token_budget=2_000,
+    )
+
+    assert history == [
+        {"role": "USER", "content": "问题 1"},
+        {"role": "ASSISTANT", "content": "回答 1"},
+        {"role": "USER", "content": "问题 2"},
+        {"role": "ASSISTANT", "content": "回答 2"},
+    ]
+    assert diagnostics["previous_document_ids"] == [previous_document_id]
+    assert diagnostics["excluded"] == [{"message_id": "a3", "reason": "NON_TECHNICAL_CONVERSATION"}]
+
+
 def test_does_not_skip_an_oversized_recent_complete_round() -> None:
     history, diagnostics = select_complete_round_history(
         [_round(2, answer="很长" * 200), _round(1)],
@@ -227,6 +252,7 @@ def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> 
             scope="IN_SCOPE",
             relation="CORRECTION",
             active_task="检查 PDC",
+            response_path="KNOWLEDGE",
         ),
         context=DocumentContext(
             prompt_context="",
@@ -269,13 +295,38 @@ def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> 
     assert "只回答产品技术部分" in prompt
 
 
+def test_conversation_prompt_uses_only_latest_round_and_forbids_new_facts() -> None:
+    prompt = json.loads(
+        build_conversation_prompt(
+            question="把刚才的建议压缩成三点",
+            history=[
+                {"role": "USER", "content": "更早的问题"},
+                {"role": "ASSISTANT", "content": "更早的回答"},
+                {"role": "USER", "content": "刚才的问题"},
+                {"role": "ASSISTANT", "content": "刚才的技术建议"},
+            ],
+            product_name="VDR600",
+            scope_description="VDR600 技术支持",
+        )
+    )
+
+    assert prompt["latest_completed_round"] == [
+        {"role": "USER", "content": "刚才的问题"},
+        {"role": "ASSISTANT", "content": "刚才的技术建议"},
+    ]
+    assert "更早的问题" not in json.dumps(prompt, ensure_ascii=False)
+    assert any("不得新增产品事实" in rule for rule in prompt["rules"])
+    assert any("不得声称已经检索" in rule for rule in prompt["rules"])
+
+
 @pytest.mark.asyncio
 async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up() -> None:
     provider = _CapturingFakeLlmProvider(
         '{"resolved_question":"更换 VDR600 PSU 电源板并拆装 3359 核心板时使用哪个端口",'
         '"search_queries":["PSU 3359 操作端口"],"key_constraints":["PSU 更换操作"],'
         '"scope":"IN_SCOPE","relation":"FOLLOW_UP",'
-        '"active_task":"更换 VDR600 PSU 电源板并拆装 3359 核心板"}'
+        '"active_task":"更换 VDR600 PSU 电源板并拆装 3359 核心板",'
+        '"response_path":"KNOWLEDGE"}'
     )
 
     outcome = await interpret_query(
@@ -299,6 +350,8 @@ async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up(
     assert any("可信产品档案" in rule for rule in prompt["rules"])
     assert any("该产品本身是什么" in rule for rule in prompt["rules"])
     assert any("无关创作或闲聊素材" in rule for rule in prompt["rules"])
+    assert any("新事实" in rule and "CONVERSATION" in rule for rule in prompt["rules"])
+    assert any("无法确定" in rule and "KNOWLEDGE" in rule for rule in prompt["rules"])
     assert prompt["recent_completed_rounds"] == [
         {
             "user_request": "请完整展示更换 PSU 电源板的步骤",
@@ -308,9 +361,11 @@ async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up(
     assert "recent_completed_history" not in prompt
     assert "immediate_previous_round" not in prompt
     assert outcome.interpretation.relation == "FOLLOW_UP"
+    assert outcome.interpretation.response_path == "KNOWLEDGE"
     assert outcome.interpretation.active_task == "更换 VDR600 PSU 电源板并拆装 3359 核心板"
     trace = outcome.trace_dict()
     assert trace["relation"] == "FOLLOW_UP"
+    assert trace["response_path"] == "KNOWLEDGE"
     assert "answer_depth" not in trace
     assert trace["active_task_chars"] == len(outcome.interpretation.active_task)
     assert trace["active_task_sha256"]
@@ -384,7 +439,8 @@ async def test_query_interpreter_timeout_does_not_inherit_explicit_new_task() ->
 async def test_query_interpreter_retries_one_immediate_transient_failure() -> None:
     provider = _FailOnceLlmProvider(
         '{"resolved_question":"配置 VAU 图像","search_queries":[],"key_constraints":[],'
-        '"scope":"IN_SCOPE","relation":"NEW_TASK","active_task":null}',
+        '"scope":"IN_SCOPE","relation":"NEW_TASK","active_task":null,'
+        '"response_path":"KNOWLEDGE"}',
         LlmError("UPSTREAM_UNAVAILABLE", "模型服务暂时不可用", retryable=True),
     )
 
@@ -404,3 +460,28 @@ async def test_query_interpreter_retries_one_immediate_transient_failure() -> No
     assert outcome.status == "PASSED"
     assert outcome.attempts == 2
     assert outcome.trace_dict()["history_fallback_applied"] is False
+
+
+@pytest.mark.asyncio
+async def test_query_interpreter_missing_response_path_falls_back_to_knowledge() -> None:
+    completion = (
+        '{"resolved_question":"配置 VAU 图像","search_queries":[],"key_constraints":[],'
+        '"scope":"IN_SCOPE","relation":"NEW_TASK","active_task":null}'
+    )
+    provider = FakeLlmProvider(completions=[completion, completion])
+
+    outcome = await interpret_query(
+        provider,
+        question="如何配置 VAU 图像？",
+        history=[],
+        knowledge_name="VDR600",
+        scope_description="VDR600 技术支持",
+        max_rounds=4,
+        variant_limit=3,
+        max_tokens=512,
+        timeout_seconds=25,
+    )
+
+    assert outcome.status == "DEGRADED"
+    assert outcome.reason == "STRUCTURED_OUTPUT_INVALID"
+    assert outcome.interpretation.response_path == "KNOWLEDGE"

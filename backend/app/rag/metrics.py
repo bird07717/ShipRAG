@@ -26,16 +26,21 @@ _STAGE_KEYS = (
 
 _MAX_RANGE_DAYS = 92
 
-# Every input-guard short circuit (greeting, meta acknowledgement, low
-# information) answers deterministically without an LLM, Embedding or Rerank
-# call, so its millisecond turn is not a sample of generation latency. The
-# turn itself still counts as a real request everywhere else.
-_LATENCY_SAMPLE = "citation_result ->> 'shortcut' IS NULL"
+# Every input-guard short circuit answers deterministically, while the
+# CONVERSATION path intentionally skips RAG. Neither is a sample of technical
+# retrieval/generation latency. Both still count as real operational requests.
+_LATENCY_SAMPLE = (
+    "citation_result ->> 'shortcut' IS NULL "
+    "AND COALESCE(citation_result ->> 'response_path', 'KNOWLEDGE') <> 'CONVERSATION'"
+)
 # Greetings and conversation-control acknowledgements are real requests for
 # operational volume, but they are not technical questions. Low-information
 # guards intentionally remain technical signals because the following turn
 # may supply the requested condition.
-_TECHNICAL_SAMPLE = "COALESCE(citation_result ->> 'shortcut', '') NOT IN ('GREETING', 'META_ACK')"
+_TECHNICAL_SAMPLE = (
+    "COALESCE(citation_result ->> 'shortcut', '') NOT IN ('GREETING', 'META_ACK') "
+    "AND COALESCE(citation_result ->> 'response_path', 'KNOWLEDGE') <> 'CONVERSATION'"
+)
 
 
 def _total_latency_select(samples_alias: str = "latency_samples") -> str:

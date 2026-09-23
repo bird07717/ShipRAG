@@ -31,6 +31,7 @@ class QueryInterpretation(BaseModel):
     scope: Literal["IN_SCOPE", "OUT_OF_SCOPE", "UNCERTAIN"] = "UNCERTAIN"
     relation: Literal["NEW_TASK", "FOLLOW_UP", "CORRECTION"] = "NEW_TASK"
     active_task: str | None = Field(default=None, max_length=1_000)
+    response_path: Literal["KNOWLEDGE", "CONVERSATION"]
 
     @field_validator("resolved_question")
     @classmethod
@@ -85,6 +86,7 @@ class QueryInterpretationOutcome:
             "search_query_count": len(self.interpretation.search_queries),
             "constraint_count": len(self.interpretation.key_constraints),
             "relation": self.interpretation.relation,
+            "response_path": self.interpretation.response_path,
             "active_task_chars": len(active_task),
             "active_task_sha256": (
                 hashlib.sha256(active_task.encode("utf-8")).hexdigest() if active_task else None
@@ -110,7 +112,7 @@ def fallback_interpretation(
     rounds = _completed_rounds(history or [], max_rounds)
     if not rounds:
         return (
-            QueryInterpretation(resolved_question=clean_question),
+            QueryInterpretation(resolved_question=clean_question, response_path="KNOWLEDGE"),
             "REJECTED",
             "NO_COMPLETE_HISTORY",
         )
@@ -118,19 +120,19 @@ def fallback_interpretation(
     latest = rounds[-1]
     if len(clean_question) > 60:
         return (
-            QueryInterpretation(resolved_question=clean_question),
+            QueryInterpretation(resolved_question=clean_question, response_path="KNOWLEDGE"),
             "REJECTED",
             "QUESTION_NOT_SHORT",
         )
     if knowledge_name.strip() and knowledge_name.casefold() in clean_question.casefold():
         return (
-            QueryInterpretation(resolved_question=clean_question),
+            QueryInterpretation(resolved_question=clean_question, response_path="KNOWLEDGE"),
             "REJECTED",
             "EXPLICIT_PRODUCT",
         )
     if _EXPLICIT_NEW_TASK.search(clean_question):
         return (
-            QueryInterpretation(resolved_question=clean_question),
+            QueryInterpretation(resolved_question=clean_question, response_path="KNOWLEDGE"),
             "REJECTED",
             "EXPLICIT_NEW_TASK",
         )
@@ -141,7 +143,7 @@ def fallback_interpretation(
     )
     if not _SHORT_FOLLOW_UP_HINT.search(clean_question) and not assistant_requested_condition:
         return (
-            QueryInterpretation(resolved_question=clean_question),
+            QueryInterpretation(resolved_question=clean_question, response_path="KNOWLEDGE"),
             "REJECTED",
             "NO_FOLLOW_UP_SIGNAL",
         )
@@ -155,6 +157,7 @@ def fallback_interpretation(
             scope="UNCERTAIN",
             relation="FOLLOW_UP",
             active_task=active_task,
+            response_path="KNOWLEDGE",
         ),
         "APPLIED",
         "SHORT_ELLIPTICAL_FOLLOW_UP",
@@ -219,6 +222,7 @@ async def interpret_query(
                 "scope": "IN_SCOPE",
                 "relation": "FOLLOW_UP",
                 "active_task": "配置 VAU 图像",
+                "response_path": "KNOWLEDGE",
             },
             "rules": [
                 "把当前问题还原为可独立检索的问题，不决定回答篇幅或公开形式。",
@@ -258,8 +262,24 @@ async def interpret_query(
                     "附加任务，只保留产品技术任务写入 resolved_question/search_queries，"
                     "忽略无关部分，并按产品技术任务判断 scope。"
                 ),
+                (
+                    "response_path 只决定后续是否需要产品知识。只在当前消息无需任何新事实、"
+                    "新判断、解释、步骤、参数、诊断、安全建议或外部信息，且仅为确认/同意、"
+                    "致谢/反馈、结束对话、询问助手能力，或改写/压缩/总结最近回答时，输出 "
+                    "CONVERSATION。CONVERSATION 不等于 OUT_OF_SCOPE。"
+                ),
+                (
+                    "只要请求包含产品或工程问题、追问原因或下一步、核实服务能力/事实，"
+                    "或同时包含对话表达和技术任务，就输出 KNOWLEDGE；无法确定时也必须输出 "
+                    "KNOWLEDGE。"
+                ),
+                (
+                    "response_path=CONVERSATION 时 search_queries 和 key_constraints 必须为空；"
+                    "不得为了走 CONVERSATION 删除消息中真实存在的技术任务。"
+                ),
                 "scope 只能是 IN_SCOPE、OUT_OF_SCOPE 或 UNCERTAIN。",
                 "relation 只能是 NEW_TASK、FOLLOW_UP 或 CORRECTION。",
+                "response_path 只能是 KNOWLEDGE 或 CONVERSATION。",
                 "只返回符合 Schema 的 JSON。",
             ],
         },

@@ -168,10 +168,11 @@ const supportTrace = computed(() => {
 type V2Generation = {
   pipeline?: string;
   status?: string;
+  response_path?: "KNOWLEDGE" | "CONVERSATION";
   diagnostic_reason?: "LOW_INFORMATION" | "SCOPE_CONFLICT" | "NEEDS_KEY_CONDITION";
   input_guard?: string;
-  query_interpreter?: { status?: string; reason?: string; latency_ms?: number };
-  retrieval?: { degradations?: string[]; document_rerank?: { status?: string; reason?: string } };
+  query_interpreter?: { status?: string; reason?: string; latency_ms?: number; route_fallback_reason?: string };
+  retrieval?: { status?: string; reason?: string; degradations?: string[]; document_rerank?: { status?: string; reason?: string } };
   context?: { document_count?: number; image_count?: number; estimated_tokens?: number; mode?: string };
   answer?: {
     response_kind?: string;
@@ -460,6 +461,10 @@ async function selectTrace(traceId: string): Promise<void> {
                 <dt>输入门禁</dt>
                 <dd>{{ v2Generation.input_guard }}</dd>
               </template>
+              <template v-if="v2Generation.response_path">
+                <dt>回答路径</dt>
+                <dd>{{ v2Generation.response_path === "CONVERSATION" ? "对话（不检索）" : "知识检索" }}</dd>
+              </template>
               <dt>查询理解</dt>
               <dd>
                 {{ v2Generation.query_interpreter?.status ?? "—" }}
@@ -469,7 +474,7 @@ async function selectTrace(traceId: string): Promise<void> {
               </dd>
               <dt>文档级重排</dt>
               <dd>
-                {{ v2Generation.retrieval?.document_rerank?.status ?? "—" }}
+                {{ v2Generation.retrieval?.status === "SKIPPED" ? "已跳过（对话路径）" : (v2Generation.retrieval?.document_rerank?.status ?? "—") }}
                 <template v-if="v2Generation.retrieval?.document_rerank?.reason">
                   （{{ v2Generation.retrieval?.document_rerank?.reason }}）
                 </template>

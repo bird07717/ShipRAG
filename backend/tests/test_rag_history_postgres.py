@@ -106,6 +106,37 @@ async def test_v2_history_excludes_completed_input_guard_shortcut(
     ]
 
 
+async def test_v2_history_excludes_conversation_response_path(
+    records,  # noqa: F811
+) -> None:
+    async with records.engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE message SET rag_user_message_id=:user_id WHERE id=:assistant_id"),
+            {"user_id": records.messages[0], "assistant_id": records.messages[1]},
+        )
+        await connection.execute(
+            text(
+                "UPDATE message SET rag_history_context=CAST(:context AS jsonb) "
+                "WHERE id=:assistant_id"
+            ),
+            {
+                "assistant_id": records.messages[3],
+                "context": json.dumps({"response_path": "CONVERSATION"}),
+            },
+        )
+
+    history, diagnostics = await _load_v2(records)
+
+    assert history == [
+        {"role": "USER", "content": "设备如何开机"},
+        {"role": "ASSISTANT", "content": "按电源键"},
+    ]
+    assert diagnostics["previous_document_ids"] == []
+    assert diagnostics["excluded"] == [
+        {"message_id": str(records.messages[3]), "reason": "NON_TECHNICAL_CONVERSATION"}
+    ]
+
+
 async def test_v2_begin_turn_preserves_support_focus_state(records) -> None:  # noqa: F811
     index_id = await _insert_active_index(records.engine, records.kb)
     async with records.engine.begin() as connection:

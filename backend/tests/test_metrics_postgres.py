@@ -22,11 +22,20 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _insert_trace(
-    connection, *, kb_id, conversation_id, total_ms, shortcut, response_type
+    connection,
+    *,
+    kb_id,
+    conversation_id,
+    total_ms,
+    shortcut,
+    response_type,
+    response_path=None,
 ) -> None:
     citation: dict[str, str] = {"status": "OK", "pipeline": "V2"}
     if shortcut:
         citation = {"status": "NOT_REQUIRED", "pipeline": "V2", "shortcut": shortcut}
+    if response_path:
+        citation["response_path"] = response_path
     await connection.execute(
         text(
             """
@@ -70,12 +79,13 @@ async def test_latency_excludes_every_input_guard_shortcut() -> None:
                 text("INSERT INTO conversation (id, knowledge_id) VALUES (:id, :kb_id)"),
                 {"id": conversation_id, "kb_id": kb_id},
             )
-            for total_ms, shortcut, response_type in (
-                (12_000, None, "ANSWERED"),
-                (12_000, None, "ANSWERED"),
-                (5, "GREETING", "ANSWERED"),
-                (5, "META_ACK", "ANSWERED"),
-                (5, "EMPTY_QUESTION", "UNCONFIRMED"),
+            for total_ms, shortcut, response_type, response_path in (
+                (12_000, None, "ANSWERED", "KNOWLEDGE"),
+                (12_000, None, "ANSWERED", "KNOWLEDGE"),
+                (5, "GREETING", "ANSWERED", None),
+                (5, "META_ACK", "ANSWERED", None),
+                (5, "EMPTY_QUESTION", "UNCONFIRMED", None),
+                (900, None, "ANSWERED", "CONVERSATION"),
             ):
                 await _insert_trace(
                     connection,
@@ -84,6 +94,7 @@ async def test_latency_excludes_every_input_guard_shortcut() -> None:
                     total_ms=total_ms,
                     shortcut=shortcut,
                     response_type=response_type,
+                    response_path=response_path,
                 )
 
         repository = MetricsRepository(engine)
@@ -99,8 +110,8 @@ async def test_latency_excludes_every_input_guard_shortcut() -> None:
         # Operational totals keep every real request. Greetings and
         # conversation-control acknowledgements stay out of technical quality,
         # while low-information clarification remains a technical signal.
-        assert overview["total_traces"] == 5
-        assert overview["completed"] == 5
+        assert overview["total_traces"] == 6
+        assert overview["completed"] == 6
         assert overview["response_type_counts"] == {
             "ANSWERED": 2,
             "UNCONFIRMED": 1,
@@ -108,10 +119,10 @@ async def test_latency_excludes_every_input_guard_shortcut() -> None:
             "DOC_DELIVERED": 0,
         }
         assert overview["classified_traces"] == 3
-        assert timeseries[0]["queries"] == 5
+        assert timeseries[0]["queries"] == 6
         assert timeseries[0]["answered"] == 2
         assert timeseries[0]["unconfirmed"] == 1
-        # Latency is computed from the two model-backed turns only.
+        # Technical latency is computed from the two knowledge turns only.
         assert overview["latency"] == {
             "p50_ms": 12_000,
             "p95_ms": 12_000,
@@ -122,8 +133,8 @@ async def test_latency_excludes_every_input_guard_shortcut() -> None:
         assert latency["total"]["samples"] == 2
         assert latency["stages"]["llm_ms"] == 12_000
         source = next(row for row in assistant["sources"] if row["source"] == "ASSISTANT_API")
-        # The operational request count still sees all five turns.
-        assert source["turns"] == 5
+        # The operational request count still sees all six turns.
+        assert source["turns"] == 6
         assert source["latency"] == {
             "p50_ms": 12_000,
             "p95_ms": 12_000,

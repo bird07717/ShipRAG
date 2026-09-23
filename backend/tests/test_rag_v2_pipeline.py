@@ -187,6 +187,23 @@ class _EmptyRepository(_Repository):
         return []
 
 
+class _ForbiddenRetrievalRepository(_Repository):
+    async def bm25_search(self, **_kwargs: Any) -> list[RetrievalCandidate]:
+        raise AssertionError("conversation path must not run chunk retrieval")
+
+    async def vector_search(self, **_kwargs: Any) -> list[RetrievalCandidate]:
+        raise AssertionError("conversation path must not run vector retrieval")
+
+    async def document_card_bm25_search(self, **_kwargs: Any) -> list[DocumentCardCandidate]:
+        raise AssertionError("conversation path must not run card retrieval")
+
+    async def document_card_vector_search(self, **_kwargs: Any) -> list[DocumentCardCandidate]:
+        raise AssertionError("conversation path must not run card retrieval")
+
+    async def get_document_blocks(self, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("conversation path must not load document context")
+
+
 class _ReverseRerankProvider:
     provider = "fake"
     model_name = "reverse-document-rerank"
@@ -287,7 +304,7 @@ async def test_v2_generate_uses_two_llms_and_one_batched_embedding_request() -> 
     completions = [
         '{"resolved_question":"如何配置 VAU 图像","search_queries":["VAU 图像配置"],'
         '"key_constraints":[],"scope":"IN_SCOPE","relation":"NEW_TASK",'
-        '"active_task":"配置 VAU 图像"}',
+        '"active_task":"配置 VAU 图像","response_path":"KNOWLEDGE"}',
         '{"response_kind":"ANSWER","basis":"DOCUMENT","answer":"先设置电脑网络参数。",'
         '"used_document_keys":["D1"],"used_image_keys":[],"next_suggestions":[]}',
     ]
@@ -321,6 +338,179 @@ async def test_v2_generate_uses_two_llms_and_one_batched_embedding_request() -> 
 
 
 @pytest.mark.asyncio
+async def test_v2_conversation_path_uses_two_llms_without_retrieval() -> None:
+    repository = _ForbiddenRetrievalRepository(_candidate())
+    repository.turn = replace(
+        _turn(),
+        history=[
+            {"role": "USER", "content": "建议联系海兰信专业检查吗？"},
+            {"role": "ASSISTANT", "content": "建议联系专业人员检查。"},
+        ],
+    )
+    completions = [
+        '{"resolved_question":"同意联系海兰信进行专业检查",'
+        '"search_queries":[],"key_constraints":[],"scope":"IN_SCOPE",'
+        '"relation":"FOLLOW_UP","active_task":"联系专业人员检查",'
+        '"response_path":"CONVERSATION"}',
+        '{"answer":"好的，这样处理更稳妥。"}',
+    ]
+    llm_calls = 0
+
+    def llm_factory(_settings: Settings, _snapshot: ModelSnapshot) -> FakeLlmProvider:
+        nonlocal llm_calls
+        llm_calls += 1
+        return FakeLlmProvider(completions=[completions.pop(0)])
+
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: (_ for _ in ()).throw(
+            AssertionError("conversation path must not call embedding")
+        ),
+        llm_factory=llm_factory,
+        rerank_factory=lambda _settings, _snapshot: (_ for _ in ()).throw(
+            AssertionError("conversation path must not call rerank")
+        ),
+    )
+
+    payload = await service.generate(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=repository.turn.conversation_id,
+        question="同意联系海兰信进行专业检查",
+        request_id="v2-conversation-route",
+    )
+
+    assert completions == []
+    assert llm_calls == 2
+    assert payload["response_type"] == "ANSWERED"
+    assert payload["answer"] == "好的，这样处理更稳妥。"
+    assert payload["answer_mode"] is None
+    assert payload["disclaimer"] is None
+    assert repository.v2_progress is not None
+    progress = repository.v2_progress["generation"]
+    assert progress["response_path"] == "CONVERSATION"
+    assert progress["retrieval"] == {
+        "status": "SKIPPED",
+        "reason": "CONVERSATION_ROUTE",
+    }
+    assert repository.v2_progress["selected_context"] == []
+    assert repository.completed is not None
+    assert repository.completed["citation_result"]["response_path"] == "CONVERSATION"
+    generation = repository.completed["doc_routing"]["generation"]
+    assert generation["response_path"] == "CONVERSATION"
+    assert generation["answer"]["basis"] == "CONVERSATION"
+    assert generation["answer"]["fallback_applied"] is False
+    assert repository.completed["usage"]["response_path"] == "CONVERSATION"
+
+
+@pytest.mark.asyncio
+async def test_v2_conversation_answer_failure_uses_fixed_fallback_without_rag() -> None:
+    repository = _ForbiddenRetrievalRepository(_candidate())
+    repository.turn = _turn()
+    completions = [
+        '{"resolved_question":"谢谢", "search_queries":[],"key_constraints":[],'
+        '"scope":"IN_SCOPE","relation":"NEW_TASK","active_task":null,'
+        '"response_path":"CONVERSATION"}',
+        "not-json",
+    ]
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: (_ for _ in ()).throw(
+            AssertionError("conversation fallback must not call embedding")
+        ),
+        llm_factory=lambda _settings, _snapshot: FakeLlmProvider(completions=[completions.pop(0)]),
+    )
+
+    payload = await service.generate(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=repository.turn.conversation_id,
+        question="谢谢",
+        request_id="v2-conversation-fallback",
+    )
+
+    assert payload["answer"] == "好的，我已了解。您可以继续说明需要协助的内容。"
+    assert repository.completed is not None
+    generation = repository.completed["doc_routing"]["generation"]
+    assert generation["response_path"] == "CONVERSATION"
+    assert generation["answer"]["status"] == "DEGRADED"
+    assert generation["answer"]["fallback_applied"] is True
+    assert generation["answer"]["fallback_reason"] == "UPSTREAM_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_v2_conversation_route_with_search_signals_falls_back_to_knowledge() -> None:
+    repository = _Repository(_candidate())
+    repository.turn = _turn()
+    embedding = _CountingEmbeddingProvider(1024)
+    completions = [
+        '{"resolved_question":"VDR600 下一步怎么操作","search_queries":["VDR600 下一步"],'
+        '"key_constraints":[],"scope":"IN_SCOPE","relation":"FOLLOW_UP",'
+        '"active_task":"操作 VDR600","response_path":"CONVERSATION"}',
+        '{"response_kind":"ANSWER","basis":"DOCUMENT","answer":"继续执行下一步。",'
+        '"used_document_keys":["D1"],"used_image_keys":[],"next_suggestions":[]}',
+    ]
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: embedding,
+        llm_factory=lambda _settings, _snapshot: FakeLlmProvider(completions=[completions.pop(0)]),
+    )
+
+    await service.generate(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=repository.turn.conversation_id,
+        question="好的，那下一步怎么操作？",
+        request_id="v2-conversation-conflict",
+    )
+
+    assert embedding.calls == 1
+    assert repository.completed is not None
+    generation = repository.completed["doc_routing"]["generation"]
+    assert generation["response_path"] == "KNOWLEDGE"
+    assert generation["query_interpreter"]["model_response_path"] == "CONVERSATION"
+    assert generation["query_interpreter"]["route_fallback_reason"] == ("KNOWLEDGE_SIGNALS_PRESENT")
+    assert repository.completed["citation_result"]["response_path"] == "KNOWLEDGE"
+
+
+@pytest.mark.asyncio
+async def test_v2_non_in_scope_conversation_route_falls_back_to_scope_handling() -> None:
+    repository = _Repository(_candidate())
+    repository.turn = _turn()
+    embedding = _CountingEmbeddingProvider(1024)
+    completions = [
+        '{"resolved_question":"写一首关于大海的诗","search_queries":[],'
+        '"key_constraints":[],"scope":"OUT_OF_SCOPE","relation":"NEW_TASK",'
+        '"active_task":null,"response_path":"CONVERSATION"}',
+        '{"response_kind":"ANSWER","basis":"GENERAL","answer":"这是一首诗。",'
+        '"used_document_keys":[],"used_image_keys":[],"next_suggestions":[]}',
+    ]
+
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: embedding,
+        llm_factory=lambda _settings, _snapshot: FakeLlmProvider(completions=[completions.pop(0)]),
+    )
+
+    payload = await service.generate(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=repository.turn.conversation_id,
+        question="帮我写一首关于大海的诗",
+        request_id="v2-non-scope-conversation-conflict",
+    )
+
+    assert payload["response_type"] == "OUT_OF_SCOPE"
+    assert repository.completed is not None
+    generation = repository.completed["doc_routing"]["generation"]
+    assert generation["response_path"] == "KNOWLEDGE"
+    assert generation["query_interpreter"]["model_response_path"] == "CONVERSATION"
+    assert generation["query_interpreter"]["route_fallback_reason"] == ("NON_IN_SCOPE_CONVERSATION")
+    assert repository.completed["citation_result"]["response_path"] == "KNOWLEDGE"
+    assert "conversation_answer" not in repository.completed["usage"]
+
+
+@pytest.mark.asyncio
 async def test_v2_generates_from_hidden_full_document_and_maps_image() -> None:
     candidate = _candidate()
     repository = _Repository(candidate)
@@ -332,7 +522,7 @@ async def test_v2_generates_from_hidden_full_document_and_maps_image() -> None:
     )
     completions = [
         '{"resolved_question":"如何配置 VAU 图像","search_queries":["VAU 图像配置"],'
-        '"key_constraints":[],"scope":"IN_SCOPE"}',
+        '"key_constraints":[],"scope":"IN_SCOPE","response_path":"KNOWLEDGE"}',
         '{"response_kind":"ANSWER","basis":"DOCUMENT","answer":"先把电脑 IP 设置为 '
         '172.16.8.175，再上传 VIDEO 配置。[IMG:I1]","used_document_keys":["D1"],'
         '"used_image_keys":["I1"],"next_suggestions":[]}',
@@ -403,7 +593,7 @@ async def test_v2_include_images_false_persists_filtered_terminal_snapshot() -> 
     )
     completions = [
         '{"resolved_question":"VAU IP","search_queries":[],"key_constraints":[],'
-        '"scope":"IN_SCOPE"}',
+        '"scope":"IN_SCOPE","response_path":"KNOWLEDGE"}',
         '{"response_kind":"ANSWER","basis":"DOCUMENT","answer":"电脑 IP 是 '
         '172.16.8.175。[IMG:I1]","used_document_keys":["D1"],'
         '"used_image_keys":["I1"],"next_suggestions":[]}',
@@ -441,7 +631,7 @@ async def test_v2_playground_stream_uses_same_hidden_document_generator() -> Non
     )
     completions = [
         '{"resolved_question":"如何配置 VAU 图像","search_queries":[],"key_constraints":[],'
-        '"scope":"IN_SCOPE"}',
+        '"scope":"IN_SCOPE","response_path":"KNOWLEDGE"}',
         '{"response_kind":"ANSWER","basis":"DOCUMENT","answer":"先设置电脑网络参数，'
         '再上传 VIDEO 配置。[IMG:I1]","used_document_keys":["D1"],'
         '"used_image_keys":["I1"],"next_suggestions":[]}',
@@ -659,6 +849,7 @@ def test_v2_query_interpreter_is_the_single_scope_authority(
         interpretation=QueryInterpretation(
             resolved_question="SC200 是什么",
             scope=interpreted_scope,
+            response_path="KNOWLEDGE",
         ),
         product_name="SC200",
     )
@@ -688,7 +879,7 @@ async def test_v2_in_scope_without_documents_uses_general_engineering_answer() -
     )
     completions = [
         '{"resolved_question":"SC200 无法启动如何排查","search_queries":[],'
-        '"key_constraints":[],"scope":"IN_SCOPE"}',
+        '"key_constraints":[],"scope":"IN_SCOPE","response_path":"KNOWLEDGE"}',
         '{"response_kind":"ANSWER","basis":"GENERAL","answer":"先检查供电、保险和急停状态，'
         '再查看控制器告警。","used_document_keys":[],"used_image_keys":[],'
         '"next_suggestions":[]}',
@@ -734,7 +925,7 @@ async def test_v2_model_ask_one_records_missing_key_condition() -> None:
     )
     completions = [
         '{"resolved_question":"SC200 告警","search_queries":[],'
-        '"key_constraints":[],"scope":"IN_SCOPE"}',
+        '"key_constraints":[],"scope":"IN_SCOPE","response_path":"KNOWLEDGE"}',
         '{"response_kind":"ASK_ONE","basis":"NONE",'
         '"answer":"请补充具体告警代码。","used_document_keys":[],'
         '"used_image_keys":[],"next_suggestions":[]}',
@@ -771,7 +962,7 @@ async def test_v2_scope_conflict_does_not_spend_a_third_model_call() -> None:
     )
     completions = [
         '{"resolved_question":"SC200 是什么","search_queries":[],'
-        '"key_constraints":[],"scope":"IN_SCOPE"}',
+        '"key_constraints":[],"scope":"IN_SCOPE","response_path":"KNOWLEDGE"}',
         '{"response_kind":"OUT_OF_SCOPE","basis":"NONE","answer":"",'
         '"used_document_keys":[],"used_image_keys":[],"next_suggestions":[]}',
     ]
@@ -832,7 +1023,7 @@ async def test_v2_repairs_public_title_alias_and_internal_markers_once() -> None
             return FakeLlmProvider(
                 completions=[
                     '{"resolved_question":"VAU IP","search_queries":[],"key_constraints":[],'
-                    '"scope":"IN_SCOPE"}'
+                    '"scope":"IN_SCOPE","response_path":"KNOWLEDGE"}'
                 ]
             )
         return FakeLlmProvider(
@@ -883,7 +1074,7 @@ async def test_v2_degrades_unsupported_lexical_queries_and_keeps_vector_evidence
     )
     completions = [
         '{"resolved_question":"配置 VAU 图像","search_queries":["VAU/FFC600 图像"],'
-        '"key_constraints":[],"scope":"IN_SCOPE"}',
+        '"key_constraints":[],"scope":"IN_SCOPE","response_path":"KNOWLEDGE"}',
         '{"response_kind":"ANSWER","basis":"DOCUMENT","answer":"电脑 IP 设置为 '
         '172.16.8.175。","used_document_keys":["D1"],"used_image_keys":[],'
         '"next_suggestions":[]}',
@@ -928,7 +1119,7 @@ async def test_v2_repairs_invalid_evidence_keys_within_same_single_retry_budget(
             return FakeLlmProvider(
                 completions=[
                     '{"resolved_question":"VAU IP","search_queries":[],"key_constraints":[],'
-                    '"scope":"IN_SCOPE"}'
+                    '"scope":"IN_SCOPE","response_path":"KNOWLEDGE"}'
                 ]
             )
         return FakeLlmProvider(
@@ -1233,6 +1424,7 @@ async def test_v2_document_level_rerank_reorders_and_degrades_safely(
             search_queries=[],
             key_constraints=[],
             scope="IN_SCOPE",
+            response_path="KNOWLEDGE",
         ),
         embedding_selector=lambda _turn: FakeEmbeddingProvider(1024),
         rerank_factory=lambda _settings, _snapshot: provider_factory(),
@@ -1268,6 +1460,7 @@ async def test_v2_follow_up_task_anchor_reaches_search_and_document_rerank() -> 
             scope="IN_SCOPE",
             relation="FOLLOW_UP",
             active_task="更换 PSU 电源板并拆装 3359 核心板",
+            response_path="KNOWLEDGE",
         ),
         embedding_selector=lambda _turn: FakeEmbeddingProvider(1024),
         rerank_factory=lambda _settings, _snapshot: provider,
@@ -1310,6 +1503,7 @@ async def test_v2_follow_up_adds_previous_evidence_as_soft_rerank_candidate() ->
             scope="IN_SCOPE",
             relation="FOLLOW_UP",
             active_task="检查 LRU 通讯线缆",
+            response_path="KNOWLEDGE",
         ),
         previous_document_ids=repository.turn.previous_document_ids,
         embedding_selector=lambda _turn: FakeEmbeddingProvider(1024),
@@ -1342,6 +1536,7 @@ async def test_v2_new_task_does_not_inherit_previous_evidence() -> None:
             resolved_question="如何配置 VAU 图像",
             scope="IN_SCOPE",
             relation="NEW_TASK",
+            response_path="KNOWLEDGE",
         ),
         previous_document_ids=repository.turn.previous_document_ids,
         embedding_selector=lambda _turn: FakeEmbeddingProvider(1024),
