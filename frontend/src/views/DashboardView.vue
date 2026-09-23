@@ -100,7 +100,7 @@ const chartPoints = computed<TrendPoint[]>(() => {
 
 // Online Assistant surface: fall back to zeros before the first external
 // call lands so the panel always renders a complete shape.
-const emptyLatency = { p50_ms: 0, p95_ms: 0, p99_ms: 0, avg_ms: 0 };
+const emptyLatency = { p50_ms: 0, p95_ms: 0, p99_ms: 0, avg_ms: 0, samples: 0 };
 const assistantSource = computed(() => {
   const found = assistantMetrics.value?.sources.find((item) => item.source === "ASSISTANT_API");
   return (
@@ -282,7 +282,7 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
         <MetricCard
           label="外部 P95 延迟"
           :value="`${assistantSource.latency.p95_ms.toLocaleString()} ms`"
-          :context="`P50 ${assistantSource.latency.p50_ms.toLocaleString()} ms · P99 ${assistantSource.latency.p99_ms.toLocaleString()} ms`"
+          :context="`P50 ${assistantSource.latency.p50_ms.toLocaleString()} ms · 样本 ${assistantSource.latency.samples.toLocaleString()} / ${assistantSource.turns.toLocaleString()} 次`"
           :icon="Clock"
           :tone="assistantLatencyTone"
         />
@@ -363,7 +363,7 @@ watch(() => store.selectedKnowledgeId, () => void loadMetrics());
         <MetricCard
           label="P95 延迟"
           :value="`${overview.latency.p95_ms.toLocaleString()} ms`"
-          :context="`P50 ${overview.latency.p50_ms.toLocaleString()} ms · 请求 ${overview.total_traces.toLocaleString()} 次`"
+          :context="`P50 ${overview.latency.p50_ms.toLocaleString()} ms · 样本 ${overview.latency.samples.toLocaleString()} / ${overview.total_traces.toLocaleString()} 次`"
           :icon="Box"
         />
       </div>

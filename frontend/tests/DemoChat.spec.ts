@@ -1,6 +1,6 @@
 import ElementPlus from "element-plus";
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminApi } from "@/api/admin";
 import DemoChat from "@/components/DemoChat.vue";
@@ -81,6 +81,10 @@ const welcomeBody = {
 };
 
 describe("DemoChat", () => {
+  beforeEach(() => {
+    sessionStorage.setItem("rag_service_token", "session-token");
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();

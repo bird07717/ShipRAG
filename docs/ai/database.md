@@ -29,7 +29,7 @@
 - `document_chunk.embedding` 固定为 `vector(1024)`，使用 HNSW cosine 索引；BM25 通过 `pg_search` 索引支持混合检索。
 - `rag_document_card` 以 `(index_id, document_id)` 唯一并同时保存 `knowledge_id`，卡片 JSON、稳定路由文本、`vector(1024)`、内容指纹、生成/审核状态、模型/Prompt 快照和乐观并发 `revision`。知识库或索引删除会级联卡片；文档为软删除，应用事务先显式删除关联卡片。显示名称不复制为卡片事实，改名查询时立即可见且不重做卡片向量。
 - `conversation` 关联知识库，并可冻结 RAG/Support 索引或发布版本；`message` 有会话内顺序约束，`rag_trace` 关联会话/消息并支持回退父子链路。
-- `message.rag_user_message_id` 将新 RAG 助手消息显式关联到本轮用户消息，删除用户消息时置空；旧 Assistant 轮次可在读取时复用 `assistant_request.user_message_id`。V2 只接受这两种显式关联且用户、助手及外部请求状态均完成的轮次，不猜测相邻消息；`rag_history_context` 仅供 legacy 文档切换确认桥接，V2 不读取。`ix_message_rag_user` 和 `ix_assistant_request_message` 支持两种关联读取。
+- `message.rag_user_message_id` 将新 RAG 助手消息显式关联到本轮用户消息，删除用户消息时置空；旧 Assistant 轮次可在读取时复用 `assistant_request.user_message_id`。V2 只接受这两种显式关联且用户、助手及外部请求状态均完成的轮次，不猜测相邻消息。`rag_history_context` 与消息同生命周期：保留 legacy 文档切换确认信息，并持久化不应进入技术历史的输入门禁分类；历史选择优先使用该字段，Trace 只作为旧数据回退。`ix_message_rag_user` 和 `ix_assistant_request_message` 支持两种关联读取。
 - `assistant_request` 的 `(external_user_id, knowledge_id, idempotency_key)` 唯一，同一非空 Conversation 只允许一条 `RUNNING` 记录；`replay_count >= 0`，终态重放会更新计数、`last_replayed_at` 和 `updated_at`。`support_idempotency` 仅记录 Support 内部重放，不作为 Assistant 门面指标。不要绕过这些约束手工重复执行对外写操作。
 - `assistant_request.conversation_id` 使用 `ON DELETE CASCADE`。未关联 Conversation 且为 `COMPLETED`、`FAILED` 或 `CANCELLED` 的记录由独立的部分索引支持按 `updated_at` 清理；保留期任务明确不删除 `RUNNING`。
 - 新 Assistant 失败/取消的公开错误同步保存到 `message.response_payload.error`，并写入显式空 `content`，避免读取旧内部成功块；该写入与请求终态收口同事务。失败关联 Trace 同步状态和错误，已终态请求不二次覆盖。历史消息优先读取错误快照，旧记录兼容 Trace，不新增列或迁移。

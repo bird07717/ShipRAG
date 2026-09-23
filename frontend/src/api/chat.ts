@@ -1,8 +1,21 @@
+import {
+  announceServiceCredentialRejected,
+  readServiceCredential,
+} from "@/api/serviceCredential";
+
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
 function authHeaders(): Record<string, string> {
-  const token = sessionStorage.getItem("rag_service_token")?.trim();
-  return token ? { Authorization: "Bearer " + token } : {};
+  const token = readServiceCredential();
+  if (!token) {
+    announceServiceCredentialRejected();
+    throw new Error("服务凭证缺失，请先配置后再访问管理功能");
+  }
+  return { Authorization: "Bearer " + token };
+}
+
+function handleCredentialRejection(response: Response): void {
+  if (response.status === 401) announceServiceCredentialRejected();
 }
 
 export interface ChatContentBlock {
@@ -103,6 +116,7 @@ export async function fetchWelcome(knowledgeId: string): Promise<WelcomePayload>
     { headers: authHeaders() },
   );
   if (!response.ok) {
+    handleCredentialRejection(response);
     throw new Error(`welcome request failed: ${response.status}`);
   }
   return (await response.json()) as WelcomePayload;
@@ -179,6 +193,7 @@ export async function streamChat(
   });
 
   if (!response.ok) {
+    handleCredentialRejection(response);
     const body = (await response.json().catch(() => null)) as {
       error?: { message?: string };
     } | null;
@@ -238,7 +253,10 @@ export async function fetchImageBlobUrl(imageAssetId: string): Promise<string> {
     apiBaseUrl + "/api/v1/image-assets/" + imageAssetId + "/content",
     { headers: authHeaders() },
   );
-  if (!response.ok) throw new Error("图片加载失败：HTTP " + response.status);
+  if (!response.ok) {
+    handleCredentialRejection(response);
+    throw new Error("图片加载失败：HTTP " + response.status);
+  }
   const blob = await response.blob();
   return URL.createObjectURL(blob);
 }
@@ -252,6 +270,7 @@ export async function downloadDocument(
     { headers: authHeaders() },
   );
   if (!response.ok) {
+    handleCredentialRejection(response);
     const body = (await response.json().catch(() => null)) as {
       error?: { message?: string };
     } | null;

@@ -48,7 +48,7 @@
 
 `src/api/admin.ts` 通过 `VITE_API_BASE_URL`（缺省同源）请求管理 API，并从 `sessionStorage` 的 `rag_service_token` 读取 Bearer Token。`src/api/chat.ts` 手动解析 SSE，支持 `status`、`trace`、`message`、`fallback`、`done`、`error` 事件。不要将服务令牌或任何真实密钥写入源码、测试夹具或认知文档。
 
-除凭证配置页外，`AdminStudio` 在当前浏览器会话没有 Service Token 时不挂载管理视图，也不启动索引/任务轮询；`App.vue` 对独立的问答测试页执行相同门禁。管理 API 返回 401 时会标记凭证失效、卸载管理视图并停止后续自动请求。保存新凭证后解除该状态并恢复加载，避免无凭证或失效凭证持续请求造成认证错误刷屏。后端仍必须对每次实际到达的未授权请求记录和返回 401，前端门禁不是认证边界。
+除凭证配置页外，`AdminStudio` 在当前浏览器会话没有 Service Token 时不挂载管理视图，也不启动索引/任务轮询；`App.vue` 对独立的问答测试页执行相同门禁。`api/serviceCredential.ts` 是凭证存储和拒绝事件的唯一工具层，管理 API 与 Chat API 共用；缺失凭证时直接本地拒绝、完全不调用 `fetch`，实际返回 401 时清除 `sessionStorage` 并广播拒绝事件。`App.vue` 在子组件挂载前注册全局监听，同步清空 Store 凭证并卸载 Dashboard 或 DemoChat；已挂载的凭证设置表单监听 Store 凭证，拒绝时也清空本地输入副本，不能重新保存刚失效的 Token。因此 Store、浏览器存储、设置表单和页面门禁不会因入口不同或挂载时序分叉。保存新凭证后解除拒绝状态并恢复加载。后端仍必须对每次实际到达的未授权请求记录和返回 401，前端门禁不是认证边界。
 
 知识库列表展示 Assistant 的“已上线/未上线”状态；详情中的 `KnowledgeAssistantSettings` 按知识库编辑三条推荐问题、试问、检查运行就绪并确认上线或下线，并明确提示活动索引中的 RAG 文档理解必须全部人工确认。保存线上问题立即生效；未上线时可保存不完整问题，上线必须三条完整且不重复。试问复用管理 Chat，每次新会话，不需要对外上线，但要求问题非空且 Assistant 当前就绪；审核前的内部验证仍可使用独立 DemoChat。**试问结果与 DemoChat 使用相同的按块渲染语义（2026-09-16 修复）**：done 后按 `content` 块渲染（text/table → Markdown，image 块按 `image_asset_id` 经 `fetchImageBlobUrl` 懒加载预签名内容），流式期间与无 content 的回退路径显示累积 `answer`；不要恢复"answer + 文本片段拼接"双通道（含图片的答案会被 `_content_blocks` 拆成多块，片段与全文的去重比较必然失败导致双重渲染）。禁用按钮通过提示说明未就绪、问题为空或请求进行中的原因；“检查就绪”仅刷新运行状态，保留未保存问题及原配置修订号，“重新加载配置”才重新读取保存值。编辑组件以知识库 ID 为 key，关闭时取消试问并忽略过期响应；写请求携带配置修订号，成功后按返回的知识库 ID 更新列表及详情，不使用异步完成时的全局选中值。配置写入即使在详情关闭后完成仍按 ID 更新列表；列表加载比较 `assistant_config_revision`，不让旧响应覆盖更新后的上线状态。索引构建产生 `READY` 候选，不自动生效；候选索引通过已有激活接口明确设为当前 RAG，`DEPRECATED` 历史索引才使用回滚操作。
 

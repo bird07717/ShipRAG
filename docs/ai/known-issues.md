@@ -46,7 +46,7 @@
 | 前端覆盖率门槛 | 已解决 | 2026-09-11 补齐管理 API、composables 和 App 分支测试后，19 个测试文件共 127 项通过；`src/api/**` 函数 100%，`src/composables/**` 语句/行 90.31%、函数 95.78%、分支 81.63%，`App.vue` 分支 94.64%，全部达到现有门槛。 |
 | 前端生产包体积 | 已确认警告 | 2026-09-13 本地生产构建通过，但 Vite 警告入口 JavaScript 压缩后为 1,328.85 kB（gzip 438.90 kB），超过 500 kB 警告阈值；可评估动态导入或手动分包。 |
 | Assistant 请求记录保留 | 代码已解决，待生产部署 | `0042` 增加终态孤儿清理索引，维护 Worker 启动时及之后每天只删除超过 `ASSISTANT_REQUEST_RETENTION_DAYS`、`conversation_id IS NULL` 且为 `COMPLETED`/`FAILED`/`CANCELLED` 的请求；默认 7 天，0 禁用，明确不删除 `RUNNING`。已关联请求仍随 Conversation 级联删除。生产目前仍为 `0041`，部署前原有 1 条无会话 `FAILED` 记录仍可能存在。 |
-| 崩溃进程遗留 RUNNING Assistant 请求 | 本地已实现自动恢复，待生产部署 | 维护 Worker 启动时及每 15 分钟（`app/tasks/assistant_recovery.py`）把超过 `ASSISTANT_REQUEST_STALE_SECONDS`（默认 600，必须大于轮次时限，Support 优先已冻结见 ADR-0021）仍 `RUNNING` 的请求按 `app.assistant.recovery` 同一收口语句标为失败，锁死的会话自愈；Redis 哨兵防重复注册周期链。恢复任务与维护队列共享串行 Worker，长维护任务（如卡片回填）可能推迟恢复执行；进程崩溃后 15 分钟内、维护 Worker 长时间宕机或队列阻塞时仍需手动恢复命令。 |
+| 崩溃进程遗留 RUNNING Assistant 请求 | 本地已实现自动恢复，待生产部署 | 维护 Worker 启动时及每 15 分钟（`app/tasks/assistant_recovery.py`）把超过 `ASSISTANT_REQUEST_STALE_SECONDS`（默认 600，必须大于轮次时限，Support 优先已冻结见 ADR-0021）仍 `RUNNING` 的请求按 `app.assistant.recovery` 同一收口语句标为失败，锁死的会话自愈；额外外部 Trace 扫描只处理孤儿或其请求同样 stale 的关联行，不会因另一批恢复任务误伤活跃请求持有的旧 Trace/Message。Redis 哨兵防重复注册周期链。恢复任务与维护队列共享串行 Worker，长维护任务（如卡片回填）可能推迟恢复执行；进程崩溃后 15 分钟内、维护 Worker 长时间宕机或队列阻塞时仍需手动恢复命令。 |
 | `begin_turn` 每轮锁知识库行 | 已确认限制，按规模暂缓 | 每个问答轮次在 `begin_turn` 事务内 `FOR UPDATE OF kb` 锁住知识库行（含十余个串行读），管理端上线/改策略同样持锁执行就绪重查询；同库并发轮次与配置写入在该阶段互相排队，每轮约数十毫秒。当前规模无碍；单库并发显著上升或 begin_turn 耗时增长时需收窄锁范围。 |
 | 同幂等键并发竞态的错误语义 | 已确认限制，暂缓 | 两个相同幂等键、不同内容的请求并发到达时，后插入者命中唯一约束被统一映射为 `CONVERSATION_BUSY` 而非 `IDEMPOTENCY_KEY_REUSED`；行为安全（409 拒绝）但语义不准。接入方开始区分错误码语义时需按约束名分派。 |
 | Assistant 幂等指标口径 | 代码已解决，待生产部署 | `0042` 为 `assistant_request` 增加 `replay_count` 和 `last_replayed_at`，终态重放在同一事务内原子更新；`/api/v1/metrics/assistant` 已改为按 `assistant_request.knowledge_id` 统计保护请求及累计重放。生产目前仍为 `0041`，部署新迁移和后端前指标仍保持旧口径。 |
@@ -56,7 +56,7 @@
 | 服务器 GitHub 非交互拉取 | 已确认操作约束 | 生产服务器仓库的 `origin` 使用 GitHub SSH 地址；`cm` 账号可在交互式输入 SSH 私钥口令后正常拉取。非交互自动化无法提供该口令，后续服务器 `git pull` 由用户手动执行。 |
 | 生产 Nginx 后端地址缓存 | 已解决 | 2026-09-11 已在生产部署共享 upstream、Docker DNS 和运行时 `resolve`；后端容器地址变化不再要求同步重启前端。Production Compose Smoke 已覆盖“后端换 IP、前端不重启”的恢复场景，生产外部健康入口当前正常。 |
 | 生产模型凭据缺失导致 fake 查询链路 | 已解决 | staging/production 已禁止 M2/M3/M5 显式或隐式回退 fake，并记录实际查询模型。2026-09-11 生产 Golden Trace 确认 58 个检索轮次实际使用 SiliconFlow Embedding、Rerank 和 LLM，5 个噪声轮次在模型调用前由输入门禁短路；查询模型与 Active Index 快照一致。 |
-| 管理台无凭证请求刷屏 | 已解决 | 管理台凭证门禁和 401 后停止轮询已部署。生产核对时，认证失败最后集中发生在新前端部署前，最近 15 分钟新增为 0；历史错误日志按现有 30 天策略清理。后端仍按认证契约记录真正到达的未授权请求。 |
+| 管理台无凭证请求刷屏 | 本地关联已收口，待生产复验 | 原管理视图门禁和 401 停止轮询已部署；2026-09-22 起本地进一步让管理 API 与 Chat API 共用凭证工具，并由始终挂载的 `App.vue` 同步清除浏览器存储、Store 状态和页面门禁。缺少 Service Token 时不调用网络，真实 401 后 Dashboard/DemoChat 均卸载；凭证设置页的本地输入副本也随 Store 清空，不能误保存刚失效的 Token。后端仍按认证契约记录真正到达的未授权请求。完整门禁已通过，仍需部署新前端并观察生产认证错误增量后关闭本项。 |
 
 ## 已核实的测试基线
 

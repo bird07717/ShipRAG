@@ -16,6 +16,19 @@ from app.core.resources import AppResources
 DEFAULT_STALE_HOURS = 24.0
 RECOVERY_CODE = "ABANDONED_ASSISTANT_REQUEST"
 RECOVERY_MESSAGE = "请求长时间未完成，已由恢复任务标记为失败"
+# Internal admin chat and playground turns have no assistant_request row, so
+# a rolled-back terminal write leaves only the message/trace pair behind.
+# They share this pass but must not be reported as an external request.
+INTERNAL_RECOVERY_CODE = "ABANDONED_CHAT_TURN"
+INTERNAL_RECOVERY_MESSAGE = "问答轮次长时间未完成，已由恢复任务标记为失败"
+
+
+_EMPTY_RECOVERY = {
+    "request_count": 0,
+    "message_count": 0,
+    "trace_count": 0,
+    "internal_trace_count": 0,
+}
 
 
 class AssistantRequestRecoveryRepository:
@@ -52,6 +65,13 @@ class AssistantRequestRecoveryRepository:
                                                AND ar.status = 'RUNNING'
                                          )
                                    ) AS orphan_trace_count,
+                                   (
+                                       SELECT count(*)
+                                       FROM rag_trace AS t
+                                       WHERE t.source IN ('INTERNAL_CHAT', 'PLAYGROUND')
+                                         AND t.status = 'RUNNING'
+                                         AND t.created_at < :stale_before
+                                   ) AS internal_trace_count,
                                    min(updated_at) AS oldest_updated_at,
                                    max(updated_at) AS newest_updated_at,
                                    (
@@ -83,6 +103,15 @@ class AssistantRequestRecoveryRepository:
             },
             ensure_ascii=False,
         )
+        internal_error = json.dumps(
+            {
+                "code": INTERNAL_RECOVERY_CODE,
+                "message": INTERNAL_RECOVERY_MESSAGE,
+                "retryable": True,
+                "recovered_at": recovered_at.isoformat(),
+            },
+            ensure_ascii=False,
+        )
         # An externally owned transaction (integration tests) can replace the
         # default short-lived one; the statement itself is identical.
         async with (
@@ -101,8 +130,29 @@ class AssistantRequestRecoveryRepository:
                             ),
                             stale_assistant_traces AS MATERIALIZED (
                                 SELECT trace_id, message_id
+                                FROM rag_trace AS t
+                                WHERE t.source = 'ASSISTANT_API'
+                                  AND t.status = 'RUNNING'
+                                  AND t.created_at < :stale_before
+                                  AND (
+                                      EXISTS (
+                                          SELECT 1
+                                          FROM stale AS s
+                                          WHERE s.trace_id = t.trace_id
+                                      )
+                                      OR NOT EXISTS (
+                                          SELECT 1
+                                          FROM assistant_request AS ar
+                                          WHERE ar.trace_id = t.trace_id
+                                            AND ar.status = 'RUNNING'
+                                      )
+                                  )
+                                FOR UPDATE SKIP LOCKED
+                            ),
+                            stale_internal_traces AS MATERIALIZED (
+                                SELECT trace_id, message_id
                                 FROM rag_trace
-                                WHERE source = 'ASSISTANT_API'
+                                WHERE source IN ('INTERNAL_CHAT', 'PLAYGROUND')
                                   AND status = 'RUNNING'
                                   AND created_at < :stale_before
                                 FOR UPDATE SKIP LOCKED
@@ -122,6 +172,10 @@ class AssistantRequestRecoveryRepository:
                                 UNION
                                 SELECT message_id
                                 FROM stale_assistant_traces
+                                WHERE message_id IS NOT NULL
+                                UNION
+                                SELECT message_id
+                                FROM stale_internal_traces
                                 WHERE message_id IS NOT NULL
                             ),
                             failed_messages AS (
@@ -144,6 +198,18 @@ class AssistantRequestRecoveryRepository:
                                   AND t.status = 'RUNNING'
                                 RETURNING t.trace_id
                             ),
+                            failed_internal_traces AS (
+                                UPDATE rag_trace AS t
+                                SET status = 'FAILED',
+                                    error = COALESCE(t.error, '{}'::jsonb)
+                                        || CAST(:internal_error AS jsonb),
+                                    stage = COALESCE(t.stage, 'chat_turn_recovery'),
+                                    finished_at = COALESCE(t.finished_at, :recovered_at)
+                                FROM stale_internal_traces AS s
+                                WHERE t.trace_id = s.trace_id
+                                  AND t.status = 'RUNNING'
+                                RETURNING t.trace_id
+                            ),
                             failed_requests AS (
                                 UPDATE assistant_request AS ar
                                 SET status = 'FAILED',
@@ -156,13 +222,16 @@ class AssistantRequestRecoveryRepository:
                             SELECT
                                 (SELECT count(*) FROM failed_requests) AS request_count,
                                 (SELECT count(*) FROM failed_messages) AS message_count,
-                                (SELECT count(*) FROM failed_traces) AS trace_count
+                                (SELECT count(*) FROM failed_traces) AS trace_count,
+                                (SELECT count(*) FROM failed_internal_traces)
+                                    AS internal_trace_count
                             """
                         ),
                         {
                             "stale_before": stale_before,
                             "recovered_at": recovered_at,
                             "error": error,
+                            "internal_error": internal_error,
                         },
                     )
                 )
@@ -185,11 +254,15 @@ async def run(
     repository = AssistantRequestRecoveryRepository(resources.database)
     try:
         before = await repository.preview(stale_before=stale_before)
-        matched_count = int(before["request_count"]) + int(before["orphan_trace_count"])
+        matched_count = (
+            int(before["request_count"])
+            + int(before["orphan_trace_count"])
+            + int(before["internal_trace_count"])
+        )
         recovered = (
             await repository.reconcile(stale_before=stale_before)
             if apply and matched_count > 0
-            else {"request_count": 0, "message_count": 0, "trace_count": 0}
+            else _EMPTY_RECOVERY.copy()
         )
         after = await repository.preview(stale_before=stale_before) if apply else before
         return {

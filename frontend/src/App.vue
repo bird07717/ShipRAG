@@ -16,6 +16,7 @@ import DemoChat from "@/components/DemoChat.vue";
 import HealthPanel from "@/components/HealthPanel.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
+import { SERVICE_CREDENTIAL_REJECTED_EVENT } from "@/api/serviceCredential";
 import { useAdminStore } from "@/composables/adminStore";
 
 interface MenuItem {
@@ -87,6 +88,14 @@ const legacyViewTargets: Record<string, { view: string; query?: string }> = {
 
 const store = useAdminStore();
 
+function handleCredentialRejected(): void {
+  store.rejectCredential();
+}
+
+// Register during setup so child onMounted hooks cannot emit a rejection
+// before the application-level credential owner is listening.
+window.addEventListener(SERVICE_CREDENTIAL_REJECTED_EVENT, handleCredentialRejected);
+
 function readNavigationLocation(): NavigationLocation {
   const raw = window.location.hash.replace(/^#\/?/, "");
   const queryAt = raw.indexOf("?");
@@ -147,7 +156,10 @@ onMounted(() => {
     void store.run(() => store.refreshAll());
   }
 });
-onUnmounted(() => window.removeEventListener("hashchange", syncHash));
+onUnmounted(() => {
+  window.removeEventListener("hashchange", syncHash);
+  window.removeEventListener(SERVICE_CREDENTIAL_REJECTED_EVENT, handleCredentialRejected);
+});
 
 /* Data-driven publishing status (replaces the old decorative A/B diagram) */
 const indexStats = computed(() => {

@@ -35,6 +35,33 @@ RerankFactory = Callable[[Settings, ModelSnapshot], RerankProvider]
 
 _META_ACK_PATTERN = re.compile(r"^(?:换一?个(?:问题|话题)|算了|先?不问了)[呀啊吧。！!，,\s]*$")
 _META_ACK_MESSAGE = "好的，请问您想了解什么？我将基于产品文档为您解答。"
+_GREETING_MESSAGE = (
+    "您好，我可以协助解答当前产品的使用、配置、维护和故障问题。请告诉我您想了解的内容。"
+)
+_GREETING_INPUTS = frozenset(
+    {
+        "你好",
+        "你好啊",
+        "你好呀",
+        "您好",
+        "您好啊",
+        "您好呀",
+        "大家好",
+        "早上好",
+        "上午好",
+        "下午好",
+        "晚上好",
+        "早安",
+        "晚安",
+        "嗨",
+        "哈喽",
+        "hello",
+        "hi",
+        "在吗",
+        "有人吗",
+    }
+)
+_SHORTCUT_STRIP_PATTERN = re.compile(r"[\s。！？!?，,、~\uff5e]+")
 _LOW_INFORMATION_MESSAGE = "请补充具体的设备、故障现象或操作目标，我会继续协助排查。"
 _KEYBOARD_ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
 _LOW_INFORMATION_GUARDS = {
@@ -74,6 +101,25 @@ def _input_guard_reason(question: str) -> str | None:
     ):
         return "PROMPT_EXTRACTION"
     return None
+
+
+def _deterministic_greeting(question: str) -> str | None:
+    """Match only whole-message greetings; never substring-match a technical request."""
+
+    normalized = _SHORTCUT_STRIP_PATTERN.sub("", question).casefold()
+    return "GREETING" if normalized in _GREETING_INPUTS else None
+
+
+def _build_greeting_answer() -> ChatResult:
+    return ChatResult(
+        response_type=ResponseType.ANSWERED,
+        answer_mode=None,
+        answer=_GREETING_MESSAGE,
+        content=[ContentBlock(type="text", text=_GREETING_MESSAGE)],
+        disclaimer=None,
+        valid_sources=[],
+        citation_result={"status": "NOT_REQUIRED", "pipeline": "V2"},
+    )
 
 
 def sse_event(event: str, payload: dict[str, Any]) -> bytes:
@@ -171,10 +217,15 @@ class RagService:
             parent_trace_id=parent_trace_id,
             fallback_reason=fallback_reason,
         )
+        greeting = _deterministic_greeting(normalized_question)
         input_guard_reason = (
-            "META_ACK"
-            if self._match_meta_ack(normalized_question) is not None
-            else _input_guard_reason(normalized_question)
+            greeting
+            if greeting is not None
+            else (
+                "META_ACK"
+                if self._match_meta_ack(normalized_question) is not None
+                else _input_guard_reason(normalized_question)
+            )
         )
         retrieval = (
             replace(turn.retrieval, **retrieval_overrides)
@@ -258,7 +309,9 @@ class RagService:
         turn = prepared.turn
         try:
             if prepared.input_guard_reason is not None:
-                if prepared.input_guard_reason == "META_ACK":
+                if prepared.input_guard_reason == "GREETING":
+                    result = _build_greeting_answer()
+                elif prepared.input_guard_reason == "META_ACK":
                     result = build_plain_answer(self._match_meta_ack(question) or _META_ACK_MESSAGE)
                 else:
                     result = ChatResult(
@@ -270,6 +323,11 @@ class RagService:
                         valid_sources=[],
                         citation_result={"status": "NO_EVIDENCE", "pipeline": "V2"},
                     )
+                # Every input-guard branch answers without an LLM, Embedding
+                # or Rerank call. Stamping the reason on the saved citation
+                # result is what lets latency aggregation drop these turns
+                # without guessing from an absent usage field.
+                result.citation_result["shortcut"] = prepared.input_guard_reason
                 usage: dict[str, Any] = {"pipeline": "V2", "llm_calls": 0}
                 next_suggestions: list[str] = []
                 v2_trace: dict[str, Any] = {

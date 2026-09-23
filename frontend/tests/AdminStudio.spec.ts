@@ -132,28 +132,4 @@ describe("AdminStudio settings", () => {
     wrapper.unmount();
   });
 
-  it("stops automatic requests after the backend rejects the credential", async () => {
-    vi.useFakeTimers();
-    adminStore.saveToken("invalid-session-token");
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 401,
-      json: () => Promise.resolve({ error: { message: "服务凭证无效" } }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const wrapper = mount(AdminStudio, {
-      props: { view: "dashboard" },
-      global: { plugins: [ElementPlus] },
-    });
-    await flushPromises();
-
-    expect(adminStore.credentialRejected).toBe(true);
-    expect(wrapper.text()).toContain("需要配置服务凭证");
-    const callsAfterRejection = fetchMock.mock.calls.length;
-    await vi.advanceTimersByTimeAsync(10_000);
-    await flushPromises();
-    expect(fetchMock).toHaveBeenCalledTimes(callsAfterRejection);
-    wrapper.unmount();
-  });
 });

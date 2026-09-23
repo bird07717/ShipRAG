@@ -87,6 +87,32 @@ def _gateway_repository(results: list[Any]) -> tuple[GatewayRepository, _FakeCon
     return repo, engine.connection
 
 
+async def test_assistant_turn_context_prefers_explicit_rag_user_link() -> None:
+    conversation_id = uuid4()
+    trace_id = uuid4()
+    user_message_id = uuid4()
+    assistant_message_id = uuid4()
+    repo, connection = _gateway_repository(
+        [
+            [
+                {
+                    "conversation_id": conversation_id,
+                    "user_message_id": user_message_id,
+                    "assistant_message_id": assistant_message_id,
+                    "trace_id": trace_id,
+                }
+            ]
+        ]
+    )
+
+    context = await repo.assistant_turn_context(conversation_id=conversation_id, trace_id=trace_id)
+
+    sql, _ = connection.executed[0]
+    assert "linked_user.id" in sql
+    assert "a.rag_user_message_id" in sql
+    assert context["user_message_id"] == user_message_id
+
+
 async def test_assistant_conversation_filter_uses_typed_direct_uuid_comparison() -> None:
     repo, connection = _gateway_repository([[]])
     conversation_id, knowledge_id = uuid4(), uuid4()
@@ -301,7 +327,7 @@ async def test_get_document_blocks_rejects_missing_document() -> None:
 
 
 async def test_complete_turn_patches_doc_routing() -> None:
-    repo, connection = _repository([])
+    repo, connection = _repository([[{}], [{}]])
     turn = Turn(
         trace_id=uuid4(),
         conversation_id=uuid4(),
@@ -313,7 +339,7 @@ async def test_complete_turn_patches_doc_routing() -> None:
         llm=ModelSnapshot("zhipu", "glm", {}),
         history=[],
     )
-    routing = {"decision": "DELIVER", "doc_scores": []}
+    routing = {"generation": {"input_guard": "GREETING"}}
 
     await repo.complete_turn(
         turn,
@@ -328,11 +354,14 @@ async def test_complete_turn_patches_doc_routing() -> None:
     trace_sql, params = connection.executed[1]
     assert "jsonb_set" in trace_sql
     assert "{doc_routing}" in trace_sql
-    assert json.loads(str(params["doc_routing"]))["decision"] == "DELIVER"
+    assert json.loads(str(params["doc_routing"]))["generation"]["input_guard"] == "GREETING"
+    _, message_params = connection.executed[0]
+    assert message_params is not None
+    assert json.loads(str(message_params["history_context"])) == {"input_guard": "GREETING"}
 
 
 async def test_complete_turn_without_routing_leaves_trace_untouched() -> None:
-    repo, connection = _repository([])
+    repo, connection = _repository([[{}], [{}]])
     turn = Turn(
         trace_id=uuid4(),
         conversation_id=uuid4(),

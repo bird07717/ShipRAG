@@ -735,9 +735,10 @@ describe("view interactions", () => {
 
     const oversized = new File(["stub"], "huge.docx");
     Object.defineProperty(oversized, "size", { value: 52_428_801 });
-    const duplicate = new File(["stub"], "virus.exe");
+    const duplicateModifiedAt = 1_787_094_000_000;
+    const duplicate = new File(["stub"], "virus.exe", { lastModified: duplicateModifiedAt });
     await pickFiles(wrapper, [
-      new File(["stub"], "virus.exe"),
+      new File(["stub"], "virus.exe", { lastModified: duplicateModifiedAt }),
       oversized,
       duplicate,
       duplicate,
@@ -1118,6 +1119,19 @@ describe("view interactions", () => {
     await flushPromises();
     expect(sessionStorage.getItem("rag_service_token")).toBeNull();
     expect(adminStore.notice).toBe("本地访问凭据已清除");
+  });
+
+  it("configuration: clears the mounted credential field after rejection", async () => {
+    const wrapper = await mountView("configuration", "tab=credentials");
+    const credential = wrapper.get('input[type="password"]');
+    expect((credential.element as HTMLInputElement).value).toBe("test-service-token");
+
+    adminStore.rejectCredential();
+    await wrapper.vm.$nextTick();
+
+    expect(sessionStorage.getItem("rag_service_token")).toBeNull();
+    expect((credential.element as HTMLInputElement).value).toBe("");
+    expect(wrapper.text()).toContain("当前会话未配置");
   });
 
   it("dashboard: opens a trace drawer from recent activity", async () => {

@@ -581,7 +581,11 @@ class RagRepository:
             text("""
             SELECT a.id, a.content AS answer, COALESCE(ar.status, a.status) AS status,
                    u.id AS user_id, u.content AS question, u.status AS user_status,
-                   previous_trace.used_document_ids
+                   previous_trace.used_document_ids,
+                   COALESCE(
+                       a.rag_history_context #>> '{input_guard}',
+                       previous_trace.input_guard_reason
+                   ) AS input_guard_reason
             FROM (
                 SELECT * FROM message
                 WHERE conversation_id = :conversation_id AND role = 'ASSISTANT'
@@ -600,7 +604,11 @@ class RagRepository:
             LEFT JOIN LATERAL (
                 SELECT retrieval_result #>
                            '{doc_routing,generation,answer,used_document_ids}'
-                           AS used_document_ids
+                           AS used_document_ids,
+                       COALESCE(
+                           retrieval_result #>> '{doc_routing,generation,input_guard}',
+                           citation_result ->> 'shortcut'
+                       ) AS input_guard_reason
                 FROM rag_trace
                 WHERE message_id = a.id AND conversation_id = a.conversation_id
                   AND engine = 'RAG' AND status = 'COMPLETED'
@@ -1057,22 +1065,35 @@ class RagRepository:
                     " '{generation}', CAST(:generation AS jsonb))"
                 )
                 routing_params["generation"] = json.dumps(generation)
+        history_context: dict[str, Any] = {}
+        if doc_routing is not None and isinstance(doc_routing.get("generation"), dict):
+            input_guard = doc_routing["generation"].get("input_guard")
+            if isinstance(input_guard, str) and input_guard:
+                history_context["input_guard"] = input_guard
         async with self.engine.begin() as connection:
-            await connection.execute(
+            message_result = await connection.execute(
                 text(
                     """
                     UPDATE message SET content = :answer, sources = CAST(:sources AS jsonb),
+                        rag_history_context = (
+                            COALESCE(rag_history_context, '{}'::jsonb) - 'input_guard'
+                        ) || CAST(:history_context AS jsonb),
                         status = 'COMPLETED', updated_at = now()
-                    WHERE id = :message_id AND status = 'STREAMING'
+                    WHERE id = :message_id
+                      AND conversation_id = :conversation_id
+                      AND role = 'ASSISTANT'
+                      AND status = 'STREAMING'
                     """
                 ),
                 {
                     "message_id": turn.assistant_message_id,
+                    "conversation_id": turn.conversation_id,
                     "answer": answer,
                     "sources": json.dumps(sources, ensure_ascii=False),
+                    "history_context": json.dumps(history_context, ensure_ascii=False),
                 },
             )
-            await connection.execute(
+            trace_result = await connection.execute(
                 text(
                     """
                     UPDATE rag_trace SET answer = :answer, sources = CAST(:sources AS jsonb),
@@ -1084,11 +1105,16 @@ class RagRepository:
                     """
                     + routing_patch
                     + """
-                    WHERE trace_id = :trace_id AND status = 'RUNNING'
+                    WHERE trace_id = :trace_id
+                      AND conversation_id = :conversation_id
+                      AND message_id = :message_id
+                      AND status = 'RUNNING'
                     """
                 ),
                 {
                     "trace_id": turn.trace_id,
+                    "conversation_id": turn.conversation_id,
+                    "message_id": turn.assistant_message_id,
                     "answer": answer,
                     "sources": json.dumps(sources, ensure_ascii=False),
                     "usage": json.dumps(usage),
@@ -1099,6 +1125,42 @@ class RagRepository:
                     **routing_params,
                 },
             )
+            if message_result.rowcount != 1 or trace_result.rowcount != 1:
+                # Report the state of whichever row refused the terminal
+                # write; a row this transaction did update would read back as
+                # its new value and tell the operator nothing.
+                state = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT
+                                    (SELECT status FROM message
+                                      WHERE id = :message_id
+                                        AND conversation_id = :conversation_id)
+                                        AS message_status,
+                                    (SELECT status FROM rag_trace
+                                      WHERE trace_id = :trace_id
+                                        AND conversation_id = :conversation_id)
+                                        AS trace_status
+                                """
+                            ),
+                            {
+                                "message_id": turn.assistant_message_id,
+                                "conversation_id": turn.conversation_id,
+                                "trace_id": turn.trace_id,
+                            },
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                details: dict[str, Any] = {}
+                if message_result.rowcount != 1:
+                    details["message_status"] = state["message_status"]
+                if trace_result.rowcount != 1:
+                    details["trace_status"] = state["trace_status"]
+                raise ApiError("TURN_STATE_CONFLICT", "问答轮次状态已变化", 409, details)
             await connection.execute(
                 text(
                     "UPDATE conversation SET updated_at = now(), last_activity_at = now() "

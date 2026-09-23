@@ -134,7 +134,7 @@ describe("view smoke", () => {
             citation_missing_rate: 0,
             rerank_degraded_rate: 0,
             unique_users: 3,
-            latency: { p50_ms: 100, p95_ms: 200, p99_ms: 300, avg_ms: 120 },
+            latency: { p50_ms: 100, p95_ms: 200, p99_ms: 300, avg_ms: 120, samples: 8 },
             tokens: { llm_prompt: 100, llm_completion: 50, llm_total: 150, rerank_total: 10 },
           };
         else if (path.includes("/metrics/")) body = [];

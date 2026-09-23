@@ -2,6 +2,11 @@ import { reactive } from "vue";
 import { ElMessageBox, ElNotification } from "element-plus";
 
 import { adminApi, ApiRequestError } from "@/api/admin";
+import {
+  clearServiceCredential,
+  readServiceCredential,
+  saveServiceCredential,
+} from "@/api/serviceCredential";
 import type {
   DocumentItem,
   DocumentProfileContext,
@@ -57,14 +62,6 @@ function writeSelectedKnowledgeId(knowledgeId: string): void {
     else localStorage.removeItem(SELECTED_KNOWLEDGE_STORAGE_KEY);
   } catch {
     // Storage can be unavailable in privacy-restricted browser contexts.
-  }
-}
-
-function readServiceToken(): string {
-  try {
-    return sessionStorage.getItem("rag_service_token")?.trim() ?? "";
-  } catch {
-    return "";
   }
 }
 
@@ -152,7 +149,7 @@ export const adminStore = reactive({
   /* forms */
   newKnowledgeName: "",
   newKnowledgeDescription: "",
-  serviceToken: readServiceToken(),
+  serviceToken: readServiceCredential(),
 
   /* playground */
   question: "如何配置数据库？",
@@ -1283,16 +1280,22 @@ export const adminStore = reactive({
     const token = value.trim();
     this.serviceToken = token;
     this.credentialRejected = false;
-    if (token) sessionStorage.setItem("rag_service_token", token);
-    else sessionStorage.removeItem("rag_service_token");
+    saveServiceCredential(token);
     this.notice = "访问凭据仅保存在当前浏览器会话";
   },
 
   clearToken(): void {
-    sessionStorage.removeItem("rag_service_token");
+    clearServiceCredential();
     this.serviceToken = "";
     this.credentialRejected = false;
     this.notice = "本地访问凭据已清除";
+  },
+
+  rejectCredential(): void {
+    clearServiceCredential();
+    this.serviceToken = "";
+    this.credentialRejected = true;
+    this.error = "服务凭证缺失或无效，请重新配置";
   },
 });
 

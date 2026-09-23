@@ -42,11 +42,6 @@ const viewProps = computed(() =>
 let indexPollTimer: ReturnType<typeof setInterval> | undefined;
 let taskPollTimer: ReturnType<typeof setInterval> | undefined;
 
-function handleCredentialRejected(): void {
-  store.credentialRejected = true;
-  store.error = "服务凭证缺失或无效，请重新配置";
-}
-
 function stopAutomaticRequests(): void {
   clearInterval(indexPollTimer);
   clearInterval(taskPollTimer);
@@ -77,13 +72,11 @@ watch(
 );
 
 onMounted(() => {
-  window.addEventListener("rag-service-auth-rejected", handleCredentialRejected);
   if (store.hasServiceCredential) void store.run(() => store.refreshAll());
   startAutomaticRequests();
 });
 
 onUnmounted(() => {
-  window.removeEventListener("rag-service-auth-rejected", handleCredentialRejected);
   stopAutomaticRequests();
 });
 </script>

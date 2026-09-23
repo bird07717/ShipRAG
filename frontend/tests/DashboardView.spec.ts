@@ -29,7 +29,7 @@ const overview: MetricsOverview = {
   citation_missing_rate: 0.02,
   rerank_degraded_rate: 0.01,
   unique_users: 12,
-  latency: { p50_ms: 900, p95_ms: 2500, p99_ms: 4000, avg_ms: 1100 },
+  latency: { p50_ms: 900, p95_ms: 2500, p99_ms: 4000, avg_ms: 1100, samples: 20 },
   tokens: { llm_prompt: 5000, llm_completion: 1000, llm_total: 6000, rerank_total: 300 },
 };
 

@@ -41,7 +41,7 @@ async def _run_recovery(settings: Settings) -> dict[str, int]:
     """Fail Assistant requests (and linked rows) RUNNING past the window."""
     stale_seconds = settings.assistant_request_stale_seconds
     if stale_seconds <= 0:
-        return {"request_count": 0, "message_count": 0, "trace_count": 0}
+        return {"request_count": 0, "message_count": 0, "trace_count": 0, "internal_trace_count": 0}
     stale_before = datetime.now(UTC) - timedelta(seconds=stale_seconds)
     resources = AppResources.create(settings)
     try:
@@ -98,7 +98,7 @@ def process_periodic_assistant_request_recovery(interval: int) -> dict[str, Any]
     """Run one stale-recovery pass and keep the delayed-job chain alive."""
     settings = get_settings()
     if settings.assistant_request_stale_seconds <= 0:
-        return {"request_count": 0, "message_count": 0, "trace_count": 0}
+        return {"request_count": 0, "message_count": 0, "trace_count": 0, "internal_trace_count": 0}
     try:
         recovered = run_stale_assistant_request_recovery_sync(settings)
     finally:

@@ -10,6 +10,7 @@ from test_assistant_content_consistency import document_payload
 from app.api.assistant import _message, messages
 from app.api.schemas import AssistantMessageResponse
 from app.assistant.service import public_complete
+from app.common.errors import ApiError
 from app.core.config import Settings
 from app.gateway.repository import GatewayRepository
 
@@ -194,3 +195,190 @@ async def test_failure_snapshot_matches_history_even_without_trace_error(
         next(row for row in rows if row["id"] == records.messages[-1])["response_payload"]["error"]
         == error
     )
+
+
+async def _reset_running_request(records, **overrides) -> None:  # noqa: F811
+    """Put the durable request back to RUNNING with only the given links bound."""
+
+    links = {
+        "conversation_id": None,
+        "user_message_id": None,
+        "assistant_message_id": None,
+        "trace_id": None,
+        **overrides,
+    }
+    assignments = ", ".join(f"{name}=:{name}" for name in links)
+    async with records.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE assistant_request SET status='RUNNING', "
+                "terminal_response='{}'::jsonb, " + assignments + " WHERE id=:id"
+            ),
+            {"id": records.request, **links},
+        )
+
+
+async def _request_row(records) -> dict:  # noqa: F811
+    async with records.engine.connect() as conn:
+        result = await conn.execute(
+            text(
+                "SELECT status, conversation_id, user_message_id, assistant_message_id, trace_id "
+                "FROM assistant_request WHERE id=:id"
+            ),
+            {"id": records.request},
+        )
+        return dict(result.mappings().one())
+
+
+async def test_context_binding_allows_unknown_ids_but_still_rejects_wrong_user(
+    records,  # noqa: F811 -- pytest injects the imported fixture
+):
+    repo = GatewayRepository(records.engine, Settings(_env_file=None))
+    await _reset_running_request(records)
+
+    # A turn whose user message is not resolvable yet must still bind: the
+    # answer already exists, so a missing observational id cannot fail it.
+    await repo.set_assistant_request_context(
+        request_id=records.request,
+        conversation_id=records.conv,
+        user_message_id=None,
+        assistant_message_id=records.messages[3],
+        trace_id=records.trace,
+    )
+    bound = await _request_row(records)
+    assert bound["conversation_id"] == records.conv
+    assert bound["user_message_id"] is None
+    assert bound["assistant_message_id"] == records.messages[3]
+
+    # A later partial observation must preserve identifiers that were already
+    # verified instead of clearing them or treating NULL as a contradiction.
+    await _reset_running_request(
+        records,
+        conversation_id=records.conv,
+        user_message_id=records.messages[2],
+        assistant_message_id=records.messages[3],
+        trace_id=records.trace,
+    )
+    await repo.set_assistant_request_context(
+        request_id=records.request,
+        conversation_id=records.conv,
+        user_message_id=None,
+        assistant_message_id=None,
+        trace_id=None,
+    )
+    preserved = await _request_row(records)
+    assert preserved["user_message_id"] == records.messages[2]
+    assert preserved["assistant_message_id"] == records.messages[3]
+    assert preserved["trace_id"] == records.trace
+
+    # Incremental events must be checked against links retained from earlier
+    # events, even when the retained identifier is omitted from this call.
+    await _reset_running_request(
+        records,
+        conversation_id=records.conv,
+        user_message_id=records.messages[2],
+    )
+    await repo.set_assistant_request_context(
+        request_id=records.request,
+        conversation_id=records.conv,
+        user_message_id=None,
+        assistant_message_id=records.messages[3],
+        trace_id=None,
+    )
+    await repo.set_assistant_request_context(
+        request_id=records.request,
+        conversation_id=records.conv,
+        user_message_id=None,
+        assistant_message_id=None,
+        trace_id=records.trace,
+    )
+    incremental = await _request_row(records)
+    assert incremental["user_message_id"] == records.messages[2]
+    assert incremental["assistant_message_id"] == records.messages[3]
+    assert incremental["trace_id"] == records.trace
+
+    await _reset_running_request(
+        records,
+        conversation_id=records.conv,
+        user_message_id=records.messages[2],
+    )
+    with pytest.raises(ApiError) as conflict:
+        await repo.set_assistant_request_context(
+            request_id=records.request,
+            conversation_id=records.conv,
+            user_message_id=None,
+            assistant_message_id=records.messages[1],
+            trace_id=None,
+        )
+    assert conflict.value.code == "ASSISTANT_CONTEXT_CONFLICT"
+
+    await _reset_running_request(
+        records,
+        conversation_id=records.conv,
+        assistant_message_id=records.messages[1],
+    )
+    with pytest.raises(ApiError) as conflict:
+        await repo.set_assistant_request_context(
+            request_id=records.request,
+            conversation_id=records.conv,
+            user_message_id=None,
+            assistant_message_id=None,
+            trace_id=records.trace,
+        )
+    assert conflict.value.code == "ASSISTANT_CONTEXT_CONFLICT"
+
+    # The three-table invariant still holds: an ASSISTANT row can never be
+    # recorded as this turn's user message.
+    await _reset_running_request(records)
+    with pytest.raises(ApiError) as conflict:
+        await repo.set_assistant_request_context(
+            request_id=records.request,
+            conversation_id=records.conv,
+            user_message_id=records.messages[1],
+            assistant_message_id=records.messages[3],
+            trace_id=records.trace,
+        )
+    assert conflict.value.code == "ASSISTANT_CONTEXT_CONFLICT"
+
+
+async def test_completion_accepts_unbound_request_and_rejects_foreign_link(
+    records,  # noqa: F811 -- pytest injects the imported fixture
+):
+    repo = GatewayRepository(records.engine, Settings(_env_file=None))
+    response = public_complete(
+        {
+            **records.response,
+            "conversation_id": records.conv,
+            "message_id": records.messages[3],
+            "trace_id": records.trace,
+        },
+        "unbound-postgres",
+    )
+    await _reset_running_request(records)
+
+    # No context event ever arrived, so the columns are still NULL; the
+    # terminal write owns the association instead of failing the turn.
+    await repo.complete_assistant_request(
+        request_id=records.request,
+        response=response,
+        message_id=records.messages[3],
+        conversation_id=records.conv,
+        trace_id=records.trace,
+    )
+    completed = await _request_row(records)
+    assert completed["status"] == "COMPLETED"
+    assert completed["assistant_message_id"] == records.messages[3]
+    assert completed["trace_id"] == records.trace
+
+    # An established link pointing at another message is still a conflict.
+    await _reset_running_request(records, assistant_message_id=records.messages[1])
+    with pytest.raises(ApiError) as conflict:
+        await repo.complete_assistant_request(
+            request_id=records.request,
+            response=response,
+            message_id=records.messages[3],
+            conversation_id=records.conv,
+            trace_id=records.trace,
+        )
+    assert conflict.value.code == "ASSISTANT_REQUEST_STATE_CONFLICT"
+    assert (await _request_row(records))["status"] == "RUNNING"

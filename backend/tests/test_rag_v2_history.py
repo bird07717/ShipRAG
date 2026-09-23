@@ -100,6 +100,7 @@ def _round(
     user_status: str = "COMPLETED",
     linked: bool = True,
     answer: str | None = None,
+    input_guard_reason: str | None = None,
 ) -> dict[str, object]:
     return {
         "id": f"a{number}",
@@ -108,6 +109,7 @@ def _round(
         "answer": answer if answer is not None else f"回答 {number}",
         "status": status,
         "user_status": user_status,
+        "input_guard_reason": input_guard_reason,
         # These legacy fields deliberately disagree. V2 must ignore them.
         "focus_epoch": number,
         "user_epoch": number + 100,
@@ -155,6 +157,48 @@ def test_skips_unlinked_and_failed_rounds_but_keeps_older_complete_round() -> No
         {"message_id": "a4", "reason": "UNLINKED_LEGACY"},
         {"message_id": "a3", "reason": "INCOMPLETE_ROUND"},
     ]
+
+
+@pytest.mark.parametrize("input_guard_reason", ["GREETING", "META_ACK"])
+def test_skips_nontechnical_shortcuts_and_keeps_previous_technical_evidence(
+    input_guard_reason: str,
+) -> None:
+    previous_document_id = "7777ff1b-efe0-4a12-a1dc-9bdf3532042b"
+    technical = _round(2)
+    technical["used_document_ids"] = [previous_document_id]
+
+    history, diagnostics = select_complete_round_history(
+        [_round(3, input_guard_reason=input_guard_reason), technical, _round(1)],
+        max_rounds=2,
+        max_messages=10,
+        token_budget=2_000,
+    )
+
+    assert history == [
+        {"role": "USER", "content": "问题 1"},
+        {"role": "ASSISTANT", "content": "回答 1"},
+        {"role": "USER", "content": "问题 2"},
+        {"role": "ASSISTANT", "content": "回答 2"},
+    ]
+    assert diagnostics["previous_document_ids"] == [previous_document_id]
+    assert diagnostics["excluded"] == [{"message_id": "a3", "reason": "NON_TECHNICAL_SHORTCUT"}]
+
+
+def test_keeps_low_information_shortcut_for_condition_followup() -> None:
+    history, diagnostics = select_complete_round_history(
+        [_round(2, input_guard_reason="SINGLE_CHARACTER"), _round(1)],
+        max_rounds=2,
+        max_messages=10,
+        token_budget=2_000,
+    )
+
+    assert history == [
+        {"role": "USER", "content": "问题 1"},
+        {"role": "ASSISTANT", "content": "回答 1"},
+        {"role": "USER", "content": "问题 2"},
+        {"role": "ASSISTANT", "content": "回答 2"},
+    ]
+    assert diagnostics["excluded"] == []
 
 
 def test_does_not_skip_an_oversized_recent_complete_round() -> None:

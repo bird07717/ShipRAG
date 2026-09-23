@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { downloadDocument, fetchImageBlobUrl, streamChat } from "@/api/chat";
 
@@ -25,13 +25,16 @@ function sseResponse(frames: Array<string | Uint8Array>): Response {
 }
 
 describe("chat API", () => {
+  beforeEach(() => {
+    sessionStorage.setItem("rag_service_token", "session-token");
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     sessionStorage.clear();
   });
 
   it("streams SSE events and dispatches callbacks", async () => {
-    sessionStorage.setItem("rag_service_token", "session-token");
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([
         'event: trace\ndata: {"trace_id":"t-1","conversation_id":"c-1"}\n\n',
@@ -124,6 +127,31 @@ describe("chat API", () => {
         onError: vi.fn(),
       }),
     ).rejects.toThrow("会话不属于指定知识库");
+  });
+
+  it("clears and announces a rejected credential for chat requests", async () => {
+    const rejected = vi.fn();
+    window.addEventListener("rag-service-auth-rejected", rejected, { once: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ error: { message: "服务凭证无效" } }),
+      }),
+    );
+
+    await expect(
+      streamChat("kb-1", "问题", undefined, {
+        onTrace: vi.fn(),
+        onDelta: vi.fn(),
+        onDone: vi.fn(),
+        onError: vi.fn(),
+      }),
+    ).rejects.toThrow("服务凭证无效");
+
+    expect(sessionStorage.getItem("rag_service_token")).toBeNull();
+    expect(rejected).toHaveBeenCalledOnce();
   });
 
   it("dispatches onError for SSE error events", async () => {

@@ -6,6 +6,8 @@ from typing import Any
 
 from app.common.text import estimate_tokens
 
+_NON_TECHNICAL_INPUT_GUARDS = frozenset({"GREETING", "META_ACK"})
+
 
 def select_complete_round_history(
     rounds: list[dict[str, Any]],
@@ -29,6 +31,9 @@ def select_complete_round_history(
 
     for row in rounds:
         assistant_id = str(row["id"])
+        if row.get("input_guard_reason") in _NON_TECHNICAL_INPUT_GUARDS:
+            excluded.append({"message_id": assistant_id, "reason": "NON_TECHNICAL_SHORTCUT"})
+            continue
         if not row.get("user_id"):
             excluded.append({"message_id": assistant_id, "reason": "UNLINKED_LEGACY"})
             continue

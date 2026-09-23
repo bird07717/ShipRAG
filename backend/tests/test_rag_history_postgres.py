@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import text
 from test_answer_reviews import records  # noqa: F401
 from test_conversations_postgres_integration import _insert_active_index
@@ -58,6 +60,50 @@ async def test_v2_history_uses_explicit_complete_pairs_and_ignores_support_focus
     assert diagnostics["selected_message_ids"] == [str(item) for item in records.messages]
     assert diagnostics["previous_document_ids"] == [str(records.document)]
     assert all("message_id" not in item for item in history)
+
+
+@pytest.mark.parametrize("input_guard", ["GREETING", "META_ACK"])
+async def test_v2_history_excludes_completed_input_guard_shortcut(
+    records,  # noqa: F811
+    input_guard: str,
+) -> None:
+    async with records.engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE message SET rag_user_message_id=:user_id WHERE id=:assistant_id"),
+            {"user_id": records.messages[0], "assistant_id": records.messages[1]},
+        )
+        await connection.execute(
+            text(
+                "UPDATE message SET rag_history_context=CAST(:context AS jsonb) "
+                "WHERE id=:assistant_id"
+            ),
+            {
+                "assistant_id": records.messages[3],
+                "context": json.dumps({"input_guard": input_guard}),
+            },
+        )
+        await connection.execute(
+            text(
+                "UPDATE rag_trace SET retrieval_result='{}'::jsonb, "
+                "runtime_snapshot='{}'::jsonb, citation_result=CAST(:result AS jsonb) "
+                "WHERE trace_id=:trace_id"
+            ),
+            {
+                "trace_id": records.trace,
+                "result": json.dumps({"status": "NOT_REQUIRED", "shortcut": input_guard}),
+            },
+        )
+
+    history, diagnostics = await _load_v2(records)
+
+    assert history == [
+        {"role": "USER", "content": "设备如何开机"},
+        {"role": "ASSISTANT", "content": "按电源键"},
+    ]
+    assert diagnostics["previous_document_ids"] == []
+    assert diagnostics["excluded"] == [
+        {"message_id": str(records.messages[3]), "reason": "NON_TECHNICAL_SHORTCUT"}
+    ]
 
 
 async def test_v2_begin_turn_preserves_support_focus_state(records) -> None:  # noqa: F811

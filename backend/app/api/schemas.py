@@ -702,6 +702,9 @@ class MetricsLatencySummary(BaseModel):
     p95_ms: int
     p99_ms: int
     avg_ms: int
+    # Turns the percentiles were computed from. Lower than the bucket's total
+    # when deterministic input-guard short circuits were excluded.
+    samples: int
 
 
 class MetricsOverviewResponse(BaseModel):

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.assistant import recovery
 from app.assistant.recovery import (
+    INTERNAL_RECOVERY_CODE,
     RECOVERY_CODE,
     AssistantRequestRecoveryRepository,
 )
@@ -83,7 +84,14 @@ async def test_preview_reports_stale_request_and_active_task_counts() -> None:
 @pytest.mark.asyncio
 async def test_reconcile_fails_request_message_and_trace_in_one_statement() -> None:
     repository, engine = _repository(
-        [{"request_count": 25, "message_count": 25, "trace_count": 25}]
+        [
+            {
+                "request_count": 25,
+                "message_count": 25,
+                "trace_count": 25,
+                "internal_trace_count": 3,
+            }
+        ]
     )
     cutoff = datetime(2026, 9, 6, tzinfo=UTC)
 
@@ -91,24 +99,31 @@ async def test_reconcile_fails_request_message_and_trace_in_one_statement() -> N
         "request_count": 25,
         "message_count": 25,
         "trace_count": 25,
+        "internal_trace_count": 3,
     }
     sql, params = engine.connection.executed[0]
     assert "FOR UPDATE SKIP LOCKED" in sql
     assert "source = 'ASSISTANT_API'" in sql
     assert "stale_assistant_traces" in sql
+    assert "stale_internal_traces" in sql
+    assert "source IN ('INTERNAL_CHAT', 'PLAYGROUND')" in sql
     assert "UPDATE message AS m" in sql
     assert "UPDATE rag_trace AS t" in sql
     assert "UPDATE assistant_request AS ar" in sql
     assert "terminal_error = CAST(:error AS jsonb)" in sql
     assert RECOVERY_CODE in params["error"]
+    assert INTERNAL_RECOVERY_CODE in params["internal_error"]
     assert params["stale_before"] == cutoff
 
 
 class _RunRepository:
-    def __init__(self, request_count: int, orphan_trace_count: int) -> None:
+    def __init__(
+        self, request_count: int, orphan_trace_count: int, internal_trace_count: int = 0
+    ) -> None:
         self.before = {
             "request_count": request_count,
             "orphan_trace_count": orphan_trace_count,
+            "internal_trace_count": internal_trace_count,
         }
         self.preview_calls = 0
         self.reconcile_calls = 0
@@ -121,7 +136,12 @@ class _RunRepository:
     async def reconcile(self, *, stale_before: datetime) -> dict[str, int]:
         assert stale_before.tzinfo is not None
         self.reconcile_calls += 1
-        return {"request_count": 2, "message_count": 2, "trace_count": 2}
+        return {
+            "request_count": 2,
+            "message_count": 2,
+            "trace_count": 2,
+            "internal_trace_count": 2,
+        }
 
 
 class _RunResources:
@@ -135,11 +155,20 @@ class _RunResources:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("apply", "request_count", "orphan_count", "expected_mode", "expected_reconcile"),
+    (
+        "apply",
+        "request_count",
+        "orphan_count",
+        "internal_count",
+        "expected_mode",
+        "expected_reconcile",
+    ),
     [
-        (False, 2, 1, "preview", 0),
-        (True, 0, 0, "apply", 0),
-        (True, 2, 0, "apply", 1),
+        (False, 2, 1, 0, "preview", 0),
+        (True, 0, 0, 0, "apply", 0),
+        (True, 2, 0, 0, "apply", 1),
+        # Internal chat residue alone must still trigger the apply pass.
+        (True, 0, 0, 2, "apply", 1),
     ],
 )
 async def test_run_previews_and_conditionally_applies_recovery(
@@ -147,10 +176,11 @@ async def test_run_previews_and_conditionally_applies_recovery(
     apply: bool,
     request_count: int,
     orphan_count: int,
+    internal_count: int,
     expected_mode: str,
     expected_reconcile: int,
 ) -> None:
-    repository = _RunRepository(request_count, orphan_count)
+    repository = _RunRepository(request_count, orphan_count, internal_count)
     resources = _RunResources()
     monkeypatch.setattr(recovery.AppResources, "create", lambda _: resources)
     monkeypatch.setattr(recovery, "AssistantRequestRecoveryRepository", lambda _: repository)

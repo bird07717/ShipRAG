@@ -808,14 +808,23 @@ class GatewayRepository:
                 text(
                     """
                     SELECT t.conversation_id, t.message_id AS assistant_message_id,
-                           (SELECT m.id FROM message m
-                            WHERE m.conversation_id = t.conversation_id
-                              AND m.role = 'USER' AND m.sequence_no < a.sequence_no
-                            ORDER BY m.sequence_no DESC LIMIT 1) AS user_message_id,
+                           COALESCE(
+                               linked_user.id,
+                               (SELECT m.id FROM message m
+                                WHERE m.conversation_id = t.conversation_id
+                                  AND m.role = 'USER' AND m.sequence_no < a.sequence_no
+                                ORDER BY m.sequence_no DESC LIMIT 1)
+                           ) AS user_message_id,
                            t.trace_id
                     FROM rag_trace t
                     JOIN message a ON a.id = t.message_id
+                    LEFT JOIN message linked_user
+                      ON linked_user.id = a.rag_user_message_id
+                     AND linked_user.conversation_id = t.conversation_id
+                     AND linked_user.role = 'USER'
+                     AND linked_user.sequence_no < a.sequence_no
                     WHERE t.trace_id = :trace_id AND t.conversation_id = :conversation_id
+                      AND a.role = 'ASSISTANT'
                     """
                 ),
                 {"trace_id": trace_id, "conversation_id": conversation_id},
@@ -998,16 +1007,113 @@ class GatewayRepository:
         trace_id: UUID | None,
     ) -> None:
         async with self.engine.begin() as connection:
-            await connection.execute(
+            result = await connection.execute(
                 text(
                     """
-                    UPDATE assistant_request
+                    UPDATE assistant_request AS ar
                     SET conversation_id = :conversation_id,
-                        user_message_id = :user_message_id,
-                        assistant_message_id = :assistant_message_id,
-                        trace_id = :trace_id,
+                        user_message_id = COALESCE(
+                            CAST(:user_message_id AS uuid), ar.user_message_id
+                        ),
+                        assistant_message_id = COALESCE(
+                            CAST(:assistant_message_id AS uuid), ar.assistant_message_id
+                        ),
+                        trace_id = COALESCE(CAST(:trace_id AS uuid), ar.trace_id),
                         updated_at = now()
-                    WHERE id = :id AND status = 'RUNNING'
+                    WHERE ar.id = :id AND ar.status = 'RUNNING'
+                      AND (
+                          ar.conversation_id IS NULL
+                          OR ar.conversation_id = :conversation_id
+                      )
+                      AND (
+                          CAST(:user_message_id AS uuid) IS NULL
+                          OR ar.user_message_id IS NULL
+                          OR ar.user_message_id = :user_message_id
+                      )
+                      AND (
+                          CAST(:assistant_message_id AS uuid) IS NULL
+                          OR ar.assistant_message_id IS NULL
+                          OR ar.assistant_message_id = :assistant_message_id
+                      )
+                      AND (
+                          CAST(:trace_id AS uuid) IS NULL
+                          OR ar.trace_id IS NULL
+                          OR ar.trace_id = :trace_id
+                      )
+                      -- Binding is observational: missing identifiers do not
+                      -- fail the turn, but a newly supplied identifier must be
+                      -- consistent with links retained from an earlier event.
+                      AND (
+                          COALESCE(
+                              CAST(:user_message_id AS uuid), ar.user_message_id
+                          ) IS NULL
+                          OR EXISTS (
+                              SELECT 1
+                              FROM message users
+                              WHERE users.id = COALESCE(
+                                      CAST(:user_message_id AS uuid), ar.user_message_id
+                                  )
+                                AND users.conversation_id = :conversation_id
+                                AND users.role = 'USER'
+                          )
+                      )
+                      AND (
+                          COALESCE(
+                              CAST(:assistant_message_id AS uuid), ar.assistant_message_id
+                          ) IS NULL
+                          OR EXISTS (
+                              SELECT 1
+                              FROM message assistant
+                              WHERE assistant.id = COALESCE(
+                                      CAST(:assistant_message_id AS uuid),
+                                      ar.assistant_message_id
+                                  )
+                                AND assistant.conversation_id = :conversation_id
+                                AND assistant.role = 'ASSISTANT'
+                                AND (
+                                    COALESCE(
+                                        CAST(:user_message_id AS uuid), ar.user_message_id
+                                    ) IS NULL
+                                    OR EXISTS (
+                                        SELECT 1
+                                        FROM message users
+                                        WHERE users.id = COALESCE(
+                                                CAST(:user_message_id AS uuid),
+                                                ar.user_message_id
+                                            )
+                                          AND users.conversation_id
+                                              = assistant.conversation_id
+                                          AND users.role = 'USER'
+                                          AND users.sequence_no < assistant.sequence_no
+                                          AND (
+                                              assistant.rag_user_message_id IS NULL
+                                              OR assistant.rag_user_message_id = users.id
+                                          )
+                                    )
+                                )
+                          )
+                      )
+                      AND (
+                          COALESCE(CAST(:trace_id AS uuid), ar.trace_id) IS NULL
+                          OR EXISTS (
+                              SELECT 1
+                              FROM rag_trace trace
+                              WHERE trace.trace_id = COALESCE(
+                                      CAST(:trace_id AS uuid), ar.trace_id
+                                  )
+                                AND trace.conversation_id = :conversation_id
+                                AND (
+                                    COALESCE(
+                                        CAST(:assistant_message_id AS uuid),
+                                        ar.assistant_message_id
+                                    ) IS NULL
+                                    OR trace.message_id = COALESCE(
+                                        CAST(:assistant_message_id AS uuid),
+                                        ar.assistant_message_id
+                                    )
+                                )
+                          )
+                      )
                     """
                 ),
                 {
@@ -1018,6 +1124,8 @@ class GatewayRepository:
                     "trace_id": trace_id,
                 },
             )
+            if result.rowcount != 1:
+                raise ApiError("ASSISTANT_CONTEXT_CONFLICT", "Assistant 轮次关联状态异常", 409)
 
     async def complete_assistant_request(
         self,
@@ -1030,14 +1138,48 @@ class GatewayRepository:
     ) -> None:
         payload = json.dumps(response, ensure_ascii=False)
         async with self.engine.begin() as connection:
-            await connection.execute(
+            request_result = await connection.execute(
                 text(
                     """
-                    UPDATE assistant_request
+                    UPDATE assistant_request AS ar
                     SET status = 'COMPLETED', conversation_id = :conversation_id,
                         assistant_message_id = :message_id, trace_id = :trace_id,
                         terminal_response = CAST(:payload AS jsonb), updated_at = now()
-                    WHERE id = :id AND status = 'RUNNING'
+                    WHERE ar.id = :id AND ar.status = 'RUNNING'
+                      -- An unbound column means the context event never
+                      -- arrived, not a mismatch; only an established link
+                      -- pointing somewhere else is a real conflict.
+                      AND (
+                          ar.conversation_id IS NULL
+                          OR ar.conversation_id = :conversation_id
+                      )
+                      AND (
+                          ar.assistant_message_id IS NULL
+                          OR ar.assistant_message_id = :message_id
+                      )
+                      AND (
+                          ar.trace_id IS NULL
+                          OR ar.trace_id IS NOT DISTINCT FROM :trace_id
+                      )
+                      AND (
+                          ar.user_message_id IS NULL
+                          OR EXISTS (
+                              SELECT 1
+                              FROM message users
+                              JOIN message assistant
+                                ON assistant.id = :message_id
+                               AND assistant.conversation_id = :conversation_id
+                               AND assistant.role = 'ASSISTANT'
+                              WHERE users.id = ar.user_message_id
+                                AND users.conversation_id = :conversation_id
+                                AND users.role = 'USER'
+                                AND users.sequence_no < assistant.sequence_no
+                                AND (
+                                    assistant.rag_user_message_id IS NULL
+                                    OR assistant.rag_user_message_id = users.id
+                                )
+                          )
+                      )
                     """
                 ),
                 {
@@ -1048,16 +1190,37 @@ class GatewayRepository:
                     "payload": payload,
                 },
             )
-            await connection.execute(
+            if request_result.rowcount != 1:
+                raise ApiError("ASSISTANT_REQUEST_STATE_CONFLICT", "Assistant 请求状态已变化", 409)
+            message_result = await connection.execute(
                 text(
                     """
                     UPDATE message
                     SET response_payload = CAST(:payload AS jsonb), updated_at = now()
                     WHERE id = :message_id
+                      AND conversation_id = :conversation_id
+                      AND role = 'ASSISTANT'
+                      AND status = 'COMPLETED'
+                      AND (
+                          CAST(:trace_id AS uuid) IS NULL OR EXISTS (
+                              SELECT 1 FROM rag_trace
+                              WHERE trace_id = CAST(:trace_id AS uuid)
+                                AND message_id = :message_id
+                                AND conversation_id = :conversation_id
+                                AND status = 'COMPLETED'
+                          )
+                      )
                     """
                 ),
-                {"message_id": message_id, "payload": payload},
+                {
+                    "message_id": message_id,
+                    "conversation_id": conversation_id,
+                    "trace_id": trace_id,
+                    "payload": payload,
+                },
             )
+            if message_result.rowcount != 1:
+                raise ApiError("ASSISTANT_MESSAGE_STATE_CONFLICT", "Assistant 消息状态异常", 409)
             await connection.execute(
                 text(
                     """

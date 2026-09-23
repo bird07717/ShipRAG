@@ -57,7 +57,13 @@ class _StubMetricsRepository:
             "citation_missing_rate": 0.02,
             "rerank_degraded_rate": 0.01,
             "unique_users": 42,
-            "latency": {"p50_ms": 1200, "p95_ms": 3400, "p99_ms": 5100, "avg_ms": 1500},
+            "latency": {
+                "p50_ms": 1200,
+                "p95_ms": 3400,
+                "p99_ms": 5100,
+                "avg_ms": 1500,
+                "samples": 118,
+            },
             "tokens": {
                 "llm_prompt": 8000,
                 "llm_completion": 2000,
@@ -90,7 +96,13 @@ class _StubMetricsRepository:
         self.calls["latency"] = kwargs
         return {
             "range": {"from": "2026-08-14T00:00:00", "to": "2026-08-21T00:00:00", "mode": "CHAT"},
-            "total": {"p50_ms": 1200, "p95_ms": 3400, "p99_ms": 5100, "avg_ms": 1500},
+            "total": {
+                "p50_ms": 1200,
+                "p95_ms": 3400,
+                "p99_ms": 5100,
+                "avg_ms": 1500,
+                "samples": 118,
+            },
             "stages": {"prepare_turn_ms": 40, "llm_ms": 900},
         }
 
@@ -120,8 +132,20 @@ class _StubMetricsRepository:
             "escalation_rate": 0.0833,
             "general_guidance_rate": 0.1667,
             "workflow_conflict_rate": 0.0,
-            "first_turn_latency": {"p50_ms": 100, "p95_ms": 200, "p99_ms": 300, "avg_ms": 120},
-            "followup_latency": {"p50_ms": 400, "p95_ms": 500, "p99_ms": 600, "avg_ms": 450},
+            "first_turn_latency": {
+                "p50_ms": 100,
+                "p95_ms": 200,
+                "p99_ms": 300,
+                "avg_ms": 120,
+                "samples": 6,
+            },
+            "followup_latency": {
+                "p50_ms": 400,
+                "p95_ms": 500,
+                "p99_ms": 600,
+                "avg_ms": 450,
+                "samples": 4,
+            },
             "tokens": {"llm_prompt": 1000, "llm_completion": 200, "llm_total": 1200},
         }
 
@@ -137,7 +161,13 @@ class _StubMetricsRepository:
                     "error_rate": 0.025,
                     "conversations": 6,
                     "users": 3,
-                    "latency": {"p50_ms": 2100, "p95_ms": 8200, "p99_ms": 9100, "avg_ms": 3200},
+                    "latency": {
+                        "p50_ms": 2100,
+                        "p95_ms": 8200,
+                        "p99_ms": 9100,
+                        "avg_ms": 3200,
+                        "samples": 40,
+                    },
                 },
                 {
                     "source": "INTERNAL_CHAT",
@@ -146,7 +176,13 @@ class _StubMetricsRepository:
                     "error_rate": 0.02,
                     "conversations": 20,
                     "users": 1,
-                    "latency": {"p50_ms": 1800, "p95_ms": 7000, "p99_ms": 8800, "avg_ms": 3000},
+                    "latency": {
+                        "p50_ms": 1800,
+                        "p95_ms": 7000,
+                        "p99_ms": 8800,
+                        "avg_ms": 3000,
+                        "samples": 20,
+                    },
                 },
             ],
             "top_users": [
@@ -627,6 +663,8 @@ def _overview_row(**overrides: Any) -> dict[str, Any]:
         "completed": 9,
         "failed": 1,
         "cancelled": 0,
+        "technical_total": 10,
+        "technical_completed": 9,
         "answered": 5,
         "unconfirmed": 3,
         "out_of_scope": 1,
@@ -641,6 +679,7 @@ def _overview_row(**overrides: Any) -> dict[str, Any]:
         "p95_ms": 200,
         "p99_ms": 300,
         "avg_ms": 120,
+        "latency_samples": 8,
         "llm_prompt_tokens": 1000,
         "llm_completion_tokens": 200,
         "rerank_tokens": 50,
@@ -709,7 +748,13 @@ class TestMetricsAggregation:
         assert result["rerank_degraded_rate"] == 0.1
         assert result["tokens"]["llm_total"] == 1200
         assert result["tokens"]["rerank_total"] == 50
-        assert result["latency"] == {"p50_ms": 100, "p95_ms": 200, "p99_ms": 300, "avg_ms": 120}
+        assert result["latency"] == {
+            "p50_ms": 100,
+            "p95_ms": 200,
+            "p99_ms": 300,
+            "avg_ms": 120,
+            "samples": 8,
+        }
 
     async def test_overview_zero_denominator_rates_are_zero(self) -> None:
         row = _overview_row(
@@ -723,6 +768,8 @@ class TestMetricsAggregation:
             product_explained=0,
             product_general=0,
             failed=0,
+            technical_total=0,
+            technical_completed=0,
             citation_missing=0,
             rerank_degraded=0,
         )
@@ -748,6 +795,9 @@ class TestMetricsAggregation:
         assert "mode = :mode" in sql
         assert "engine = :engine" in sql
         assert "source = :source" in sql
+        assert "COALESCE(citation_result ->> 'shortcut', '') <> 'GREETING'" not in sql
+        assert "NOT IN ('GREETING', 'META_ACK')" in sql
+        assert "FILTER (WHERE citation_result ->> 'shortcut' IS NULL)" in sql
         assert params["kb_id"] == "kb-1"
         assert params["mode"] == "CHAT"
         assert params["engine"] == "RAG"
@@ -768,7 +818,8 @@ class TestMetricsAggregation:
                 "rerank_tokens": 20,
             }
         ]
-        result = await MetricsRepository(_FakeEngine(rows)).timeseries()  # type: ignore[arg-type]
+        engine = _FakeEngine(rows)
+        result = await MetricsRepository(engine).timeseries()  # type: ignore[arg-type]
         assert len(result) == 1
         point = result[0]
         assert point["bucket"] == "2026-08-20T00:00:00+00:00"
@@ -777,6 +828,9 @@ class TestMetricsAggregation:
         assert point["out_of_scope_rate"] == round(1 / 9, 4)
         assert point["queries"] == 10
         assert point["p95_ms"] == 900
+        sql, _ = engine.connection.queries[0]
+        assert "FILTER (WHERE citation_result ->> 'shortcut' IS NULL)" in sql
+        assert "NOT IN ('GREETING', 'META_ACK')" in sql
 
     async def test_latency_maps_stages(self) -> None:
         row: dict[str, Any] = {
@@ -784,6 +838,7 @@ class TestMetricsAggregation:
             "p95_ms": 200,
             "p99_ms": 300,
             "avg_ms": 120,
+            "latency_samples": 7,
         }
         for stage in (
             "prepare_turn_ms",
@@ -800,7 +855,13 @@ class TestMetricsAggregation:
             row[stage] = 10
         row["llm_ms"] = 500
         result = await MetricsRepository(_FakeEngine([row])).latency()  # type: ignore[arg-type]
-        assert result["total"] == {"p50_ms": 100, "p95_ms": 200, "p99_ms": 300, "avg_ms": 120}
+        assert result["total"] == {
+            "p50_ms": 100,
+            "p95_ms": 200,
+            "p99_ms": 300,
+            "avg_ms": 120,
+            "samples": 7,
+        }
         assert result["stages"]["llm_ms"] == 500
         assert result["stages"]["rerank_ms"] == 10
         assert len(result["stages"]) == 10

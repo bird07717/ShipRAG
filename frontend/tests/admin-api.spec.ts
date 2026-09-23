@@ -1,6 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminApi, apiRequest, ApiRequestError } from "@/api/admin";
+
+beforeEach(() => {
+  sessionStorage.setItem("rag_service_token", "session-token");
+});
 
 describe("admin API", () => {
   it("keeps Assistant configuration writes on the management API with revisions", async () => {
@@ -71,17 +75,34 @@ describe("admin API", () => {
   it("announces a rejected service credential so automatic requests can stop", async () => {
     const rejected = vi.fn();
     window.addEventListener("rag-service-auth-rejected", rejected, { once: true });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: false,
-        status: 401,
-        json: () => Promise.resolve({ error: { message: "未授权" } }),
-      }),
-    );
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: () => Promise.resolve({ error: { message: "未授权" } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(apiRequest("/knowledge-bases")).rejects.toMatchObject({ status: 401 });
     expect(rejected).toHaveBeenCalledOnce();
+    expect(sessionStorage.getItem("rag_service_token")).toBeNull();
+
+    await expect(apiRequest("/metrics/overview")).rejects.toMatchObject({
+      status: 401,
+      details: { request_blocked: true },
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("blocks management requests locally when no service credential is configured", async () => {
+    sessionStorage.removeItem("rag_service_token");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(apiRequest("/metrics/overview")).rejects.toMatchObject({
+      status: 401,
+      details: { request_blocked: true },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("sends whitelisted playground options as JSON", async () => {

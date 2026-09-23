@@ -2,6 +2,7 @@ import { mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App.vue";
+import { SERVICE_CREDENTIAL_REJECTED_EVENT } from "@/api/serviceCredential";
 import { adminStore } from "@/composables/adminStore";
 
 const globalStubs = {
@@ -29,6 +30,7 @@ describe("App", () => {
     adminStore.knowledgeBases = [];
     adminStore.requestedView = "";
     adminStore.requestedViewQuery = "";
+    sessionStorage.clear();
     window.history.replaceState(null, "", "#/dashboard");
   });
 
@@ -141,6 +143,22 @@ describe("App", () => {
     await wrapper.vm.$nextTick();
     expect(window.location.hash).toBe("#/configuration?tab=rag");
     expect(adminStore.requestedView).toBe("");
+    wrapper.unmount();
+  });
+
+  it("synchronizes a rejected credential while standalone chat is mounted", async () => {
+    adminStore.saveToken("invalid-session-token");
+    window.history.replaceState(null, "", "#/support-chat");
+    const wrapper = mount(App, { global: { stubs: globalStubs } });
+
+    window.dispatchEvent(new Event(SERVICE_CREDENTIAL_REJECTED_EVENT));
+    await wrapper.vm.$nextTick();
+
+    expect(sessionStorage.getItem("rag_service_token")).toBeNull();
+    expect(adminStore.serviceToken).toBe("");
+    expect(adminStore.credentialRejected).toBe(true);
+    expect(wrapper.text()).toContain("需要配置服务凭证");
+    expect(wrapper.text()).not.toContain("demo-chat");
     wrapper.unmount();
   });
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -24,6 +25,35 @@ _STAGE_KEYS = (
 )
 
 _MAX_RANGE_DAYS = 92
+
+# Every input-guard short circuit (greeting, meta acknowledgement, low
+# information) answers deterministically without an LLM, Embedding or Rerank
+# call, so its millisecond turn is not a sample of generation latency. The
+# turn itself still counts as a real request everywhere else.
+_LATENCY_SAMPLE = "citation_result ->> 'shortcut' IS NULL"
+# Greetings and conversation-control acknowledgements are real requests for
+# operational volume, but they are not technical questions. Low-information
+# guards intentionally remain technical signals because the following turn
+# may supply the requested condition.
+_TECHNICAL_SAMPLE = "COALESCE(citation_result ->> 'shortcut', '') NOT IN ('GREETING', 'META_ACK')"
+
+
+def _total_latency_select(samples_alias: str = "latency_samples") -> str:
+    """Percentiles, average and sample count over non-shortcut turns only."""
+
+    total = "(latency ->> 'total_ms')::bigint"
+    keep = f"FILTER (WHERE {_LATENCY_SAMPLE})"
+    percentiles = ",\n".join(
+        f"""COALESCE(percentile_cont({quantile}) WITHIN GROUP (
+                    ORDER BY {total}
+                ) {keep}, 0)::bigint AS p{label}_ms"""
+        for quantile, label in ((0.5, "50"), (0.95, "95"), (0.99, "99"))
+    )
+    return (
+        f"{percentiles},\n"
+        f"                COALESCE(avg({total}) {keep}, 0)::bigint AS avg_ms,\n"
+        f"                count(*) {keep} AS {samples_alias}"
+    )
 
 
 class MetricsRepository:
@@ -65,7 +95,11 @@ class MetricsRepository:
         engine: str | None = None,
         source: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        clauses = ["mode = :mode", "created_at >= :start", "created_at < :end"]
+        clauses = [
+            "mode = :mode",
+            "created_at >= :start",
+            "created_at < :end",
+        ]
         parameters: dict[str, Any] = {"mode": mode, "start": start, "end": end}
         if knowledge_id is not None:
             clauses.append("kb_id = :kb_id")
@@ -103,38 +137,45 @@ class MetricsRepository:
                 count(*) FILTER (WHERE status = 'COMPLETED') AS completed,
                 count(*) FILTER (WHERE status = 'FAILED') AS failed,
                 count(*) FILTER (WHERE status = 'CANCELLED') AS cancelled,
-                count(*) FILTER (WHERE response_type = 'ANSWERED') AS answered,
-                count(*) FILTER (WHERE response_type = 'UNCONFIRMED') AS unconfirmed,
-                count(*) FILTER (WHERE response_type = 'OUT_OF_SCOPE') AS out_of_scope,
+                count(*) FILTER (WHERE {_TECHNICAL_SAMPLE}) AS technical_total,
                 count(*) FILTER (
-                    WHERE response_type IN ('DOC_DELIVERED', 'DOCUMENT_DELIVERED')
+                    WHERE {_TECHNICAL_SAMPLE} AND status = 'COMPLETED'
+                ) AS technical_completed,
+                count(*) FILTER (
+                    WHERE {_TECHNICAL_SAMPLE} AND response_type = 'ANSWERED'
+                ) AS answered,
+                count(*) FILTER (
+                    WHERE {_TECHNICAL_SAMPLE} AND response_type = 'UNCONFIRMED'
+                ) AS unconfirmed,
+                count(*) FILTER (
+                    WHERE {_TECHNICAL_SAMPLE} AND response_type = 'OUT_OF_SCOPE'
+                ) AS out_of_scope,
+                count(*) FILTER (
+                    WHERE {_TECHNICAL_SAMPLE}
+                      AND response_type IN ('DOC_DELIVERED', 'DOCUMENT_DELIVERED')
                 ) AS doc_delivered,
                 count(*) FILTER (
-                    WHERE response_type = 'ANSWERED' AND answer_mode = 'PRODUCT_KNOWLEDGE'
+                    WHERE {_TECHNICAL_SAMPLE}
+                      AND response_type = 'ANSWERED' AND answer_mode = 'PRODUCT_KNOWLEDGE'
                 ) AS product_knowledge,
                 count(*) FILTER (
-                    WHERE response_type = 'ANSWERED' AND answer_mode = 'PRODUCT_EXPLAINED'
+                    WHERE {_TECHNICAL_SAMPLE}
+                      AND response_type = 'ANSWERED' AND answer_mode = 'PRODUCT_EXPLAINED'
                 ) AS product_explained,
                 count(*) FILTER (
-                    WHERE response_type = 'ANSWERED' AND answer_mode = 'PRODUCT_GENERAL'
+                    WHERE {_TECHNICAL_SAMPLE}
+                      AND response_type = 'ANSWERED' AND answer_mode = 'PRODUCT_GENERAL'
                 ) AS product_general,
                 count(DISTINCT user_id) AS unique_users,
                 count(*) FILTER (
-                    WHERE citation_result ->> 'citation_missing' = 'true'
+                    WHERE {_TECHNICAL_SAMPLE}
+                      AND citation_result ->> 'citation_missing' = 'true'
                 ) AS citation_missing,
                 count(*) FILTER (
-                    WHERE rerank_result ->> 'status' = 'DEGRADED'
+                    WHERE {_TECHNICAL_SAMPLE}
+                      AND rerank_result ->> 'status' = 'DEGRADED'
                 ) AS rerank_degraded,
-                COALESCE(percentile_cont(0.5) WITHIN GROUP (
-                    ORDER BY (latency ->> 'total_ms')::bigint
-                ), 0)::bigint AS p50_ms,
-                COALESCE(percentile_cont(0.95) WITHIN GROUP (
-                    ORDER BY (latency ->> 'total_ms')::bigint
-                ), 0)::bigint AS p95_ms,
-                COALESCE(percentile_cont(0.99) WITHIN GROUP (
-                    ORDER BY (latency ->> 'total_ms')::bigint
-                ), 0)::bigint AS p99_ms,
-                COALESCE(avg((latency ->> 'total_ms')::bigint), 0)::bigint AS avg_ms,
+                {_total_latency_select()},
                 COALESCE(sum((model_usage ->> 'prompt_tokens')::bigint), 0) AS llm_prompt_tokens,
                 COALESCE(sum((model_usage ->> 'completion_tokens')::bigint), 0)
                     AS llm_completion_tokens,
@@ -191,15 +232,12 @@ class MetricsRepository:
             "out_of_scope_rate": _rate(out_of_scope, classified),
             "doc_delivered_rate": _rate(doc_delivered, classified),
             "failure_rate": _rate(int(row["failed"]), int(row["total"])),
-            "citation_missing_rate": _rate(int(row["citation_missing"]), int(row["completed"])),
-            "rerank_degraded_rate": _rate(int(row["rerank_degraded"]), int(row["total"])),
+            "citation_missing_rate": _rate(
+                int(row["citation_missing"]), int(row["technical_completed"])
+            ),
+            "rerank_degraded_rate": _rate(int(row["rerank_degraded"]), int(row["technical_total"])),
             "unique_users": int(row["unique_users"]),
-            "latency": {
-                "p50_ms": int(row["p50_ms"]),
-                "p95_ms": int(row["p95_ms"]),
-                "p99_ms": int(row["p99_ms"]),
-                "avg_ms": int(row["avg_ms"]),
-            },
+            "latency": _latency_summary(row, samples=row["latency_samples"]),
             "tokens": {
                 "llm_prompt": int(row["llm_prompt_tokens"]),
                 "llm_completion": int(row["llm_completion_tokens"]),
@@ -234,15 +272,22 @@ class MetricsRepository:
             SELECT date_trunc(:trunc, created_at) AS bucket,
                    count(*) AS queries,
                    count(*) FILTER (WHERE status = 'FAILED') AS failed,
-                   count(*) FILTER (WHERE response_type = 'ANSWERED') AS answered,
-                   count(*) FILTER (WHERE response_type = 'UNCONFIRMED') AS unconfirmed,
-                   count(*) FILTER (WHERE response_type = 'OUT_OF_SCOPE') AS out_of_scope,
                    count(*) FILTER (
-                       WHERE response_type IN ('DOC_DELIVERED', 'DOCUMENT_DELIVERED')
+                       WHERE {_TECHNICAL_SAMPLE} AND response_type = 'ANSWERED'
+                   ) AS answered,
+                   count(*) FILTER (
+                       WHERE {_TECHNICAL_SAMPLE} AND response_type = 'UNCONFIRMED'
+                   ) AS unconfirmed,
+                   count(*) FILTER (
+                       WHERE {_TECHNICAL_SAMPLE} AND response_type = 'OUT_OF_SCOPE'
+                   ) AS out_of_scope,
+                   count(*) FILTER (
+                       WHERE {_TECHNICAL_SAMPLE}
+                         AND response_type IN ('DOC_DELIVERED', 'DOCUMENT_DELIVERED')
                    ) AS doc_delivered,
                    COALESCE(percentile_cont(0.95) WITHIN GROUP (
                        ORDER BY (latency ->> 'total_ms')::bigint
-                   ), 0)::bigint AS p95_ms,
+                   ) FILTER (WHERE {_LATENCY_SAMPLE}), 0)::bigint AS p95_ms,
                    COALESCE(sum((model_usage ->> 'total_tokens')::bigint), 0) AS llm_tokens,
                    COALESCE(sum((rerank_result -> 'usage' ->> 'total_tokens')::bigint), 0)
                        AS rerank_tokens
@@ -289,21 +334,13 @@ class MetricsRepository:
         start, end = self.resolve_range(created_from, created_to)
         where, parameters = self._filters(knowledge_id, mode, start, end)
         stage_select = ",\n".join(
-            f"COALESCE(avg((latency ->> '{key}')::bigint), 0)::bigint AS {key}"
+            f"COALESCE(avg((latency ->> '{key}')::bigint) "
+            f"FILTER (WHERE {_LATENCY_SAMPLE}), 0)::bigint AS {key}"
             for key in _STAGE_KEYS
         )
         query = f"""
             SELECT
-                COALESCE(percentile_cont(0.5) WITHIN GROUP (
-                    ORDER BY (latency ->> 'total_ms')::bigint
-                ), 0)::bigint AS p50_ms,
-                COALESCE(percentile_cont(0.95) WITHIN GROUP (
-                    ORDER BY (latency ->> 'total_ms')::bigint
-                ), 0)::bigint AS p95_ms,
-                COALESCE(percentile_cont(0.99) WITHIN GROUP (
-                    ORDER BY (latency ->> 'total_ms')::bigint
-                ), 0)::bigint AS p99_ms,
-                COALESCE(avg((latency ->> 'total_ms')::bigint), 0)::bigint AS avg_ms,
+                {_total_latency_select()},
                 {stage_select}
             FROM rag_trace
             WHERE {where}
@@ -313,12 +350,7 @@ class MetricsRepository:
             row = dict(result.mappings().one())
         return {
             "range": {"from": start.isoformat(), "to": end.isoformat(), "mode": mode},
-            "total": {
-                "p50_ms": int(row["p50_ms"]),
-                "p95_ms": int(row["p95_ms"]),
-                "p99_ms": int(row["p99_ms"]),
-                "avg_ms": int(row["avg_ms"]),
-            },
+            "total": _latency_summary(row, samples=row["latency_samples"]),
             "stages": {key: int(row[key]) for key in _STAGE_KEYS},
         }
 
@@ -490,8 +522,8 @@ class MetricsRepository:
             "escalation_rate": _rate(int(row["escalation_required"]), support_turns),
             "general_guidance_rate": _rate(int(row["general_guidance_turns"]), support_turns),
             "workflow_conflict_rate": _rate(int(row["workflow_conflicts"]), support_turns),
-            "first_turn_latency": _latency_summary(row, "first"),
-            "followup_latency": _latency_summary(row, "followup"),
+            "first_turn_latency": _latency_summary(row, "first", samples=row["first_turns"]),
+            "followup_latency": _latency_summary(row, "followup", samples=row["followup_turns"]),
             "tokens": {
                 "llm_prompt": int(row["llm_prompt_tokens"]),
                 "llm_completion": int(row["llm_completion_tokens"]),
@@ -545,17 +577,7 @@ class MetricsRepository:
                                    count(*) FILTER (WHERE status = 'FAILED') AS failed,
                                    count(DISTINCT conversation_id) AS conversations,
                                    count(DISTINCT user_id) AS users,
-                                   COALESCE(percentile_cont(0.5) WITHIN GROUP (
-                                       ORDER BY (latency ->> 'total_ms')::bigint
-                                   ), 0)::bigint AS p50_ms,
-                                   COALESCE(percentile_cont(0.95) WITHIN GROUP (
-                                       ORDER BY (latency ->> 'total_ms')::bigint
-                                   ), 0)::bigint AS p95_ms,
-                                   COALESCE(percentile_cont(0.99) WITHIN GROUP (
-                                       ORDER BY (latency ->> 'total_ms')::bigint
-                                   ), 0)::bigint AS p99_ms,
-                                   COALESCE(avg((latency ->> 'total_ms')::bigint), 0)::bigint
-                                       AS avg_ms
+                                   {_total_latency_select()}
                             FROM rag_trace
                             WHERE created_at >= :start AND created_at < :end
                               AND source IS NOT NULL{kb_clause}
@@ -737,12 +759,7 @@ class MetricsRepository:
                 "error_rate": _rate(int(row["failed"]), int(row["turns"])),
                 "conversations": int(row["conversations"]),
                 "users": int(row["users"]),
-                "latency": {
-                    "p50_ms": int(row["p50_ms"]),
-                    "p95_ms": int(row["p95_ms"]),
-                    "p99_ms": int(row["p99_ms"]),
-                    "avg_ms": int(row["avg_ms"]),
-                },
+                "latency": _latency_summary(dict(row), samples=row["latency_samples"]),
             }
             for row in source_rows
         ]
@@ -803,10 +820,14 @@ def _rate(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 4)
 
 
-def _latency_summary(row: dict[str, Any], prefix: str) -> dict[str, int]:
+def _latency_summary(row: Mapping[str, Any], prefix: str = "", *, samples: Any) -> dict[str, int]:
+    """Latency block plus how many turns it was actually computed from."""
+
+    key = f"{prefix}_" if prefix else ""
     return {
-        "p50_ms": int(row[f"{prefix}_p50_ms"]),
-        "p95_ms": int(row[f"{prefix}_p95_ms"]),
-        "p99_ms": int(row[f"{prefix}_p99_ms"]),
-        "avg_ms": int(row[f"{prefix}_avg_ms"]),
+        "p50_ms": int(row[f"{key}p50_ms"]),
+        "p95_ms": int(row[f"{key}p95_ms"]),
+        "p99_ms": int(row[f"{key}p99_ms"]),
+        "avg_ms": int(row[f"{key}avg_ms"]),
+        "samples": int(samples),
     }

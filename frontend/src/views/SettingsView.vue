@@ -1,11 +1,21 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 
 const store = useAdminStore();
-const credential = ref(sessionStorage.getItem("rag_service_token") ?? "");
+const credential = ref(store.serviceToken);
 const credentialConfigured = computed(() => store.hasServiceCredential);
+
+// A global 401 rejection clears the credential owner in the Store. Keep this
+// local form copy in sync so an invalid token cannot remain visible or be
+// accidentally saved again from an already-mounted settings page.
+watch(
+  () => store.serviceToken,
+  (value) => {
+    if (credential.value !== value) credential.value = value;
+  },
+);
 
 const sections = [
   { key: "api", label: "服务凭证" },

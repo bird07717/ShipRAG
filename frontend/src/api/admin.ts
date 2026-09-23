@@ -50,6 +50,10 @@ import type {
   TraceSummary,
 } from "@/types/admin";
 import { randomUUID } from "@/utils/uuid";
+import {
+  announceServiceCredentialRejected,
+  readServiceCredential,
+} from "@/api/serviceCredential";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -61,11 +65,6 @@ export class ApiRequestError extends Error {
   ) {
     super(message);
   }
-}
-
-function authorizationHeaders(): Record<string, string> {
-  const token = sessionStorage.getItem("rag_service_token")?.trim();
-  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 function buildMetricsQuery(params: Record<string, string | undefined>): string {
@@ -80,9 +79,16 @@ function buildMetricsQuery(params: Record<string, string | undefined>): string {
 }
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const token = readServiceCredential();
+  if (!token) {
+    announceServiceCredentialRejected();
+    throw new ApiRequestError("服务凭证缺失，请先配置后再访问管理功能", 401, {
+      request_blocked: true,
+    });
+  }
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
-  for (const [name, value] of Object.entries(authorizationHeaders())) headers.set(name, value);
+  headers.set("Authorization", `Bearer ${token}`);
   if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
   const response = await fetch(`${apiBaseUrl}/api/v1${path}`, { ...init, headers });
   if (!response.ok) {
@@ -90,7 +96,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
       error?: { message?: string; details?: Record<string, unknown> };
     } | null;
     if (response.status === 401 && typeof window !== "undefined") {
-      window.dispatchEvent(new Event("rag-service-auth-rejected"));
+      announceServiceCredentialRejected();
     }
     throw new ApiRequestError(
       body?.error?.message ?? `请求失败：HTTP ${response.status}`,

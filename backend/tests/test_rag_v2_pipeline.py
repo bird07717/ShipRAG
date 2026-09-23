@@ -34,7 +34,7 @@ from app.rag.v2.validation import (
     public_leaks,
     validate_generated_answer,
 )
-from app.services.rag import RagService
+from app.services.rag import RagService, _deterministic_greeting
 
 DOC_ID = UUID("7777ff1b-efe0-4a12-a1dc-9bdf3532042b")
 IMAGE_ID = UUID("8888ff1b-efe0-4a12-a1dc-9bdf3532042b")
@@ -508,6 +508,61 @@ async def test_v2_meta_ack_completes_without_retrieval_or_model_call() -> None:
     assert repository.completed is not None
     assert repository.completed["usage"] == {"pipeline": "V2", "llm_calls": 0}
     assert repository.completed["doc_routing"]["generation"]["input_guard"] == "META_ACK"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "question",
+    [
+        "你好！",
+        "Hello",
+        "您好呀。",
+        "在吗？",
+    ],
+)
+async def test_v2_greetings_complete_without_retrieval_or_model_call(question: str) -> None:
+    repository = _Repository(_candidate())
+    repository.turn = _turn()
+
+    def forbidden_llm_factory(_settings: Settings, _snapshot: ModelSnapshot) -> FakeLlmProvider:
+        raise AssertionError("deterministic social shortcut must not call the model")
+
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: (_ for _ in ()).throw(
+            AssertionError("deterministic social shortcut must not call embedding")
+        ),
+        llm_factory=forbidden_llm_factory,
+    )
+
+    payload = await service.generate(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=repository.turn.conversation_id,
+        question=question,
+        request_id="v5-greeting",
+    )
+
+    assert payload["response_type"] == "ANSWERED"
+    assert payload["answer"]
+    assert payload["disclaimer"] is None
+    assert repository.completed is not None
+    assert repository.completed["usage"] == {"pipeline": "V2", "llm_calls": 0}
+    generation = repository.completed["doc_routing"]["generation"]
+    assert generation["input_guard"] == "GREETING"
+    assert repository.completed["citation_result"]["shortcut"] == "GREETING"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "你好，VDR600 怎么升级？",
+        "谢谢，那下一步怎么处理？",
+        "你能帮我检查 PDC 吗？",
+    ],
+)
+def test_v2_greeting_never_substring_matches_technical_input(question: str) -> None:
+    assert _deterministic_greeting(question) is None
 
 
 @pytest.mark.asyncio

@@ -112,7 +112,12 @@ async def test_recovery_disabled_does_not_create_resources(
         Settings(_env_file=None, app_env="test", assistant_request_stale_seconds=0)
     )
 
-    assert result == {"request_count": 0, "message_count": 0, "trace_count": 0}
+    assert result == {
+        "request_count": 0,
+        "message_count": 0,
+        "trace_count": 0,
+        "internal_trace_count": 0,
+    }
 
 
 def test_sync_wrapper_uses_supplied_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -219,6 +224,7 @@ def test_periodic_task_disabled_does_not_run_or_reschedule(
         "request_count": 0,
         "message_count": 0,
         "trace_count": 0,
+        "internal_trace_count": 0,
     }
 
 
@@ -256,11 +262,14 @@ async def test_recovery_reconcile_real_postgres_fails_only_stale_rows() -> None:
     engine = create_async_engine(database_url, pool_pre_ping=True)
     knowledge_id = uuid4()
     conversation_id = uuid4()
+    fresh_conversation_id = uuid4()
     stale_request_id = uuid4()
     fresh_request_id = uuid4()
     terminal_request_id = uuid4()
     stale_message_id = uuid4()
     stale_trace_id = uuid4()
+    fresh_message_id = uuid4()
+    fresh_trace_id = uuid4()
     try:
         async with engine.connect() as connection:
             transaction = await connection.begin()
@@ -269,23 +278,33 @@ async def test_recovery_reconcile_real_postgres_fails_only_stale_rows() -> None:
                 {"id": knowledge_id, "name": f"assistant-recovery-{knowledge_id}"},
             )
             await connection.execute(
-                text("INSERT INTO conversation (id, knowledge_id) VALUES (:id, :knowledge_id)"),
-                {"id": conversation_id, "knowledge_id": knowledge_id},
+                text(
+                    "INSERT INTO conversation (id, knowledge_id) VALUES "
+                    "(:id, :knowledge_id), (:fresh_id, :knowledge_id)"
+                ),
+                {
+                    "id": conversation_id,
+                    "fresh_id": fresh_conversation_id,
+                    "knowledge_id": knowledge_id,
+                },
             )
             await connection.execute(
                 text(
                     """
                     INSERT INTO message (
                         id, conversation_id, sequence_no, role, content, status
-                    ) VALUES (
-                        :message_id, :conversation_id, 1, 'ASSISTANT',
-                        'partial answer', 'STREAMING'
-                    )
+                    ) VALUES
+                        (:message_id, :conversation_id, 1, 'ASSISTANT',
+                         'partial answer', 'STREAMING'),
+                        (:fresh_message_id, :fresh_conversation_id, 1, 'ASSISTANT',
+                         'active answer', 'STREAMING')
                     """
                 ),
                 {
                     "message_id": stale_message_id,
                     "conversation_id": conversation_id,
+                    "fresh_message_id": fresh_message_id,
+                    "fresh_conversation_id": fresh_conversation_id,
                 },
             )
             await connection.execute(
@@ -293,19 +312,28 @@ async def test_recovery_reconcile_real_postgres_fails_only_stale_rows() -> None:
                     """
                     INSERT INTO rag_trace (
                         id, trace_id, request_id, kb_id, conversation_id,
-                        message_id, question, mode, status, engine, stage
-                    ) VALUES (
-                        :id, :trace_id, 'recovery-stale-req', :kb_id, :conversation_id,
-                        :message_id, '问题', 'CHAT', 'RUNNING', 'RAG', 'LLM'
-                    )
+                        message_id, question, mode, status, engine, stage,
+                        source, created_at
+                    ) VALUES
+                        (:id, :trace_id, 'recovery-stale-req', :kb_id, :conversation_id,
+                         :message_id, '问题', 'CHAT', 'RUNNING', 'RAG', 'LLM',
+                         'ASSISTANT_API', now()),
+                        (:fresh_id, :fresh_trace_id, 'recovery-fresh-req', :kb_id,
+                         :fresh_conversation_id, :fresh_message_id, '问题', 'CHAT',
+                         'RUNNING', 'RAG', 'LLM', 'ASSISTANT_API',
+                         now() - interval '30 minutes')
                     """
                 ),
                 {
                     "id": uuid4(),
                     "trace_id": stale_trace_id,
+                    "fresh_id": uuid4(),
+                    "fresh_trace_id": fresh_trace_id,
                     "kb_id": knowledge_id,
                     "conversation_id": conversation_id,
                     "message_id": stale_message_id,
+                    "fresh_conversation_id": fresh_conversation_id,
+                    "fresh_message_id": fresh_message_id,
                 },
             )
             await connection.execute(
@@ -320,7 +348,8 @@ async def test_recovery_reconcile_real_postgres_fails_only_stale_rows() -> None:
                          :conversation_id, :message_id, :trace_id,
                          'RUNNING', now() - interval '30 minutes'),
                         (:fresh_id, 'recovery-user', :kb_id, 'fresh', 'fresh-hash',
-                         NULL, NULL, NULL, 'RUNNING', now()),
+                         :fresh_conversation_id, :fresh_message_id, :fresh_trace_id,
+                         'RUNNING', now()),
                         (:terminal_id, 'recovery-user', :kb_id, 'terminal',
                          'terminal-hash', NULL, NULL, NULL, 'COMPLETED',
                          now() - interval '30 minutes')
@@ -334,6 +363,9 @@ async def test_recovery_reconcile_real_postgres_fails_only_stale_rows() -> None:
                     "conversation_id": conversation_id,
                     "message_id": stale_message_id,
                     "trace_id": stale_trace_id,
+                    "fresh_conversation_id": fresh_conversation_id,
+                    "fresh_message_id": fresh_message_id,
+                    "fresh_trace_id": fresh_trace_id,
                 },
             )
 
@@ -342,7 +374,12 @@ async def test_recovery_reconcile_real_postgres_fails_only_stale_rows() -> None:
                 connection=connection,
             )
 
-            assert recovered == {"request_count": 1, "message_count": 1, "trace_count": 1}
+            assert recovered == {
+                "request_count": 1,
+                "message_count": 1,
+                "trace_count": 1,
+                "internal_trace_count": 0,
+            }
 
             request_rows = dict(
                 (
@@ -382,6 +419,138 @@ async def test_recovery_reconcile_real_postgres_fails_only_stale_rows() -> None:
                 )
             ).scalar_one()
             assert trace_status == "FAILED"
+
+            fresh_message_status = (
+                await connection.execute(
+                    text("SELECT status FROM message WHERE id = :id"),
+                    {"id": fresh_message_id},
+                )
+            ).scalar_one()
+            assert fresh_message_status == "STREAMING"
+
+            fresh_trace_status = (
+                await connection.execute(
+                    text("SELECT status FROM rag_trace WHERE trace_id = :id"),
+                    {"id": fresh_trace_id},
+                )
+            ).scalar_one()
+            assert fresh_trace_status == "RUNNING"
+
+            await transaction.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recovery_also_reclaims_internal_chat_turns() -> None:
+    """Admin chat and playground turns have no assistant_request row, so a
+    rolled-back terminal write used to leave the message/trace pair RUNNING
+    forever.  The same statement now reclaims them under their own code."""
+    database_url = os.getenv("SUPPORT_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("SUPPORT_TEST_DATABASE_URL is not configured")
+
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    knowledge_id = uuid4()
+    conversation_id = uuid4()
+    stale_message_id, fresh_message_id = uuid4(), uuid4()
+    stale_trace_id, fresh_trace_id = uuid4(), uuid4()
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            await connection.execute(
+                text("INSERT INTO knowledge_base (id, name) VALUES (:id, :name)"),
+                {"id": knowledge_id, "name": f"internal-recovery-{knowledge_id}"},
+            )
+            await connection.execute(
+                text("INSERT INTO conversation (id, knowledge_id) VALUES (:id, :knowledge_id)"),
+                {"id": conversation_id, "knowledge_id": knowledge_id},
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO message (
+                        id, conversation_id, sequence_no, role, content, status
+                    ) VALUES
+                        (:stale_message_id, :conversation_id, 1, 'ASSISTANT', '', 'STREAMING'),
+                        (:fresh_message_id, :conversation_id, 2, 'ASSISTANT', '', 'STREAMING')
+                    """
+                ),
+                {
+                    "stale_message_id": stale_message_id,
+                    "fresh_message_id": fresh_message_id,
+                    "conversation_id": conversation_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO rag_trace (
+                        id, trace_id, request_id, kb_id, conversation_id, message_id,
+                        question, mode, status, engine, stage, source, created_at
+                    ) VALUES
+                        (:stale_id, :stale_trace_id, 'internal-stale', :kb_id,
+                         :conversation_id, :stale_message_id, '问题', 'CHAT', 'RUNNING',
+                         'RAG', 'LLM', 'INTERNAL_CHAT', now() - interval '30 minutes'),
+                        (:fresh_id, :fresh_trace_id, 'internal-fresh', :kb_id,
+                         :conversation_id, :fresh_message_id, '问题', 'CHAT', 'RUNNING',
+                         'RAG', 'LLM', 'INTERNAL_CHAT', now())
+                    """
+                ),
+                {
+                    "stale_id": uuid4(),
+                    "fresh_id": uuid4(),
+                    "stale_trace_id": stale_trace_id,
+                    "fresh_trace_id": fresh_trace_id,
+                    "kb_id": knowledge_id,
+                    "conversation_id": conversation_id,
+                    "stale_message_id": stale_message_id,
+                    "fresh_message_id": fresh_message_id,
+                },
+            )
+
+            recovered = await AssistantRequestRecoveryRepository(engine).reconcile(
+                stale_before=datetime.now(UTC) - timedelta(minutes=10),
+                connection=connection,
+            )
+
+            assert recovered["internal_trace_count"] == 1
+            assert recovered["request_count"] == 0
+            assert recovered["message_count"] == 1
+
+            traces = {
+                row["trace_id"]: (row["status"], row["code"])
+                for row in (
+                    await connection.execute(
+                        text(
+                            "SELECT trace_id, status, error ->> 'code' AS code "
+                            "FROM rag_trace WHERE conversation_id = :conversation_id"
+                        ),
+                        {"conversation_id": conversation_id},
+                    )
+                )
+                .mappings()
+                .all()
+            }
+            assert traces[stale_trace_id] == ("FAILED", "ABANDONED_CHAT_TURN")
+            assert traces[fresh_trace_id] == ("RUNNING", None)
+
+            messages = {
+                row["id"]: row["status"]
+                for row in (
+                    await connection.execute(
+                        text(
+                            "SELECT id, status FROM message "
+                            "WHERE conversation_id = :conversation_id"
+                        ),
+                        {"conversation_id": conversation_id},
+                    )
+                )
+                .mappings()
+                .all()
+            }
+            assert messages[stale_message_id] == "FAILED"
+            assert messages[fresh_message_id] == "STREAMING"
 
             await transaction.rollback()
     finally:

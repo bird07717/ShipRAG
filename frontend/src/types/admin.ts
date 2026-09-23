@@ -591,6 +591,8 @@ export interface MetricsLatencySummary {
   p95_ms: number;
   p99_ms: number;
   avg_ms: number;
+  /** 参与统计的轮次数；零模型调用的输入门禁短路不计入延迟。 */
+  samples: number;
 }
 
 export interface MetricsOverview {
