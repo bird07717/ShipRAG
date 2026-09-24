@@ -149,7 +149,16 @@ const traceDetail = {
       response_path: "KNOWLEDGE",
       diagnostic_reason: "NEEDS_KEY_CONDITION",
       query_interpreter: { status: "PASSED" },
-      retrieval: { degradations: [], document_rerank: { status: "PASSED" } },
+      retrieval: {
+        degradations: [],
+        document_rerank: {
+          status: "PASSED",
+          provider: "dashscope",
+          before_document_ids: ["doc-2", "doc-1"],
+          after_document_ids: ["doc-1", "doc-2"],
+          scores: [0.8, 0.5],
+        },
+      },
       context: { document_count: 1, image_count: 0, estimated_tokens: 120, mode: "FULL" },
       answer: {
         response_kind: "ASK_ONE",
@@ -876,6 +885,59 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("缺少关键条件");
     expect(wrapper.text()).toContain("回答路径");
     expect(wrapper.text()).toContain("知识检索");
+    expect(wrapper.text()).toContain("文档级重排（RAG V2）");
+    expect(wrapper.text()).not.toContain("重排序（Rerank · 遗留）");
+    await wrapper.findAll(".el-collapse-item__header")
+      .find((item) => item.text().includes("文档级重排（RAG V2）"))!.trigger("click");
+    expect(wrapper.text()).toContain("before_document_ids");
+    expect(wrapper.text()).toContain("0.8");
+  });
+
+  it("logs: keeps the legacy rerank panel for a non-V2 trace", async () => {
+    vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
+    vi.spyOn(adminApi, "listRequestErrors").mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
+    vi.mocked(adminApi.getTrace).mockResolvedValue({
+      ...traceDetail,
+      runtime_snapshot: {},
+      rerank_result: { status: "PASSED", provider: "legacy-provider" },
+    });
+    const wrapper = await mountView("logs");
+    await wrapper.findAll(".el-tabs__item")
+      .find((tab) => tab.text().includes("全部链路追踪"))!.trigger("click");
+    await flushPromises();
+    await wrapper.get(".trace-row").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("重排序（Rerank · 遗留）");
+    expect(wrapper.text()).not.toContain("文档级重排（RAG V2）");
+    await wrapper.findAll(".el-collapse-item__header")
+      .find((item) => item.text().includes("重排序（Rerank · 遗留）"))!.trigger("click");
+    expect(wrapper.text()).toContain("legacy-provider");
+  });
+
+  it("logs: shows the skipped V2 retrieval instead of an empty rerank result", async () => {
+    vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
+    vi.spyOn(adminApi, "listRequestErrors").mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
+    vi.mocked(adminApi.getTrace).mockResolvedValue({
+      ...traceDetail,
+      runtime_snapshot: {
+        generation: {
+          pipeline: "V2",
+          response_path: "CONVERSATION",
+          retrieval: { status: "SKIPPED", reason: "CONVERSATION_ROUTE" },
+        },
+      },
+    });
+    const wrapper = await mountView("logs");
+    await wrapper.findAll(".el-tabs__item")
+      .find((tab) => tab.text().includes("全部链路追踪"))!.trigger("click");
+    await flushPromises();
+    await wrapper.get(".trace-row").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("已跳过（对话路径）");
+    await wrapper.findAll(".el-collapse-item__header")
+      .find((item) => item.text().includes("文档级重排（RAG V2）"))!.trigger("click");
+    expect(wrapper.text()).toContain("CONVERSATION_ROUTE");
+    expect(wrapper.text()).not.toContain("重排序（Rerank · 遗留）");
   });
 
   it("logs: applies the retired RAG errors deep-link state", async () => {

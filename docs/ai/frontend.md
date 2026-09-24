@@ -76,7 +76,7 @@
 - `RagConfigurationView` 只保留 `vector_top_k`、`bm25_top_k`、`fusion_top_k` 三个 V2 实际消费的参数；`rerank_top_n`、`context_max_chunks` 已从界面移除（后端 PATCH 为部分更新，兼容缺省）。Rerank 数量与全文上下文预算由环境变量控制，界面只作说明。
 - `DemoChat` 的模式标签收敛为 V2 五种 `answer_mode`；legacy 模式（`DOCUMENT_EXPLANATION`、`STEP_GUIDANCE` 等）与 `DOC_DELIVERED` 专用渲染分支已删除，未知值仍按原文兜底显示。
 - `PlaygroundView` 结果面板按 V2 文档级语义展示：`selected_context` 渲染为"隐藏上下文候选文档"（document_key + 内容 SHA-256 前缀），不再按 chunk 分数/正文渲染；`SourceCitation`、`RetrievalChunk` 组件因此删除。`playgroundOptions` 已移除 `rerank_top_n`。
-- `TracesView` 时间线包含 V2 各阶段耗时（`v2_query_interpreter_ms` 等）并保留 legacy 键（标注"遗留"，按存在与否自过滤）；详情的"RAG V2 生成详情"展示 Knowledge/Conversation 回答路径、查询理解、文档级重排或对话路径跳过状态、检索降级、隐藏上下文与合规修复，Support 决策段标注"遗留"；Prompt 折叠面板仅在存在时显示。
+- `TracesView` 时间线包含 V2 各阶段耗时（`v2_query_interpreter_ms` 等）并保留 legacy 键（标注"遗留"，按存在与否自过滤）；详情的"RAG V2 生成详情"展示 Knowledge/Conversation 回答路径、查询理解、文档级重排或对话路径跳过状态、检索降级、隐藏上下文与合规修复。V2 重排折叠面板读取 `runtime_snapshot.generation.retrieval.document_rerank`（对话路径读取检索跳过状态），仅非 V2 Trace 读取旧 `rerank_result`；Support 决策段标注"遗留"，Prompt 折叠面板仅在存在时显示。
 - `LogsView` 的"升级记录"页签标注"（遗留）"并说明其仅来自已冻结 Support 链路，保留历史查询能力。
 - `SupportReviewView` 顶部有 ADR-0021 冻结横幅，发布/重生成流程保留；`DocumentsView` 上传与空态文案不再宣传 Support Profile 审核，改为说明 RAG 文档卡片自动生成。
 - `DashboardView` 的回答结果区只统计外部 `ASSISTANT_API`、`RAG`、近 7 天：分别展示直接回答率、待补充信息率、范围外请求率、失败率和延迟；范围外拒答不再计入负向“无答案”。独立“回答依据分布”以三类 `PRODUCT_*` 回答为分母，展示文档知识、文档加通用解释和通用工程扩展，不把欢迎语或历史未分类回答混入。趋势图、`UNCONFIRMED` 列表和柱形下钻复用同一时间/引擎/来源条件，待补充信息不再直接标作知识库缺口。Trace 的 RAG V2 详情将内部 `diagnostic_reason` 显示为输入信息不足、范围判断冲突或缺少关键条件，并保留原始输入门禁码；这些字段不出现在外部 Assistant 响应。冻结 Support 的文档交付、澄清率、升级次数和 Profile 待办已从概览移除，遗留能力仍保留在独立页面。

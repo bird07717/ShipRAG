@@ -172,7 +172,7 @@ type V2Generation = {
   diagnostic_reason?: "LOW_INFORMATION" | "SCOPE_CONFLICT" | "NEEDS_KEY_CONDITION";
   input_guard?: string;
   query_interpreter?: { status?: string; reason?: string; latency_ms?: number; route_fallback_reason?: string };
-  retrieval?: { status?: string; reason?: string; degradations?: string[]; document_rerank?: { status?: string; reason?: string } };
+  retrieval?: { status?: string; reason?: string; degradations?: string[]; document_rerank?: Record<string, unknown> & { status?: string; reason?: string } };
   context?: { document_count?: number; image_count?: number; estimated_tokens?: number; mode?: string };
   answer?: {
     response_kind?: string;
@@ -201,6 +201,11 @@ const v2Generation = computed(() => {
 const v2Degradations = computed(() => {
   const items = v2Generation.value?.retrieval?.degradations ?? [];
   return items.filter(Boolean);
+});
+
+const v2RerankDetail = computed(() => {
+  const retrieval = v2Generation.value?.retrieval;
+  return retrieval?.document_rerank ?? (retrieval?.status === "SKIPPED" ? retrieval : null);
 });
 
 const citationWarning = computed(() => {
@@ -553,7 +558,11 @@ async function selectTrace(traceId: string): Promise<void> {
             <el-collapse-item title="检索（Retrieval）" name="retrieval">
               <CodeBlock :code="store.formatJson(activeTraceDetail.retrieval_result)" max-height="280px" />
             </el-collapse-item>
-            <el-collapse-item title="重排序（Rerank · 遗留）" name="rerank">
+            <el-collapse-item v-if="v2Generation" title="文档级重排（RAG V2）" name="rerank-v2">
+              <CodeBlock v-if="v2RerankDetail" :code="store.formatJson(v2RerankDetail)" max-height="280px" />
+              <p v-else class="muted detail-empty">（本轮未记录文档级重排详情）</p>
+            </el-collapse-item>
+            <el-collapse-item v-else title="重排序（Rerank · 遗留）" name="rerank">
               <CodeBlock :code="store.formatJson(activeTraceDetail.rerank_result)" max-height="280px" />
             </el-collapse-item>
             <el-collapse-item v-if="activeTraceDetail.prompt" title="提示词（Prompt · 遗留）" name="prompt">
