@@ -332,9 +332,9 @@ async def test_v2_generate_uses_two_llms_and_one_batched_embedding_request() -> 
     assert payload["response_type"] == "ANSWERED"
     assert llm_calls == 2
     assert embedding.calls == 1
-    assert embedding.batch_sizes == [3]
+    assert embedding.batch_sizes == [2]
     assert repository.v2_progress is not None
-    assert repository.v2_progress["generation"]["retrieval"]["query_count"] == 3
+    assert repository.v2_progress["generation"]["retrieval"]["query_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -404,6 +404,52 @@ async def test_v2_conversation_path_uses_two_llms_without_retrieval() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v2_general_human_assistance_advice_skips_document_retrieval() -> None:
+    repository = _ForbiddenRetrievalRepository(_candidate())
+    repository.turn = replace(
+        _turn(),
+        history=[
+            {"role": "USER", "content": "如何检查 VDR600 LRU 通讯线缆？"},
+            {"role": "ASSISTANT", "content": "可先检查连接和指示灯。"},
+        ],
+    )
+    completions = [
+        '{"resolved_question":"检查 VDR600 LRU 通讯线缆时，是否考虑寻求人工协助",'
+        '"scope":"IN_SCOPE","relation":"FOLLOW_UP",'
+        '"active_task":"检查 VDR600 LRU 通讯线缆",'
+        '"response_path":"CONVERSATION"}',
+        '{"answer":"如果现场无法继续安全排查，可以考虑联系海兰信工作人员咨询；'
+        '仅凭目前信息无法判断是否必须联系。"}',
+    ]
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: (_ for _ in ()).throw(
+            AssertionError("non-document path must not call embedding")
+        ),
+        rerank_factory=lambda _settings, _snapshot: (_ for _ in ()).throw(
+            AssertionError("non-document path must not call rerank")
+        ),
+        llm_factory=lambda _settings, _snapshot: FakeLlmProvider(completions=[completions.pop(0)]),
+    )
+
+    payload = await service.generate(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=repository.turn.conversation_id,
+        question="我需要联系海兰信专业人员吗？",
+        request_id="v2-general-human-assistance",
+    )
+
+    assert completions == []
+    assert payload["response_type"] == "ANSWERED"
+    assert payload["references"] == []
+    assert repository.completed is not None
+    generation = repository.completed["doc_routing"]["generation"]
+    assert generation["response_path"] == "CONVERSATION"
+    assert generation["retrieval"]["status"] == "SKIPPED"
+
+
+@pytest.mark.asyncio
 async def test_v2_conversation_answer_failure_uses_fixed_fallback_without_rag() -> None:
     repository = _ForbiddenRetrievalRepository(_candidate())
     repository.turn = _turn()
@@ -439,21 +485,24 @@ async def test_v2_conversation_answer_failure_uses_fixed_fallback_without_rag() 
 
 
 @pytest.mark.asyncio
-async def test_v2_conversation_route_with_search_signals_falls_back_to_knowledge() -> None:
-    repository = _Repository(_candidate())
+async def test_v2_conversation_route_ignores_search_signals_and_skips_retrieval() -> None:
+    repository = _ForbiddenRetrievalRepository(_candidate())
     repository.turn = _turn()
-    embedding = _CountingEmbeddingProvider(1024)
     completions = [
         '{"resolved_question":"VDR600 下一步怎么操作","search_queries":["VDR600 下一步"],'
         '"key_constraints":[],"scope":"IN_SCOPE","relation":"FOLLOW_UP",'
         '"active_task":"操作 VDR600","response_path":"CONVERSATION"}',
-        '{"response_kind":"ANSWER","basis":"DOCUMENT","answer":"继续执行下一步。",'
-        '"used_document_keys":["D1"],"used_image_keys":[],"next_suggestions":[]}',
+        '{"answer":"我可以把上一轮内容换成更容易理解的说法。"}',
     ]
     service = RagService(
         cast(RagRepository, repository),
         Settings(_env_file=None, app_env="test"),
-        embedding_factory=lambda _settings: embedding,
+        embedding_factory=lambda _settings: (_ for _ in ()).throw(
+            AssertionError("conversation path must not call embedding")
+        ),
+        rerank_factory=lambda _settings, _snapshot: (_ for _ in ()).throw(
+            AssertionError("conversation path must not call rerank")
+        ),
         llm_factory=lambda _settings, _snapshot: FakeLlmProvider(completions=[completions.pop(0)]),
     )
 
@@ -464,32 +513,31 @@ async def test_v2_conversation_route_with_search_signals_falls_back_to_knowledge
         request_id="v2-conversation-conflict",
     )
 
-    assert embedding.calls == 1
     assert repository.completed is not None
     generation = repository.completed["doc_routing"]["generation"]
-    assert generation["response_path"] == "KNOWLEDGE"
-    assert generation["query_interpreter"]["model_response_path"] == "CONVERSATION"
-    assert generation["query_interpreter"]["route_fallback_reason"] == ("KNOWLEDGE_SIGNALS_PRESENT")
-    assert repository.completed["citation_result"]["response_path"] == "KNOWLEDGE"
+    assert generation["response_path"] == "CONVERSATION"
+    assert generation["query_interpreter"]["response_path"] == "CONVERSATION"
+    assert "route_fallback_reason" not in generation["query_interpreter"]
+    assert repository.completed["citation_result"]["response_path"] == "CONVERSATION"
 
 
 @pytest.mark.asyncio
-async def test_v2_non_in_scope_conversation_route_falls_back_to_scope_handling() -> None:
-    repository = _Repository(_candidate())
+async def test_v2_scope_metadata_cannot_override_conversation_route() -> None:
+    repository = _ForbiddenRetrievalRepository(_candidate())
     repository.turn = _turn()
-    embedding = _CountingEmbeddingProvider(1024)
     completions = [
         '{"resolved_question":"写一首关于大海的诗","search_queries":[],'
         '"key_constraints":[],"scope":"OUT_OF_SCOPE","relation":"NEW_TASK",'
         '"active_task":null,"response_path":"CONVERSATION"}',
-        '{"response_kind":"ANSWER","basis":"GENERAL","answer":"这是一首诗。",'
-        '"used_document_keys":[],"used_image_keys":[],"next_suggestions":[]}',
+        '{"answer":"我主要协助当前产品相关问题。"}',
     ]
 
     service = RagService(
         cast(RagRepository, repository),
         Settings(_env_file=None, app_env="test"),
-        embedding_factory=lambda _settings: embedding,
+        embedding_factory=lambda _settings: (_ for _ in ()).throw(
+            AssertionError("conversation path must not call embedding")
+        ),
         llm_factory=lambda _settings, _snapshot: FakeLlmProvider(completions=[completions.pop(0)]),
     )
 
@@ -503,10 +551,10 @@ async def test_v2_non_in_scope_conversation_route_falls_back_to_scope_handling()
     assert payload["response_type"] == "OUT_OF_SCOPE"
     assert repository.completed is not None
     generation = repository.completed["doc_routing"]["generation"]
-    assert generation["response_path"] == "KNOWLEDGE"
-    assert generation["query_interpreter"]["model_response_path"] == "CONVERSATION"
-    assert generation["query_interpreter"]["route_fallback_reason"] == ("NON_IN_SCOPE_CONVERSATION")
-    assert repository.completed["citation_result"]["response_path"] == "KNOWLEDGE"
+    assert generation["response_path"] == "CONVERSATION"
+    assert generation["query_interpreter"]["scope"] == "OUT_OF_SCOPE"
+    assert "route_fallback_reason" not in generation["query_interpreter"]
+    assert repository.completed["citation_result"]["response_path"] == "CONVERSATION"
     assert "conversation_answer" not in repository.completed["usage"]
 
 

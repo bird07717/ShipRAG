@@ -142,7 +142,6 @@ class Settings(BaseSettings):
     m3_rag_scope_max_tokens: int = 800
     m3_rag_query_interpreter_max_tokens: int = 512
     m3_rag_query_interpreter_timeout_seconds: float = 25.0
-    m3_rag_query_variant_limit: int = 3
     m3_rag_document_card_top_k: int = 5
     # Fast-fail ceilings below the turn deadline: a hung upstream request
     # retries once (embedding, idempotent and cheap) or degrades to
@@ -455,7 +454,6 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "m3_rag_query_variant_limit",
         "m3_rag_document_card_top_k",
         "m3_rag_full_document_limit",
         "m3_rag_history_max_rounds",

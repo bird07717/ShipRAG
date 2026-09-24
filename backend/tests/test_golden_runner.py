@@ -131,6 +131,7 @@ def test_v2_trace_expectations_cover_shortcut_and_conversation_routes() -> None:
                     "generation": {
                         "pipeline": "V2",
                         "response_path": "CONVERSATION",
+                        "query_interpreter": {"relation": "FOLLOW_UP"},
                         "retrieval": {"status": "SKIPPED"},
                     }
                 }
@@ -138,6 +139,7 @@ def test_v2_trace_expectations_cover_shortcut_and_conversation_routes() -> None:
             {
                 "trace_response_path": "CONVERSATION",
                 "trace_retrieval_status": "SKIPPED",
+                "trace_relation": "FOLLOW_UP",
             },
         )
         == []

@@ -100,7 +100,6 @@ def _queries(question: str, interpretation: QueryInterpretation) -> list[Semanti
                 "CONTEXT_ANCHOR",
             )
         )
-    entries.extend((item, "INTERPRETER") for item in interpretation.search_queries)
     for text, source in entries:
         cleaned = " ".join(text.split())
         key = _query_key(cleaned)

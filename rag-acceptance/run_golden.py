@@ -33,9 +33,7 @@ BOOK_TITLE_PATTERN = re.compile(r"《([^》]{2,120})》")
 def normalize(value: str) -> str:
     value = unicodedata.normalize("NFKC", str(value or "")).casefold()
     return "".join(
-        ch
-        for ch in value
-        if not ch.isspace() and not unicodedata.category(ch).startswith("P")
+        ch for ch in value if not ch.isspace() and not unicodedata.category(ch).startswith("P")
     )
 
 
@@ -153,9 +151,7 @@ def evaluate(expected: dict[str, Any], hits: set[str]) -> tuple[bool, list[str]]
     # document-level constraint.
     matched = any(any(k in h for k in keys) for h in hit_norms) if keys else True
     if not matched:
-        problems.append(
-            f"未命中期望文档 keys={expected.get('document_keys')} 实际={sorted(hits)}"
-        )
+        problems.append(f"未命中期望文档 keys={expected.get('document_keys')} 实际={sorted(hits)}")
     bad = {h for h in hit_norms if any(f in h for f in forbidden)}
     if bad:
         problems.append(f"命中了禁止文档: {sorted(bad)}")
@@ -218,32 +214,31 @@ def v2_trace_hits(
     )
 
 
-def v2_trace_expectation_problems(
-    trace: dict[str, Any], expected: dict[str, Any]
-) -> list[str]:
+def v2_trace_expectation_problems(trace: dict[str, Any], expected: dict[str, Any]) -> list[str]:
     generation = (trace.get("runtime_snapshot") or {}).get("generation") or {}
     problems: list[str] = []
 
     expected_path = expected.get("trace_response_path")
     if expected_path is not None and generation.get("response_path") != expected_path:
         problems.append(
-            "V2 Trace 回答路径不符: "
-            f"{generation.get('response_path')}，期望 {expected_path}"
+            f"V2 Trace 回答路径不符: {generation.get('response_path')}，期望 {expected_path}"
         )
 
     expected_guard = expected.get("trace_input_guard")
     if expected_guard is not None and generation.get("input_guard") != expected_guard:
         problems.append(
-            "V2 Trace 输入短路不符: "
-            f"{generation.get('input_guard')}，期望 {expected_guard}"
+            f"V2 Trace 输入短路不符: {generation.get('input_guard')}，期望 {expected_guard}"
         )
 
     expected_retrieval = expected.get("trace_retrieval_status")
     actual_retrieval = (generation.get("retrieval") or {}).get("status")
     if expected_retrieval is not None and actual_retrieval != expected_retrieval:
-        problems.append(
-            f"V2 Trace 检索状态不符: {actual_retrieval}，期望 {expected_retrieval}"
-        )
+        problems.append(f"V2 Trace 检索状态不符: {actual_retrieval}，期望 {expected_retrieval}")
+
+    expected_relation = expected.get("trace_relation")
+    actual_relation = (generation.get("query_interpreter") or {}).get("relation")
+    if expected_relation is not None and actual_relation != expected_relation:
+        problems.append(f"V2 Trace 上下文关系不符: {actual_relation}，期望 {expected_relation}")
     return problems
 
 
@@ -398,9 +393,7 @@ async def main() -> int:
         cases = [case for case in cases if case.get("id") in selected_ids]
         missing_ids = selected_ids - {str(case.get("id")) for case in cases}
         if missing_ids:
-            raise SystemExit(
-                "未找到指定 Golden 用例: " + ", ".join(sorted(missing_ids))
-            )
+            raise SystemExit("未找到指定 Golden 用例: " + ", ".join(sorted(missing_ids)))
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
     external_user_id = args.external_user_id or f"golden-assistant-{run_id}"
@@ -436,9 +429,7 @@ async def main() -> int:
                 return 2
             observer_token = _env_value("GOLDEN_TOKEN", "SERVICE_TOKEN")
             if not observer_token:
-                print(
-                    "V2 Assistant Golden 需要 GOLDEN_TOKEN 或 SERVICE_TOKEN 读取内部 Trace"
-                )
+                print("V2 Assistant Golden 需要 GOLDEN_TOKEN 或 SERVICE_TOKEN 读取内部 Trace")
                 return 2
             docs_resp = await client.get(
                 f"{args.base_url}/api/v1/knowledge-bases/{args.kb_id}/documents",
@@ -449,15 +440,9 @@ async def main() -> int:
                 print(f"Golden 内部文档目录不可用: HTTP {docs_resp.status_code}")
                 return 2
             docs_payload = docs_resp.json()
-            docs = (
-                docs_payload
-                if isinstance(docs_payload, list)
-                else docs_payload.get("items", [])
-            )
+            docs = docs_payload if isinstance(docs_payload, list) else docs_payload.get("items", [])
             catalog_by_id = {
-                str(item["id"]): str(
-                    item.get("display_name") or item.get("filename") or ""
-                )
+                str(item["id"]): str(item.get("display_name") or item.get("filename") or "")
                 for item in docs
                 if item.get("id")
             }
@@ -474,15 +459,11 @@ async def main() -> int:
                 timeout=30.0,
             )
             if docs_resp.status_code != 200:
-                print(
-                    f"知识库目录接口不可用: HTTP {docs_resp.status_code} {docs_resp.text[:200]}"
-                )
+                print(f"知识库目录接口不可用: HTTP {docs_resp.status_code} {docs_resp.text[:200]}")
                 return 2
             docs = docs_resp.json()
             docs = docs if isinstance(docs, list) else docs.get("items", [])
-            catalog = [
-                str(d.get("display_name") or d.get("filename") or "") for d in docs
-            ]
+            catalog = [str(d.get("display_name") or d.get("filename") or "") for d in docs]
             catalog_norm = {t: normalize(t) for t in catalog if t}
             print(f"知识库目录: {len(catalog_norm)} 份文档")
 
@@ -522,14 +503,10 @@ async def main() -> int:
                         }
                     )
                     case_result["passed"] = False
-                    print(
-                        f"[FAIL] {case['id']}#{step} {turn['question'][:24]} -> {error}"
-                    )
+                    print(f"[FAIL] {case['id']}#{step} {turn['question'][:24]} -> {error}")
                     break
 
-                conversation_id = str(
-                    payload.get("conversation_id") or conversation_id or ""
-                )
+                conversation_id = str(payload.get("conversation_id") or conversation_id or "")
                 expected = turn["expected"]
                 public_hits = extract_hits(
                     payload,
@@ -550,9 +527,7 @@ async def main() -> int:
                     if observation_error:
                         observation_problems.append(observation_error)
                     elif trace is not None:
-                        is_v2, hidden_hits, trace_problems = v2_trace_hits(
-                            trace, catalog_by_id
-                        )
+                        is_v2, hidden_hits, trace_problems = v2_trace_hits(trace, catalog_by_id)
                         if is_v2:
                             expected = v2_expected(expected)
                             hits = hidden_hits
@@ -594,9 +569,7 @@ async def main() -> int:
                 await asyncio.sleep(0.5)
             results.append(case_result)
 
-    by_category: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"cases": 0, "passed": 0}
-    )
+    by_category: dict[str, dict[str, Any]] = defaultdict(lambda: {"cases": 0, "passed": 0})
     latencies: list[float] = []
     for case in results:
         bucket = by_category[case["category"]]
@@ -621,9 +594,7 @@ async def main() -> int:
             cat: {
                 "cases": stats["cases"],
                 "passed": stats["passed"],
-                "pass_rate": round(stats["passed"] / stats["cases"], 4)
-                if stats["cases"]
-                else 0.0,
+                "pass_rate": round(stats["passed"] / stats["cases"], 4) if stats["cases"] else 0.0,
             }
             for cat, stats in sorted(by_category.items())
         },
@@ -638,17 +609,13 @@ async def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"baseline-{run_id}.json"
-    out_path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print("\n===== 黄金集基线报告 =====")
     print(f"接口模式: {args.api_mode}")
     print(f"用例: {total} | 通过: {passed} | 通过率: {report['pass_rate']:.1%}")
     for cat, stats in report["by_category"].items():
-        print(
-            f"  {cat:<14} {stats['passed']}/{stats['cases']}  ({stats['pass_rate']:.0%})"
-        )
+        print(f"  {cat:<14} {stats['passed']}/{stats['cases']}  ({stats['pass_rate']:.0%})")
     lat = report["latency_ms"]
     print(f"延迟: p50={lat['p50']:.0f}ms p95={lat['p95']:.0f}ms max={lat['max']:.0f}ms")
     print(f"报告: {out_path}")

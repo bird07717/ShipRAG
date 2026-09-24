@@ -27,7 +27,6 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
         "M3_RAG_ANSWER_REPAIR_ATTEMPTS",
         "M3_RAG_QUERY_INTERPRETER_MAX_TOKENS",
         "M3_RAG_QUERY_INTERPRETER_TIMEOUT_SECONDS",
-        "M3_RAG_QUERY_VARIANT_LIMIT",
         "M3_RAG_DOCUMENT_CARD_TOP_K",
         "M3_DOC_LOCK_BEST_FLOOR",
         "M3_DOC_SINGLE_CLARIFY_BEST_FLOOR",
@@ -53,7 +52,6 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
     assert settings.m3_rag_answer_repair_attempts == 1
     assert settings.m3_rag_query_interpreter_max_tokens == 512
     assert settings.m3_rag_query_interpreter_timeout_seconds == 25.0
-    assert settings.m3_rag_query_variant_limit == 3
     assert settings.m3_rag_document_card_top_k == 5
     assert settings.m3_doc_lock_best_floor == 0.70
     assert settings.m3_doc_single_clarify_best_floor == 0.65
@@ -66,7 +64,6 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("m3_rag_query_variant_limit", 0),
         ("m3_rag_document_card_top_k", 21),
         ("m3_rag_query_interpreter_timeout_seconds", 0),
         ("m3_rag_query_interpreter_max_tokens", 99),

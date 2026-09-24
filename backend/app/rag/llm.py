@@ -161,8 +161,6 @@ class FakeLlmProvider:
                 return schema.model_validate(
                     {
                         "resolved_question": question,
-                        "search_queries": [],
-                        "key_constraints": [],
                         "scope": "IN_SCOPE",
                         "relation": "NEW_TASK",
                         "active_task": None,

@@ -38,7 +38,6 @@ staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐�
 | `M3_RAG_SCOPE_MAX_TOKENS` | `800` | 每轮知识库名称/公开范围说明的 Prompt 快照估算 Token 上限；只截断运行时副本，不改数据库说明。 |
 | `M3_RAG_QUERY_INTERPRETER_MAX_TOKENS` | `512` | LLM 1 结构化查询理解输出上限。 |
 | `M3_RAG_QUERY_INTERPRETER_TIMEOUT_SECONDS` | `25.0` | LLM 1 单次调用时限；完整超时不重试，进入短追问历史兜底。 |
-| `M3_RAG_QUERY_VARIANT_LIMIT` | `3` | LLM 1 补充检索查询上限。 |
 | `M3_RAG_DOCUMENT_CARD_TOP_K` | `5` | 文档卡片候选上限。 |
 | `M3_TURN_DEADLINE_SECONDS` | `90.0` | 单轮 RAG 总时限；必须大于 Query Interpreter 与 Answer Generator 时限之和。 |
 | `M3_QUERY_EMBEDDING_TIMEOUT_SECONDS` | `10.0` | 查询向量请求的单次快速失败时限。 |
@@ -145,7 +144,7 @@ V2 配置见上表。Query 与 Answer 两段超时之和必须小于 `M3_TURN_DE
 
 V4.1 文档级排序复用现有 Rerank Provider、`M3_RERANK_TIMEOUT_SECONDS` 和模型快照，不增加环境变量或第三次 LLM。候选池内部最多取 `max(M3_RAG_FULL_DOCUMENT_LIMIT, M3_RAG_DOCUMENT_CARD_TOP_K)` 份用于排序，最终全文上限仍由 `M3_RAG_FULL_DOCUMENT_LIMIT=3` 控制。当前未调整 Chunk、向量/BM25 Top-K、卡片 Top-K 或 20,000 Token 全文预算；后续只有在多轮 Trace 显示稳定的召回或上下文问题时才单变量调整。
 
-V4.2 没有新增配置。有效 V2 的 `prepare()` 只冻结轮次和覆盖参数，查询解释完成后将去重后的原问题、独立问题、可选任务锚点和补充查询合并为一次批量 Embedding，再执行一次文档级 Rerank；不再先跑 legacy 检索后把候选二次混入。短追问由 LLM 1 输出 `FOLLOW_UP/CORRECTION + active_task`，任务锚点参与召回和排序；新任务不加入该锚点。修改后无需迁移或索引重建，只需重启 API 进程并使用新会话/新幂等键验证。
+V4.2 没有新增配置。有效 V2 的 `prepare()` 只冻结轮次和覆盖参数，查询解释完成后将去重后的原问题、独立请求和可选任务锚点合并为一次批量 Embedding，再执行一次文档级 Rerank；LLM 1 不再输出补充检索查询。短追问由 LLM 1 输出 `FOLLOW_UP/CORRECTION + active_task`，任务锚点参与召回和排序；新任务不加入该锚点。修改后无需迁移或索引重建，只需重启 API 进程并使用新会话/新幂等键验证。
 
 V4.3 同样没有新增配置、迁移或索引要求。它只增强 LLM 2 的多文档证据覆盖规则，并在公开组装层兼容成组图片别名；部署后重启 API 即可。验证需检查回答正文不含 `[IMG:`，图片仍为结构化 `content` 块，并复测“更换后/下一步/仍失败”类多文档追问。
 

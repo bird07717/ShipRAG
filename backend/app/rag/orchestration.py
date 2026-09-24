@@ -8,7 +8,7 @@ from typing import Literal
 
 from app.rag.models import DocumentCardCandidate, RetrievalCandidate
 
-QuerySource = Literal["ORIGINAL", "STANDALONE", "CONTEXT_ANCHOR", "INTERPRETER"]
+QuerySource = Literal["ORIGINAL", "STANDALONE", "CONTEXT_ANCHOR"]
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,7 +9,7 @@ from typing import Any
 from app.core.config import Settings
 from app.rag.llm import LlmError, LlmProvider
 from app.rag.models import ModelSnapshot, PreparedRag
-from app.rag.response import ChatResult, TraceDiagnosticReason
+from app.rag.response import OUT_OF_SCOPE_MESSAGE, ChatResult, TraceDiagnosticReason
 from app.rag.v2.answer_generator import (
     apply_scope_authority,
     build_answer_prompt,
@@ -70,6 +70,8 @@ class RagV2Pipeline:
         prepared: PreparedRag,
         *,
         question: str,
+        resolved_question: str,
+        interpreted_scope: str,
         product_name: str,
         scope_description: str,
         query_usage: dict[str, Any],
@@ -100,8 +102,39 @@ class RagV2Pipeline:
             timings=timings,
         )
 
+        if interpreted_scope == "OUT_OF_SCOPE":
+            result = build_conversation_result(OUT_OF_SCOPE_MESSAGE, out_of_scope=True)
+            timings["v2_answer_generator_ms"] = 0
+            return RagV2Result(
+                result=result,
+                usage={
+                    "pipeline": "V2",
+                    "response_path": "CONVERSATION",
+                    "query_interpreter": query_usage,
+                },
+                trace={
+                    "pipeline": "V2",
+                    "response_path": "CONVERSATION",
+                    "query_interpreter": query_trace,
+                    "retrieval": retrieval_trace,
+                    "context": context_trace,
+                    "answer": {
+                        "status": "PASSED",
+                        "response_kind": "OUT_OF_SCOPE",
+                        "basis": "CONVERSATION",
+                        "used_document_count": 0,
+                        "used_image_count": 0,
+                        "answer_sha256": hashlib.sha256(result.answer.encode("utf-8")).hexdigest(),
+                        "fallback_applied": False,
+                    },
+                },
+                timings=timings,
+                next_suggestions=[],
+            )
+
         prompt = build_conversation_prompt(
             question=question,
+            resolved_question=resolved_question,
             history=turn.history,
             product_name=turn.knowledge_name or product_name,
             scope_description=turn.scope_description or scope_description,
@@ -206,7 +239,6 @@ class RagV2Pipeline:
                 knowledge_name=turn.knowledge_name or product_name,
                 scope_description=turn.scope_description or scope_description,
                 max_rounds=self.settings.m3_rag_history_max_rounds,
-                variant_limit=self.settings.m3_rag_query_variant_limit,
                 max_tokens=self.settings.m3_rag_query_interpreter_max_tokens,
                 timeout_seconds=self.settings.m3_rag_query_interpreter_timeout_seconds,
             )
@@ -232,28 +264,16 @@ class RagV2Pipeline:
                 await query_provider.aclose()
         timings["v2_query_interpreter_ms"] = round((time.perf_counter() - query_started) * 1000)
 
-        requested_path = query_outcome.interpretation.response_path
-        scope_conflict = (
-            requested_path == "CONVERSATION" and query_outcome.interpretation.scope != "IN_SCOPE"
-        )
-        knowledge_signal_conflict = requested_path == "CONVERSATION" and bool(
-            query_outcome.interpretation.search_queries
-            or query_outcome.interpretation.key_constraints
-        )
-        route_conflict = scope_conflict or knowledge_signal_conflict
-        response_path = "KNOWLEDGE" if route_conflict else requested_path
+        response_path = query_outcome.interpretation.response_path
         query_trace = query_outcome.trace_dict()
         query_trace["response_path"] = response_path
-        if route_conflict:
-            query_trace["model_response_path"] = requested_path
-            query_trace["route_fallback_reason"] = (
-                "NON_IN_SCOPE_CONVERSATION" if scope_conflict else "KNOWLEDGE_SIGNALS_PRESENT"
-            )
 
         if response_path == "CONVERSATION":
             return await self._run_conversation_path(
                 prepared,
                 question=question,
+                resolved_question=query_outcome.interpretation.resolved_question,
+                interpreted_scope=query_outcome.interpretation.scope,
                 product_name=product_name,
                 scope_description=scope_description,
                 query_usage=query_usage,

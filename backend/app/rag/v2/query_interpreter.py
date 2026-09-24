@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.rag.llm import LlmError, LlmProvider
 
@@ -26,8 +26,6 @@ class QueryInterpretation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     resolved_question: str = Field(min_length=1, max_length=4_000)
-    search_queries: list[str] = Field(default_factory=list, max_length=3)
-    key_constraints: list[str] = Field(default_factory=list, max_length=8)
     scope: Literal["IN_SCOPE", "OUT_OF_SCOPE", "UNCERTAIN"] = "UNCERTAIN"
     relation: Literal["NEW_TASK", "FOLLOW_UP", "CORRECTION"] = "NEW_TASK"
     active_task: str | None = Field(default=None, max_length=1_000)
@@ -38,18 +36,15 @@ class QueryInterpretation(BaseModel):
     def clean_question(cls, value: str) -> str:
         return " ".join(value.split())
 
-    @field_validator("search_queries", "key_constraints")
+    @model_validator(mode="before")
     @classmethod
-    def clean_list(cls, values: list[str]) -> list[str]:
-        result: list[str] = []
-        seen: set[str] = set()
-        for value in values:
-            cleaned = " ".join(value.split())
-            key = cleaned.casefold()
-            if cleaned and key not in seen:
-                seen.add(key)
-                result.append(cleaned)
-        return result
+    def discard_legacy_retrieval_plan(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        normalized.pop("search_queries", None)
+        normalized.pop("key_constraints", None)
+        return normalized
 
     @field_validator("active_task")
     @classmethod
@@ -83,8 +78,6 @@ class QueryInterpretationOutcome:
             "history_fallback_reason": self.history_fallback_reason,
             "scope": self.interpretation.scope,
             "resolved_question_chars": len(self.interpretation.resolved_question),
-            "search_query_count": len(self.interpretation.search_queries),
-            "constraint_count": len(self.interpretation.key_constraints),
             "relation": self.interpretation.relation,
             "response_path": self.interpretation.response_path,
             "active_task_chars": len(active_task),
@@ -152,8 +145,6 @@ def fallback_interpretation(
     return (
         QueryInterpretation(
             resolved_question=f"{active_task}；当前追问：{clean_question}",
-            search_queries=[],
-            key_constraints=[],
             scope="UNCERTAIN",
             relation="FOLLOW_UP",
             active_task=active_task,
@@ -201,7 +192,6 @@ async def interpret_query(
     knowledge_name: str,
     scope_description: str,
     max_rounds: int,
-    variant_limit: int,
     max_tokens: int,
     timeout_seconds: float,
 ) -> QueryInterpretationOutcome:
@@ -217,15 +207,40 @@ async def interpret_query(
             "output_schema": QueryInterpretation.model_json_schema(),
             "output_example": {
                 "resolved_question": "配置 VAU 图像时电脑网卡应设置什么 IP",
-                "search_queries": ["VAU 图像配置 电脑网络参数"],
-                "key_constraints": ["电脑网卡参数"],
                 "scope": "IN_SCOPE",
                 "relation": "FOLLOW_UP",
                 "active_task": "配置 VAU 图像",
                 "response_path": "KNOWLEDGE",
             },
+            "route_examples": [
+                {
+                    "current_question": "你能帮我做什么",
+                    "response_path": "CONVERSATION",
+                    "reason": "只需概括助手能力，不需要列举或核实具体文档覆盖",
+                },
+                {
+                    "current_question": "好的，我同意联系海兰信进行专业检查",
+                    "response_path": "CONVERSATION",
+                    "reason": "只确认既有建议，没有请求新判断",
+                },
+                {
+                    "current_question": "我需要联系海兰信专业人员吗",
+                    "response_path": "CONVERSATION",
+                    "reason": "询问是否寻求人工协助，不要求从文档确认技术事实或官方规定",
+                },
+                {
+                    "current_question": "文档是否规定 LRU 故障必须联系工作人员",
+                    "response_path": "KNOWLEDGE",
+                    "reason": "需要核实文档中的具体规定",
+                },
+                {
+                    "current_question": "上面的内容我看不懂，请简单解释",
+                    "response_path": "CONVERSATION",
+                    "reason": "只改写最近回答，不请求新事实",
+                },
+            ],
             "rules": [
-                "把当前问题还原为可独立检索的问题，不决定回答篇幅或公开形式。",
+                "把当前问题还原为可独立理解的请求，不决定回答篇幅或公开形式。",
                 (
                     "knowledge_base.name 和 knowledge_base.scope 是管理员维护的可信产品"
                     "档案。询问该产品本身是什么、用途、组成、原理、使用、维护或故障时，"
@@ -250,32 +265,31 @@ async def interpret_query(
                     "同时包含继承任务和当前所问属性；NEW_TASK 不得携带旧任务。"
                 ),
                 "必须保留当前所问属性的技术含义，不得把地址、目录、路径或参数互相替换。",
-                f"search_queries 最多 {variant_limit} 条，只补充有助召回的同义表达。",
-                "每条补充查询都应包含已还原的设备或部件名称，避免检索到其他设备的相似操作。",
-                "原始问题由服务器强制参与检索，不需要重复堆砌。",
                 (
                     "只有请求目标明显与知识库产品及其技术原理无关时才输出 OUT_OF_SCOPE；"
                     "仅把产品名称当作无关创作或闲聊素材，不会让无关任务变成产品问题。"
                 ),
                 (
                     "如果 current_question 同时包含产品技术任务和写作、娱乐、闲聊等无关"
-                    "附加任务，只保留产品技术任务写入 resolved_question/search_queries，"
+                    "附加任务，只保留产品技术任务写入 resolved_question，"
                     "忽略无关部分，并按产品技术任务判断 scope。"
                 ),
                 (
-                    "response_path 只决定后续是否需要产品知识。只在当前消息无需任何新事实、"
-                    "新判断、解释、步骤、参数、诊断、安全建议或外部信息，且仅为确认/同意、"
-                    "致谢/反馈、结束对话、询问助手能力，或改写/压缩/总结最近回答时，输出 "
-                    "CONVERSATION。CONVERSATION 不等于 OUT_OF_SCOPE。"
+                    "response_path 是是否检索的唯一决定，依据是回答是否需要文档提供产品专有"
+                    "事实或技术依据，而不是是否需要作出新判断。确认/同意、致谢、概括助手"
+                    "能提供哪类帮助、"
+                    "改写既有回答，以及一般性的沟通和人工协助建议，无需文档时输出 "
+                    "CONVERSATION；该路径可以给谨慎的通用建议，但不得声称文档或官方要求。"
                 ),
                 (
-                    "只要请求包含产品或工程问题、追问原因或下一步、核实服务能力/事实，"
-                    "或同时包含对话表达和技术任务，就输出 KNOWLEDGE；无法确定时也必须输出 "
-                    "KNOWLEDGE。"
+                    "产品参数、操作步骤、故障原因或下一步技术处置，以及官方服务能力、"
+                    "联系方式、服务条款或文档是否规定某事等需要核实的事实，输出 "
+                    "KNOWLEDGE；同时包含一般建议和技术任务时也输出 KNOWLEDGE。"
+                    "无法判断能否脱离文档安全回答时，保守输出 KNOWLEDGE。"
                 ),
                 (
-                    "response_path=CONVERSATION 时 search_queries 和 key_constraints 必须为空；"
-                    "不得为了走 CONVERSATION 删除消息中真实存在的技术任务。"
+                    "不要因为消息出现产品名、厂商名或历史技术内容，就把无需文档的请求判为"
+                    " KNOWLEDGE；也不得为了走 CONVERSATION 删除消息中真实存在的技术任务。"
                 ),
                 "scope 只能是 IN_SCOPE、OUT_OF_SCOPE 或 UNCERTAIN。",
                 "relation 只能是 NEW_TASK、FOLLOW_UP 或 CORRECTION。",
@@ -325,7 +339,7 @@ async def interpret_query(
         )
     return QueryInterpretationOutcome(
         "PASSED",
-        result.model_copy(update={"search_queries": result.search_queries[:variant_limit]}),
+        result,
         round((time.perf_counter() - started_at) * 1000),
         attempts=attempts,
     )

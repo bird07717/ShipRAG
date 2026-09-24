@@ -9,7 +9,10 @@ from app.rag.v2.answer_generator import build_answer_prompt
 from app.rag.v2.conversation_answer import build_conversation_prompt
 from app.rag.v2.document_context import DocumentContext
 from app.rag.v2.history import select_complete_round_history
-from app.rag.v2.query_interpreter import QueryInterpretation, interpret_query
+from app.rag.v2.query_interpreter import (
+    QueryInterpretation,
+    interpret_query,
+)
 
 
 class _CapturingFakeLlmProvider(FakeLlmProvider):
@@ -299,6 +302,7 @@ def test_conversation_prompt_uses_only_latest_round_and_forbids_new_facts() -> N
     prompt = json.loads(
         build_conversation_prompt(
             question="把刚才的建议压缩成三点",
+            resolved_question="把上一轮关于 VDR600 的建议压缩成三点",
             history=[
                 {"role": "USER", "content": "更早的问题"},
                 {"role": "ASSISTANT", "content": "更早的回答"},
@@ -314,8 +318,10 @@ def test_conversation_prompt_uses_only_latest_round_and_forbids_new_facts() -> N
         {"role": "USER", "content": "刚才的问题"},
         {"role": "ASSISTANT", "content": "刚才的技术建议"},
     ]
+    assert prompt["standalone_request"] == "把上一轮关于 VDR600 的建议压缩成三点"
     assert "更早的问题" not in json.dumps(prompt, ensure_ascii=False)
-    assert any("不得新增产品事实" in rule for rule in prompt["rules"])
+    assert any("不得编造产品专有事实" in rule for rule in prompt["rules"])
+    assert any("人工协助" in rule for rule in prompt["rules"])
     assert any("不得声称已经检索" in rule for rule in prompt["rules"])
 
 
@@ -339,19 +345,25 @@ async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up(
         knowledge_name="VDR600",
         scope_description="VDR600 技术支持",
         max_rounds=4,
-        variant_limit=3,
         max_tokens=512,
         timeout_seconds=5,
     )
 
     prompt = json.loads(provider.prompt)
+    assert [item["response_path"] for item in prompt["route_examples"]] == [
+        "CONVERSATION",
+        "CONVERSATION",
+        "CONVERSATION",
+        "KNOWLEDGE",
+        "CONVERSATION",
+    ]
     assert "answer_depth" not in prompt["output_example"]
     assert any("不决定回答篇幅" in rule for rule in prompt["rules"])
     assert any("可信产品档案" in rule for rule in prompt["rules"])
     assert any("该产品本身是什么" in rule for rule in prompt["rules"])
     assert any("无关创作或闲聊素材" in rule for rule in prompt["rules"])
-    assert any("新事实" in rule and "CONVERSATION" in rule for rule in prompt["rules"])
-    assert any("无法确定" in rule and "KNOWLEDGE" in rule for rule in prompt["rules"])
+    assert any("是否需要文档" in rule and "CONVERSATION" in rule for rule in prompt["rules"])
+    assert any("无法判断" in rule and "KNOWLEDGE" in rule for rule in prompt["rules"])
     assert prompt["recent_completed_rounds"] == [
         {
             "user_request": "请完整展示更换 PSU 电源板的步骤",
@@ -373,6 +385,33 @@ async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up(
 
 
 @pytest.mark.asyncio
+async def test_query_interpreter_uses_model_route_without_contact_override() -> None:
+    provider = _CapturingFakeLlmProvider(
+        '{"resolved_question":"在 VDR600 LRU 排查中是否寻求人工协助",'
+        '"scope":"IN_SCOPE","relation":"FOLLOW_UP",'
+        '"active_task":"检查 VDR600 LRU 通讯线缆",'
+        '"response_path":"CONVERSATION"}'
+    )
+    outcome = await interpret_query(
+        provider,
+        question="我需要联系海兰信专业人员吗",
+        history=[
+            {"role": "USER", "content": "如何检查 VDR600 LRU 通讯线缆？"},
+            {"role": "ASSISTANT", "content": "先检查连接。"},
+        ],
+        knowledge_name="VDR600",
+        scope_description="VDR600 技术支持",
+        max_rounds=4,
+        max_tokens=512,
+        timeout_seconds=5,
+    )
+    assert provider.prompt
+    assert outcome.interpretation.relation == "FOLLOW_UP"
+    assert outcome.interpretation.response_path == "CONVERSATION"
+    assert outcome.attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_query_interpreter_timeout_inherits_elliptical_short_follow_up() -> None:
     provider = _AlwaysFailLlmProvider(
         LlmError("UPSTREAM_TIMEOUT", "模型服务响应超时", retryable=True)
@@ -388,7 +427,6 @@ async def test_query_interpreter_timeout_inherits_elliptical_short_follow_up() -
         knowledge_name="VDR600",
         scope_description="VDR600 技术支持",
         max_rounds=4,
-        variant_limit=3,
         max_tokens=512,
         timeout_seconds=25,
     )
@@ -421,7 +459,6 @@ async def test_query_interpreter_timeout_does_not_inherit_explicit_new_task() ->
         knowledge_name="VDR600",
         scope_description="VDR600 技术支持",
         max_rounds=4,
-        variant_limit=3,
         max_tokens=512,
         timeout_seconds=25,
     )
@@ -451,7 +488,6 @@ async def test_query_interpreter_retries_one_immediate_transient_failure() -> No
         knowledge_name="VDR600",
         scope_description="VDR600 技术支持",
         max_rounds=4,
-        variant_limit=3,
         max_tokens=512,
         timeout_seconds=25,
     )
@@ -477,7 +513,6 @@ async def test_query_interpreter_missing_response_path_falls_back_to_knowledge()
         knowledge_name="VDR600",
         scope_description="VDR600 技术支持",
         max_rounds=4,
-        variant_limit=3,
         max_tokens=512,
         timeout_seconds=25,
     )
