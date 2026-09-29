@@ -186,7 +186,7 @@ async function loadMetrics() {
 }
 
 function autoRefresh(): void {
-  if (!metricsLoading.value) {
+  if (store.hasServiceCredential && !metricsLoading.value) {
     void loadMetrics();
   }
 }

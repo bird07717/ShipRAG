@@ -67,7 +67,10 @@ const trace: TraceSummary = {
 describe("DashboardView metrics", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     adminStore.selectedKnowledgeId = "";
+    adminStore.serviceToken = "";
+    adminStore.credentialRejected = false;
   });
 
   it("renders overview cards, trend chart and drilldown from metrics", async () => {
@@ -176,5 +179,25 @@ describe("DashboardView metrics", () => {
 
     expect(wrapper.text()).toContain("部分质量指标暂时无法加载");
     expect(wrapper.text()).not.toContain("迁移 0014");
+  });
+
+  it("stops the 60s auto-refresh once the service credential is rejected, instead of spamming 401s forever", async () => {
+    vi.useFakeTimers();
+    const overviewSpy = vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    adminStore.serviceToken = "test-service-token";
+
+    mount(DashboardView, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+    expect(overviewSpy).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(overviewSpy).toHaveBeenCalledTimes(2); // credential still valid: auto-refresh keeps polling
+
+    adminStore.credentialRejected = true;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(overviewSpy).toHaveBeenCalledTimes(2); // rejected: no further ticks call the API
   });
 });
