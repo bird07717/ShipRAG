@@ -51,21 +51,17 @@ import type {
 } from "@/types/admin";
 import { randomUUID } from "@/utils/uuid";
 import {
+  ApiRequestError,
   announceServiceCredentialRejected,
   readServiceCredential,
 } from "@/api/serviceCredential";
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
+// Re-exported so existing `import { ApiRequestError } from "@/api/admin"`
+// call sites keep working; the class now lives in the shared credential
+// module so `@/api/chat` can throw the same type without importing `admin`.
+export { ApiRequestError };
 
-export class ApiRequestError extends Error {
-  constructor(
-    message: string,
-    public readonly status: number,
-    public readonly details: Record<string, unknown> = {},
-  ) {
-    super(message);
-  }
-}
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
 function buildMetricsQuery(params: Record<string, string | undefined>): string {
   const search = new URLSearchParams();
@@ -81,7 +77,7 @@ function buildMetricsQuery(params: Record<string, string | undefined>): string {
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = readServiceCredential();
   if (!token) {
-    announceServiceCredentialRejected();
+    announceServiceCredentialRejected("missing");
     throw new ApiRequestError("服务凭证缺失，请先配置后再访问管理功能", 401, {
       request_blocked: true,
     });
@@ -96,7 +92,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
       error?: { message?: string; details?: Record<string, unknown> };
     } | null;
     if (response.status === 401 && typeof window !== "undefined") {
-      announceServiceCredentialRejected();
+      announceServiceCredentialRejected("invalid");
     }
     throw new ApiRequestError(
       body?.error?.message ?? `请求失败：HTTP ${response.status}`,

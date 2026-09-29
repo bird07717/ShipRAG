@@ -682,6 +682,23 @@ describe("adminStore", () => {
     expect(adminStore.notice).toBe("本地访问凭据已清除");
   });
 
+  it("distinguishes a never-configured credential from a rejected one", () => {
+    adminStore.saveToken("tok");
+    adminStore.rejectCredential("missing");
+    expect(adminStore.credentialRejected).toBe(true);
+    expect(adminStore.error).toBe("尚未配置服务访问凭据，请先在设置页填写后再使用管理功能");
+
+    adminStore.saveToken("tok");
+    adminStore.rejectCredential("invalid");
+    expect(adminStore.error).toBe("服务凭证缺失或无效，请重新配置");
+
+    // Defaults to the stronger "invalid" wording when a caller omits the
+    // reason (e.g. an older manually-dispatched event with no detail).
+    adminStore.saveToken("tok");
+    adminStore.rejectCredential();
+    expect(adminStore.error).toBe("服务凭证缺失或无效，请重新配置");
+  });
+
   it("reads task metadata defensively", () => {
     expect(adminStore.taskMetadata(task, "current_document")).toBe("a.docx");
     expect(adminStore.taskMetadata(undefined, "x")).toBeUndefined();

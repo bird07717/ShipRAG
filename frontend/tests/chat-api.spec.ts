@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { downloadDocument, fetchImageBlobUrl, streamChat } from "@/api/chat";
+import { ApiRequestError } from "@/api/serviceCredential";
 
 function sseResponse(frames: Array<string | Uint8Array>): Response {
   const encoder = new TextEncoder();
@@ -151,6 +152,35 @@ describe("chat API", () => {
     ).rejects.toThrow("服务凭证无效");
 
     expect(sessionStorage.getItem("rag_service_token")).toBeNull();
+    expect(rejected).toHaveBeenCalledOnce();
+  });
+
+  it("blocks chat requests locally with a typed error when no credential is configured", async () => {
+    sessionStorage.removeItem("rag_service_token");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const rejected = vi.fn();
+    window.addEventListener("rag-service-auth-rejected", rejected, { once: true });
+
+    let caught: unknown;
+    try {
+      await streamChat("kb-1", "问题", undefined, {
+        onTrace: vi.fn(),
+        onDelta: vi.fn(),
+        onDone: vi.fn(),
+        onError: vi.fn(),
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    // Same shape as admin.ts's local guard: callers can tell this apart
+    // from a real network/server failure via `details.request_blocked`,
+    // instead of both cases throwing an indistinguishable bare Error.
+    expect(caught).toBeInstanceOf(ApiRequestError);
+    expect((caught as ApiRequestError).status).toBe(401);
+    expect((caught as ApiRequestError).details).toEqual({ request_blocked: true });
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(rejected).toHaveBeenCalledOnce();
   });
 

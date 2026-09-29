@@ -88,8 +88,11 @@ const legacyViewTargets: Record<string, { view: string; query?: string }> = {
 
 const store = useAdminStore();
 
-function handleCredentialRejected(): void {
-  store.rejectCredential();
+function handleCredentialRejected(event: Event): void {
+  // Older manual dispatches (and any non-CustomEvent) carry no detail; treat
+  // that as a real rejection rather than the quieter "never configured" case.
+  const reason = (event as CustomEvent<{ reason?: "missing" | "invalid" }>).detail?.reason;
+  store.rejectCredential(reason ?? "invalid");
 }
 
 // Register during setup so child onMounted hooks cannot emit a rejection

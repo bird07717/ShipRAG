@@ -802,19 +802,30 @@ class GatewayRepository:
     async def assistant_turn_context(
         self, *, conversation_id: UUID, trace_id: UUID
     ) -> dict[str, Any]:
-        """Resolve one turn's public identifiers from an internal trace."""
+        """Resolve one turn's public identifiers from an internal trace.
+
+        ``rag_user_message_id`` is the authoritative link. The nearest-prior-
+        USER fallback is only for legacy turns that never recorded one
+        (``NULL``); a turn that *has* an explicit link but fails to resolve
+        it (wrong role, conversation, or ordering — data corruption, never
+        normal writes) must surface as "unknown" rather than silently
+        guessing a different message. Guessing here would defeat the whole
+        point of having an authoritative field.
+        """
         async with self.engine.connect() as connection:
             result = await connection.execute(
                 text(
                     """
                     SELECT t.conversation_id, t.message_id AS assistant_message_id,
-                           COALESCE(
-                               linked_user.id,
-                               (SELECT m.id FROM message m
-                                WHERE m.conversation_id = t.conversation_id
-                                  AND m.role = 'USER' AND m.sequence_no < a.sequence_no
-                                ORDER BY m.sequence_no DESC LIMIT 1)
-                           ) AS user_message_id,
+                           CASE
+                               WHEN a.rag_user_message_id IS NOT NULL THEN linked_user.id
+                               ELSE (
+                                   SELECT m.id FROM message m
+                                   WHERE m.conversation_id = t.conversation_id
+                                     AND m.role = 'USER' AND m.sequence_no < a.sequence_no
+                                   ORDER BY m.sequence_no DESC LIMIT 1
+                               )
+                           END AS user_message_id,
                            t.trace_id
                     FROM rag_trace t
                     JOIN message a ON a.id = t.message_id

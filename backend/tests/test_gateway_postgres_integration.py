@@ -263,3 +263,99 @@ async def test_rag_fallback_reuses_support_message_pair() -> None:
                 text("DELETE FROM knowledge_base WHERE id = :id"), {"id": knowledge_id}
             )
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_assistant_turn_context_reports_unknown_for_unresolvable_explicit_link() -> None:
+    """An explicit ``rag_user_message_id`` that fails to validate must resolve
+    to "unknown" (``None``), never to a guessed different message.
+
+    Guessing here would be exactly the wrong-association bug the field was
+    added to eliminate: a corrupted or self-referencing link is a data
+    problem to surface, not to paper over with an unrelated message. A
+    legacy turn that never recorded a link at all still gets the
+    nearest-prior-USER fallback.
+    """
+    database_url = os.getenv("SUPPORT_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("SUPPORT_TEST_DATABASE_URL is not configured")
+
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    knowledge_id = uuid4()
+    conversation_id = uuid4()
+    trace_id = uuid4()
+    user_message_id, other_assistant_message_id, assistant_message_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO knowledge_base (id, name) VALUES (:id, :name)"),
+                {"id": knowledge_id, "name": f"turn-context-{knowledge_id}"},
+            )
+            await connection.execute(
+                text("INSERT INTO conversation (id, knowledge_id) VALUES (:id, :knowledge_id)"),
+                {"id": conversation_id, "knowledge_id": knowledge_id},
+            )
+            for seq, (message_id, role) in enumerate(
+                [
+                    (user_message_id, "USER"),
+                    (other_assistant_message_id, "ASSISTANT"),
+                    (assistant_message_id, "ASSISTANT"),
+                ],
+                1,
+            ):
+                await connection.execute(
+                    text(
+                        "INSERT INTO message (id, conversation_id, sequence_no, role, "
+                        "content, status) VALUES (:id, :conv, :seq, :role, 'x', 'COMPLETED')"
+                    ),
+                    {"id": message_id, "conv": conversation_id, "seq": seq, "role": role},
+                )
+            # Corrupted link: points at an ASSISTANT message, not the real
+            # USER turn. A real preceding USER message still exists, which
+            # is exactly what a silent fallback would wrongly return.
+            await connection.execute(
+                text("UPDATE message SET rag_user_message_id = :bad WHERE id = :id"),
+                {"bad": other_assistant_message_id, "id": assistant_message_id},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO rag_trace (id, trace_id, request_id, kb_id, "
+                    "conversation_id, message_id, question, status, engine) "
+                    "VALUES (:id, :trace_id, 'turn-context-test', :kb_id, :conversation_id, "
+                    ":message_id, 'q', 'COMPLETED', 'RAG')"
+                ),
+                {
+                    "id": uuid4(),
+                    "trace_id": trace_id,
+                    "kb_id": knowledge_id,
+                    "conversation_id": conversation_id,
+                    "message_id": assistant_message_id,
+                },
+            )
+
+        repository = GatewayRepository(engine, Settings(_env_file=None, app_env="test"))
+        context = await repository.assistant_turn_context(
+            conversation_id=conversation_id, trace_id=trace_id
+        )
+        assert context["user_message_id"] is None
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("UPDATE message SET rag_user_message_id = NULL WHERE id = :id"),
+                {"id": assistant_message_id},
+            )
+
+        legacy_context = await repository.assistant_turn_context(
+            conversation_id=conversation_id, trace_id=trace_id
+        )
+        assert legacy_context["user_message_id"] == user_message_id
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM knowledge_base WHERE id = :id"), {"id": knowledge_id}
+            )
+        await engine.dispose()

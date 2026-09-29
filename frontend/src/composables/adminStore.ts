@@ -7,6 +7,7 @@ import {
   readServiceCredential,
   saveServiceCredential,
 } from "@/api/serviceCredential";
+import type { ServiceCredentialRejectionReason } from "@/api/serviceCredential";
 import type {
   DocumentItem,
   DocumentProfileContext,
@@ -1291,11 +1292,17 @@ export const adminStore = reactive({
     this.notice = "本地访问凭据已清除";
   },
 
-  rejectCredential(): void {
+  rejectCredential(reason: ServiceCredentialRejectionReason = "invalid"): void {
     clearServiceCredential();
     this.serviceToken = "";
     this.credentialRejected = true;
-    this.error = "服务凭证缺失或无效，请重新配置";
+    // "missing" fires the first time any request layer finds no token
+    // configured yet — an onboarding state, not a failure, so it gets a
+    // neutral prompt instead of the "invalid" wording used for a real 401.
+    this.error =
+      reason === "missing"
+        ? "尚未配置服务访问凭据，请先在设置页填写后再使用管理功能"
+        : "服务凭证缺失或无效，请重新配置";
   },
 });
 

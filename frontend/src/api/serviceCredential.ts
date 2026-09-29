@@ -1,6 +1,26 @@
 export const SERVICE_CREDENTIAL_REJECTED_EVENT = "rag-service-auth-rejected";
 
+/**
+ * Why the credential was rejected. "missing" means the request layer never
+ * sent anything (no token was configured yet) — an onboarding state, not a
+ * failure. "invalid" means the server actually returned 401 for a token
+ * that was present, i.e. the token is stale, revoked, or wrong.
+ */
+export type ServiceCredentialRejectionReason = "missing" | "invalid";
+
 const SERVICE_TOKEN_STORAGE_KEY = "rag_service_token";
+
+/** Shared HTTP error carrying enough detail to distinguish a local guard
+ * rejection (never reached the network) from a real backend response. */
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly details: Record<string, unknown> = {},
+  ) {
+    super(message);
+  }
+}
 
 export function readServiceCredential(): string {
   try {
@@ -28,9 +48,16 @@ export function clearServiceCredential(): void {
   }
 }
 
-export function announceServiceCredentialRejected(): void {
+export function announceServiceCredentialRejected(
+  reason: ServiceCredentialRejectionReason,
+): void {
   clearServiceCredential();
   if (typeof window !== "undefined") {
-    window.dispatchEvent(new Event(SERVICE_CREDENTIAL_REJECTED_EVENT));
+    window.dispatchEvent(
+      new CustomEvent<{ reason: ServiceCredentialRejectionReason }>(
+        SERVICE_CREDENTIAL_REJECTED_EVENT,
+        { detail: { reason } },
+      ),
+    );
   }
 }

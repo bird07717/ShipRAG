@@ -1,4 +1,5 @@
 import {
+  ApiRequestError,
   announceServiceCredentialRejected,
   readServiceCredential,
 } from "@/api/serviceCredential";
@@ -8,14 +9,19 @@ const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 function authHeaders(): Record<string, string> {
   const token = readServiceCredential();
   if (!token) {
-    announceServiceCredentialRejected();
-    throw new Error("服务凭证缺失，请先配置后再访问管理功能");
+    announceServiceCredentialRejected("missing");
+    // Same shape as admin.ts's local guard: callers that care can check
+    // `instanceof ApiRequestError && details.request_blocked` to tell this
+    // apart from a real network or server failure below.
+    throw new ApiRequestError("服务凭证缺失，请先配置后再访问管理功能", 401, {
+      request_blocked: true,
+    });
   }
   return { Authorization: "Bearer " + token };
 }
 
 function handleCredentialRejection(response: Response): void {
-  if (response.status === 401) announceServiceCredentialRejected();
+  if (response.status === 401) announceServiceCredentialRejected("invalid");
 }
 
 export interface ChatContentBlock {

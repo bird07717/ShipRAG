@@ -1,6 +1,6 @@
 # 当前项目状态
 
-> 本文记录当前有效状态，不是任务流水账。本地 RAG 路由与真实模型验证更新至 2026-09-24；生产端未部署本轮改动。
+> 本文记录当前有效状态，不是任务流水账。本地 RAG 路由与真实模型验证更新至 2026-09-24；2026-09-29 核对生产 HEAD 为 `043ca38`，与本地历史提交一致（含 ADR-0026/0027 两路径路由），此前"生产端未部署"的记录已过期。
 
 ## Dashboard 回答结果指标收口（2026-09-20，本地已实施，未部署）
 
@@ -189,6 +189,7 @@
 
 ## 正在进行的工作
 
+- 2026-09-29 代码 Review 复核：确认生产 HEAD 已是 `043ca38`（含 ADR-0026/0027 两路径路由与 Trace 展示修复），本地不再领先生产，下方 09-24 记录"生产未部署"已过期。用户裁定 ADR-0027 已知的证据边界问题（"未见规定"被误推断为"允许自行操作"）暂不处理——面向专业运维人员且随附免责声明，接受当前风险。同时完成三处小修：`assistant_turn_context()` 对已显式设置但校验失败的 `rag_user_message_id` 返回未知而非静默回退到最近一条 USER 消息（新增 PG 回归 `test_assistant_turn_context_reports_unknown_for_unresolvable_explicit_link`，验证过修复前该用例确实失败）；`chat.ts` 的本地凭证拦截改为抛 `ApiRequestError`（原为裸 `Error`），与 `admin.ts` 共用同一类型（现定义于 `serviceCredential.ts`，`admin.ts` 重新导出兼容旧导入）；凭证拒绝事件新增 `detail.reason`（`missing`/`invalid`），`adminStore.rejectCredential()` 据此区分"从未配置"与"已配置但被拒绝"两种提示文案。`turn_gate` 并发限流的单进程假设、管理台与 Assistant 图片端点的权限范围不对称，写入 ADR-0028 并同步 `known-issues.md`；均为记录既有行为，不改变代码。后端 865 项、Ruff/格式/Mypy 通过；前端 183 项（含 3 项新增）、ESLint/vue-tsc 通过；未运行完整 `scripts/check.sh`，生产未重新部署（本轮改动尚未提交）。
 - 2026-09-24 本地按 ADR-0027 调整双路径：LLM 1 不再输出补充检索查询/约束，服务端从原问题、独立请求和可选任务锚点构造查询；`response_path` 独占是否检索的决定，Conversation 扩展为无需文档依据的一般回答，允许谨慎的人工协助建议，删除本轮新增的联系/同意/改写句式正则和事后关系归一化。技术 LLM 2 增加“未见规定不等于允许自行操作”的通用证据边界。真实 Assistant 定向 5/5；同版本完整 Golden 58 案例/82 轮通过 56/58（96.5%，报告 `rag-acceptance/reports/baseline-20260924-092115.json`），Conversation 类 6/6，联系人工追问走 Conversation 且检索跳过。两项机器失败：含糊 PSU“哪个端口”追问未满足 `3359` 断言；询问文档是否要求联系时，技术 LLM 2 仍从未见联系规定推断“自行更换”。另有 PSU 拆板前追问机器通过但未命中 PSU 文档，需人工复核；因此本轮不构成生产放行。`bash scripts/check.sh` 退出码 0：Ruff/格式、Mypy（140 源文件）、后端 864 项与 81% 覆盖率、前端 179 项与 91.36% 覆盖率、lint/type-check/build 全部通过，仅有既有大包告警。生产未部署。
 - 2026-09-23 已完成 RAG V2 第一版双路径：Query Interpreter 新增必填 `response_path=KNOWLEDGE|CONVERSATION`；纯寒暄仍在 LLM 1 前零模型短路，Knowledge 完整保留原检索与技术 LLM 2，Conversation 使用同一模型快照的受约束 LLM 2 并确定性跳过 Embedding、检索、Rerank 和文档加载。缺失/无效路由、查询字段冲突、混合或不确定输入保守进入 Knowledge；只有 `scope=IN_SCOPE` 才允许 Conversation，范围外或不确定的冲突组合强制回到既有 Knowledge/范围收口。Conversation LLM 2 失败固定兜底且不回跳 RAG。回答路径同时写入 Citation、Trace、Usage 与 Message 历史上下文；Conversation 保留在运营总量和审计记录，但从技术历史、技术质量和 RAG 延迟样本排除，管理 Trace 可直接显示回答路径。无迁移和新环境变量。定向 Ruff/Mypy 及后端 125 项测试通过；最终 `bash scripts/check.sh` 退出码 0：Ruff/格式、Mypy（140 源文件）、后端 861 项、三项 fake smoke、累计覆盖率 81%、前端 23 文件 179 项、覆盖率 91.36%、ESLint、vue-tsc 与生产构建全部通过，仅保留既有 Vite 大包警告。首次 50 案例/72 轮真实技术 Golden 为 47/50，三个失败均是 LLM 1 已判 `OUT_OF_SCOPE` 但 Conversation 抢先返回；增加上述硬约束及 5 个路由案例后，三个原失败与五个新案例统一复跑 8/8，p50 4.387 秒、p95/最大 6.404 秒。两个纯寒暄为 69–80ms，另外三个正向用例由 Trace 确认为 Conversation 且检索 `SKIPPED`。首次定向运行 7/8 的“谢谢，明白了”因 LLM 1 一次结构化输出无效后保守降级而失败，单例复跑及随后统一复跑均通过；完整扩充后的 55 案例/77 轮尚未执行。
 - 2026-09-23 本轮凭证门禁、寒暄短路、关联不变量、内部轮次回收与延迟口径已随 `ca5cd60` 部署生产并完成只读复验：生产源码含全部改动（`stale_internal_traces`、`_total_latency_select`、绑定 NULL 放行），backend/frontend/worker 容器于 10:19（CST）重建，前端产物含新凭证模块与“样本 N / M 次”文案；`request_error_log` 401 计数归零，清理后仅剩 215 条真实业务错误（最新一条 2026-09-17）；在线的管理台轮询会话与外部 Assistant 集成全部 200。仍未做：Golden Set、真实模型回归和寒暄/组合输入的浏览器人工验收。
