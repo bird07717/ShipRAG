@@ -1,6 +1,8 @@
 # 当前项目状态
 
-> 本文记录当前有效状态，不是任务流水账。本地 RAG 路由与真实模型验证更新至 2026-09-24；2026-09-29 核对生产 HEAD 为 `043ca38`，与本地历史提交一致（含 ADR-0026/0027 两路径路由），此前"生产端未部署"的记录已过期。
+> 本文记录当前有效状态，不是任务流水账。
+>
+> **生产快照（2026-09-29 核对）**：生产 HEAD `9cd6569`，与本地 `main` 的代码完全一致（本地更新的 `a00e192` 只改文档和 Golden 用例）；Alembic `0047 (head)`；backend/frontend/两个 Worker 健康。共 7 个知识库，只有 `VDR600产品` 上线 Assistant（活动索引 v6），文档以 PDF 为主、均在活动索引中 READY。LLM/Rerank/Embedding 均为 DashScope（LLM `qwen3.7-flash`）。因此下文各节标题和旧记录里的“本地已实施，未部署”“生产尚未部署”只代表记录当时的状态，相关代码现已全部在生产运行；“已部署”不等于已在生产做过真实模型或浏览器验收。
 
 ## 证据边界真实复验与 Golden 补充（2026-09-29，仅测试资产，无功能改动）
 
@@ -14,7 +16,7 @@
 - 修复：`autoRefresh()` 增加 `store.hasServiceCredential` 判断，对齐 `AdminStudio.vue` 已有模式；新增 `DashboardView.spec.ts` 假定时器回归用例，验证凭证失效后定时器不再调用任何指标接口（修复前该用例可复现失败）。`bash scripts/check.sh` 退出码 0：后端 865 项、前端 184 项（新增 1 项）。未修改数据库结构或新增环境变量。
 - 2026-09-29 先清理历史数据：生产 `request_error_log` 中 62275 条 401（2026-09-23 03:54~2026-09-29 03:39）已备份为服务器 `/home/cm/request_error_log_401_backup_202609291139.csv` 后删除，剩余 215 条真实业务错误（404×8、409×204、422×2、500×1）。随后用户部署，生产 HEAD `9cd6569`（含 `0317fc5`），容器 03:45（UTC）重建，部署后 401 为 0。“会话中途凭证失效”的场景尚未在生产真实发生，继续观察。
 
-## Dashboard 回答结果指标收口（2026-09-20，本地已实施，未部署）
+## Dashboard 回答结果指标收口（2026-09-20，已部署）
 
 - 原“无答案率”把正常 `OUT_OF_SCOPE` 拒答和 `UNCONFIRMED` 相加，且概览、趋势、下钻的分母、时间与来源不一致；Dashboard 还展示冻结 Support 的文档交付、澄清、升级和 Profile 待办。现改为直接回答率、待补充信息率、范围外请求率和独立失败率，外部拒答不再记作负向无答案；`UNCONFIRMED` 明确只表示需要更多条件或低信息输入，不自动归因为知识库缺口。
 - 回答结果卡片、趋势、待补充列表和柱形下钻统一过滤 `source=ASSISTANT_API`、`engine=RAG` 和同一个近 7 天窗口；列表额外要求 `COMPLETED/UNCONFIRMED`。管理指标 overview/timeseries 新增可选 `engine`、`source` 过滤及三项新比例字段，移除旧 `no_answer_rate`；前后端类型、Schema、API 测试和运营手册同步。Assistant TOP Trace/HTTP 错误同时收窄到外部 Assistant 路径，避免混入内部 Chat。
@@ -22,7 +24,7 @@
 - 本轮观测增强没有修改范围判定、Prompt、检索、生成、`response_type`、回答正文或公开 Assistant/SSE 契约，没有新增数据库迁移和环境变量，也不回填历史 Trace。三类原因不能覆盖证据不足和检索误判；精确知识库缺口仍需人工结合候选与文档判断。
 - 完整门禁 `bash scripts/check.sh` 退出码 0：Ruff/格式、Mypy（139 个源文件）、后端 836 项、摄取/RAG V2/管理三项 fake smoke、累计覆盖率 81%、前端 23 个文件 176 项、覆盖率 91.42%、ESLint、类型检查和生产构建全部通过，仅有既有 Vite 大包警告。本轮未运行 Golden Set、真实模型、浏览器人工验收或生产部署。
 
-## RAG 产品内扩展与双模型范围一致性（2026-09-18，本地已实施，未部署）
+## RAG 产品内扩展与双模型范围一致性（2026-09-18，已部署；2026-09-29 真实复验见顶部）
 
 - 生产 SC200 Trace 只读复核确认：首轮“SC200是什么”已被 LLM 1 判为 `IN_SCOPE`，检索也取得同库 FU 标定文档，但 LLM 2 再次输出 `OUT_OF_SCOPE`；用户纠正后 LLM 2 改用 `GENERAL`，却给出当前产品档案和文档均未支持的厂商/正式产品类别。根因是范围所有权重叠，以及“无直接文档时的产品内通用扩展”缺少稳定契约，不是单纯检索失败。
 - Query Interpreter 现在明确把知识库名称和公开说明视为可信产品档案，并将产品身份、用途、组成、原理、使用、维护和故障纳入产品范围；把产品名用于无关创作/闲聊仍不算产品问题。Answer Generator 使用同一档案作为身份锚点，文档优先但不再是回答许可证；无直接文档时优先给专业通用分析，型号专有精确事实无档案/文档依据时不猜值，而是说明核验位置并继续给可执行步骤。
@@ -32,7 +34,7 @@
 - 针对上述抽样暴露点已完成稳定性收口：LLM 1 单次时限由 15 秒增至 25 秒；即时 `UPSTREAM_UNAVAILABLE` 最多快速重试一次，完整 `UPSTREAM_TIMEOUT` 不重试；解释器失败时仅明确省略对象的短追问继承最近完整成功轮次的用户任务及已用文档软候选。LLM 1/LLM 2 同时约束混合请求只处理产品技术部分，未加入具体诗句或案例特判。Trace 增加超时、尝试次数、历史兜底采用/拒绝原因和兜底检索结果。
 - 同一组 10 案例/14 轮真实 Assistant 复跑为 10/10（100%），p50 10.113 秒、p95 13.885 秒、最大 15.532 秒，报告为 `rag-acceptance/reports/baseline-20260918-171603.json`。原 PSU 短追问正常返回 `FOLLOW_UP`，LLM 1 本轮 2.106 秒成功、上一轮两份实际证据进入软候选；因此真实复跑验证了提高时限后的正常路径，未直接触发超时兜底，后者由自动化故障注入验证。混合 VAU/写诗案例经人工复核只回答技术排查，没有诗歌。机器全绿仍不代表答案事实逐项审定：PSU 追问虽然包含断言要求的 `3359`，但回答扩展到多个电源端口并出现“文档 D1/D3”措辞；PDC 2015 年追问仍重复询问年份。这些属于现有 Golden 断言覆盖和生成精度边界，未在本轮继续增加特判。
 
-## 索引构建重试与中止改为人工决策（2026-09-17，本地已实施，未部署）
+## 索引构建重试与中止改为人工决策（2026-09-17，已部署）
 
 - 按 ADR-0024 移除自动 followup：构建失败、worker 崩溃回收与协作取消均不再自动排重建任务，`create_followup_build_if_needed` 已删除；失败/取消时 `rebuild_required` 重新置位，由索引管理页"文档有变更待重建"徽标提示，重试经"重建"按钮（`POST /indexes/{id}/retry`，白名单扩至 CANCELLED）由管理员触发，ADR-0022 熔断计数由手动重试推进（第 3 次构建自动跳过坏文档）。
 - INDEX_BUILD 接入协作取消（`POST /tasks/{id}/cancel` 白名单扩容）：取消是任务行终态转换，构建循环文档边界轮询生效，`_update_task` 带守卫防止进度心跳覆盖 CANCELLED；排队期取消在管线入口短路（零模型消耗）；索引与未处理文档落 `CANCELLED` 终态，与 FAILED 同权可删可重试、不进失败计数。迁移 `0047` 为 `knowledge_index.status` 增加 CANCELLED，并补上 ADR-0022 遗漏的 `index_document` `SKIPPED` 约束值（此前该路径一旦触发即撞 CHECK 约束崩溃）。
@@ -41,22 +43,22 @@
 - 验证：后端 819 项测试全过（新增 `tests/test_index_build_cancel.py` 11 项：取消短路/边界停止/失败置位/CANCELLED 重试/保留修剪，含真实 PostgreSQL 集成 5 项）；Ruff lint/format、Mypy 139 源文件通过；迁移 `0047` 已在本地数据库应用；前端 174 项（新增 4 项：停止/重建/删除按钮与徽标）、ESLint、类型检查通过。未执行生产部署；生产更新须 Alembic 升级至 `0047 (head)` 并重建后端、前端与索引/维护 Worker。
 - 部署注意：移除自动 followup 后，`rebuild_required=true` 的库不会再自愈，上线后以徽标提示管理员手动重建；用户 WIP（RAG V2 会话历史相关）未合入本次提交，部署前需先处理。
 
-## Assistant 上线要求 RAG 文档理解全部确认（2026-09-17，本地已实施，未部署）
+## Assistant 上线要求 RAG 文档理解全部确认（2026-09-17，已部署）
 
 - Assistant 的统一运行门禁新增活动索引 RAG 文档理解审核：每份 `index_document.status='READY'` 且源文档为 `STORED` 的文档，都必须存在当前卡片结构版本、`generation_status='READY'`、`review_status='CONFIRMED'` 的卡片；无可确认文档、缺失、失败、过期、拒绝或 `AUTO` 待确认均阻止上线。
 - 门禁只接入 Assistant 的管理发布、公开知识库 `ready`、欢迎语和问答入口，不改变通用 Gateway 引擎策略就绪态；管理员仍可在独立 DemoChat 中生成、检查未上线库的回答。已上线库切换到未确认的新活动索引，或显式重生成已确认卡片后，会保留上线标志但立即变为 `ready=false`，欢迎语/问答返回 409，全部重新确认后自动恢复。
 - 外部 Assistant 路径、请求字段和响应结构不变；知识库列表中 `ready` 的语义扩展为包含平台侧内容理解审核。没有新增环境变量或数据库迁移，部署前数据库仍须升级到现有 `0046 (head)`。
 - 验证：`scripts/check.sh` 退出码 0；Ruff、格式、Mypy（139 个源文件）、后端 809 项、摄取/RAG V2/管理三项 fake smoke、累计覆盖率 81%、前端 23 个文件 170 项、覆盖率 91.45%、ESLint、类型检查和生产构建全部通过，仅保留既有 Vite 大包警告。定向真实 PostgreSQL 回归覆盖卡片“缺失→AUTO→全部 CONFIRMED”及公开门禁，33 项通过；本地 VDR600 统一 Assistant 门禁实测为 ready。本轮未运行 Golden Set、真实模型或生产部署。
 
-## 千问扩展为全模型类型 Provider（2026-09-15，本地已实施，未部署）
+## 千问扩展为全模型类型 Provider（2026-09-15，已部署，生产已在使用）
 
 - 管理台模型配置中，千问（阿里云百炼 / DashScope）不再仅限 LLM：`model_providers.py` 的能力注册表为 EMBEDDING、RERANK、OCR、VISION 增加了 `dashscope`，前端 Provider 下拉由后端 `supported_providers` 驱动，自动跟随，无需前端代码改动。
 - Embedding、OCR、Vision 复用既有 OpenAI 兼容实现（`/embeddings` 与多模态 `chat/completions`，qwen-vl 默认不思考，不发送 thinking 控制）；Rerank 新增 `DashScopeRerankProvider`（`app/rag/rerank.py`），请求 DashScope 原生 `/api/v1/services/rerank/text-rerank/text-rerank` 端点，payload 为嵌套 `input`/`parameters` 结构并解析 `output.results`；`dashscope_rerank_base_url()` 把管理台保存的 compatible-mode 地址映射到 `/api/v1` 根（业务空间/国际站域名仅替换路径前缀）。
 - `model_probe.py` 的连通性探测对 DashScope Rerank 使用同一原生端点与嵌套 payload；`M2_EMBEDDING_PROVIDER`、`M4_OCR_PROVIDER`、`M4_VISION_PROVIDER`、`M5_RERANK_PROVIDER` 的 Literal 均新增 `dashscope` 显式值（默认仍 `auto`，现有部署不受影响）。
 - 验证：后端定向测试 `tests/test_model_secrets.py`（含 DashScope rerank 原生端点/payload/解析/URL 映射、embedding/vision 兼容端点、probe 三类新用例）、`tests/test_build_model_config.py`、`tests/test_m4_multimodal.py`、`tests/test_m5_retrieval.py`、`tests/test_config.py`、`tests/test_m3_rag.py`、`tests/test_api.py`、`tests/test_admin_config.py`、`tests/test_rag_v2_pipeline.py`、`tests/test_m2_ingestion.py` 全部通过；Ruff lint/format 与 Mypy 定向检查通过；前端 `tests/viewInteractions.spec.ts` 19 项（含新增"非 LLM 模型也提供千问选项"用例）、`npm run lint`、`npm run type-check` 通过。未执行真实 DashScope 嵌入/重排/OCR/Vision 端到端调用（协议按官方文档与公开实现交叉核对：兼容模式 `dimensions` 参数、原生 rerank 嵌套结构），未运行完整 `scripts/check.sh`，无数据库迁移。
-- 待确认：真实百炼账号下 gte-rerank-v2 与 text-embedding-v4 的实测连通性和批量/速率限制；生产部署后建议先用"测试连接"探测再启用。
+- 2026-09-29：生产已在使用 DashScope 的 `qwen3.7-text-rerank` 与 `qwen3.7-text-embedding-flash`，连通性由生产实际调用证实；批量/速率限制仍未专门测过。
 
-## 并发加固：RUNNING 自动恢复、轮次准入闸门与运行指标（2026-09-15，本地已实施，未部署）
+## 并发加固：RUNNING 自动恢复、轮次准入闸门与运行指标（2026-09-15，已部署）
 
 - 崩溃 API 进程遗留的 `RUNNING` Assistant 请求不再只靠手动命令：`app/tasks/assistant_recovery.py` 让维护 Worker 启动时及每 15 分钟将超过 `ASSISTANT_REQUEST_STALE_SECONDS`（默认 600，校验器强制大于轮次时限——Support 优先已冻结、RAG 轮次被时限包络，见 ADR-0021；0 禁用）的 RUNNING 请求及关联消息/Trace 用与 `app.assistant.recovery` 相同的 `FOR UPDATE SKIP LOCKED` 单语句收口为失败；Redis 哨兵键防多 Worker 重复注册周期链，`with_scheduler` 条件已包含该链。恢复任务与维护队列共享串行 Worker，长维护任务可能推迟恢复（见 known-issues）。
 - 新增每进程问答轮次准入闸门 `app/common/turn_gate.py`（`CHAT_TURN_CONCURRENCY_LIMIT` 默认 64、`CHAT_TURN_WAIT_SECONDS` 默认 2.0，0 禁用）：管理 `/chat`、`/chat/stream` 与对外 Assistant 流在预留/生成前获取按事件循环隔离的信号量，超限等待后快速失败 503 `SERVICE_BUSY`；Assistant 路径在预留幂等请求前判定（容量拒绝不烧幂等键），信号量随流收口释放；管理端复测不走闸门。生产 Compose 支持可选 `BACKEND_LIMIT_CONCURRENCY`（uvicorn 每进程连接上限，不设置不限）。
@@ -64,7 +66,7 @@
 - 验证：Ruff lint/format、Mypy（143 源文件）、后端 1181 项测试（新增 turn gate 8 项、恢复任务 9 项含真实 PostgreSQL 集成 1 项、门面闸门 3 项、metrics 4 项、配置校验 3 项、管理端闸门行为 1 项）、摄取/RAG/管理三项 fake 冒烟及累计覆盖率 83%（门槛 80%）全部通过；RAG 冒烟含 Assistant 流在默认闸门下正常完成；新 metrics SQL（`make_interval(secs => ...)`、RUNNING/忙拒绝查询）已在本地真实 PostgreSQL 执行验证。未执行真实模型、并发压测、生产部署或数据库迁移（无新迁移）。
 - 明确未修：`begin_turn` 每轮 FOR UPDATE 锁知识库行、同幂等键并发竞态语义、Assistant 列表 N+1 就绪检查——均已记录到 known-issues 并给出触发条件。
 
-## PDF 摄取与首行标题删除退役（2026-09-15，feat/PDF 分支本地已实施）
+## PDF 摄取与首行标题删除退役（2026-09-15，`feat/PDF` 已合入 main 并部署）
 
 - 已按 ADR-0020 新增 PDF 直接解析：`ingestion/parser_pdf.py`（pdfplumber 0.11.10，MIT）产出与 DOCX 相同的 TEXT/IMAGE 元素契约，页眉/页脚（跨页重复文本/页码/Logo 图片）在输出前剔除，区域内一次性内容保留；图片解码 DCT/Flate(SMask)/JPX/**ICCBased（按 Alternate/N 解析，真实样本驱动）**，失败即中止构建；加密 PDF 上传即拒。上传按扩展名分发校验/对象键/MIME，DOCX 路径不变；`content_revision` 按格式分派（docx=`ooxml-vml-1`，pdf=`pdf-1`），REUSE 判定双路径（构建计划期 + 执行期）均按格式比较，不触发既有 DOCX 重解析。
 - ADR-0011 已废弃：`strip_leading_document_heading` 及 4 处调用（RAG 文档 Prompt、路由内容块、Chunk 标题去重、Support 交付）全部移除，交付按元素原文逐块输出；`_generation_candidates` 仅保留候选文档显示名归一化。`index_document.metadata` 的 `mammoth_warnings` 键泛化为 `parser_warnings`。前端上传入口支持 `.docx/.pdf`（accept、文案、按文件名显示 PDF/DOCX 徽标；DemoChat 来源图标改为中性 DOC）。
@@ -76,7 +78,7 @@
 
 项目已有带 `v1.0.1` Git 标签的前后端与生产 Compose 交付形态，并已实现管理 API、对外 Assistant API、RAG/Support 双引擎、文档摄取、Profile 发布和验收脚本。生产镜像默认标签已统一为 `1.0.1`。
 
-## RAG 隐藏全文双 LLM V2（2026-09-15，V0～V5 本地已实施）
+## RAG 隐藏全文双 LLM V2（2026-09-15，V0～V5 已部署；生产最早 V2 Trace 为 2026-09-22）
 
 - 已批准 [RAG 隐藏全文双 LLM V2 执行计划](../technical/rag-full-document-generation-v2-execution-plan.md) 和 ADR-0019。V2 每轮由 LLM 1 根据最近完整问答还原问题并辅助检索，Chunk/卡片聚合到文档后加载前 1～3 份完整有序元素作为隐藏上下文，LLM 2 统一生成答案和选择图片。
 - V2 淘汰 RAG 的首轮专用命中、单强/事实/解释分支、文档选择交互、公开原文交付、硬焦点停留与计划中的 `rag_case`。RAG 每轮重新检索；只保留普通完整轮次历史，不按 `focus_epoch` 过滤。
@@ -201,7 +203,7 @@
 
 ## 正在进行的工作
 
-- 2026-09-29 代码 Review 复核：确认生产 HEAD 已是 `043ca38`（含 ADR-0026/0027 两路径路由与 Trace 展示修复），本地不再领先生产，下方 09-24 记录"生产未部署"已过期。用户裁定 ADR-0027 已知的证据边界问题（"未见规定"被误推断为"允许自行操作"）暂不处理——面向专业运维人员且随附免责声明，接受当前风险。同时完成三处小修：`assistant_turn_context()` 对已显式设置但校验失败的 `rag_user_message_id` 返回未知而非静默回退到最近一条 USER 消息（新增 PG 回归 `test_assistant_turn_context_reports_unknown_for_unresolvable_explicit_link`，验证过修复前该用例确实失败）；`chat.ts` 的本地凭证拦截改为抛 `ApiRequestError`（原为裸 `Error`），与 `admin.ts` 共用同一类型（现定义于 `serviceCredential.ts`，`admin.ts` 重新导出兼容旧导入）；凭证拒绝事件新增 `detail.reason`（`missing`/`invalid`），`adminStore.rejectCredential()` 据此区分"从未配置"与"已配置但被拒绝"两种提示文案。`turn_gate` 并发限流的单进程假设、管理台与 Assistant 图片端点的权限范围不对称，写入 ADR-0028 并同步 `known-issues.md`；均为记录既有行为，不改变代码。后端 865 项、Ruff/格式/Mypy 通过；前端 183 项（含 3 项新增）、ESLint/vue-tsc 通过；未运行完整 `scripts/check.sh`，生产未重新部署（本轮改动尚未提交）。
+- 2026-09-29 代码 Review 复核：确认生产 HEAD 已是 `043ca38`（含 ADR-0026/0027 两路径路由与 Trace 展示修复），本地不再领先生产，下方 09-24 记录"生产未部署"已过期。用户裁定 ADR-0027 已知的证据边界问题（"未见规定"被误推断为"允许自行操作"）暂不处理——面向专业运维人员且随附免责声明，接受当前风险。同时完成三处小修：`assistant_turn_context()` 对已显式设置但校验失败的 `rag_user_message_id` 返回未知而非静默回退到最近一条 USER 消息（新增 PG 回归 `test_assistant_turn_context_reports_unknown_for_unresolvable_explicit_link`，验证过修复前该用例确实失败）；`chat.ts` 的本地凭证拦截改为抛 `ApiRequestError`（原为裸 `Error`），与 `admin.ts` 共用同一类型（现定义于 `serviceCredential.ts`，`admin.ts` 重新导出兼容旧导入）；凭证拒绝事件新增 `detail.reason`（`missing`/`invalid`），`adminStore.rejectCredential()` 据此区分"从未配置"与"已配置但被拒绝"两种提示文案。`turn_gate` 并发限流的单进程假设、管理台与 Assistant 图片端点的权限范围不对称，写入 ADR-0028 并同步 `known-issues.md`；均为记录既有行为，不改变代码。随后提交为 `7d8fe4e`，完整 `scripts/check.sh` 通过（后端 865 项、前端 183 项），并已部署生产。
 - 2026-09-24 本地按 ADR-0027 调整双路径：LLM 1 不再输出补充检索查询/约束，服务端从原问题、独立请求和可选任务锚点构造查询；`response_path` 独占是否检索的决定，Conversation 扩展为无需文档依据的一般回答，允许谨慎的人工协助建议，删除本轮新增的联系/同意/改写句式正则和事后关系归一化。技术 LLM 2 增加“未见规定不等于允许自行操作”的通用证据边界。真实 Assistant 定向 5/5；同版本完整 Golden 58 案例/82 轮通过 56/58（96.5%，报告 `rag-acceptance/reports/baseline-20260924-092115.json`），Conversation 类 6/6，联系人工追问走 Conversation 且检索跳过。两项机器失败：含糊 PSU“哪个端口”追问未满足 `3359` 断言；询问文档是否要求联系时，技术 LLM 2 仍从未见联系规定推断“自行更换”。另有 PSU 拆板前追问机器通过但未命中 PSU 文档，需人工复核；因此本轮不构成生产放行。`bash scripts/check.sh` 退出码 0：Ruff/格式、Mypy（140 源文件）、后端 864 项与 81% 覆盖率、前端 179 项与 91.36% 覆盖率、lint/type-check/build 全部通过，仅有既有大包告警。生产未部署。
 - 2026-09-23 已完成 RAG V2 第一版双路径：Query Interpreter 新增必填 `response_path=KNOWLEDGE|CONVERSATION`；纯寒暄仍在 LLM 1 前零模型短路，Knowledge 完整保留原检索与技术 LLM 2，Conversation 使用同一模型快照的受约束 LLM 2 并确定性跳过 Embedding、检索、Rerank 和文档加载。缺失/无效路由、查询字段冲突、混合或不确定输入保守进入 Knowledge；只有 `scope=IN_SCOPE` 才允许 Conversation，范围外或不确定的冲突组合强制回到既有 Knowledge/范围收口。Conversation LLM 2 失败固定兜底且不回跳 RAG。回答路径同时写入 Citation、Trace、Usage 与 Message 历史上下文；Conversation 保留在运营总量和审计记录，但从技术历史、技术质量和 RAG 延迟样本排除，管理 Trace 可直接显示回答路径。无迁移和新环境变量。定向 Ruff/Mypy 及后端 125 项测试通过；最终 `bash scripts/check.sh` 退出码 0：Ruff/格式、Mypy（140 源文件）、后端 861 项、三项 fake smoke、累计覆盖率 81%、前端 23 文件 179 项、覆盖率 91.36%、ESLint、vue-tsc 与生产构建全部通过，仅保留既有 Vite 大包警告。首次 50 案例/72 轮真实技术 Golden 为 47/50，三个失败均是 LLM 1 已判 `OUT_OF_SCOPE` 但 Conversation 抢先返回；增加上述硬约束及 5 个路由案例后，三个原失败与五个新案例统一复跑 8/8，p50 4.387 秒、p95/最大 6.404 秒。两个纯寒暄为 69–80ms，另外三个正向用例由 Trace 确认为 Conversation 且检索 `SKIPPED`。首次定向运行 7/8 的“谢谢，明白了”因 LLM 1 一次结构化输出无效后保守降级而失败，单例复跑及随后统一复跑均通过；完整扩充后的 55 案例/77 轮尚未执行。
 - 2026-09-23 本轮凭证门禁、寒暄短路、关联不变量、内部轮次回收与延迟口径已随 `ca5cd60` 部署生产并完成只读复验：生产源码含全部改动（`stale_internal_traces`、`_total_latency_select`、绑定 NULL 放行），backend/frontend/worker 容器于 10:19（CST）重建，前端产物含新凭证模块与“样本 N / M 次”文案；`request_error_log` 401 计数归零，清理后仅剩 215 条真实业务错误（最新一条 2026-09-17）；在线的管理台轮询会话与外部 Assistant 集成全部 200。仍未做：Golden Set、真实模型回归和寒暄/组合输入的浏览器人工验收。
@@ -212,16 +214,16 @@
 - 2026-09-15 已完成 RAG V4.2 本地收口：Query Interpreter 增加 `NEW_TASK/FOLLOW_UP/CORRECTION` 和脱敏任务锚点，短追问任务同时进入召回、文档级 Rerank 与 LLM 2；有效 V2 的 `prepare()` 不再运行 legacy Embedding/BM25/向量检索或混入其候选，本轮查询只批量 Embedding 一次。真实 Trace 确认追问存在 `CONTEXT_ANCHOR`、换题没有该锚点，且耗时字段不再出现旧预检索阶段。技术助手 Golden 仍为 49/50（98%，50 题/72 轮），原 PSU 端口失败已通过；新唯一失败为 LRU 更换追问虽召回正确更换/升级文档，但模型只采用升级文档并遗漏“配置/导入”断言。p50 12.068s、p95 18.180s、max 24.179s。没有新增配置、迁移、索引重建或生产切换。
 - 2026-09-14 管理台 LLM 配置已新增千问（阿里云百炼 / DashScope）Provider，支持默认 OpenAI 兼容地址、管理台加密 API Key 与环境变量兜底。模型配置仍在保存前执行真实连通性探测，保存后由每轮 Gateway 模型快照同时作用于 DemoChat 和 Assistant；Embedding、Rerank、OCR、Vision 当时未开放 DashScope——该限制已于 2026-09-15 解除（见顶部记录）。
 - 生产服务器已完成源码、PostgreSQL 和 MinIO 数据迁移，并于 2026-09-10 同步到完成 Assistant 生产验收的版本；核验时服务器工作树与 `origin/main` 一致，生产 `.env` 权限为 `600`，迁移备份校验通过。
-- 生产 PostgreSQL 已位于 Alembic `0041 (head)`；此前核对共有 1 个知识库、64 条文档记录、2004 个分块和 1096 条图片记录，MinIO 有 70 个文档对象和 1232 个图片对象。活动索引状态为 `ACTIVE`。
-- PostgreSQL、Redis 和 MinIO 保持原数据卷持续运行；生产服务器于 2026-09-11 使用提交 `49c799a` 重建后端、前端和两个 Worker，相关容器健康，外部 `/health/ready` 返回 ready，Alembic 为 `0041 (head)`。
+- 生产数据库现状见顶部生产快照（Alembic `0047`、7 个知识库）。2026-09-10 迁移时的历史数字为：1 个知识库、64 条文档记录、2004 个分块和 1096 条图片记录，MinIO 有 70 个文档对象和 1232 个图片对象。
+- PostgreSQL、Redis 和 MinIO 保持原数据卷持续运行；生产服务器于 2026-09-11 使用提交 `49c799a` 重建后端、前端和两个 Worker，相关容器健康，外部 `/health/ready` 返回 ready，Alembic 为 `0041 (head)`；此后多次更新，2026-09-29 为 `9cd6569` / `0047`。
 - Assistant 生产验收已覆盖鉴权、知识库与欢迎语、会话与消息、真实 SSE、幂等重放与冲突、外部用户隔离、文档/图片下载及删除资源拒绝。SSE 经生产 Nginx 返回 HTTP 200、`text/event-stream`、`Cache-Control: no-cache, no-transform`、`X-Accel-Buffering: no`，并到达 `complete` 终态，已具备内网联调条件。
 - 生产服务器仓库的 `origin` 使用 GitHub SSH 地址；`cm` 账号可在交互式输入 SSH 私钥口令后正常拉取。自动化执行使用非交互模式时无法提供该口令，因此后续服务器 `git pull` 由用户手动执行。
 - 已新增 Assistant 遗留请求预览/恢复命令；当前数据库原有的 25 条遗留 `assistant_request` 及对应 Assistant 消息/Trace 已保留记录并恢复为失败终态。另有 2 条确认无业务价值的内部 Support 轮次，已在完整数据库备份后精确删除 2 条 Trace 与 4 条消息，未删除所属会话。
 - Assistant 对接契约已统一：会话归属、知识库/Active Index、幂等及并发前置失败在 SSE 建立前返回 HTTP JSON；SSE `context` 使用公开字段白名单，已知短暂错误保留可重试语义；流发送失败或客户端断连会事务取消仍为 `RUNNING` 的预留请求及其关联消息/Trace；资源代理转发可用的 `Content-Length`，且不再暴露已删除文档的图片；业务后台新会话锁使用稳定 `client_chat_id`。
 - 2026-09-11 生产服务器源码和后端已更新到 Assistant 欢迎语版本；欢迎语不再展示知识库名称、描述和文档数量，三条推荐问题固定使用已通过 Assistant Golden Set 的标准精确命中用例。更新时只重建后端导致其容器 IP 变化，旧前端 Nginx 仍缓存原地址，外部 `/api/` 和 `/health/` 暂时返回 502；重启前端可立即恢复。
 - 生产 Nginx 已使用共享 upstream、Docker DNS 和运行时 `resolve`，避免后端容器重建换 IP 后继续使用旧地址；生产 smoke 包含“后端容器换 IP、前端不重启”的恢复验证。
-- staging/production 已禁止查询 Embedding/Rerank/LLM 在缺少凭据时静默使用 fake，并记录实际查询模型；明显噪声在检索前短路，Rerank 降级不沿用焦点文档，非知识回答会清理来源和下载引用。2026-09-11 生产 Golden Trace 复核确认 58 个检索轮次使用真实 SiliconFlow 模型，5 个噪声轮次由输入门禁短路。
-- 管理台已部署 Service Token 门禁：无凭证时仅允许进入凭证配置页，不挂载其余管理视图或启动轮询；收到 401 后停止后续自动请求，保存新凭证后恢复，避免认证错误持续刷屏。
+- staging/production 已禁止查询 Embedding/Rerank/LLM 在缺少凭据时静默使用 fake，并记录实际查询模型；明显噪声在检索前短路，Rerank 降级不沿用焦点文档，非知识回答会清理来源和下载引用。2026-09-11 生产 Golden Trace 复核确认 58 个检索轮次使用真实 SiliconFlow 模型，5 个噪声轮次由输入门禁短路；2026-09-29 生产查询模型已换为 DashScope。
+- 管理台已部署 Service Token 门禁：收到 401 后停止后续自动请求，保存新凭证后恢复。**更正（2026-09-29）**：实际只有 DemoChat 在无凭证时不挂载，Dashboard 等其余管理视图始终挂载；Dashboard 60s 自动刷新缺少凭证判断曾导致 5 天 401 刷屏，已由 `0317fc5` 修复（见顶部）。
 - 管理台文档页现可修改文档显示名称，名称更新不改变原始文件、对象存储键或索引，也不触发索引重建；后续 RAG/Support/Assistant 回答使用新名称，历史消息、幂等重放和 Trace 不回写。回答正文中的文档标题统一以 Markdown 加粗展示；文档直达时只显示标题和后续内容（2026-09-15 起不再删除原文首条非空文本行，见 ADR-0011 废弃记录），不显示额外的“已找到/以下是文档内容”引导语。
 - 对外 Assistant 原文下载接口已删除，业务后台只能展示文档来源元数据，不得使用 `document_id` 拼接下载地址；受控图片接口和管理端原文访问保持不变。
 - 对外业务后台指南已按标准服务契约重构，包含可跳转目录、整体接入及恢复流程、详细接口关系、逐接口请求/响应字段说明、SSE 事件契约、错误处理和验收清单；文档注明测试阶段使用临时 Token、正式上线前必须轮换，但不记录真实凭据，也不包含平台核心逻辑或我方运维操作。
@@ -230,14 +232,14 @@
 - 2026-09-11 本地验证通过：本次 Python 文件 Ruff format/check、后端 Mypy（112 个源文件）、111 项相关后端测试通过且 1 项按条件跳过；前端 ESLint、类型检查、18 个测试文件共 109 项测试和生产构建通过。隔离迁移验证确认 `0040` 既有启用知识库升级后保持上线、`0041` 后新建知识库默认下线；Production Compose Smoke 确认默认私有、未上线欢迎语不可访问、服务健康及 Nginx 后端换 IP 自动恢复。
 - 2026-09-11 已在生产服务器通过 Assistant 对外接口执行全部 53 个 Golden 用例/63 轮：51/53 通过（96.2%），5/5 噪声输入全部由门禁返回 `UNCONFIRMED`，错交付、范围外误命中、噪声误命中及 HTTP/SSE 错误均为 0；延迟 p50 4.868s、p95 14.630s、max 26.453s。两个失败分别是追问缺少公开文档引用，以及安全拒答措辞不在用例限定词中；报告保存在服务器 `rag-acceptance/reports/baseline-20260911-080747.json`。
 - 已根据生产 Trace 修正上述两项 Golden 断言：文档未覆盖追问或回答为通用建议时不得为了通过测试而暴露引用；安全拒答统一接受“未涉及、未找到、无法确认、没有足够”。修正后离线重放 Run 11 原始响应为 53/53，真实模型全量复跑尚待执行。
-- 2026-09-11 生产运营数据只读复核：近 7 天 Assistant 共 116 个完成轮次、0 个失败 Trace，p95 11.633s；数据库 `assistant_request` 为 116 条 `COMPLETED` 和 1 条无会话 `FAILED`，没有 `RUNNING`。当前工作树已新增 `0042`：Assistant 指标改为统计 `assistant_request` 并持久化终态重放次数，维护 Worker 每日清理超过配置期限的终态孤儿请求；生产仍为 `0041`，需部署后生效。管理台认证失败刷屏在前端门禁部署后已停止，最近 15 分钟新增为 0。
+- 2026-09-11 生产运营数据只读复核：近 7 天 Assistant 共 116 个完成轮次、0 个失败 Trace，p95 11.633s；数据库 `assistant_request` 为 116 条 `COMPLETED` 和 1 条无会话 `FAILED`，没有 `RUNNING`。当前工作树已新增 `0042`：Assistant 指标改为统计 `assistant_request` 并持久化终态重放次数，维护 Worker 每日清理超过配置期限的终态孤儿请求；该迁移已部署（生产现为 `0047`）。管理台认证失败刷屏在前端门禁部署后已停止，最近 15 分钟新增为 0。
 - 2026-09-11 已补齐提交门禁测试：新增构建模型加载、Assistant 遗留恢复/终态孤儿保留、维护任务和索引 GC 单元及 PostgreSQL 集成测试，并扩展管理 API、凭证门禁、路由/RAG store、Profile/Release/模型管理测试。最终工作树的 `scripts/check.sh` 完整通过：Ruff lint/format、Mypy（113 个源文件）、后端 635 项 Pytest、三项 fake smoke、后端累计覆盖率 80% 门槛、前端 ESLint/类型检查、19 个文件共 127 项测试及全部目录覆盖率门禁、生产构建均通过；构建仍有已记录的大包体积警告。Production Compose Smoke 也已在全新数据库验证 `0042`、两个 Worker、Assistant 私有默认边界和 Nginx 动态 DNS；真实模型 Golden 和服务器部署状态已按上条另行验证。
 - 2026-09-11 文档显示名称修改、对外 Assistant 原文下载接口删除及回答标题加粗变更已完成完整门禁：`scripts/check.sh` 通过 Ruff lint/format、Mypy（113 个源文件）、后端 643 项 Pytest、三项 fake smoke、后端累计覆盖率 81%、前端 ESLint/类型检查、19 个文件共 128 项测试及覆盖率门禁和生产构建；构建仍仅有已记录的大包体积警告。
 - 2026-09-11 文档直达展示已进一步收敛：RAG 与 Support 的新回答只以 Markdown 加粗标题开头，正文过滤重复的原文首行标题，不再输出“已找到/以下是文档内容/已提供文档”等引导语。`scripts/check.sh` 完整通过，后端 646 项 Pytest、三项 fake smoke、后端累计覆盖率 81%、前端 19 个文件共 128 项测试和生产构建均成功。
 
 - RAG 首轮单强直达已完成本地离线实验，尚未接入在线链路：426 条可证明首轮的历史真实 Rerank Trace，按问题取最新后为 44 题；0.85 最强块门槛和 0.18 跨文档分差新增 1 题唯一目标相符直达，降到 0.60/0.10 开始自动选择歧义题。建议先做 RAG 独立影子记录与留出题真实模型验证，不混用 Support Profile/标签，不降低共享路由阈值；单块仅作选文档证据，仍须完整交付步骤和图片。实验脚本、结果口径与限制见 [`single-strong-experiment.md`](../../rag-acceptance/single-strong-experiment.md)。新增实验测试及现有路由/Chat 流程测试共 104 项通过；本次没有改生产、执行新的真实模型 Golden 或复跑全量门禁。
 
-- 已实现轻量知识库 Assistant 管理：每库编辑并保存三条推荐问题、独立新会话试问、运行就绪检查和确认上下线。写入使用行锁与配置修订号，防止并发覆盖；线上问题保存立即生效，未上线库允许暂存不完整问题。欢迎语统一使用 Gateway 就绪条件，外部契约不变。本地已升级 `0043`，生产尚未部署本次功能。 本次曾执行后端全量 713 项测试及三项 smoke，均通过，累计覆盖率 81%；最终后端相关 API/数据库回归 73 项通过；最终前端 ESLint、类型检查、20 个文件 137 项测试及目录覆盖率门禁、生产构建通过，仍有已知大包警告。原始 `scripts/check.sh` 被已有实验测试文件的 Ruff 导入排序错误阻断；随后完整 Mypy 又受并行修改的 `rag/first_turn.py` 类型错误影响，不能宣称当前整个工作树完整门禁已通过。
+- 已实现轻量知识库 Assistant 管理：每库编辑并保存三条推荐问题、独立新会话试问、运行就绪检查和确认上下线。写入使用行锁与配置修订号，防止并发覆盖；线上问题保存立即生效，未上线库允许暂存不完整问题。欢迎语统一使用 Gateway 就绪条件，外部契约不变。已部署生产。 本次曾执行后端全量 713 项测试及三项 smoke，均通过，累计覆盖率 81%；最终后端相关 API/数据库回归 73 项通过；最终前端 ESLint、类型检查、20 个文件 137 项测试及目录覆盖率门禁、生产构建通过，仍有已知大包警告。原始 `scripts/check.sh` 被已有实验测试文件的 Ruff 导入排序错误阻断；随后完整 Mypy 又受并行修改的 `rag/first_turn.py` 类型错误影响，不能宣称当前整个工作树完整门禁已通过。
 
 - RAG 首轮第二轮本地实验完成：44 个旧问题的真实纯文本重排对比、17 个新问题（其中 2 个由噪声门禁短路）及 3 个原生多模态核验。二次文档重排在保守门槛下没有新增直达；“检查 PDC 接线盒”被聚合到“更换故障 PDC”在多模态下复现，建议先增加 RAG 独立的聚合/最强块排序冲突保护。DC24V 源 DOCX 有 110 个旧式 `w:pict`，当前解析仅得 17 段 TEXT、0 图片、0 中文且无告警，需修复摄取后再调召回。实验代码未接入在线链路，相关测试 130 项通过；详见 [`document-rerank-experiment.md`](../../rag-acceptance/document-rerank-experiment.md)。
 
@@ -251,12 +253,14 @@
 
 ## 近期下一步
 
-1. V5 已完成；上线前保存当前生产镜像/提交作为唯一回滚路径，清理生产 `.env` 中已删除的旧 RAG 变量，并在测试环境使用新会话、新幂等键复跑 Assistant 冒烟和真实模型 Golden。
-2. 完成 UFW/`DOCKER-USER` 来源限制和临时凭据轮换。
-3. 生产部署 V5 后观察 Query Interpreter、文档级 Rerank、LLM 2 与总时限；不要用产品词、标题或编号硬编码换取单条全绿。跨库资产和真实实现信息泄露仍须零容忍。
-4. 部署知识库 Assistant 管理与本次审核门禁：升级至 `0046`、更新前后端，逐库对活动索引生成并确认全部 RAG 文档理解，再维护三条推荐问题、试问并确认上线；外部接口结构不变，欢迎语继续使用通用文案。
-5. 将修正后的 Golden 用例同步到服务器并在相同生产环境复跑全量 Assistant Golden Set；确认全绿后建立新基线，并继续关注相对 Run 10 的延迟长尾回升。
-6. 下次生产更新执行 Alembic 到 `0047 (head)` 并重建后端、前端和维护 Worker，确认 Assistant 指标、终态孤儿清理、RAG 文档理解生成/审核及上线门禁均已生效；索引构建的人工重试/中止/前缀删除与任务记录修剪（ADR-0024）同批生效。ADR-0025 卡片跨版本复用与一键确认（提交 `badeaad`）无需迁移，同批部署即可：部署后首次构建存量卡片会因指纹算法变更（去除 index_id）重新生成一次并自愈，之后新增文档仅对新增部分调 LLM 并逐份/一键确认。
+1. 在生产复跑 Assistant Golden。上次生产全量 Golden 是 2026-09-11，之后 V2、两路径路由等改动都没在生产用真实模型验过。现有用例的文档断言按本地语料编写，与生产 `VDR600产品` 的文档不一致（见 known-issues），需要先核对或另建生产用例集；证据边界组 `ta_evidence_*` 可以直接跑。
+2. 确认生产把候选文档全文发给 DashScope 这件事在数据条款上是否已获认可（供应商、地域、日志保留、企业数据条款），仓库内没有确认记录。
+3. 完成 UFW/`DOCKER-USER` 来源限制和临时凭据轮换（沿用，见“当前阻塞”）。
+4. 待确认：生产 `.env` 中已删除的旧 RAG 变量是否已清理。
+5. 持续观察：生产 V2 的 Query Interpreter、文档级 Rerank、LLM 2 与总时限；Dashboard 轮询修复在“会话中途凭证失效且标签页不关”场景下是否仍会出现成批 401。不要用产品词、标题或编号硬编码换取单条全绿。
+6. 本地 VDR600 仍含旧的 DC24V 浮动版式 DOCX，本地全库构建前先处置该文件（生产已换用重制文档）。
+
+原计划中“升级到 `0046`/`0047` 并部署 Assistant 管理、审核门禁、ADR-0024/0025”等项已在 2026-09-29 前完成（生产 `9cd6569` / Alembic `0047`）。
 
 - 2026-09-18 RAG 理解卡片跨版本复用与一键确认已完成（ADR-0025，提交 `badeaad`，无迁移）：构建成功后按摄取层 REUSE 判定把卡片行（含 `routing_embedding` 与 `review_status`）从 `IndexBuildResult.prev_index_id` 复制到新索引，生成任务只为新增/变更文档调 LLM；`content_fingerprint` 去除 `index_id`（存量卡下次生成自愈）；新增 `POST .../rag-document-cards/confirm-batch` 与文档页"一键确认待确认"按钮。`scripts/check.sh` 完整通过（后端 823 项含两个新 PostgreSQL 集成测试、覆盖率 81%、Mypy；前端 174 项、ESLint、类型检查与构建，仅既有大包警告）。同日先期提交 `312500d` 修复 ADR-0024 自查发现的删除顺序缺陷（前缀扫删移到数据库行物理删除成功之后，指针恢复路径对象完整性优先）与取消后 worker 死亡的僵尸 BUILDING 索引回收缺口（reconcile 纳入 CANCELLED 任务并按取消语义结算）。
 
