@@ -256,7 +256,7 @@
 1. 在生产复跑 Assistant Golden。上次生产全量 Golden 是 2026-09-11，之后 V2、两路径路由等改动都没在生产用真实模型验过。现有用例的文档断言按本地语料编写，与生产 `VDR600产品` 的文档不一致（见 known-issues），需要先核对或另建生产用例集；证据边界组 `ta_evidence_*` 可以直接跑。
 2. 确认生产把候选文档全文发给 DashScope 这件事在数据条款上是否已获认可（供应商、地域、日志保留、企业数据条款），仓库内没有确认记录。
 3. 完成 UFW/`DOCKER-USER` 来源限制和临时凭据轮换（沿用，见“当前阻塞”）。
-4. 待确认：生产 `.env` 中已删除的旧 RAG 变量是否已清理。
+4. ~~清理生产 `.env` 旧变量~~：2026-09-30 已完成。逐项对照 `Settings.model_fields` 与 `compose.production.yaml`，61 个键中只有 `M3_RAG_QUERY_VARIANT_LIMIT` 已无任何代码读取，另有 `APP_HTTP_BIND_ADDRESS`/`APP_HTTP_PORT` 在文件末尾重复定义（值相同）；已删除这三行，备份为服务器 `.env.bak-202609300514`（权限 600）。删除前后 `docker compose config` 哈希一致，运行中容器不受影响，无需重启。
 5. 持续观察：生产 V2 的 Query Interpreter、文档级 Rerank、LLM 2 与总时限；Dashboard 轮询修复在“会话中途凭证失效且标签页不关”场景下是否仍会出现成批 401。不要用产品词、标题或编号硬编码换取单条全绿。
 6. 本地 VDR600 仍含旧的 DC24V 浮动版式 DOCX，本地全库构建前先处置该文件（生产已换用重制文档）。
 
