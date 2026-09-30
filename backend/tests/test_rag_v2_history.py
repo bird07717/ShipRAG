@@ -286,7 +286,8 @@ def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> 
     assert "answer_depth" not in payload
     assert "最小充分回答" in prompt
     assert "操作题给完成任务必需的连续步骤" in prompt
-    assert "按需选择而非全部返回" in prompt
+    assert "主任务文档中与所写步骤对应的图片按步骤顺序全部放入" in prompt
+    assert "局部追问、单个参数或是否类问题只放能直接说明答案的图片" in prompt
     assert payload["trusted_product_profile"] == {
         "name": "VDR600",
         "description": "VDR600 技术支持",
@@ -369,6 +370,8 @@ async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up(
     assert any("可信产品档案" in rule for rule in prompt["rules"])
     assert any("该产品本身是什么" in rule for rule in prompt["rules"])
     assert any("无关创作或闲聊素材" in rule for rule in prompt["rules"])
+    assert any("按档案里的名称还原" in rule and "保持原文" in rule for rule in prompt["rules"])
+    assert any("回答形式要求" in rule and "原样保留" in rule for rule in prompt["rules"])
     assert any("是否需要文档" in rule and "CONVERSATION" in rule for rule in prompt["rules"])
     assert any("无法判断" in rule and "KNOWLEDGE" in rule for rule in prompt["rules"])
     assert prompt["recent_completed_rounds"] == [
