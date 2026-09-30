@@ -36,7 +36,7 @@
 
 ## 后台任务和外部依赖
 
-RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生产均将索引 Worker 和维护 Worker 分开：索引 Worker 负责索引构建、启动时的索引恢复/GC；维护 Worker 负责 Profile/维护任务、过期错误日志和周期 GC 调度。不要因方便把它们合并，长索引任务会阻塞维护工作。
+RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生产均将索引 Worker 和维护 Worker 分开：索引 Worker 负责索引构建、启动时的索引恢复/GC；维护 Worker 负责 Profile/维护任务、过期错误日志和周期 GC 调度。`request_error_log` 按 `REQUEST_ERROR_LOG_RETENTION_DAYS`（默认 30 天，0 禁用）在维护 Worker 启动时清理一次；随后维护 Worker 复用 RQ 约每 10 分钟的维护检查，以 Redis 24 小时门禁向 `maintenance` 队列投递一次性清理任务。投递失败会尝试释放门禁供后续检查重试，任务失败也不会切断后续周期；任务并非固定钟点执行，仍受维护队列等待影响。旧版已注册的延迟清理任务只执行一次、不再续排。不要因方便把两个 Worker 合并，长索引任务会阻塞维护工作。
 
 索引构建的文档级熔断（ADR-0022）：文档处理失败时按（同 KB + 同 `document_id` + 同 `error_code`）统计历史 FAILED 的 `index_document` 行数，达到 2 次后该文档在当轮构建中标为 `SKIPPED`（错误信息带文件名），其余文档继续、构建可成功；跳过清单写入任务 `metadata.skipped_documents`。`_finalize_index` 容忍 SKIPPED 但要求至少 1 份 READY，`knowledge_index.document_count` 只计 READY。`list_documents` 以 LATERAL join 附带每份文档最近一次构建的 `last_build_status/last_build_error/last_build_version` 供前端告警。注意 `_mark_failed` 仍会把未轮到的文档批量标为同一错误——判断"哪份文档失败"必须看任务 `metadata.current_document` 或 SKIPPED/首个 FAILED 行，不能读批量标记的 error_message。
 

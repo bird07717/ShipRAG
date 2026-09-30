@@ -4,6 +4,12 @@
 >
 > **生产快照（2026-09-29 核对）**：生产 HEAD `9cd6569`，与本地 `main` 的代码完全一致（本地更新的 `a00e192` 只改文档和 Golden 用例）；Alembic `0047 (head)`；backend/frontend/两个 Worker 健康。共 7 个知识库，只有 `VDR600产品` 上线 Assistant（活动索引 v6），文档以 PDF 为主、均在活动索引中 READY。LLM/Rerank/Embedding 均为 DashScope（LLM `qwen3.7-flash`）。因此下文各节标题和旧记录里的“本地已实施，未部署”“生产尚未部署”只代表记录当时的状态，相关代码现已全部在生产运行；“已部署”不等于已在生产做过真实模型或浏览器验收。
 
+## 请求错误日志周期清理（2026-09-30，本地已实施，待部署）
+
+- `request_error_log` 原先只在维护 Worker 启动时按 `REQUEST_ERROR_LOG_RETENTION_DAYS` 清理；本地初版加入自续排的 RQ 延迟链，经 review 发现续排失败会永久断链、48 小时哨兵过期后可能形成重复链。已改为保留启动清理，维护 Worker 约每 10 分钟检查 Redis 24 小时门禁，门禁到期就投递一次性清理任务；投递失败会尝试释放门禁供下一次检查重试，任务失败则等待下一个可用周期，不再依赖任务自续排。旧版已排队任务仍可执行一次但不续排。
+- 生产 Compose 显式传递该变量，默认 30 天，0 禁用。不涉及数据库迁移，也不会阻止客户端继续产生新的 401。上线需重建后端镜像并重建维护 Worker，先核对启动日志 `Daily request error log retention gate initialized`，下一次到期后核对 `Daily request error log retention enqueued`；本轮没有操作生产环境。
+- 本地后端关联测试（维护任务、Assistant 保留/恢复、周期 GC、配置）85 passed、7 skipped；Ruff lint/format、Mypy（140 个源文件）、生产 Compose 配置和本次 diff 检查通过。本机 Redis 映射端口 `127.0.0.1:16379` 的连接仍超时，未重跑依赖本地基础设施的完整门禁，也未做真实 24 小时运行验证。
+
 ## ADR-0029/0030：证据分层放开与“回答阶段只读标准化问题”（2026-09-30，已提交，未部署）
 
 - ADR-0029：回答策略按“文档 / 产品档案 / 行业通用”三层依据放开，规格类参数可给标注的行业典型值，电压等高后果参数仍只能引用文档；来源必须真实。ADR-0030：LLM 2 不再接收用户原话，只回答 LLM 1 的 `resolved_question`；LLM 1 新增一条规则，要求原样保留现场条件、数值、否定、纠正和回答形式要求；生成后由 `scrub_document_keys()` 确定性删除/替换正文中的本轮内部文档编号（`[D1]`、“文档 D3”→“相关文档”），不触发重生成，Trace 记录 `document_key_scrub_count`。

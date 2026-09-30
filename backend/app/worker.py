@@ -17,7 +17,11 @@ from app.tasks.assistant_retention import (
     run_assistant_request_retention_sync,
 )
 from app.tasks.gc import ensure_periodic_index_gc, run_index_gc_sync
-from app.tasks.log_retention import run_request_error_log_retention_sync
+from app.tasks.log_retention import (
+    enqueue_due_request_error_log_retention,
+    mark_request_error_log_retention_started,
+    run_request_error_log_retention_sync,
+)
 from app.tasks.recovery import (
     reconcile_abandoned_index_builds,
     reconcile_abandoned_maintenance_tasks,
@@ -26,12 +30,25 @@ from app.tasks.recovery import (
 logger = logging.getLogger(__name__)
 
 
+class MaintenanceWorker(Worker):
+    def run_maintenance_tasks(self) -> None:
+        super().run_maintenance_tasks()  # type: ignore[no-untyped-call]
+        if get_settings().request_error_log_retention_days <= 0:
+            return
+        try:
+            if enqueue_due_request_error_log_retention(self.connection):
+                logger.info("Daily request error log retention enqueued")
+        except Exception:
+            logger.warning("Failed to enqueue due request error log retention", exc_info=True)
+
+
 def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     connection = Redis.from_url(settings.redis_url.get_secret_value())
     queues = [Queue(name, connection=connection) for name in settings.queue_names]
-    worker = Worker(queues, connection=connection, name=settings.rq_worker_name)
+    worker_class = MaintenanceWorker if "maintenance" in settings.queue_names else Worker
+    worker = worker_class(queues, connection=connection, name=settings.rq_worker_name)
     worker.clean_registries()  # type: ignore[no-untyped-call]
     # Index recovery and index GC must have one owner.  In production the
     # index and maintenance queues run in separate workers, so only the index
@@ -60,6 +77,8 @@ def main() -> None:
                     "Pruned %s expired request error log row(s)",
                     retention_result["deleted_count"],
                 )
+            mark_request_error_log_retention_started(connection)
+            logger.info("Daily request error log retention gate initialized")
         assistant_retention_enabled = settings.assistant_request_retention_days > 0
         if assistant_retention_enabled:
             assistant_retention_result = run_assistant_request_retention_sync(settings)

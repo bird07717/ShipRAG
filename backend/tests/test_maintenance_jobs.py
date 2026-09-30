@@ -3,12 +3,13 @@ from __future__ import annotations
 import base64
 import os
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
 import pytest
 from pydantic import SecretStr
 
+from app import worker as worker_module
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
@@ -164,6 +165,258 @@ def test_log_retention_sync_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(log_retention, "_run_prune", fake_prune)
     assert log_retention.run_request_error_log_retention_sync(settings) == {"deleted_count": 1}
+
+
+@pytest.mark.asyncio
+async def test_log_retention_disabled_does_not_open_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        log_retention.AppResources,
+        "create",
+        lambda _: pytest.fail("disabled retention must not open resources"),
+    )
+    settings = Settings(_env_file=None, app_env="test", request_error_log_retention_days=0)
+
+    assert await log_retention._run_prune(settings) == {"deleted_count": 0}
+
+
+class _LogRetentionRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.set_calls: list[tuple[str, dict[str, Any]]] = []
+        self.deleted: list[str] = []
+
+    def set(self, key: str, value: str, **kwargs: Any) -> bool:
+        self.set_calls.append((key, kwargs))
+        if kwargs.get("nx") and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self.values.pop(key, None)
+
+
+class _LogRetentionQueue:
+    instances: ClassVar[list[_LogRetentionQueue]] = []
+
+    def __init__(self, name: str, *, connection: Any) -> None:
+        self.name = name
+        self.connection = connection
+        self.enqueued: list[tuple[Any, dict[str, Any]]] = []
+        self.__class__.instances.append(self)
+
+    def enqueue(self, function: Any, **kwargs: Any) -> None:
+        self.enqueued.append((function, kwargs))
+
+
+def test_log_retention_startup_sets_one_day_gate() -> None:
+    connection = _LogRetentionRedis()
+
+    log_retention.mark_request_error_log_retention_started(connection, 3_600)
+
+    assert connection.set_calls == [(log_retention._DAILY_GATE_KEY, {"ex": 3_600})]
+
+
+def test_log_retention_daily_gate_enqueues_one_off_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _LogRetentionQueue.instances = []
+    connection = _LogRetentionRedis()
+    monkeypatch.setattr(log_retention, "Queue", _LogRetentionQueue)
+
+    assert log_retention.enqueue_due_request_error_log_retention(connection, 3_600)
+    assert not log_retention.enqueue_due_request_error_log_retention(connection, 3_600)
+    connection.values.pop(log_retention._DAILY_GATE_KEY)  # Simulate TTL expiry after downtime.
+    assert log_retention.enqueue_due_request_error_log_retention(connection, 3_600)
+
+    queue = _LogRetentionQueue.instances[0]
+    assert queue.name == "maintenance"
+    assert len(queue.enqueued) == 1
+    assert len(_LogRetentionQueue.instances[1].enqueued) == 1
+    function, kwargs = queue.enqueued[0]
+    assert function is log_retention.process_request_error_log_retention
+    assert kwargs["job_timeout"] == 600
+    assert connection.set_calls[0][1] == {"nx": True, "ex": 3_600}
+
+
+def test_log_retention_enqueue_failure_releases_daily_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _LogRetentionRedis()
+    monkeypatch.setattr(log_retention, "Queue", _LogRetentionQueue)
+    original_enqueue = _LogRetentionQueue.enqueue
+
+    def fail(*_: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("queue unavailable")
+
+    monkeypatch.setattr(_LogRetentionQueue, "enqueue", fail)
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        log_retention.enqueue_due_request_error_log_retention(connection, 60)
+    assert connection.deleted == [log_retention._DAILY_GATE_KEY]
+    monkeypatch.setattr(_LogRetentionQueue, "enqueue", original_enqueue)
+    assert log_retention.enqueue_due_request_error_log_retention(connection, 60)
+
+
+def test_log_retention_one_off_task_runs_without_rescheduling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(_env_file=None, app_env="test")
+    calls: list[Settings] = []
+    monkeypatch.setattr(log_retention, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        log_retention,
+        "run_request_error_log_retention_sync",
+        lambda received: calls.append(received) or {"deleted_count": 3},
+    )
+    monkeypatch.setattr(
+        log_retention,
+        "Queue",
+        lambda *_args, **_kwargs: pytest.fail("task must not schedule another job"),
+    )
+
+    assert log_retention.process_request_error_log_retention() == {"deleted_count": 3}
+    assert log_retention.process_periodic_request_error_log_retention(60) == {"deleted_count": 3}
+    assert calls == [settings, settings]
+
+
+def test_log_retention_one_off_failure_does_not_schedule_another_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(_env_file=None, app_env="test")
+    monkeypatch.setattr(log_retention, "get_settings", lambda: settings)
+
+    def fail(_: Settings) -> dict[str, Any]:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(log_retention, "run_request_error_log_retention_sync", fail)
+    monkeypatch.setattr(
+        log_retention,
+        "Queue",
+        lambda *_args, **_kwargs: pytest.fail("task must not schedule another job"),
+    )
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        log_retention.process_request_error_log_retention()
+
+
+def test_log_retention_one_off_task_disabled_does_not_prune(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(_env_file=None, app_env="test", request_error_log_retention_days=0)
+    monkeypatch.setattr(log_retention, "get_settings", lambda: settings)
+    monkeypatch.setattr(log_retention.AppResources, "create", lambda _: pytest.fail("disabled"))
+
+    assert log_retention.process_request_error_log_retention() == {"deleted_count": 0}
+
+
+@pytest.mark.parametrize("retention_days", [0, 30])
+def test_maintenance_worker_rechecks_daily_retention(
+    monkeypatch: pytest.MonkeyPatch,
+    retention_days: int,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        request_error_log_retention_days=retention_days,
+    )
+    calls: list[str] = []
+    worker = object.__new__(worker_module.MaintenanceWorker)
+    worker.connection = object()
+    monkeypatch.setattr(
+        worker_module.Worker,
+        "run_maintenance_tasks",
+        lambda _: calls.append("base"),
+    )
+    monkeypatch.setattr(worker_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        worker_module,
+        "enqueue_due_request_error_log_retention",
+        lambda _: calls.append("enqueue") or True,
+    )
+
+    worker.run_maintenance_tasks()
+
+    assert calls == (["base", "enqueue"] if retention_days else ["base"])
+
+
+def test_maintenance_worker_retries_after_enqueue_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(_env_file=None, app_env="test")
+    worker = object.__new__(worker_module.MaintenanceWorker)
+    worker.connection = object()
+    attempts: list[int] = []
+    monkeypatch.setattr(worker_module.Worker, "run_maintenance_tasks", lambda _: None)
+    monkeypatch.setattr(worker_module, "get_settings", lambda: settings)
+
+    def enqueue(_: Any) -> bool:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("temporary queue error")
+        return True
+
+    monkeypatch.setattr(worker_module, "enqueue_due_request_error_log_retention", enqueue)
+
+    worker.run_maintenance_tasks()
+    worker.run_maintenance_tasks()
+
+    assert len(attempts) == 2
+
+
+@pytest.mark.parametrize("retention_days", [0, 30])
+def test_maintenance_worker_marks_log_retention_after_startup_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    retention_days: int,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        rq_queues="maintenance",
+        index_gc_enabled=False,
+        request_error_log_retention_days=retention_days,
+        assistant_request_retention_days=0,
+        assistant_request_stale_seconds=0,
+    )
+    connection = object()
+    calls: list[str] = []
+    scheduler: list[bool] = []
+
+    class FakeWorker:
+        def __init__(self, queues: Any, *, connection: Any, name: str) -> None:
+            assert queues == ["maintenance"]
+
+        def clean_registries(self) -> None:
+            pass
+
+        def work(self, *, with_scheduler: bool) -> None:
+            scheduler.append(with_scheduler)
+
+    async def no_recovery(*_: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(worker_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker_module, "configure_logging", lambda _: None)
+    monkeypatch.setattr(worker_module.Redis, "from_url", lambda _: connection)
+    monkeypatch.setattr(worker_module, "Queue", lambda name, *, connection: name)
+    monkeypatch.setattr(worker_module, "MaintenanceWorker", FakeWorker)
+    monkeypatch.setattr(worker_module, "reconcile_abandoned_maintenance_tasks", no_recovery)
+    monkeypatch.setattr(
+        worker_module,
+        "run_request_error_log_retention_sync",
+        lambda _: calls.append("startup") or {"deleted_count": 0},
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "mark_request_error_log_retention_started",
+        lambda _: calls.append("mark"),
+    )
+
+    worker_module.main()
+
+    assert calls == (["startup", "mark"] if retention_days else [])
+    assert scheduler == [False]
 
 
 class _Records:
