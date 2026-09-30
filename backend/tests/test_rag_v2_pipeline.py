@@ -32,6 +32,7 @@ from app.rag.v2.validation import (
     normalize_evidence_bindings,
     parameter_observations,
     public_leaks,
+    scrub_document_keys,
     validate_generated_answer,
 )
 from app.services.rag import RagService, _deterministic_greeting
@@ -1618,3 +1619,50 @@ def test_v2_valid_image_evidence_implies_its_owning_document() -> None:
     )
 
     assert normalized.used_document_keys == ["D2", "D1"]
+
+
+def _scrub_context() -> DocumentContext:
+    return DocumentContext(
+        prompt_context="PSU 板上 D1 指示灯常亮表示供电正常。",
+        document_keys=("D1", "D2", "D3"),
+        image_bindings=(),
+        title_aliases=(),
+        document_ids=("doc-1", "doc-2", "doc-3"),
+        estimated_tokens=10,
+        context_mode="FULL_DOCUMENT",
+    )
+
+
+def _scrub(answer: str, allowed_text: str = "") -> tuple[str, int]:
+    generated = GeneratedAnswer(
+        response_kind="ANSWER",
+        basis="DOCUMENT",
+        answer=answer,
+        used_document_keys=["D1"],
+        used_image_keys=[],
+        next_suggestions=[],
+    )
+    scrubbed, count = scrub_document_keys(generated, _scrub_context(), allowed_text=allowed_text)
+    return scrubbed.answer, count
+
+
+def test_scrub_removes_internal_document_key_citations_without_regenerating() -> None:
+    answer, count = _scrub("先检查供电 [D1]。当前提供的文档（D1、D2、D3）中未包含该参数。")
+    assert answer == "先检查供电。当前提供的文档中未包含该参数。"
+    assert count == 2
+
+    answer, count = _scrub("对应文档D3中的开关模块规格为 18-36VDC，参考文档 D1-D2。")
+    assert answer == "对应相关文档中的开关模块规格为 18-36VDC，参考相关文档。"
+    assert count == 2
+
+    answer, count = _scrub("但文档 D2 提供了以下关键参数。")
+    assert answer == "但相关文档提供了以下关键参数。"
+    assert count == 1
+
+
+def test_scrub_keeps_real_component_labels_and_unrelated_codes() -> None:
+    context_text = _scrub_context().prompt_context
+    original = "观察 D1 指示灯是否常亮，DC24V 输入是否正常，D12 端子无需处理。"
+    answer, count = _scrub(original, allowed_text=context_text)
+    assert answer == original
+    assert count == 0

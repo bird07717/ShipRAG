@@ -195,6 +195,45 @@ def evidence_violations(
     return violations
 
 
+def scrub_document_keys(
+    generated: GeneratedAnswer,
+    context: DocumentContext,
+    *,
+    allowed_text: str = "",
+) -> tuple[GeneratedAnswer, int]:
+    """Remove this turn's internal document keys (D1…) from prose; never regenerate.
+
+    Only bracketed citations and "文档/资料 + key" forms are rewritten, so a real
+    component label such as a board LED "D1" in the source text stays untouched.
+    """
+
+    keys = sorted(context.document_keys, key=len, reverse=True)
+    if not keys or not generated.answer:
+        return generated, 0
+    key = "(?:" + "|".join(re.escape(item) for item in keys) + ")"
+    key_list = rf"{key}(?:\s*[、,，/~\uff5e至-]\s*{key})*"
+    patterns = (
+        (re.compile(rf"\s*[\[【(（]\s*{key_list}\s*[\]】)）]"), ""),
+        (re.compile(rf"(文档|资料)\s*{key_list}(?![0-9A-Za-z])[ \t]*"), r"相关\1"),
+    )
+    answer = generated.answer
+    count = 0
+    for pattern, replacement in patterns:
+
+        def substitute(match: re.Match[str], replacement: str = replacement) -> str:
+            nonlocal count
+            if _is_evidenced(match.group(0).strip(), allowed_text):
+                return match.group(0)
+            count += 1
+            return match.expand(replacement)
+
+        answer = pattern.sub(substitute, answer)
+    if not count:
+        return generated, 0
+    answer = re.sub(r"[ \t]+([。，；：、！？）])", r"\1", answer)
+    return generated.model_copy(update={"answer": answer}), count
+
+
 def normalize_evidence_bindings(
     generated: GeneratedAnswer,
     context: DocumentContext,

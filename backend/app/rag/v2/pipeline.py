@@ -34,6 +34,7 @@ from app.rag.v2.validation import (
     normalize_evidence_bindings,
     parameter_observations,
     public_leaks,
+    scrub_document_keys,
     validate_generated_answer,
 )
 
@@ -345,7 +346,6 @@ class RagV2Pipeline:
             timings=timings,
         )
         prompt = build_answer_prompt(
-            question=question,
             history=turn.history,
             interpretation=query_outcome.interpretation,
             context=context,
@@ -357,6 +357,7 @@ class RagV2Pipeline:
         answer_started = time.perf_counter()
         answer_provider = self.llm_factory(self.settings, turn.llm)
         repair_count = 0
+        key_scrub_count = 0
         allowed_public_text = question + "\n" + context.prompt_context
         try:
             generated = await generate_answer(
@@ -374,6 +375,10 @@ class RagV2Pipeline:
                 product_name=turn.knowledge_name or product_name,
             )
             generated = normalize_evidence_bindings(generated, context)
+            generated, scrubbed = scrub_document_keys(
+                generated, context, allowed_text=allowed_public_text
+            )
+            key_scrub_count += scrubbed
             violations = [
                 *public_leaks(
                     generated.answer,
@@ -405,6 +410,10 @@ class RagV2Pipeline:
                 )
                 scope_authority_applied = scope_authority_applied or repair_scope_authority_applied
                 generated = normalize_evidence_bindings(generated, context)
+                generated, scrubbed = scrub_document_keys(
+                    generated, context, allowed_text=allowed_public_text
+                )
+                key_scrub_count += scrubbed
                 violations = [
                     *public_leaks(
                         generated.answer,
@@ -484,6 +493,7 @@ class RagV2Pipeline:
                 "used_document_ids": used_document_ids,
                 "used_image_count": len(generated.used_image_keys),
                 "public_leak_repair_count": repair_count,
+                "document_key_scrub_count": key_scrub_count,
                 "parameter_observations": observed_parameters,
                 "unsupported_parameter_count": sum(
                     item["status"] == "UNSUPPORTED" for item in observed_parameters

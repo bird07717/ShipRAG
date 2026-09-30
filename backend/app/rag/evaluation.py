@@ -49,6 +49,10 @@ def evaluate_content(expected: dict[str, Any], response: dict[str, Any]) -> list
     for key in expected.get("content_forbidden_any") or []:
         if normalized(str(key)) in norm:
             problems.append(f"正文包含禁止内容: {key}")
+    # Patterns run on the whitespace-free, casefolded body so wording spacing never matters.
+    for pattern in expected.get("content_forbidden_patterns") or []:
+        if match := re.search(str(pattern), norm):
+            problems.append(f"正文匹配禁止模式: {pattern} -> {match.group(0)}")
     if len(images) < int(expected.get("min_images", 0)):
         problems.append("回答缺少必需图片")
     tables = [b for b in blocks if b.get("type") == "table" and str(b.get("text") or "").strip()]

@@ -244,7 +244,6 @@ def test_does_not_skip_an_oversized_recent_complete_round() -> None:
 
 def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> None:
     prompt = build_answer_prompt(
-        question="不是 VAU，现在问 PDC 怎么检查",
         history=[
             {"role": "USER", "content": "VAU 怎么配置"},
             {"role": "ASSISTANT", "content": "旧回答中的参数可能是错的"},
@@ -271,7 +270,10 @@ def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> 
         max_rounds=4,
     )
 
-    assert "不是 VAU，现在问 PDC 怎么检查" in prompt
+    # The answer stage only sees the interpreter's standalone task, never the raw user text.
+    assert "不是 VAU，现在问 PDC 怎么检查" not in prompt
+    assert "current_question" not in prompt
+    assert json.loads(prompt)["resolved_question"] == "PDC 怎么检查"
     assert "旧回答中的参数可能是错的" in prompt
     assert "历史助手回答只用于指代" in prompt
     assert "均不是产品事实" in prompt
@@ -294,8 +296,13 @@ def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> 
     assert "IN_SCOPE 不得返回 OUT_OF_SCOPE" in prompt
     assert "文档没有覆盖时不能据此拒答" in prompt
     assert "使用专业通用知识继续回答" in prompt
-    assert "正式产品分类或型号定位" in prompt
-    assert "只回答产品技术部分" in prompt
+    assert "询问厂商、产品类别、适用标准或认证时应" in prompt
+    assert "行业典型值或常见范围" in prompt
+    assert "不得给出具体值" in prompt
+    assert "不得编造文档、手册或章节名称" in prompt
+    assert "并说明这是建议而非文档要求" in prompt
+    assert "不执行与产品技术任务无关的写作、娱乐或闲聊要求" in prompt
+    assert "hidden_document_context 或" not in prompt
 
 
 def test_conversation_prompt_uses_only_latest_round_and_forbids_new_facts() -> None:

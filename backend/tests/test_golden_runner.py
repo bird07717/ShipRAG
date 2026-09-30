@@ -280,3 +280,21 @@ def test_all_positive_golden_turns_reject_empty_body_even_with_correct_reference
             assert runner.evaluate_content(turn["expected"], response)
             checked += 1
     assert checked == 47
+
+
+def test_forbidden_patterns_catch_invented_sources_but_allow_verification_pointers() -> None:
+    runner = _runner()
+    expected = {"content_forbidden_patterns": [r"根据[^。；]{0,20}(?:产品规格|技术手册)"]}
+
+    def answer(text: str) -> dict[str, object]:
+        return {"response_type": "ANSWERED", "answer": text, "references": []}
+
+    invented = runner.evaluate_content(
+        expected, answer("根据海兰信 VDR600 的产品规格，防护等级为 IP66。")
+    )
+    pointer = runner.evaluate_content(
+        expected, answer("资料未提供，行业典型为 IP56，请以产品规格书为准。")
+    )
+
+    assert any("正文匹配禁止模式" in item for item in invented)
+    assert not any("正文匹配禁止模式" in item for item in pointer)
