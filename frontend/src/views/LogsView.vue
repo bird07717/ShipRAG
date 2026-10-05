@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Refresh, Search, WarningFilled } from "@element-plus/icons-vue";
 
 import { adminApi } from "@/api/admin";
@@ -23,17 +23,25 @@ const store = useAdminStore();
 const loadError = ref("");
 
 const LOG_TABS = new Set(["assistant-answers", "request-errors", "failed-turns", "task-failures", "escalations", "traces"]);
+type TraceSource = "" | "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND";
 
 function navigationState(query = ""): {
   tab: string;
   engine: "" | "SUPPORT" | "RAG";
+  source: TraceSource;
+  from: string;
+  to: string;
 } {
   const params = new URLSearchParams(query);
   const requestedTab = params.get("tab") ?? "request-errors";
   const requestedEngine = params.get("engine");
+  const requestedSource = params.get("source");
   return {
     tab: LOG_TABS.has(requestedTab) ? requestedTab : "request-errors",
     engine: requestedEngine === "SUPPORT" || requestedEngine === "RAG" ? requestedEngine : "",
+    source: requestedSource === "ASSISTANT_API" || requestedSource === "INTERNAL_CHAT" || requestedSource === "PLAYGROUND" ? requestedSource : "",
+    from: params.get("from") ?? "",
+    to: params.get("to") ?? "",
   };
 }
 
@@ -146,35 +154,60 @@ const requestErrorDetailText = computed(() => {
 
 /* ---------------- failed support turns ---------------- */
 
-const failedTraceFilter = ref<{ engine: "" | "SUPPORT" | "RAG"; errorCode: string }>({
+const failedTraceFilter = ref<{ engine: "" | "SUPPORT" | "RAG"; errorCode: string; source: TraceSource; from: string; to: string }>({
   engine: initialNavigation.engine,
   errorCode: "",
+  source: initialNavigation.source,
+  from: initialNavigation.from,
+  to: initialNavigation.to,
+});
+const failedTraceScope = computed(() => {
+  const { source, from, to } = failedTraceFilter.value;
+  const labels = { ASSISTANT_API: "外部 Assistant", INTERNAL_CHAT: "内部聊天", PLAYGROUND: "检索试验台" };
+  return [source ? labels[source] : "", from || to ? `${from ? store.formatDate(from) : "不限起始时间"} ～ ${to ? store.formatDate(to) : "不限结束时间"}` : ""].filter(Boolean).join(" · ");
 });
 const failedTraces = ref<TraceSummary[]>([]);
 const loadingFailedTraces = ref(false);
 const selectedFailedTrace = ref<RagTrace | null>(null);
 const failedTraceDrawerOpen = ref(false);
 const loadingFailedDetail = ref(false);
+let failedTraceLoadGeneration = 0;
+
+function invalidateFailedTraces(): void {
+  failedTraceLoadGeneration++;
+  failedTraces.value = [];
+  loadingFailedTraces.value = false;
+}
 
 const failedTraceCodes = computed(() =>
   (summary.value?.trace_failures ?? []).map((group) => group.error_code),
 );
 
 async function loadFailedTraces(): Promise<void> {
+  const generation = ++failedTraceLoadGeneration;
+  const knowledgeId = store.selectedKnowledgeId;
+  const isCurrent = () => generation === failedTraceLoadGeneration && knowledgeId === store.selectedKnowledgeId;
   loadingFailedTraces.value = true;
+  failedTraces.value = [];
   loadError.value = "";
   try {
-    failedTraces.value = await adminApi.listTraces(store.selectedKnowledgeId || undefined, {
+    const traces = await adminApi.listTraces(knowledgeId || undefined, {
       status: "FAILED",
       engine: failedTraceFilter.value.engine || undefined,
       errorCode: failedTraceFilter.value.errorCode || undefined,
+      ...(failedTraceFilter.value.source ? { source: failedTraceFilter.value.source } : {}),
+      ...(failedTraceFilter.value.from ? { from: failedTraceFilter.value.from } : {}),
+      ...(failedTraceFilter.value.to ? { to: failedTraceFilter.value.to } : {}),
       limit: 200,
     });
+    if (isCurrent()) failedTraces.value = traces;
   } catch (error) {
-    failedTraces.value = [];
-    loadError.value = errorMessage(error);
+    if (isCurrent()) {
+      failedTraces.value = [];
+      loadError.value = errorMessage(error);
+    }
   } finally {
-    loadingFailedTraces.value = false;
+    if (isCurrent()) loadingFailedTraces.value = false;
   }
 }
 
@@ -303,8 +336,9 @@ const activeTab = ref(initialNavigation.tab);
 
 function handleTabChange(tab: string | number): void {
   const name = String(tab);
+  if (name !== "failed-turns") invalidateFailedTraces();
   if (name === "request-errors" && !requestErrors.value.length) void loadRequestErrors();
-  if (name === "failed-turns" && !failedTraces.value.length) void loadFailedTraces();
+  if (name === "failed-turns" && !failedTraces.value.length && !loadingFailedTraces.value) void loadFailedTraces();
   if (name === "task-failures" && !failedTasks.value.length) void loadFailedTasks();
   if (name === "escalations" && !escalations.value.length) void loadEscalations();
 }
@@ -313,13 +347,15 @@ onMounted(() => {
   void loadSummary();
   handleTabChange(activeTab.value);
 });
+onUnmounted(invalidateFailedTraces);
 
 watch(
   () => props.navigationQuery,
   (query) => {
+    invalidateFailedTraces();
     const next = navigationState(query);
     activeTab.value = next.tab;
-    failedTraceFilter.value.engine = next.engine;
+    failedTraceFilter.value = { engine: next.engine, errorCode: "", source: next.source, from: next.from, to: next.to };
     if (next.tab === "failed-turns") void loadFailedTraces();
   },
 );
@@ -327,6 +363,7 @@ watch(
 watch(
   () => store.selectedKnowledgeId,
   () => {
+    invalidateFailedTraces();
     void loadSummary();
     if (activeTab.value === "failed-turns") void loadFailedTraces();
     if (activeTab.value === "task-failures") void loadFailedTasks();
@@ -352,6 +389,7 @@ watch(
           <span class="sub">
             最近 7 天 · 失败轮次 {{ totalTraceFailures }}（{{ summary?.scope.trace_failures === "KNOWLEDGE_BASE" ? "当前知识库" : "全局" }}）
             · 请求错误 {{ totalRequestErrors }}（全局）
+            · 独立汇总，不随下方列表筛选变化
           </span>
         </div>
         <div class="scope-actions">
@@ -541,6 +579,7 @@ watch(
 
           <!-- 2. Failed support turns -->
           <el-tab-pane label="失败轮次" name="failed-turns">
+            <p v-if="failedTraceScope" class="muted">列表范围：{{ failedTraceScope }} · 最多显示 200 条</p>
             <div class="tab-toolbar">
               <el-select
                 v-model="failedTraceFilter.engine"

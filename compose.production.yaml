@@ -1,5 +1,10 @@
 name: enterprise-rag-production
 
+x-build-identity: &build-identity
+  BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+  BUILD_TIME: ${BUILD_TIME:-unknown}
+  BUILD_DIRTY: ${BUILD_DIRTY:-unknown}
+
 x-app-environment: &app-environment
   APP_ENV: production
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -135,6 +140,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+      args: *build-identity
     environment: *app-environment
     command: ["alembic", "upgrade", "head"]
     depends_on:
@@ -147,6 +153,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+      args: *build-identity
     environment: *app-environment
     command: ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers $${BACKEND_WORKERS:-2} $${BACKEND_LIMIT_CONCURRENCY:+--limit-concurrency $${BACKEND_LIMIT_CONCURRENCY}}"]
     depends_on:
@@ -207,6 +214,7 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+      args: *build-identity
     depends_on:
       backend:
         condition: service_healthy

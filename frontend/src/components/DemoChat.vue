@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
-import { fetchImageBlobUrl, fetchWelcome, streamChat, downloadDocument } from "@/api/chat";
+import { fetchWelcome, streamChat, downloadDocument } from "@/api/chat";
+import ReviewImage from "@/components/ReviewImage.vue";
 import type {
   ChatContentBlock,
   ChatFallbackEvent,
@@ -51,7 +52,6 @@ const input = ref("");
 const loading = ref(false);
 const streamingHint = ref("");
 const conversationId = ref<string | undefined>(undefined);
-const imageUrls = reactive<Record<string, string>>({});
 const messagesContainer = ref<HTMLElement | null>(null);
 const abortController = ref<AbortController | null>(null);
 
@@ -101,9 +101,6 @@ function modeTone(m: string) {
 }
 function isText(b: ChatContentBlock): boolean {
   return b.type === "text" || b.type === "table";
-}
-function hasImage(b: ChatContentBlock): boolean {
-  return b.type === "image" && !!b.image_asset_id && !!imageUrls[b.image_asset_id];
 }
 function refSection(ref: ChatReference): string {
   const paths = ref.section_paths?.[0];
@@ -249,18 +246,6 @@ async function send(choiceId?: string) {
         if (!conversationId.value) conversationId.value = event.conversation_id;
         // NO_MATCH 回合后重显"换个问法"建议；正常回合清空，避免过时引导
         suggestions.value = event.next_suggestions ?? [];
-        for (const b of event.content) {
-          const assetId = b.image_asset_id;
-          if (b.type === "image" && assetId && !imageUrls[assetId]) {
-            fetchImageBlobUrl(assetId)
-              .then((url) => {
-                imageUrls[assetId] = url;
-              })
-              .catch(() => {
-                imageUrls[assetId] = "";
-              });
-          }
-        }
         scrollToBottomDebounce();
       },
       onError: (msg) => {
@@ -299,6 +284,12 @@ async function send(choiceId?: string) {
     scrollToBottomDebounce();
   }
 }
+
+onBeforeUnmount(() => {
+  streamGeneration++;
+  abortController.value?.abort();
+  if (scrollTimer) clearTimeout(scrollTimer);
+});
 
 function stopGeneration(): void {
   streamGeneration += 1;
@@ -440,16 +431,7 @@ onMounted(async () => {
                   >
                     <!-- eslint-disable-next-line vue/no-v-html -- DOMPurify 消毒后的 Markdown 输出 -->
                     <div v-if="isText(block)" class="text-block" v-html="renderMarkdown(block.text || '')"></div>
-                    <div v-else-if="block.type === 'image'" class="image-wrap">
-                      <img
-                        v-if="hasImage(block)"
-                        :src="imageUrls[block.image_asset_id!]"
-                        class="content-image"
-                        alt="文档图片"
-                      />
-                      <div v-else class="image-placeholder">图片加载中...</div>
-                      <small v-if="block.caption" class="image-caption">{{ block.caption }}</small>
-                    </div>
+                    <ReviewImage v-else-if="block.type === 'image' && block.image_asset_id" :asset-id="block.image_asset_id" :caption="block.caption" />
                   </div>
                   <span v-if="msg.streaming" class="cursor">●●●</span>
                 </template>
@@ -915,31 +897,6 @@ onMounted(async () => {
 
 .streaming-hint {
   margin-top: 4px;
-  color: var(--text-tertiary);
-  font-size: 12px;
-}
-
-.image-wrap {
-  margin: 8px 0;
-}
-
-.content-image {
-  max-width: 100%;
-  border-radius: var(--radius-sm);
-}
-
-.image-placeholder {
-  padding: 24px;
-  border: 1px dashed var(--border-default);
-  border-radius: var(--radius-sm);
-  color: var(--text-tertiary);
-  background: var(--bg-subtle);
-  text-align: center;
-}
-
-.image-caption {
-  display: block;
-  margin-top: 6px;
   color: var(--text-tertiary);
   font-size: 12px;
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { Collection, MoreFilled, Search } from "@element-plus/icons-vue";
 import { ElMessageBox } from "element-plus";
 
@@ -11,6 +11,7 @@ import ListSkeleton from "@/components/ui/ListSkeleton.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 
 const store = useAdminStore();
+const props = defineProps<{ navigationQuery?: string }>();
 
 const detailTarget = ref<KnowledgeBase | null>(null);
 const detailOpen = ref(false);
@@ -57,6 +58,18 @@ async function selectAndOpen(kb: KnowledgeBase): Promise<void> {
     await store.selectKnowledge();
   }
 }
+
+let openedFromQuery = "";
+watch(
+  () => [props.navigationQuery, store.knowledgeBases] as const,
+  ([query]) => {
+    const id = new URLSearchParams(query ?? "").get("id") ?? "";
+    if (!id) { openedFromQuery = ""; return; }
+    const kb = store.knowledgeBases.find((item) => item.id === id);
+    if (kb && openedFromQuery !== id) { openedFromQuery = id; void selectAndOpen(kb); }
+  },
+  { immediate: true },
+);
 
 function assistantChanged(config: KnowledgeAssistantConfig): void {
   store.applyKnowledgeAssistantConfig(config);

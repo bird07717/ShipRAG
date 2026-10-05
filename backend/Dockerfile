@@ -15,6 +15,13 @@ COPY backend/alembic.ini backend/alembic.ini
 COPY backend/alembic backend/alembic
 COPY backend/app backend/app
 
+ARG BUILD_COMMIT=unknown
+ARG BUILD_TIME=unknown
+ARG BUILD_DIRTY=unknown
+# Stamp before wheel installation so API and Workers share the same identity.
+RUN PYTHONPATH=backend python -m app.core.build_info --write \
+    --commit "$BUILD_COMMIT" --built-at "$BUILD_TIME" --dirty "$BUILD_DIRTY"
+
 RUN pip install --no-cache-dir "pip==25.2" \
     && pip install --no-cache-dir -r backend/requirements.prod.lock \
     && pip install --no-cache-dir --no-deps ./backend \

@@ -34,6 +34,8 @@ staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐�
 | `M3_RAG_ANSWER_THINKING_ENABLED` | `false` | 可选地为 RAG V2 的 LLM 2 和其修复调用请求内部思考；上线默认关闭，LLM 1 与其他结构化任务始终默认关闭。 |
 | `M3_RAG_ANSWER_THINKING_BUDGET` | `2048` | 启用时 DashScope/Qwen 的最大内部思考 Token；关闭时不生效，与 `M3_RAG_ANSWER_MAX_TOKENS` 的最终回答预算分离。其他 Provider 当前不发送该扩展字段。 |
 | `M3_RAG_HISTORY_MAX_ROUNDS` | `4` | 最近完整问答轮次上限。 |
+| `M3_HISTORY_MAX_MESSAGES` | `10` | 技术历史消息上限，用户/助手成对选取；当前 Production Compose 未显式转发此变量。 |
+| `M3_HISTORY_TOKEN_BUDGET` | `2000` | 技术历史估算 Token 预算；最新完整轮次超预算时历史可能为空。当前 Production Compose 未显式转发此变量。 |
 | `M3_RAG_ANSWER_REPAIR_ATTEMPTS` | `1` | 结构、证据白名单或真实实现信息违规后的最多修复次数。 |
 | `M3_RAG_SCOPE_MAX_TOKENS` | `800` | 每轮知识库名称/公开范围说明的 Prompt 快照估算 Token 上限；只截断运行时副本，不改数据库说明。 |
 | `M3_RAG_QUERY_INTERPRETER_MAX_TOKENS` | `512` | LLM 1 结构化查询理解输出上限。 |
@@ -64,7 +66,7 @@ bash scripts/dev-up.sh
 
 ## 校验命令
 
-RAG 正文质量用例：`.venv/bin/python rag-acceptance/run_golden.py --api-mode assistant --cases rag-acceptance/quality-cases.jsonl`。事实问答实验用例为 `rag-acceptance/fact-qa-cases.jsonl`，分别在 shadow/enabled 的测试进程运行。两者都调用真实配置模型，并创建隔离的新会话，不修改源文件或活动索引。解释边界用例为 `rag-acceptance/reasoning-cases.jsonl`；业务契约检查使用 `rag-acceptance/check_assistant_contract.py --kb-id <uuid> --base-url <URL>`，创建独立测试用户会话并核验重放、分页、图片、并发与断连。普通全量门禁仍只使用 fake 模型。
+当前 V2 专项 Golden 用例：`.venv/bin/python rag-acceptance/run_golden.py --api-mode assistant --cases rag-acceptance/technical-assistant-cases.jsonl`。旧质量/事实/解释用例分别为 `quality-cases.jsonl`、`fact-qa-cases.jsonl`、`reasoning-cases.jsonl`，其历史模式和文档名断言须先按当前 V2/目标语料核对，不再配置已删除的 shadow/enabled 开关。Golden 调用真实配置模型并创建隔离新会话，不修改源文件或活动索引。业务契约检查使用 `rag-acceptance/check_assistant_contract.py --kb-id <uuid> --base-url <URL>`，创建独立测试用户会话并核验重放、分页、图片、并发与断连。普通全量门禁仍只使用 fake 模型。
 
 离线对照：`.venv/bin/python rag-acceptance/compare_golden.py <before.json> <after.json> --cases <cases.jsonl> --output <comparison.json>`。仅支持同库 Assistant 报告，使用同一份当前断言重评两边；报告必须保存完整 `response`，只有答案摘要的旧报告不能用作正文对比。
 
@@ -96,7 +98,18 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 
 ## 生产核验与待确认
 
-- 2026-09-11 已确认目标生产服务器使用提交 `49c799a`，PostgreSQL、Redis、MinIO、后端和前端健康，两个 Worker 正常运行，数据库位于 Alembic `0041`；Assistant 鉴权、知识库、会话、真实 SSE、幂等、用户隔离以及当时仍存在的文档/图片资源代理均已完成生产验收。当前源码已删除 Assistant 原文下载接口，但该变更尚待生产部署；工作树已新增 `0042`，生产需在下一次部署执行迁移后才能使用 Assistant 重放计数和终态孤儿保留任务。生产 Golden Trace 已确认真实模型链路，不再使用 fake 查询链路。
+### 带版本标记的构建（2026-10-03）
+
+```bash
+bash scripts/build-production.sh --env-file .env.production backend frontend
+docker compose --env-file .env.production -f compose.production.yaml up -d --force-recreate
+```
+
+环境文件名按实际部署替换；使用根目录默认 `.env` 时可省略 `--env-file`。脚本只构建、不启动，写入构建期 `BUILD_COMMIT`、`BUILD_TIME`（UTC）、`BUILD_DIRTY`，不输出凭据。正式发布前提交工作区，避免 dirty 标记导致同一提交无法唯一识别代码。后端/API、两个 Worker 共用镜像内不可变标记；前端将同一信息编译入静态资源。直接 `docker compose build` 且未提供三个构建参数仍可构建，但版本显示“未标注”；启动时设置同名环境变量不能给旧镜像补版本。上述 `up` 不加 `--build`，避免无构建参数的二次构建覆盖标记。
+
+上线后刷新管理页面，展开侧栏“运行版本”核对前后端提交；Worker 可执行 `docker compose --env-file .env.production -f compose.production.yaml exec worker-index python -m app.core.build_info`（维护 Worker 同理，服务名 `worker-maintenance`）或查看启动日志。本批无需迁移、无需重建索引；必须更新前端、后端及两个 Worker 容器，不能仅 Git pull 或 restart。
+
+- 历史验收：2026-09-11 曾核对生产提交 `49c799a`、Alembic `0041` 及 Assistant 鉴权/SSE/幂等/隔离等；已被 2026-09-29 的生产快照（HEAD `9cd6569`、Alembic `0047`）取代，不能据旧记录继续判断 `0042` 或 V2 尚未部署。2026-10-05 本次仅检查本地源码与迁移图，未重新核对生产容器/数据库；9 月 30 日后提交与当前未提交管理台改动是否已部署，仍待核验。
 - 正式上线前仍需由具备 sudo 权限的管理员确认 UFW 与 `DOCKER-USER` 的实际规则，并轮换曾用于联调的临时凭据。服务器仓库通过 GitHub SSH 拉取，`cm` 账号需在交互式终端输入 SSH 私钥口令，因此服务器 `git pull` 由用户手动执行。
 
 ## 已删除的 RAG 聚焦历史方案（历史）
@@ -110,7 +123,7 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 
 ## 回答优化功能验证
 
-部署管理侧回答优化前执行 `cd backend && ../.venv/bin/python -m alembic upgrade head` 至 `0044`，再更新后端、前端。无需重建业务索引；本地已升级，生产是否升级必须另行核验。
+管理侧回答优化的表由 `0044` 引入；部署执行 `cd backend && ../.venv/bin/python -m alembic upgrade head`（当前仓库 head 为 `0047`），不能把 `0044` 当作当前目标版本。再更新后端、前端；该功能本身无需重建业务索引，实际数据库版本另行核验。
 
 定向后端验证：`cd backend && ../.venv/bin/python -m pytest -q -o addopts='' tests/test_answer_reviews.py tests/test_assistant_facade.py`；后端 PostgreSQL 测试复用测试环境连接并清理临时知识库。前端验证：`npm --prefix frontend run test -- tests/answer-reviews.spec.ts tests/reviews-api.spec.ts`。人工验收入口：管理台概览 → 查看回答与优化 → 选择知识库 → 查看 → 保存标记 → 按当前配置复测。复测会调用配置的模型，最多20轮、180秒。
 
@@ -124,7 +137,7 @@ RAG V2 不公开交付完整原文，完整候选只进入隐藏模型上下文�
 
 ## RAG 文档卡片部署与验证（0046）
 
-先执行 `cd backend && ../.venv/bin/alembic upgrade head`，再用 `../.venv/bin/alembic current` 确认为 `0046 (head)`；生产 Compose 仍由一次性 `migrate` 服务完成同一升级。迁移本身不调用模型、不回填数据。升级后在管理台“文档”页点击“生成/补齐 RAG 理解”，页面按 3 秒轮询显示 `RAG_DOCUMENT_CARD_GENERATE` 的进度、成功/失败/总数和终态错误；等待任务结束，再逐份进入“RAG 文档理解”检查并确认。活动索引中全部有效文档确认后，Assistant 才允许上线并保持 `ready=true`。整批 0 成功视为任务失败，部分失败保留已成功卡片并明确警告；再次全量补齐只选择缺失/失败/过期项。已确认卡片重新生成需要明确确认，成功后重新变成待确认并令已上线 Assistant 暂时 `ready=false`；失败时保留原已确认卡片。
+先执行 `cd backend && ../.venv/bin/alembic upgrade head`，再用 `../.venv/bin/alembic current` 确认为当前仓库 head（2026-10-05 为 `0047`，`0046` 是卡片功能首次迁移）；生产 Compose 仍由一次性 `migrate` 服务完成同一升级。迁移本身不调用模型、不回填数据。升级后在管理台“文档”页点击“生成/补齐 RAG 理解”，页面按 3 秒轮询显示 `RAG_DOCUMENT_CARD_GENERATE` 的进度、成功/失败/总数和终态错误；等待任务结束，再逐份进入“RAG 文档理解”检查并确认。活动索引中全部有效文档确认后，Assistant 才允许上线并保持 `ready=true`。整批 0 成功视为任务失败，部分失败保留已成功卡片并明确警告；再次全量补齐只选择缺失/失败/过期项。已确认卡片重新生成需要明确确认，成功后重新变成待确认并令已上线 Assistant 暂时 `ready=false`；失败时保留原已确认卡片。
 
 定向自动化：`cd backend && ../.venv/bin/pytest --no-cov -q tests/test_rag_document_cards.py tests/test_rag_document_cards_postgres.py tests/test_maintenance_jobs.py tests/test_task_recovery.py`；前端：`cd frontend && npx vitest run tests/admin-api.spec.ts tests/viewInteractions.spec.ts`。PostgreSQL 用例必须实际执行，跳过不算通过。RAG V2 会读取当前冻结索引中有效的卡片参与文档召回；卡片缺失时仍可走 Chunk 通道，但不能把“卡片已生成”单独表述为回答质量已经通过。
 
@@ -141,6 +154,8 @@ V5 已删除旧 P2/P3 `shadow/enabled` 运行时、后台任务、Query/Response
 RAG V2 为唯一主路径，开发与 Production Compose 使用同一执行逻辑。V5 本身无需数据库迁移或重建索引；部署需要重建后端镜像并重启 API，回滚使用旧镜像。
 
 V2 配置见上表。Query 与 Answer 两段超时之和必须小于 `M3_TURN_DEADLINE_SECONDS`；开发和生产示例总时限均为 90 秒。
+
+表中默认值来自 Settings，不代表所有值都能只改生产 `.env` 覆盖。当前 Production Compose 显式转发历史轮次上限，但未转发历史消息数/Token 预算；镜像也不带项目 `.env`。若未来调整后两项，须同时为容器声明对应环境变量并重建容器，本次未修改编排或预算。
 
 V4.1 文档级排序复用现有 Rerank Provider、`M3_RERANK_TIMEOUT_SECONDS` 和模型快照，不增加环境变量或第三次 LLM。候选池内部最多取 `max(M3_RAG_FULL_DOCUMENT_LIMIT, M3_RAG_DOCUMENT_CARD_TOP_K)` 份用于排序，最终全文上限仍由 `M3_RAG_FULL_DOCUMENT_LIMIT=3` 控制。当前未调整 Chunk、向量/BM25 Top-K、卡片 Top-K 或 20,000 Token 全文预算；后续只有在多轮 Trace 显示稳定的召回或上下文问题时才单变量调整。
 

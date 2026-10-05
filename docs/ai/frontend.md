@@ -34,7 +34,15 @@
 
 `adminStore` 是模块级 `reactive` 单例，跨视图保持选中的知识库、文档、索引、Trace、模型和任务状态；选择的知识库 ID 使用 `localStorage`，跟踪任务使用 `sessionStorage`。`engineRoutingStore` 管理知识库运行策略；`ragAdminStore` 服务于 RAG 配置界面。
 
-配置页的 LLM Provider 可选择智谱、硅基流动或千问（阿里云百炼 / DashScope）。选择 DashScope 会填入北京地域共享 OpenAI 兼容地址；管理员仍可按业务空间或地域修改 Base URL。模型身份或密钥变更必须先通过后端连通性探测，保存后从下一轮管理 DemoChat 和 Assistant 请求共同生效。2026-09-15 起 Embedding、Rerank、OCR、Vision 的编辑对话框同样提供 DashScope 选项（列表由后端 `supported_providers` 返回），Embedding 身份变更仍走全量重建确认。
+`adminStore.loadSystemInfo()` 使用模块级请求序号，首次加载与 Dashboard 手动刷新共用同一保护；只有最新发起的请求可更新版本，过期成功或失败均忽略。最新请求失败仍清空为未知，不回退旧请求结果。`LogsView` 的失败列表同样按请求序号和知识库 ID 校验成功、错误及加载终态；新查询清空旧行，换库、更新深链、离开失败页签或组件卸载使旧请求失效。页签进入时不重复发起已在加载的失败列表请求。这是响应提交保护，不取消网络请求、不新增轮询，也不扩展到其他日志查询。
+
+配置页的 LLM Provider 可选择智谱、硅基流动或千问（阿里云百炼 / DashScope）。选择 DashScope 会填入北京地域共享 OpenAI 兼容地址；管理员仍可按业务空间或地域修改 Base URL。模型身份或密钥变更必须先通过后端连通性探测；同一部署/数据库内，LLM 保存后从下一轮管理 DemoChat 和 Assistant 请求共同生效，既有会话不冻结 LLM。2026-09-15 起 Embedding、Rerank、OCR、Vision 的编辑对话框同样提供 DashScope 选项（列表由后端 `supported_providers` 返回），Embedding 身份变更仍走全量重建确认，不能将所有模型都描述为下一轮即时生效；OCR/Vision 的旧解析结果还可能被复用，生效限制见 `backend.md`。
+
+模型编辑弹窗按编辑代次、模型 ID 和凭证绑定异步提交；关闭、重新打开、凭证变化或卸载使旧回调失效。清密钥/保存期间锁定草稿并防止重复提交；Embedding 等待确认后再次校验弹窗身份才提交。已发出的写请求不取消，关闭弹窗不等于撤回服务端操作。“测试已保存配置”仅调用既有模型 ID 探测，不测试草稿；草稿变化清除连通徽标，并使旧探测结果失效，连通性不代表结构化回答质量通过。
+
+模型保存/清密钥返回本次 `ModelActionResult`，弹窗据此关闭或显示错误，不再用共享 `store.error` 判断成功。仅模型写操作使用 `runModelAction`：保留原 `run()` 的加载计数，但按模型操作序号与凭证保护全局错误/成功提示，不让较早的模型操作覆盖较新操作的状态；其他管理操作的 `run()` 行为未改。模型列表首次加载、保存与密钥写入/清除统一调用 `loadModels()`，按列表请求序号和凭证提交；过期成功/失败忽略，最新失败保留现有列表并返回错误，不以旧响应补填，不新增轮询或取消服务端写操作。
+
+索引模型提示按类型区分：Embedding 同时用于查询和构建，身份切换须通过 1024 维校验并为启用且有有效文档的库提交重建，切换可能影响 Assistant 就绪；需核对活动索引、文档理解审核并用新会话验收，不承诺无中断或保留完整旧配置。OCR/Vision 使用 Worker 任务开始时的快照，只影响实际重新解析，普通重建可能 REUSE 旧内容，停用数据库配置仍可能回退环境模型。保存提示沿用同一边界，不将提交重建写成重建完成。缓存失效及模型身份一致性本身未在此处修改。
 
 知识库文档页可通过管理 API 修改文档显示名称；成功后就地更新列表和已打开的文档详情，不提交索引构建。原始文件名仍只读保留，用于管理员识别源文件。
 
@@ -54,6 +62,7 @@
 
 ## 开发约定
 
+- 模型配置页已移除不被 V2 消费的 temperature/max_tokens/thinking 编辑控件，改为阶段代码/Settings 来源的只读说明，不宣称展示实时运行值；保存身份、密钥或启用状态不提交 `parameters`，保留数据库已有 JSON。V2 结构化调用仍使用原阶段显式参数，未改变后端生成策略。
 - 使用 TypeScript 严格类型；对 API 契约改动应同步 `types/`、适配层、视图与测试。
 - UI 文字主要为中文；复用 `components/ui/`、设计 token 和 Element Plus，而非复制样式。
 - API/Store/工具核心逻辑维持较高覆盖率；当前覆盖率门槛定义在 `vite.config.ts`，按目录分别计算。
@@ -70,7 +79,7 @@
 
 ## V5 后管理台与 RAG V2 对齐（2026-09-16）
 
-侧边栏按 RAG 优先重组为：概览 / 知识管理（含索引管理）/ 问答与调优（问答测试、引擎路由、调试台）/ 运维 / 遗留能力（Support · 已冻结，仅 `support-review`）。视图键（hash）未变，旧深链映射不受影响；概览横幅改为"RAG V2 知识发布"。
+侧边栏按 RAG 优先重组为：概览 / 知识管理（含索引管理）/ 问答与调优（问答测试、引擎路由、调试台）/ 运维 / 遗留能力（Support · 已冻结，仅 `support-review`）。视图键（hash）未变，旧深链映射不受影响；2026-10-03 移除概览宣传横幅，改为运行状态与操作入口。
 
 - `EngineRoutingView` 默认策略为 `RAG_ONLY`，`SUPPORT_WITH_RAG_FALLBACK` 选项与 Support 就绪卡片标注"已冻结（ADR-0021）"但保留可用（后端网关仍可执行该策略，前端不单独禁用）。
 - `RagConfigurationView` 只保留 `vector_top_k`、`bm25_top_k`、`fusion_top_k` 三个 V2 实际消费的参数；`rerank_top_n`、`context_max_chunks` 已从界面移除（后端 PATCH 为部分更新，兼容缺省）。Rerank 数量与全文上下文预算由环境变量控制，界面只作说明。
@@ -79,6 +88,14 @@
 - `TracesView` 时间线包含 V2 各阶段耗时（`v2_query_interpreter_ms` 等）并保留 legacy 键（标注"遗留"，按存在与否自过滤）；详情的"RAG V2 生成详情"展示 Knowledge/Conversation 回答路径、查询理解、文档级重排或对话路径跳过状态、检索降级、隐藏上下文与合规修复。V2 重排折叠面板读取 `runtime_snapshot.generation.retrieval.document_rerank`（对话路径读取检索跳过状态），仅非 V2 Trace 读取旧 `rerank_result`；Support 决策段标注"遗留"，Prompt 折叠面板仅在存在时显示。
 - `LogsView` 的"升级记录"页签标注"（遗留）"并说明其仅来自已冻结 Support 链路，保留历史查询能力。
 - `SupportReviewView` 顶部有 ADR-0021 冻结横幅，发布/重生成流程保留；`DocumentsView` 上传与空态文案不再宣传 Support Profile 审核，改为说明 RAG 文档卡片自动生成。
-- `DashboardView` 的回答结果区只统计外部 `ASSISTANT_API`、`RAG`、近 7 天：分别展示直接回答率、待补充信息率、范围外请求率、失败率和延迟；范围外拒答不再计入负向“无答案”。独立“回答依据分布”以三类 `PRODUCT_*` 回答为分母，展示文档知识、文档加通用解释和通用工程扩展，不把欢迎语或历史未分类回答混入。趋势图、`UNCONFIRMED` 列表和柱形下钻复用同一时间/引擎/来源条件，待补充信息不再直接标作知识库缺口。Trace 的 RAG V2 详情将内部 `diagnostic_reason` 显示为输入信息不足、范围判断冲突或缺少关键条件，并保留原始输入门禁码；这些字段不出现在外部 Assistant 响应。冻结 Support 的文档交付、澄清率、升级次数和 Profile 待办已从概览移除，遗留能力仍保留在独立页面。
+- `DashboardView` 的回答结果区只统计外部 `ASSISTANT_API`、`RAG`、近 7 天：分别展示直接回答率、待补充信息率、范围外请求率、失败率和延迟；范围外拒答不再计入负向“无答案”。独立“回答依据分布”以三类 `PRODUCT_*` 回答为分母，展示文档知识、文档加通用解释和通用工程扩展，不把欢迎语或历史未分类回答混入。趋势图、`UNCONFIRMED` 列表和柱形下钻复用同一时间/引擎/来源条件，待补充信息不再直接标作知识库缺口。Trace 的 RAG V2 详情将内部 `diagnostic_reason` 显示为输入信息不足、范围判断冲突或缺少关键条件，并保留原始输入门禁码；这些字段不出现在外部 Assistant 响应。冻结 Support 的文档交付、澄清率、升级次数和 Profile 待办已从概览移除，遗留能力仍保留在独立页面。失败待办深链携带当前 Overview 已显示的准确 from/to 和 engine/source，`LogsView` 解析并在失败列表刷新时保留；新深链重置旧条件与错误码。列表显示应用范围、最多 200 条，上方近 7 天失败汇总独立、不随列表筛选变化。
 - `IndexBuildView` 索引管理页（ADR-0024，2026-09-17）：工具栏在 `rebuild_required` 时显示"文档有变更待重建"徽标；BUILDING 条目且任务活动时显示"停止"按钮（接 `cancelTask`，协作取消、文档边界生效）；FAILED/CANCELLED 条目显示"重建"按钮（接 `retryIndex`，确认框提示"同一文档同一错误失败 2 次后将自动跳过"）和"删除"按钮（CANCELLED 与 FAILED/DEPRECATED 同权）。重建后不自动激活——沿用全局 staged 候选语义，完成后需手动"设为当前 RAG"。删除按钮文案在详情抽屉为"删除此索引版本"，避免误以为删除文档。
 - `DocumentsView` 工具栏（ADR-0025，2026-09-18）：readiness 计数旁新增"一键确认待确认（N）"按钮（`confirmRagDocumentCards` action，N 为 `auto_count`，为 0 时禁用），确认框说明只影响待确认卡片，完成后以响应携带的 readiness 与刷新后的卡片列表更新页面；REJECTED/FAILED/缺失仍由 blockers 展示。新增文档重建时，未变更文档的卡片经后端复制保留审核状态，页面仅需确认新增部分。
+
+## 管理台口径与可操作性（2026-10-03）
+
+- `utils/traceDiagnostics.ts` 是回答复核与 Trace 的管理诊断适配入口：V2 重排取 `runtime_snapshot.generation.retrieval.document_rerank`，实际采用文档取 `generation.answer.used_document_ids`；候选、隐藏上下文、实际采用是不同集合，不从公开空引用或候选反推实际采用。历史缺失字段显示无法判断，保留非 V2 的旧记录兼容。
+- `ReviewImage.vue` 统一用于回答复核、文档预览、DemoChat 和上线试问：懒加载、点击放大、关闭预览、加载失败重试、资产不可用/凭证失效提示，以及中止请求和 Blob URL 释放。仅按资产 ID 经管理鉴权取图，不使用响应内任意 URL。外部 Assistant 图片 API 不变，业务端放大交互仍由业务前端实现。
+- Dashboard 按“能否对外服务 → 当前待办 → 四个核心指标 → 趋势与人工复核 → 折叠诊断”展示。外部轮次含寒暄/非文档对话；直接回答率与 P95 使用技术样本。零样本显示“—”；直接回答率不是正确率，`UNCONFIRMED` 不是自动判定的知识缺口。最近链路含内部调试，与外部运营指标分区说明。切换知识库/卸载忽略旧响应，缺凭证不轮询，部分刷新失败明确标记旧数据。
+- 侧栏 `RuntimeVersion.vue` 同时显示前端静态构建与后端运行镜像的提交、时间、dirty 标记；差异提示核对镜像及缓存，缺标记显示未知。标记生成流程见 `environment.md`，不新增轮询；Worker 版本需另核对启动日志/只读命令。Dashboard 手动“刷新状态”重新读取 `store.systemInfo`，失败显示未知；60 秒指标刷新不读取版本。前端版本仍代表已加载的静态包，部署新前端后须重新加载页面。
+- 上线配置显示服务端编码检查项（知识库、模型、索引、文档理解、策略）与去处理入口，加上推荐问题保存和人工试问建议；试问不等于自动质量合格，也不新增上线门禁。Dashboard 的清单入口使用 `#/knowledge?id=<ID>`，清单动作绑定原知识库。`openCheck` 在等待前后校验组件存活与凭证有效，等待后校验凭证未替换、组件知识库 ID 与全局选中 ID 仍匹配；卸载、凭证失效/替换或换库后不执行旧导航。

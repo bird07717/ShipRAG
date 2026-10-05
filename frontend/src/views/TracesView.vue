@@ -8,6 +8,7 @@ import type { RagTrace, TraceSummary } from "@/types/admin";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
+import { traceDiagnostics } from "@/utils/traceDiagnostics";
 
 const store = useAdminStore();
 
@@ -165,48 +166,21 @@ const supportTrace = computed(() => {
   return trace && trace.support_version === 1 ? (trace as SupportTrace) : null;
 });
 
-type V2Generation = {
-  pipeline?: string;
-  status?: string;
-  response_path?: "KNOWLEDGE" | "CONVERSATION";
-  diagnostic_reason?: "LOW_INFORMATION" | "SCOPE_CONFLICT" | "NEEDS_KEY_CONDITION";
-  input_guard?: string;
-  query_interpreter?: { status?: string; reason?: string; latency_ms?: number; route_fallback_reason?: string };
-  retrieval?: { status?: string; reason?: string; degradations?: string[]; document_rerank?: Record<string, unknown> & { status?: string; reason?: string } };
-  context?: { document_count?: number; image_count?: number; estimated_tokens?: number; mode?: string };
-  answer?: {
-    response_kind?: string;
-    basis?: string;
-    used_document_count?: number;
-    used_image_count?: number;
-    public_leak_repair_count?: number;
-    unsupported_parameter_count?: number;
-  };
-};
-
 const DIAGNOSTIC_REASON_LABELS: Record<string, string> = {
   LOW_INFORMATION: "输入信息不足",
   SCOPE_CONFLICT: "范围判断冲突（已按查询理解收口）",
   NEEDS_KEY_CONDITION: "缺少关键条件",
 };
 
-const v2Generation = computed(() => {
-  const snapshot = activeTraceDetail.value?.runtime_snapshot as
-    | { generation?: V2Generation }
-    | undefined;
-  const generation = snapshot?.generation;
-  return generation?.pipeline === "V2" ? generation : null;
-});
+const diagnostics = computed(() => traceDiagnostics(activeTraceDetail.value));
+const v2Generation = computed(() => diagnostics.value.generation);
 
 const v2Degradations = computed(() => {
   const items = v2Generation.value?.retrieval?.degradations ?? [];
   return items.filter(Boolean);
 });
 
-const v2RerankDetail = computed(() => {
-  const retrieval = v2Generation.value?.retrieval;
-  return retrieval?.document_rerank ?? (retrieval?.status === "SKIPPED" ? retrieval : null);
-});
+const v2RerankDetail = computed(() => diagnostics.value.rerank);
 
 const citationWarning = computed(() => {
   const result = activeTraceDetail.value?.citation_result as

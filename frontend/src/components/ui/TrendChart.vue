@@ -158,6 +158,7 @@ const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
 
 .legend {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 16px;
   padding: 0 4px;
@@ -169,6 +170,7 @@ const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
   gap: 6px;
   color: var(--text-secondary);
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .legend-hint {

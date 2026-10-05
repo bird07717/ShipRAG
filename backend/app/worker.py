@@ -6,6 +6,7 @@ import logging
 from redis import Redis
 from rq import Queue, Worker
 
+from app.core.build_info import read_build_info
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.tasks.assistant_recovery import (
@@ -45,6 +46,7 @@ class MaintenanceWorker(Worker):
 def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
+    logger.info("Worker image build: %s", read_build_info())
     connection = Redis.from_url(settings.redis_url.get_secret_value())
     queues = [Queue(name, connection=connection) for name in settings.queue_names]
     worker_class = MaintenanceWorker if "maintenance" in settings.queue_names else Worker

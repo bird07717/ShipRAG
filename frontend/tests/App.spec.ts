@@ -60,8 +60,8 @@ describe("App", () => {
     expect(wrapper.text()).not.toContain("Support Errors");
     expect(wrapper.text()).not.toContain("RAG Errors");
     expect(wrapper.text()).toContain("知识库");
-    expect(wrapper.text()).toContain("RAG V2 知识发布");
-    expect(wrapper.text()).toContain("RAG 技术构建生成候选索引，经管理员明确切换");
+    expect(wrapper.text()).toContain("运行版本");
+    expect(wrapper.text()).not.toContain("RAG V2 知识发布");
     expect(wrapper.text()).toContain("admin-studio");
     expect(wrapper.text()).toContain("health-panel");
     expect(wrapper.findAll("nav button")).toHaveLength(10);

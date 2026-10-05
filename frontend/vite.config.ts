@@ -1,9 +1,23 @@
 import { fileURLToPath, URL } from "node:url";
+import { execFileSync } from "node:child_process";
 
 import vue from "@vitejs/plugin-vue";
 import { defineConfig } from "vitest/config";
 
+function gitValue(args: string[]): string {
+  try { return execFileSync("git", args, { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+  catch { return ""; }
+}
+const commit = process.env.BUILD_COMMIT ?? gitValue(["rev-parse", "HEAD"]);
+const buildInfo = {
+  commit: /^[0-9a-f]{40,64}$/.test(commit) ? commit : null,
+  built_at: process.env.BUILD_TIME === "unknown" ? null : process.env.BUILD_TIME ?? new Date().toISOString(),
+  dirty: process.env.BUILD_DIRTY === "unknown" ? null
+    : process.env.BUILD_DIRTY ? process.env.BUILD_DIRTY === "true" : !!gitValue(["status", "--porcelain", "--untracked-files=normal"]),
+};
+
 export default defineConfig({
+  define: { "import.meta.env.APP_BUILD_INFO": JSON.stringify(buildInfo) },
   plugins: [vue()],
   resolve: {
     alias: {

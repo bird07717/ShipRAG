@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.api.answer_reviews import router as answer_reviews_router
 from app.api.assistant import router as assistant_router
@@ -44,6 +44,12 @@ assistant_api_router.include_router(assistant_router)
 
 @router.get("/system/info", tags=["system"])
 async def system_info(
+    request: Request,
     settings: Annotated[Settings, Depends(get_app_settings)],
-) -> dict[str, str]:
-    return {"name": settings.app_name, "environment": settings.app_env, "version": "1.0.0"}
+) -> dict[str, Any]:
+    return {
+        "name": settings.app_name,
+        "environment": settings.app_env,
+        "version": "1.0.0",
+        "build": request.app.state.build_info,
+    }

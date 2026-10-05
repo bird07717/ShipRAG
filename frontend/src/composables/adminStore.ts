@@ -40,6 +40,11 @@ import type {
 
 const SELECTED_KNOWLEDGE_STORAGE_KEY = "rag_admin_selected_knowledge_id";
 const TRACKED_TASKS_STORAGE_KEY = "rag_admin_tracked_tasks";
+let systemInfoLoadGeneration = 0;
+let modelListLoadGeneration = 0;
+let modelActionGeneration = 0;
+
+export type ModelActionResult = { ok: true } | { ok: false; error: string };
 
 type TrackedTask = {
   taskId: string;
@@ -498,10 +503,25 @@ export const adminStore = reactive({
   },
 
   async loadSystemInfo(): Promise<void> {
+    const generation = ++systemInfoLoadGeneration;
     try {
-      this.systemInfo = await adminApi.getSystemInfo();
+      const info = await adminApi.getSystemInfo();
+      if (generation === systemInfoLoadGeneration) this.systemInfo = info;
     } catch {
-      this.systemInfo = null;
+      if (generation === systemInfoLoadGeneration) this.systemInfo = null;
+    }
+  },
+
+  async loadModels(): Promise<void> {
+    const generation = ++modelListLoadGeneration;
+    const credential = this.serviceToken;
+    const isCurrent = () => generation === modelListLoadGeneration
+      && this.hasServiceCredential && this.serviceToken === credential;
+    try {
+      const models = await adminApi.listModels();
+      if (isCurrent()) this.models = models;
+    } catch (error) {
+      if (isCurrent()) throw error;
     }
   },
 
@@ -612,7 +632,7 @@ export const adminStore = reactive({
     await this.loadKnowledgeDetails();
     await Promise.allSettled([
       adminApi.listTraces().then((value) => (this.traces = value)),
-      adminApi.listModels().then((value) => (this.models = value)),
+      this.loadModels(),
       adminApi.listPrompts().then((value) => (this.prompts = value)),
       this.loadSystemInfo(),
     ]);
@@ -1229,30 +1249,54 @@ export const adminStore = reactive({
     ]);
   },
 
-  async saveModelConfig(modelId: string, payload: ModelConfigUpdatePayload): Promise<void> {
-    let successMessage = "模型配置已保存，下一轮对话生效";
+  async runModelAction(action: () => Promise<string>): Promise<ModelActionResult> {
+    const generation = ++modelActionGeneration;
+    const credential = this.serviceToken;
+    const isCurrent = () => generation === modelActionGeneration
+      && this.hasServiceCredential && this.serviceToken === credential;
+    let result: ModelActionResult = { ok: true };
     await this.run(async () => {
-      const result = await adminApi.updateModel(modelId, payload);
-      this.models = await adminApi.listModels();
-      if (payload.rebuild_all_confirmed && result.rebuilds?.length) {
-        successMessage = `模型配置已保存；已对 ${result.rebuilds.length} 个知识库自动发起 RAG 全量重建`;
+      try {
+        const notice = await action();
+        if (isCurrent()) this.notice = notice;
+      } catch (cause) {
+        const error = cause instanceof Error ? cause.message : "模型配置操作失败";
+        result = { ok: false, error };
+        if (isCurrent()) this.error = error;
       }
-    }, "");
-    if (!this.error) this.notice = successMessage;
+    });
+    return result;
+  },
+
+  async saveModelConfig(modelId: string, payload: ModelConfigUpdatePayload): Promise<ModelActionResult> {
+    let successMessage = "模型配置已保存，下一轮对话生效";
+    const modelType = this.models.find((model) => model.id === modelId)?.model_type;
+    if (modelType === "EMBEDDING") successMessage = "Embedding 配置已保存；查询侧后续请求读取新配置，请核对索引向量与模型一致性";
+    else if (modelType === "OCR" || modelType === "VISION") successMessage = "模型配置已保存，知识库已标记待重建；仅实际重新解析的文档使用新配置，旧解析可能复用";
+    return this.runModelAction(async () => {
+      const result = await adminApi.updateModel(modelId, payload);
+      await this.loadModels();
+      if (payload.rebuild_all_confirmed && result.rebuilds?.length) {
+        successMessage = `模型配置已保存；已对 ${result.rebuilds.length} 个知识库提交 RAG 重建，请核对构建结果、活动索引及文档理解确认状态`;
+      }
+      return successMessage;
+    });
   },
 
   async putModelApiKey(modelId: string, apiKey: string): Promise<void> {
-    await this.run(async () => {
+    await this.runModelAction(async () => {
       await adminApi.putApiKey(modelId, apiKey);
-      this.models = await adminApi.listModels();
-    }, "API 密钥已加密保存（数据库密钥优先于环境变量）");
+      await this.loadModels();
+      return "API 密钥已加密保存（数据库密钥优先于环境变量）";
+    });
   },
 
-  async clearModelApiKey(modelId: string): Promise<void> {
-    await this.run(async () => {
+  async clearModelApiKey(modelId: string): Promise<ModelActionResult> {
+    return this.runModelAction(async () => {
       await adminApi.deleteApiKey(modelId);
-      this.models = await adminApi.listModels();
-    }, "数据库密钥已清除，回退到环境变量密钥");
+      await this.loadModels();
+      return "数据库密钥已清除；有环境密钥时回退，否则模型调用可能不可用";
+    });
   },
 
   async probeModel(modelId: string): Promise<ModelProbeResult> {

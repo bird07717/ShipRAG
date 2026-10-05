@@ -16,6 +16,7 @@ from app.api.router import assistant_api_router
 from app.api.router import router as api_router
 from app.common.errors import SERVER_BUSY_MESSAGE, ApiError, user_safe_chat_message
 from app.common.middleware import RequestContextMiddleware
+from app.core.build_info import read_build_info
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.resources import AppResources
@@ -66,6 +67,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
+    app.state.build_info = read_build_info()
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(
         CORSMiddleware,

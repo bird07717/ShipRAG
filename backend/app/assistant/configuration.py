@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.assistant.readiness import publication_checks
 from app.common.errors import ApiError
 from app.common.suggestions import validate_suggestions
 from app.gateway.repository import GatewayRepository
@@ -42,14 +43,20 @@ class AssistantConfiguration:
         return dict(row)
 
     async def get(self, knowledge_id: UUID, *, public: bool = False) -> dict[str, Any]:
+        check_details: dict[str, list[str]] = {}
         async with self.gateway.engine.connect() as connection:
             config = await self._read(connection, knowledge_id)
             if public and (not config["assistant_online"] or config["status"] != "ENABLED"):
                 raise ApiError("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", 404)
             blockers = await self.gateway.assistant_runtime_blockers(
-                knowledge_id, connection=connection
+                knowledge_id,
+                connection=connection,
+                check_details=check_details if not public else None,
             )
-        return {**config, "ready": not blockers, "blockers": blockers}
+        result = {**config, "ready": not blockers, "blockers": blockers}
+        if not public:
+            result["checks"] = publication_checks(blockers, check_details)
+        return result
 
     async def update(
         self,

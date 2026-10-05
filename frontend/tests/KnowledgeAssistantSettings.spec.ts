@@ -28,14 +28,58 @@ function button(wrapper: ReturnType<typeof editor>, label: string) {
 }
 
 describe("knowledge Assistant settings", () => {
+  it("shows coded runtime blockers and navigates with the bound knowledge base", async () => {
+    vi.spyOn(adminStore, "selectKnowledge").mockResolvedValue();
+    const navigate = vi.spyOn(adminStore, "navigate").mockImplementation(() => {});
+    vi.mocked(adminApi.getKnowledgeAssistant).mockResolvedValue({ ...configuration("kb-a"), ready: false, blockers: ["文案可以变化"], checks: [{ code: "UNDERSTANDING", title: "文档理解已全部确认", status: "BLOCKED", messages: ["文案可以变化"], action: { view: "documents", query: "", label: "检查文档理解" } }] });
+    adminStore.selectedKnowledgeId = "kb-b";
+    const wrapper = editor(); await flushPromises();
+    expect(wrapper.find('[aria-label="知识库上线检查清单"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain("文档理解已全部确认");
+    expect(wrapper.text()).toContain("不是新增上线门禁");
+    await button(wrapper, "检查文档理解").trigger("click"); await flushPromises();
+    expect(adminStore.selectedKnowledgeId).toBe("kb-a");
+    expect(navigate).toHaveBeenCalledWith("documents", "");
+  });
   beforeEach(() => {
+    adminStore.serviceToken = "test-service-token";
+    adminStore.credentialRejected = false;
+    vi.stubGlobal("URL", Object.assign(URL, { revokeObjectURL: vi.fn() }));
     vi.spyOn(adminApi, "getKnowledgeAssistant").mockImplementation(async (id) => configuration(id));
     vi.spyOn(ElMessageBox, "confirm").mockResolvedValue({ action: "confirm" } as never);
   });
   afterEach(() => {
     wrappers.splice(0).forEach((wrapper) => wrapper.unmount());
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    adminStore.serviceToken = "";
+    adminStore.credentialRejected = false;
+    adminStore.selectedKnowledgeId = "";
   });
+
+  it.each(["unmounted", "credential-rejected", "credential-replaced", "knowledge-changed"])(
+    "does not navigate a pending checklist action after %s",
+    async (reason) => {
+      let finish!: () => void;
+      vi.spyOn(adminStore, "selectKnowledge").mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+      const navigate = vi.spyOn(adminStore, "navigate").mockImplementation(() => {});
+      vi.mocked(adminApi.getKnowledgeAssistant).mockResolvedValue({
+        ...configuration(), checks: [{ code: "UNDERSTANDING", title: "文档理解", status: "BLOCKED", messages: [], action: { view: "documents", query: "", label: "检查文档理解" } }],
+      });
+      adminStore.selectedKnowledgeId = "kb-b";
+      const wrapper = editor();
+      await flushPromises();
+      await button(wrapper, "检查文档理解").trigger("click");
+      expect(adminStore.selectedKnowledgeId).toBe("kb-a");
+      if (reason === "unmounted") wrapper.unmount();
+      if (reason === "credential-rejected") adminStore.credentialRejected = true;
+      if (reason === "credential-replaced") adminStore.serviceToken = "replacement-test-token";
+      if (reason === "knowledge-changed") adminStore.selectedKnowledgeId = "kb-c";
+      finish();
+      await flushPromises();
+      expect(navigate).not.toHaveBeenCalled();
+    },
+  );
 
   it("saves to the bound KB and publishes the saved revision", async () => {
     const changed = ["如何重启设备系统", ...questions.slice(1)];
@@ -145,7 +189,7 @@ describe("knowledge Assistant settings", () => {
     finish();
     await flushPromises();
 
-    expect(image).toHaveBeenCalledWith("asset-1");
+    expect(image).toHaveBeenCalledWith("asset-1", expect.any(AbortSignal));
     expect(wrapper.find("img").attributes("src")).toBe("blob:image-url");
     expect(wrapper.text()).toContain("内部结构");
     // 文本片段只渲染一次：块渲染生效时不再叠加完整 answer。

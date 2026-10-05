@@ -73,9 +73,24 @@ class KnowledgeAssistantConfig(BaseModel):
     revision: int
 
 
+class ReadinessAction(BaseModel):
+    view: Literal["knowledge", "configuration", "indexes", "documents", "engine-routing"]
+    query: str = ""
+    label: str
+
+
+class PublicationCheck(BaseModel):
+    code: str
+    title: str
+    status: Literal["PASSED", "BLOCKED"]
+    messages: list[str]
+    action: ReadinessAction
+
+
 class KnowledgeAssistantCheck(KnowledgeAssistantConfig):
     ready: bool
     blockers: list[str]
+    checks: list[PublicationCheck] = Field(default_factory=list)
 
 
 class KnowledgeAssistantUpdate(BaseModel):

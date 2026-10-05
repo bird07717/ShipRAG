@@ -1,16 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { ElMessageBox } from "element-plus";
 
 import { adminApi, ApiRequestError } from "@/api/admin";
-import { fetchImageBlobUrl, streamChat } from "@/api/chat";
+import { streamChat } from "@/api/chat";
+import ReviewImage from "@/components/ReviewImage.vue";
 import type { ChatContentBlock, ChatDoneEvent } from "@/api/chat";
-import type { KnowledgeAssistantConfig } from "@/types/admin";
+import type { KnowledgeAssistantConfig, PublicationCheck } from "@/types/admin";
 import { renderMarkdown } from "@/utils/markdown";
 import { useAdminStore } from "@/composables/adminStore";
 
-// The parent keys this component by KB ID. No global selected-KB state is
-// consulted after an asynchronous operation has started.
+// The parent keys this component by KB ID. Actions stay bound to that ID;
+// checklist navigation also verifies that the selection is still current.
 const props = defineProps<{ knowledgeId: string; knowledgeName: string }>();
 const emit = defineEmits<{ changed: [config: KnowledgeAssistantConfig] }>();
 const store = useAdminStore();
@@ -18,6 +19,22 @@ const config = ref<KnowledgeAssistantConfig | null>(null);
 const questions = ref(["", "", ""]);
 const ready = ref(false);
 const blockers = ref<string[]>([]);
+const checks = ref<PublicationCheck[]>([]);
+const trialCompleted = ref(false);
+
+async function openCheck(check: PublicationCheck): Promise<void> {
+  if (!mounted || !store.hasServiceCredential) return;
+  const id = props.knowledgeId;
+  const credential = store.serviceToken;
+  if (store.selectedKnowledgeId !== id) {
+    store.selectedKnowledgeId = id;
+    await store.selectKnowledge();
+  }
+  if (mounted && store.hasServiceCredential && store.serviceToken === credential
+      && props.knowledgeId === id && store.selectedKnowledgeId === id) {
+    store.navigate(check.action.view, check.action.query);
+  }
+}
 const busy = ref(false);
 const error = ref("");
 const notice = ref("");
@@ -26,8 +43,6 @@ const testedQuestion = ref("");
 const answer = ref("");
 const result = ref<ChatDoneEvent | null>(null);
 const testError = ref("");
-// 与 DemoChat 相同的按块渲染语义：图片块按 asset_id 懒加载预签名内容。
-const imageUrls = reactive<Record<string, string>>({});
 let mounted = true;
 let controller: AbortController | undefined;
 
@@ -45,29 +60,11 @@ function isTextBlock(block: ChatContentBlock): boolean {
   return block.type === "text" || block.type === "table";
 }
 
-function hasImage(block: ChatContentBlock): boolean {
-  return block.type === "image" && !!block.image_asset_id && !!imageUrls[block.image_asset_id];
-}
-
-function loadTrialImages(event: ChatDoneEvent): void {
-  for (const block of event.content) {
-    const assetId = block.image_asset_id;
-    if (block.type === "image" && assetId && !imageUrls[assetId]) {
-      fetchImageBlobUrl(assetId)
-        .then((url) => {
-          imageUrls[assetId] = url;
-        })
-        .catch(() => {
-          imageUrls[assetId] = "";
-        });
-    }
-  }
-}
-
 function report(cause: unknown): void {
   error.value = cause instanceof Error ? cause.message : "操作失败，请重试";
   if (cause instanceof ApiRequestError && Array.isArray(cause.details.blockers)) {
     blockers.value = cause.details.blockers.map(String);
+    checks.value = [];
     ready.value = false;
   }
 }
@@ -92,6 +89,8 @@ async function checkReadiness(): Promise<void> {
     // so a concurrent configuration edit still produces a conflict on save.
     ready.value = response.ready;
     blockers.value = response.blockers;
+    checks.value = response.checks ?? [];
+    trialCompleted.value = false;
     notice.value = response.ready ? "运行已就绪，可以试问" : "运行未就绪，请先处理下方原因";
   } catch (cause) { if (mounted) report(cause); }
   finally { if (mounted) busy.value = false; }
@@ -112,6 +111,8 @@ async function reload(): Promise<void> {
     questions.value = Array.from({ length: 3 }, (_, i) => response.suggestions[i] ?? "");
     ready.value = response.ready;
     blockers.value = response.blockers;
+    checks.value = response.checks ?? [];
+    trialCompleted.value = false;
     emit("changed", response);
   } catch (cause) { if (mounted) report(cause); }
   finally { if (mounted) busy.value = false; }
@@ -169,13 +170,14 @@ async function tryQuestion(question: string): Promise<void> {
   answer.value = "";
   result.value = null;
   testError.value = "";
+  trialCompleted.value = false;
   const current = () => mounted && !signal.aborted;
   try {
     // Each trial starts a new internal conversation; offline KBs remain private.
     await streamChat(props.knowledgeId, question.trim(), undefined, {
       onTrace: () => {},
       onDelta: (text) => { if (current()) answer.value += text; },
-      onDone: (event) => { if (current()) { result.value = event; answer.value = event.answer; loadTrialImages(event); } },
+      onDone: (event) => { if (current()) { result.value = event; answer.value = event.answer; trialCompleted.value = true; } },
       onError: (message) => { if (current()) testError.value = message; },
     }, {}, signal);
   } catch (cause) { if (current()) testError.value = cause instanceof Error ? cause.message : "试问失败"; }
@@ -213,7 +215,34 @@ onUnmounted(() => { mounted = false; controller?.abort(); });
     <template v-if="config">
       <el-tag :type="config.assistant_online ? 'success' : 'info'">{{ config.assistant_online ? "已上线" : "未上线" }}</el-tag>
       <el-tag :type="ready ? 'success' : 'warning'">{{ ready ? "运行已就绪" : "运行未就绪" }}</el-tag>
-      <ul v-if="blockers.length"><li v-for="blocker in blockers" :key="blocker">{{ blocker }}</li></ul>
+      <div class="publication-checklist" aria-label="知识库上线检查清单">
+        <article
+          v-for="check in checks"
+          :key="check.code"
+          class="check-row"
+          :class="{ blocked: check.status === 'BLOCKED' }"
+        >
+          <span class="check-status">{{ check.status === 'PASSED' ? '已通过' : '待处理' }}</span>
+          <div><b>{{ check.title }}</b><p v-for="reason in check.messages" :key="reason">{{ reason }}</p></div>
+          <el-button
+            v-if="check.status === 'BLOCKED'"
+            text
+            :disabled="busy || testing"
+            @click="openCheck(check)"
+          >
+            {{ check.action.label }}
+          </el-button>
+        </article>
+        <article class="check-row" :class="{ blocked: normalized.length !== 3 || dirty || !!validation }">
+          <span class="check-status">{{ normalized.length === 3 && !dirty && !validation ? '已通过' : '待处理' }}</span>
+          <div><b>配置并保存三条推荐问题</b><p>{{ validation || (dirty ? '下方问题有未保存修改' : normalized.length === 3 ? '业务端将展示这些快捷提问' : '请填写下方三条推荐问题并保存') }}</p></div>
+        </article>
+        <article class="check-row">
+          <span class="check-status">{{ trialCompleted ? '已试问' : '建议检查' }}</span>
+          <div><b>人工检查回答效果</b><p>点击下方“试问”核验正文与图片；试问完成不代表质量自动通过，也不是新增上线门禁。</p></div>
+        </article>
+      </div>
+      <ul v-if="blockers.length && !checks.length"><li v-for="blocker in blockers" :key="blocker">{{ blocker }}</li></ul>
       <el-form label-position="top" @submit.prevent>
         <el-form-item v-for="(_, index) in questions" :key="index" :label="`推荐问题 ${index + 1}`">
           <div class="question-row">
@@ -277,11 +306,7 @@ onUnmounted(() => { mounted = false; controller?.abort(); });
             class="markdown-body"
             v-html="renderMarkdown(block.text || '')"
           />
-          <div v-else-if="block.type === 'image'" class="trial-image">
-            <img v-if="hasImage(block)" :src="imageUrls[block.image_asset_id!]" alt="文档图片" />
-            <div v-else class="image-placeholder">图片加载中...</div>
-            <small v-if="block.caption" class="image-caption">{{ block.caption }}</small>
-          </div>
+          <ReviewImage v-else-if="block.type === 'image' && block.image_asset_id" :asset-id="block.image_asset_id" :caption="block.caption" />
         </div>
       </template>
       <div v-else class="markdown-body" v-html="renderMarkdown(answer)" />
@@ -300,6 +325,13 @@ onUnmounted(() => { mounted = false; controller?.abort(); });
 .settings-header, .question-row, .settings-actions { display: flex; align-items: center; gap: 8px; }
 .settings-header { justify-content: space-between; flex-wrap: wrap; }
 .settings-header h4 { margin: 0; }
+.publication-checklist { display: grid; gap: 8px; }
+.check-row { display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-subtle); }
+.check-row > div { flex: 1; min-width: 0; }
+.check-row b { font-size: 13px; }
+.check-row p { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); }
+.check-status { flex-shrink: 0; color: var(--success); font-size: 12px; }
+.blocked .check-status { color: var(--warning); }
 .question-row { width: 100%; }
 .trial-result { border-top: 1px solid var(--border-subtle); padding-top: 16px; overflow-wrap: anywhere; }
 .content-block { margin: 4px 0; }

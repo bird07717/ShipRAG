@@ -9,6 +9,7 @@ import DocumentPreview from "@/components/DocumentPreview.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
 import { useAdminStore } from "@/composables/adminStore";
 import { randomUUID } from "@/utils/uuid";
+import { traceDiagnostics } from "@/utils/traceDiagnostics";
 
 const props = defineProps<{ knowledgeId: string; requestId: string }>();
 const emit = defineEmits<{ changed: [] }>();
@@ -24,20 +25,10 @@ const form = ref<ReviewInput>({ revision: 0, category: "WRONG_DOCUMENT", status:
 const baseline = ref("");
 const dirty = computed(() => JSON.stringify(form.value) !== baseline.value);
 const lastRun = computed(() => detail.value?.retests[0]);
-function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-const routing = computed(() => record(record(detail.value?.snapshot.diagnostics.retrieval_result).doc_routing));
-const candidates = computed(() => {
-  const values = record(detail.value?.snapshot.diagnostics.rerank_result).candidates;
-  const scores = Array.isArray(routing.value.doc_scores) ? routing.value.doc_scores.map(record) : [];
-  return Array.isArray(values) ? values.map((value) => {
-    const candidate = record(value);
-    const score = scores.find((item) => item.document_id === candidate.document_id);
-    return { ...candidate, document_title: score?.title || candidate.document_id || "未记录" };
-  }) : [];
-});
-const routeLabel = computed(() => ({ DELIVER: "交付文档", CLARIFY: "请用户澄清", NO_MATCH: "未确认匹配", STAY: "沿用焦点文档", SWITCH: "切换文档" }[String(routing.value.decision)] || String(routing.value.decision || "未记录")));
+const diagnostics = computed(() => traceDiagnostics(detail.value?.snapshot.diagnostics));
+const routing = computed(() => diagnostics.value.routing);
+const candidates = computed(() => diagnostics.value.candidates);
+const routeLabel = computed(() => diagnostics.value.routeLabel);
 
 const preview = ref<{ title: string; index: string; elements: Array<Record<string, unknown>> } | null>(null);
 const previewError = ref("");
@@ -90,8 +81,17 @@ function matchLabel(run: AnswerRetest) {
   const expected = run.expectation.expected_document_id;
   if (run.status !== "COMPLETED") return "未完成，不作质量判定";
   if (!expected) return "请按预期表现人工核验";
-  const response = run.turns.at(-1)?.response;
+  const turn = run.turns.at(-1);
+  const actual = traceDiagnostics(turn?.diagnostics);
+  if (actual.generation) {
+    if (actual.usedDocumentIds === null) return "采用文档记录缺失，无法自动判断，请人工核验";
+    return actual.usedDocumentIds.includes(expected)
+      ? "实际采用预期文档，正文仍需人工核验" : "实际采用文档未包含预期文档";
+  }
+  if (!turn || !Object.keys(turn.diagnostics).length) return "诊断记录缺失，无法自动判断，请人工核验";
+  const response = turn.response;
   const ids = new Set([response?.document?.document_id, response?.document?.id, ...response?.references?.map((item) => item.document_id) ?? []]);
+  if (![...ids].some(Boolean)) return "文档关联记录缺失，无法自动判断，请人工核验";
   return ids.has(expected) ? "预期文档出现在结果中，正文仍需人工核验" : "结果未包含预期文档";
 }
 async function inspect(documentId: string, inspectedIndex?: unknown) {
@@ -148,7 +148,12 @@ onBeforeUnmount(() => { alive = false; controller.abort(); previewVersion++; });
       <CodeBlock v-if="Object.keys(detail.snapshot.error).length" :code="JSON.stringify(detail.snapshot.error, null, 2)" />
       <section class="diagnostic-summary">
         <p>实际引擎：{{ detail.snapshot.diagnostics.engine || '未记录' }} · 文档路由：{{ routeLabel }}</p>
-        <p v-if="routing.document_title">路由目标：{{ routing.document_title }}</p>
+        <p v-if="!diagnostics.generation && routing.document_title">路由目标：{{ routing.document_title }}</p>
+        <template v-if="diagnostics.generation">
+          <p>重排状态：{{ diagnostics.rerank?.status || '未记录' }}<span v-if="diagnostics.rerank?.reason">（{{ diagnostics.rerank.reason }}）</span></p>
+          <p>隐藏上下文：{{ diagnostics.generation.context?.document_count ?? '未记录' }} 份文档 · 实际采用文档：{{ diagnostics.usedDocumentIds === null ? '记录缺失，无法判断' : (diagnostics.usedDocumentIds.join('、') || '无') }}</p>
+          <p class="muted">候选不等于实际采用；此处仅辅助核验，不能代替正文质量判断。历史文档名称未记录时显示文档 ID。</p>
+        </template>
         <el-table v-if="candidates.length" :data="candidates" size="small">
           <el-table-column prop="document_title" label="重排候选文档" min-width="180" />
           <el-table-column prop="rerank_score" label="原始重排分数" width="130" />

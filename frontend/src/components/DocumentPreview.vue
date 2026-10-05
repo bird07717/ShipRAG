@@ -8,7 +8,7 @@ const ordered = computed(() => [...props.elements].sort((a, b) => Number(a.seque
 <!-- eslint-disable vue/no-v-html -- Markdown rendering is sanitized by DOMPurify. -->
 <template>
   <div class="document-preview">
-    <p class="muted">按所选索引的解析顺序展示；图片识别文字仅作排查参考。回答交付会去除首条非空文本行。</p>
+    <p class="muted">按所选索引的解析顺序展示；图片识别文字仅作排查参考，点击图片可放大查看。此处是原文预览，不代表回答会采用全部内容。</p>
     <p v-if="!ordered.length">该索引没有可展示的解析元素。</p>
     <section v-for="element in ordered" :key="String(element.id)" class="element">
       <small>{{ element.sequence_no }} · {{ element.element_type }}</small>

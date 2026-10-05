@@ -14,6 +14,7 @@ import { computed, onMounted, onUnmounted, ref, watch, type Component } from "vu
 import AdminStudio from "@/components/AdminStudio.vue";
 import DemoChat from "@/components/DemoChat.vue";
 import HealthPanel from "@/components/HealthPanel.vue";
+import RuntimeVersion from "@/components/RuntimeVersion.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import { SERVICE_CREDENTIAL_REJECTED_EVENT } from "@/api/serviceCredential";
@@ -164,15 +165,6 @@ onUnmounted(() => {
   window.removeEventListener(SERVICE_CREDENTIAL_REJECTED_EVENT, handleCredentialRejected);
 });
 
-/* Data-driven publishing status (replaces the old decorative A/B diagram) */
-const indexStats = computed(() => {
-  const kbs = store.knowledgeBases;
-  return {
-    ready: kbs.filter((kb) => kb.runtime_state === "READY").length,
-    building: kbs.filter((kb) => kb.building_index_id).length,
-    chunks: kbs.reduce((total, kb) => total + kb.active_chunk_count, 0),
-  };
-});
 </script>
 
 <template>
@@ -196,6 +188,7 @@ const indexStats = computed(() => {
           </button>
         </div>
       </nav>
+      <RuntimeVersion />
     </aside>
 
     <main class="main" :class="{ 'chat-mode': isDemoChat }">
@@ -237,28 +230,11 @@ const indexStats = computed(() => {
           </template>
         </PageHeader>
         <div class="page-body">
-          <section v-if="activeView === 'dashboard'" class="panel index-note">
-            <div class="index-note-text">
-              <h3>RAG V2 知识发布</h3>
-              <p>RAG 技术构建生成候选索引，经管理员明确切换后供新会话使用；文档理解卡片在索引构建后自动生成。Support Profile 已冻结（ADR-0021），不再参与在线问答。</p>
-            </div>
-            <div class="index-stats">
-              <div class="index-stat">
-                <strong>{{ indexStats.ready }}</strong>
-                <span>在线知识库</span>
-              </div>
-              <div class="index-stat">
-                <strong :class="{ building: indexStats.building > 0 }">{{ indexStats.building }}</strong>
-                <span>构建中</span>
-              </div>
-              <div class="index-stat">
-                <strong>{{ indexStats.chunks.toLocaleString() }}</strong>
-                <span>已索引切片（Chunks）</span>
-              </div>
-            </div>
-          </section>
           <AdminStudio :view="activeView" :navigation-query="navigationQuery" />
-          <HealthPanel v-if="activeView === 'dashboard'" />
+          <details v-if="activeView === 'dashboard'" class="panel infrastructure-details">
+            <summary>基础服务状态 · 数据库、队列与文件存储</summary>
+            <HealthPanel />
+          </details>
         </div>
       </div>
     </main>
@@ -266,69 +242,5 @@ const indexStats = computed(() => {
 </template>
 
 <style scoped>
-.index-note {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 16px 18px;
-}
-
-.index-note h3 {
-  color: var(--text-primary);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.index-note p {
-  margin-top: 2px;
-  max-width: 520px;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-
-.index-stats {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 28px;
-  padding-left: 24px;
-  border-left: 1px solid var(--border-subtle);
-}
-
-.index-stat {
-  display: grid;
-  gap: 2px;
-  justify-items: center;
-  min-width: 72px;
-}
-
-.index-stat strong {
-  color: var(--text-primary);
-  font-size: 20px;
-  font-weight: 600;
-  line-height: 1.2;
-  font-variant-numeric: tabular-nums;
-}
-
-.index-stat strong.building {
-  color: var(--warning);
-}
-
-.index-stat span {
-  color: var(--text-tertiary);
-  font-size: 11px;
-}
-
-@media (max-width: 900px) {
-  .index-note {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .index-stats {
-    padding-left: 0;
-    border-left: 0;
-  }
-}
+.infrastructure-details > summary { padding: 16px 18px; cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 </style>

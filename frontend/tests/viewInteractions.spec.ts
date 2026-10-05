@@ -572,6 +572,18 @@ describe("view interactions", () => {
     adminStore.documentSearch = "";
   });
 
+  it("knowledge: a publication deep link opens the intended knowledge drawer", async () => {
+    vi.spyOn(adminApi, "getKnowledgeAssistant").mockResolvedValue({
+      knowledge_id: "kb-1", assistant_online: true, suggestions: [], revision: 1,
+      ready: true, blockers: [], checks: [],
+    });
+    const wrapper = await mountView("knowledge", "id=kb-1");
+    expect(wrapper.text()).toContain("知识库详情");
+    expect(wrapper.find('[aria-label="知识库上线检查清单"]').exists()).toBe(true);
+    expect(adminApi.getKnowledgeAssistant).toHaveBeenCalledWith("kb-1");
+    wrapper.unmount();
+  });
+
   it("documents: displays live RAG card generation progress and counts", async () => {
     vi.mocked(adminApi.listIndexTasks).mockImplementation(async (indexId) =>
       indexId === "idx-1"
@@ -956,6 +968,31 @@ describe("view interactions", () => {
       errorCode: undefined,
       limit: 200,
     });
+  });
+
+  it("logs: retains Dashboard source/time filters on refresh and resets them on a new deep link", async () => {
+    vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
+    const from = "2026-08-14T00:00:00Z";
+    const to = "2026-08-21T00:00:00Z";
+    const query = new URLSearchParams({ tab: "failed-turns", engine: "RAG", source: "ASSISTANT_API", from, to }).toString();
+    const listTraces = vi.mocked(adminApi.listTraces);
+    const wrapper = await mountView("logs", query);
+    expect(listTraces).toHaveBeenCalledWith("kb-1", {
+      status: "FAILED", engine: "RAG", source: "ASSISTANT_API", from, to,
+      errorCode: undefined, limit: 200,
+    });
+    expect(wrapper.text()).toContain("外部 Assistant");
+    const failedPane = wrapper.findAllComponents({ name: "ElTabPane" }).find((item) => item.props("name") === "failed-turns")!;
+    await failedPane.findAll("button").find((item) => item.text() === "刷新")!.trigger("click");
+    await flushPromises();
+    expect(listTraces).toHaveBeenLastCalledWith("kb-1", expect.objectContaining({ source: "ASSISTANT_API", from, to }));
+
+    await wrapper.setProps({ navigationQuery: "tab=failed-turns&engine=SUPPORT" });
+    await flushPromises();
+    expect(listTraces).toHaveBeenLastCalledWith("kb-1", {
+      status: "FAILED", engine: "SUPPORT", errorCode: undefined, limit: 200,
+    });
+    wrapper.unmount();
   });
 
   it("logs: reviews request errors, failed turns and opens conversation replay", async () => {

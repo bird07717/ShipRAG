@@ -2,7 +2,7 @@
 
 ## 类型与迁移
 
-数据库是 PostgreSQL，开发和生产编排使用 ParadeDB PostgreSQL 17 镜像，并要求 `vector` 与 `pg_search` 扩展。Alembic 配置在 `backend/alembic.ini`，迁移位于 `backend/alembic/versions/`；当前仓库可见的最新修订是 `0046_rag_document_cards`。实际环境是否已升级到 head，必须通过 `alembic current` 或数据库检查确认。
+数据库是 PostgreSQL，开发和生产编排使用 ParadeDB PostgreSQL 17 镜像，并要求 `vector` 与 `pg_search` 扩展。Alembic 配置在 `backend/alembic.ini`，迁移位于 `backend/alembic/versions/`；2026-10-05 只读运行 `alembic heads` 确认当前仓库 head 为 `0047`（索引 CANCELLED 和文档 SKIPPED 状态约束）。实际环境是否已升级到 head，必须通过 `alembic current` 或数据库检查确认；仓库迁移图不等于当前生产数据库版本。
 
 数据库访问使用 SQLAlchemy async/asyncpg，但业务 SQL 大多由 repository 层直接管理；迁移而不是本文是表结构和约束的权威来源。
 
@@ -33,7 +33,7 @@
 - `assistant_request` 的 `(external_user_id, knowledge_id, idempotency_key)` 唯一，同一非空 Conversation 只允许一条 `RUNNING` 记录；`replay_count >= 0`，终态重放会更新计数、`last_replayed_at` 和 `updated_at`。`support_idempotency` 仅记录 Support 内部重放，不作为 Assistant 门面指标。不要绕过这些约束手工重复执行对外写操作。
 - `assistant_request.conversation_id` 使用 `ON DELETE CASCADE`。未关联 Conversation 且为 `COMPLETED`、`FAILED` 或 `CANCELLED` 的记录由独立的部分索引支持按 `updated_at` 清理；保留期任务明确不删除 `RUNNING`。
 - 新 Assistant 失败/取消的公开错误同步保存到 `message.response_payload.error`，并写入显式空 `content`，避免读取旧内部成功块；该写入与请求终态收口同事务。失败关联 Trace 同步状态和错误，已终态请求不二次覆盖。历史消息优先读取错误快照，旧记录兼容 Trace，不新增列或迁移。
-- RAG 技术助手启用时，`conversation.chat_context.rag_issue` 保存原问题、回答形式、一个待确认条件及来源用户/助手消息 ID。读取必须校验来源消息同会话、角色、成功状态和 `rag_user_message_id` 配对；写入或清理与本轮 Message/RAG Trace 成功终态共用事务和 `support_context_version` CAS。失败、取消、并发冲突和幂等重放不创建第二份状态；Support 不消费该命名空间。
+- 历史 RAG 分层技术助手曾使用 `conversation.chat_context.rag_issue` 保存问题和条件；该运行时已随 V5 删除，当前 V2 不读取或更新这一命名空间。旧 JSON 与共享字段保留用于兼容，不能将旧状态描述为当前多轮任务记忆。
 - ADR-0019 的 V0～V2 已实施：V2 不恢复 `rag_issue`、不处理待选文档且回答完成不写 RAG 焦点；`begin_turn` 的 V2 分支只读取会话归属和冻结索引，不读取共享焦点或 `chat_context`，新消息兼容列 `focus_epoch` 固定写 `0`。`conversation.focus_document_id/focus_index_id/focus_epoch/chat_context/support_context_version` 与 `message.focus_epoch` 同时被 Support、Gateway 和清理逻辑使用，不能批量清空、修改既有迁移或直接删列。共享字段只有在 Support 独立迁移、数据核对、应用回滚验证和至少两个发布周期零旧列读取后才可评估删除；没有收益时允许保留兼容列。
 
 ## 数据流
@@ -42,11 +42,11 @@
 
 ## 操作注意
 
-- RAG 质量优化没有新增迁移：`rag_trace.runtime_snapshot` 的 JSON 新增 `generation`，保存实际生成计划/提示词哈希/来源；已有 `retrieval` 改为记录本轮有效覆盖值。`selected_context` 继续表示准备阶段检索上下文，历史记录不回填。文档内二次检索同时在 SQL 限定知识库、索引、文档与有效源文件状态，再应用 Top K。
-- RAG 聚焦历史需要迁移 `0045`。本地开发库已在 2026-09-12 验证升级到 `0045 (head)`；生产状态仍须在目标服务器单独执行 `alembic current` 确认。该迁移不要求重建知识索引，也不改写历史回答或 Trace。
+- RAG V2 管理诊断没有新增迁移：`rag_trace.runtime_snapshot.generation` 保存当前生成诊断；`selected_context` 在 V2 表示隐藏全文候选的文档标识与哈希，不是实际采用文档。实际采用取 `generation.answer.used_document_ids`，历史记录不回填。旧 Trace 的 Chunk 上下文与焦点文档二次检索只属于 legacy 历史。
+- RAG 显式消息配对需要迁移 `0045`，V2 继续使用其消息关联字段。2026-09-12 的 `0045 (head)` 是历史验证，不是当前 head；生产当前版本须另行确认。该迁移不要求重建知识索引，也不改写历史回答或 Trace。
 - 本次知识库范围编辑、范围快照和 `rag_issue` 复用既有 `description`、`updated_at`、JSONB 与上下文版本字段，没有新增 Alembic 迁移；部署仍必须先执行当前仓库的 `upgrade head`，不能据此跳过既有 `0045`。
-- RAG 文档卡片需要迁移 `0046`。本地开发库已验证 `0046 -> 0045 -> 0046` 并回到 `0046 (head)`；迁移只创建结构和索引，不调用模型、不回填业务卡片。生产升级后必须显式生成/审核当前活动索引卡片，生产状态仍待目标服务器确认。
-- P2 语义编排没有新增迁移：配置快照与 Shadow 结果写入既有 `rag_trace.runtime_snapshot` JSONB。卡片向量/BM25 读取同时限定 `knowledge_id`、会话冻结 `index_id`、`index_document=READY`、`document_source=STORED`、当前卡片 Schema、`generation_status=READY` 且审核状态非 `REJECTED`；显示名称仍动态联接源文档。P2 不写 Support 表，也不把 Shadow 候选写成公开 `retrieval_result`。
+- RAG 文档卡片由迁移 `0046` 引入；曾验证 `0046 -> 0045 -> 0046`，该记录不代表当前 head。迁移只创建结构和索引，不调用模型、不回填业务卡片。部署执行当前 `upgrade head`，再生成/审核活动索引卡片；2026-09-29 的生产 `0047` 快照见 `current-state.md`，本次未重新检查生产。
+- 旧 P2 Shadow 编排已删除；当前 V2 卡片向量/BM25 读取仍限定 `knowledge_id`、会话冻结 `index_id`、`index_document=READY`、`document_source=STORED`、当前卡片 Schema、`generation_status=READY` 且审核状态非 `REJECTED`；显示名称动态联接源文档。该读取不写 Support 表。
 - RAG V2 的 V1～V5 计划不新增数据库结构，继续复用 `0046` 卡片、元素、图片、消息、Trace 和 Assistant 请求。若未来执行共享焦点字段清理，必须作为独立 V6 迁移任务，不得与 V2 首次开发切换同批执行。详见 [RAG V2 执行计划](../technical/rag-full-document-generation-v2-execution-plan.md)。
 - V2 实施时发现 unfocused 向量/BM25/Chunk ID 查询可能读取软删除文档；Repository 已统一增加 `document_source.status='STORED'` 条件。该修复不改表结构、不需迁移或重建索引，legacy 与 V2 同时受益。
 

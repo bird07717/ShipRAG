@@ -6,7 +6,7 @@ import { ElMessageBox } from "element-plus";
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
 import AdminStudio from "@/components/AdminStudio.vue";
-import type { KnowledgeBase } from "@/types/admin";
+import type { KnowledgeBase, SystemInfo } from "@/types/admin";
 
 const kb = {
   id: "kb-1",
@@ -135,6 +135,7 @@ describe("adminStore", () => {
     adminStore.actionLoading = {};
     adminStore.knowledgeSearch = "";
     adminStore.knowledgeStatusFilter = "";
+    adminStore.systemInfo = null;
     localStorage.clear();
   });
 
@@ -144,7 +145,38 @@ describe("adminStore", () => {
     sessionStorage.clear();
     adminStore.serviceToken = "";
     adminStore.credentialRejected = false;
+    adminStore.systemInfo = null;
     localStorage.clear();
+  });
+
+  it.each(["success", "failure"])("ignores an older system info %s after a newer version loads", async (outcome) => {
+    let resolveOlder!: (value: SystemInfo) => void;
+    let rejectOlder!: (error: Error) => void;
+    const older = new Promise<SystemInfo>((resolve, reject) => { resolveOlder = resolve; rejectOlder = reject; });
+    const newer: SystemInfo = { name: "Shipdemo", environment: "test", version: "new", build: { commit: "b".repeat(40), built_at: null, dirty: false } };
+    vi.spyOn(adminApi, "getSystemInfo").mockReturnValueOnce(older).mockResolvedValueOnce(newer);
+    const first = adminStore.loadSystemInfo();
+    await adminStore.loadSystemInfo();
+    expect(adminStore.systemInfo).toEqual(newer);
+    if (outcome === "success") resolveOlder({ ...newer, version: "old", build: { ...newer.build!, commit: "a".repeat(40) } });
+    else rejectOlder(new Error("old request failed"));
+    await first;
+    expect(adminStore.systemInfo).toEqual(newer);
+  });
+
+  it("keeps an unknown version when the newest system info request fails, even if an older request succeeds", async () => {
+    let resolveOlder!: (value: SystemInfo) => void;
+    const previous: SystemInfo = { name: "Shipdemo", environment: "test", version: "old" };
+    adminStore.systemInfo = previous;
+    vi.spyOn(adminApi, "getSystemInfo")
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOlder = resolve; }))
+      .mockRejectedValueOnce(new Error("latest request failed"));
+    const first = adminStore.loadSystemInfo();
+    await adminStore.loadSystemInfo();
+    expect(adminStore.systemInfo).toBeNull();
+    resolveOlder(previous);
+    await first;
+    expect(adminStore.systemInfo).toBeNull();
   });
 
   it("aggregates totals and filters knowledge bases", () => {
@@ -860,7 +892,23 @@ describe("adminStore", () => {
     expect(adminStore.notice).toContain("1 个知识库");
     await adminStore.putModelApiKey("model-1", "test-key");
     await adminStore.clearModelApiKey("model-1");
+    expect(adminStore.notice).toContain("有环境密钥时回退，否则模型调用可能不可用");
     expect(await adminStore.probeModel("model-1")).toEqual({ success: true });
+  });
+
+  it.each(["EMBEDDING", "OCR", "VISION", "LLM", "RERANK"])("uses the %s model's actual activation boundary in save notices", async (modelType) => {
+    adminStore.models = [{ id: "model-1", model_type: modelType } as never];
+    vi.spyOn(adminApi, "updateModel").mockResolvedValue({ rebuilds: [] } as never);
+    vi.spyOn(adminApi, "listModels").mockResolvedValue([]);
+    await adminStore.saveModelConfig("model-1", { enabled: true });
+    if (modelType === "EMBEDDING") {
+      expect(adminStore.notice).toContain("索引向量与模型一致性");
+      expect(adminStore.notice).not.toContain("下一轮对话生效");
+    } else if (modelType === "OCR" || modelType === "VISION") {
+      expect(adminStore.notice).toContain("仅实际重新解析的文档使用新配置");
+      expect(adminStore.notice).toContain("旧解析可能复用");
+      expect(adminStore.notice).not.toContain("下一轮对话生效");
+    } else expect(adminStore.notice).toContain("下一轮对话生效");
   });
 
   it("short-circuits selected-knowledge operations and normalizes non-Error failures", async () => {

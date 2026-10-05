@@ -44,6 +44,32 @@ beforeEach(() => {
 afterEach(() => { wrappers.splice(0).forEach((item) => item.unmount()); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("answer review workflow", () => {
+  it.each([
+    { ids: ["doc-a"], label: "实际采用预期文档，正文仍需人工核验" },
+    { ids: ["other"], label: "实际采用文档未包含预期文档" },
+    { ids: [], label: "实际采用文档未包含预期文档" },
+    { ids: undefined, label: "采用文档记录缺失，无法自动判断" },
+  ])("judges V2 retests from actual evidence: $label", async ({ ids, label }) => {
+    const value = saved();
+    value.snapshot.diagnostics = { engine: "RAG", runtime_snapshot: { generation: { pipeline: "V2", response_path: "KNOWLEDGE", retrieval: { document_rerank: { status: "PASSED", after_document_ids: ["doc-a"], scores: [0.9] } }, answer: { used_document_ids: ["other"] } } } };
+    value.retests = [{ id: "run-a", review_id: "review-a", review_revision: 2, status: "COMPLETED", expectation: { expected_document_id: "doc-a", expected_document_title: "原标题", expectation: "核验" }, turns: [{ question: "问题", response: { answer: "回答", references: [] }, diagnostics: { runtime_snapshot: { generation: { pipeline: "V2", response_path: "KNOWLEDGE", retrieval: { candidate_document_ids: ["doc-a"] }, answer: { used_document_ids: ids } } } } }], error: null, created_at: "today" }];
+    vi.mocked(reviewsApi.detail).mockResolvedValue(value);
+    const wrapper = editor(); await flushPromises();
+    expect(wrapper.text()).toContain(label);
+    expect(wrapper.text()).toContain("知识检索");
+    expect(wrapper.text()).toContain("PASSED");
+    expect(wrapper.text()).toContain("候选不等于实际采用");
+    expect(wrapper.text()).not.toContain("文档路由：未记录");
+  });
+
+  it("does not mark missing diagnostics as a failed document match", async () => {
+    const value = saved();
+    value.retests = [{ id: "run-a", review_id: "review-a", review_revision: 2, status: "COMPLETED", expectation: { expected_document_id: "doc-a", expected_document_title: null, expectation: "核验" }, turns: [{ question: "问题", response: { answer: "回答" }, diagnostics: {} }], error: null, created_at: "today" }];
+    vi.mocked(reviewsApi.detail).mockResolvedValue(value);
+    const wrapper = editor(); await flushPromises();
+    expect(wrapper.text()).toContain("诊断记录缺失，无法自动判断");
+    expect(wrapper.text()).not.toContain("结果未包含预期文档");
+  });
   it("shows the historical body and saves to the bound KB with its revision", async () => {
     const save = vi.spyOn(reviewsApi, "save").mockResolvedValue(saved());
     const wrapper = editor(); await flushPromises();

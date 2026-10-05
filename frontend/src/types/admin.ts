@@ -8,6 +8,15 @@ export interface KnowledgeAssistantConfig {
 export interface KnowledgeAssistantCheck extends KnowledgeAssistantConfig {
   ready: boolean;
   blockers: string[];
+  checks?: PublicationCheck[];
+}
+
+export interface PublicationCheck {
+  code: string;
+  title: string;
+  status: "PASSED" | "BLOCKED";
+  messages: string[];
+  action: { view: "knowledge" | "configuration" | "indexes" | "documents" | "engine-routing"; query: string; label: string };
 }
 
 export interface KnowledgeBase {
@@ -39,6 +48,13 @@ export interface SystemInfo {
   name: string;
   environment: string;
   version: string;
+  build?: BuildInfo;
+}
+
+export interface BuildInfo {
+  commit: string | null;
+  built_at: string | null;
+  dirty: boolean | null;
 }
 
 export interface DocumentItem {

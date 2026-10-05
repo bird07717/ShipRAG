@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from app.assistant.readiness import ReadinessBlockers
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.gateway.models import ChatEngine, ConversationMode, ExecutionPolicy, ResolvedPolicy
@@ -207,49 +208,49 @@ class GatewayRepository:
             ).mappings()
 
         models = {str(row["model_type"]): dict(row) for row in model_rows}
-        support_blockers: list[str] = []
-        rag_blockers: list[str] = []
+        support_blockers = ReadinessBlockers()
+        rag_blockers = ReadinessBlockers()
         if kb["status"] != "ENABLED":
-            support_blockers.append("知识库已停用")
-            rag_blockers.append("知识库已停用")
+            support_blockers.add("KNOWLEDGE", "知识库已停用")
+            rag_blockers.add("KNOWLEDGE", "知识库已停用")
         if int(kb["ready_profile_count"] or 0) == 0:
-            support_blockers.append("没有已发布就绪的 Problem Profile")
+            support_blockers.add("POLICY", "没有已发布就绪的 Problem Profile")
         if kb["support_active_index_id"] is None:
-            support_blockers.append("知识库没有 Active Index")
+            support_blockers.add("INDEX", "知识库没有 Active Index")
         elif kb["support_index_status"] != "ACTIVE":
-            support_blockers.append("Active Index 状态异常")
+            support_blockers.add("INDEX", "Active Index 状态异常")
 
         llm = models.get("LLM")
         if llm is None:
-            support_blockers.append("LLM 模型未启用")
-            rag_blockers.append("LLM 模型未启用")
+            support_blockers.add("MODELS", "LLM 模型未启用")
+            rag_blockers.add("MODELS", "LLM 模型未启用")
         elif str(llm["provider"]) != "fake" and not (
             bool(llm["stored_key_configured"])
             or self.settings.has_secret(
                 environment_api_key(self.settings, "LLM", str(llm["provider"]))
             )
         ):
-            support_blockers.append("LLM API Key 未配置")
-            rag_blockers.append("LLM API Key 未配置")
+            support_blockers.add("MODELS", "LLM API Key 未配置")
+            rag_blockers.add("MODELS", "LLM API Key 未配置")
 
         if kb["rag_active_index_id"] is None:
-            rag_blockers.append("知识库没有 Active Index")
+            rag_blockers.add("INDEX", "知识库没有 Active Index")
         elif kb["rag_index_status"] != "ACTIVE":
-            rag_blockers.append("Active Index 状态异常")
+            rag_blockers.add("INDEX", "Active Index 状态异常")
         rerank = models.get("RERANK")
         if rerank is None:
-            rag_blockers.append("Rerank 模型未启用")
+            rag_blockers.add("MODELS", "Rerank 模型未启用")
         elif str(rerank["provider"]) != "fake" and not (
             bool(rerank["stored_key_configured"])
             or self.settings.has_secret(
                 environment_api_key(self.settings, "RERANK", str(rerank["provider"]))
             )
         ):
-            rag_blockers.append("Rerank API Key 未配置")
+            rag_blockers.add("MODELS", "Rerank API Key 未配置")
 
         embedding = models.get("EMBEDDING")
         if embedding is None:
-            rag_blockers.append("Embedding 模型未启用")
+            rag_blockers.add("MODELS", "Embedding 模型未启用")
             query_embedding_model = ""
         else:
             embedding_uses_fake = self.settings.m2_embedding_provider == "fake" or (
@@ -268,16 +269,21 @@ class GatewayRepository:
             kb["rag_active_index_id"] is not None
             and str(kb["embedding_model_name"]) != query_embedding_model
         ):
-            rag_blockers.append("查询 Embedding 模型与 Active Index 快照不一致")
+            rag_blockers.add("INDEX", "查询 Embedding 模型与 Active Index 快照不一致")
 
         return {
             "support": {
                 "ready": not support_blockers,
                 "blockers": support_blockers,
+                "blocker_groups": support_blockers.groups,
                 "profile_count": int(kb["profile_count"] or 0),
                 "ready_profile_count": int(kb["ready_profile_count"] or 0),
             },
-            "rag": {"ready": not rag_blockers, "blockers": rag_blockers},
+            "rag": {
+                "ready": not rag_blockers,
+                "blockers": rag_blockers,
+                "blocker_groups": rag_blockers.groups,
+            },
         }
 
     @staticmethod
@@ -357,6 +363,7 @@ class GatewayRepository:
         *,
         conversation_id: UUID | None = None,
         connection: AsyncConnection | None = None,
+        check_details: dict[str, list[str]] | None = None,
     ) -> list[str]:
         # One policy-aware check shared by admin publication, public welcome,
         # catalog and chat. An existing transaction can own the connection.
@@ -371,9 +378,16 @@ class GatewayRepository:
             )
             readiness = await self.get_readiness(knowledge_id, connection=connection)
         blockers = self._policy_blockers(policy.policy, readiness)
-        blockers.extend(
-            await self._assistant_rag_understanding_blockers(knowledge_id, connection=connection)
+        card_blockers = await self._assistant_rag_understanding_blockers(
+            knowledge_id, connection=connection
         )
+        blockers.extend(card_blockers)
+        if check_details is not None:
+            engines = ["rag"] if policy.policy == ExecutionPolicy.RAG_ONLY else ["support", "rag"]
+            for engine in engines:
+                for group, messages in readiness[engine].get("blocker_groups", {}).items():
+                    check_details.setdefault(group, []).extend(messages)
+            check_details["UNDERSTANDING"] = card_blockers
         return list(dict.fromkeys(blockers))
 
     async def update_policy(

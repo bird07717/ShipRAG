@@ -254,14 +254,14 @@ export async function streamChat(
   }
 }
 
-export async function fetchImageBlobUrl(imageAssetId: string): Promise<string> {
+export async function fetchImageBlobUrl(imageAssetId: string, signal?: AbortSignal): Promise<string> {
   const response = await fetch(
     apiBaseUrl + "/api/v1/image-assets/" + imageAssetId + "/content",
-    { headers: authHeaders() },
+    { headers: authHeaders(), signal },
   );
   if (!response.ok) {
     handleCredentialRejection(response);
-    throw new Error("图片加载失败：HTTP " + response.status);
+    throw new ApiRequestError("图片加载失败：HTTP " + response.status, response.status);
   }
   const blob = await response.blob();
   return URL.createObjectURL(blob);

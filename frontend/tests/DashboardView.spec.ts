@@ -1,6 +1,6 @@
 import ElementPlus from "element-plus";
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
@@ -64,13 +64,28 @@ const trace: TraceSummary = {
   created_at: "2026-08-20T10:00:00Z",
 };
 
+const wrappers: ReturnType<typeof mount>[] = [];
+function mountDashboard() {
+  const wrapper = mount(DashboardView, { global: { plugins: [ElementPlus] } });
+  wrappers.push(wrapper);
+  return wrapper;
+}
+
 describe("DashboardView metrics", () => {
+  beforeEach(() => {
+    adminStore.serviceToken = "test-service-token";
+    adminStore.credentialRejected = false;
+    vi.spyOn(adminApi, "getAssistantMetrics").mockResolvedValue({ days: 7, sources: [], idempotency: { assistant_protected: 0, assistant_replays: 0, internal_protected: 0 }, retention: { active: 0, expired: 0, retention_days: 7 }, top_users: [], turn_error_codes: [], request_error_codes: [], running: {} } as never);
+    vi.spyOn(adminApi, "getKnowledgeAssistant").mockImplementation(async (id) => ({ knowledge_id: id, assistant_online: false, suggestions: [], revision: 0, ready: false, blockers: ["需要确认文档"] }));
+  });
   afterEach(() => {
+    wrappers.splice(0).forEach((wrapper) => wrapper.unmount());
     vi.restoreAllMocks();
     vi.useRealTimers();
     adminStore.selectedKnowledgeId = "";
     adminStore.serviceToken = "";
     adminStore.credentialRejected = false;
+    adminStore.systemInfo = null;
   });
 
   it("renders overview cards, trend chart and drilldown from metrics", async () => {
@@ -79,7 +94,7 @@ describe("DashboardView metrics", () => {
     vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([trace]);
     adminStore.selectedKnowledgeId = "kb-1";
 
-    const wrapper = mount(DashboardView, { global: { plugins: [ElementPlus] } });
+    const wrapper = mountDashboard();
     await flushPromises();
 
     expect(adminApi.getMetricsOverview).toHaveBeenCalledWith(
@@ -97,6 +112,8 @@ describe("DashboardView metrics", () => {
     );
     expect(wrapper.text()).toContain("120"); // total queries
     expect(wrapper.text()).toContain("61.9%"); // direct-answer rate
+    expect(wrapper.text()).toContain("近 7 天暂无外部调用"); // API has no Assistant source rows
+    expect(wrapper.text()).not.toContain("调用数据未加载");
     expect(wrapper.text()).toContain("38.1%"); // needs-information rate
     expect(wrapper.text()).toContain("4.5%"); // out-of-scope rate
     expect(wrapper.text()).toContain("回答依据分布");
@@ -110,6 +127,9 @@ describe("DashboardView metrics", () => {
     expect(wrapper.find("svg.chart-svg").exists()).toBe(true);
     expect(wrapper.text()).toContain("如何配置？"); // drilldown question
     expect(wrapper.text()).toContain("mobile-user-1");
+    expect(wrapper.findAll(".metric-card")).toHaveLength(4);
+    expect(wrapper.find("details.advanced-details").attributes("open")).toBeUndefined();
+    expect(wrapper.text()).toContain("直接回答率不是答案正确率");
   });
 
   it("opens a bucket drilldown dialog with that bucket's traces on bar click", async () => {
@@ -120,7 +140,7 @@ describe("DashboardView metrics", () => {
       .spyOn(adminApi, "listTraces")
       .mockResolvedValue([trace]);
 
-    const wrapper = mount(DashboardView, { global: { plugins: [ElementPlus] } });
+    const wrapper = mountDashboard();
     await flushPromises();
 
     const bar = wrapper.find("svg.chart-svg rect.bar");
@@ -139,6 +159,45 @@ describe("DashboardView metrics", () => {
     expect(wrapper.text()).toContain("如何配置？"); // dialog lists the trace
   });
 
+  it("opens failed turns with the displayed overview's source and exact time window", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const navigate = vi.spyOn(adminStore, "navigate").mockImplementation(() => {});
+    const wrapper = mountDashboard();
+    await flushPromises();
+
+    await wrapper.findAll("button").find((item) => item.text().includes("技术请求执行失败"))!.trigger("click");
+    const [view, query] = navigate.mock.calls[0]!;
+    expect(view).toBe("logs");
+    expect(Object.fromEntries(new URLSearchParams(query))).toEqual({
+      tab: "failed-turns", engine: "RAG", source: "ASSISTANT_API",
+      from: overview.range.from, to: overview.range.to,
+    });
+  });
+
+  it("refreshes backend build identity manually, without polling system info", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    vi.spyOn(adminStore, "refreshOperationalState").mockResolvedValue();
+    const systemInfo = { build: { commit: "b".repeat(40), built_at: "2026-10-05T00:00:00Z", dirty: false } };
+    const getSystemInfo = vi.spyOn(adminApi, "getSystemInfo").mockResolvedValue(systemInfo as never);
+    adminStore.systemInfo = { build: { commit: "a".repeat(40) } } as never;
+    const wrapper = mountDashboard();
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(getSystemInfo).not.toHaveBeenCalled();
+
+    await wrapper.findAll("button").find((item) => item.text() === "刷新状态")!.trigger("click");
+    await flushPromises();
+    expect(getSystemInfo).toHaveBeenCalledTimes(1);
+    expect(adminStore.systemInfo).toEqual(systemInfo);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(getSystemInfo).toHaveBeenCalledTimes(1);
+  });
+
   it("shows hourly labels when timeseries buckets are hourly", async () => {
     vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
     vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([
@@ -147,7 +206,7 @@ describe("DashboardView metrics", () => {
     ]);
     vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
 
-    const wrapper = mount(DashboardView, { global: { plugins: [ElementPlus] } });
+    const wrapper = mountDashboard();
     await flushPromises();
 
     const ticks = wrapper.findAll("text.axis-label.bottom");
@@ -159,7 +218,7 @@ describe("DashboardView metrics", () => {
     vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
     vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
 
-    const wrapper = mount(DashboardView, { global: { plugins: [ElementPlus] } });
+    const wrapper = mountDashboard();
     await flushPromises();
 
     expect(wrapper.find(".el-alert").exists()).toBe(true);
@@ -174,7 +233,7 @@ describe("DashboardView metrics", () => {
     vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([dailyPoint]);
     vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
 
-    const wrapper = mount(DashboardView, { global: { plugins: [ElementPlus] } });
+    const wrapper = mountDashboard();
     await flushPromises();
 
     expect(wrapper.text()).toContain("部分质量指标暂时无法加载");
@@ -188,7 +247,7 @@ describe("DashboardView metrics", () => {
     vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
     adminStore.serviceToken = "test-service-token";
 
-    mount(DashboardView, { global: { plugins: [ElementPlus] } });
+    mountDashboard();
     await flushPromises();
     expect(overviewSpy).toHaveBeenCalledTimes(1);
 
@@ -199,5 +258,66 @@ describe("DashboardView metrics", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(overviewSpy).toHaveBeenCalledTimes(2); // rejected: no further ticks call the API
+  });
+
+  it("marks a malformed refresh as partial even if previous overview data exists", async () => {
+    vi.useFakeTimers();
+    const api = vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValueOnce(overview).mockResolvedValue([] as never);
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const wrapper = mountDashboard(); await flushPromises();
+    expect(wrapper.find(".el-alert").exists()).toBe(false);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain("部分质量指标暂时无法加载");
+    expect(wrapper.text()).toContain("61.9%");
+  });
+
+  it("does not load or poll any metrics without a credential", async () => {
+    vi.useFakeTimers();
+    adminStore.serviceToken = "";
+    const api = vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    mountDashboard(); await flushPromises();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(api).not.toHaveBeenCalled();
+    expect(adminApi.getKnowledgeAssistant).not.toHaveBeenCalled();
+    expect(adminApi.getAssistantMetrics).not.toHaveBeenCalled();
+  });
+
+  it("uses dashes for zero-sample percentages and latency", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue({ ...overview, total_traces: 0, failed: 0, in_scope_traces: 0, classified_traces: 0, answer_basis_traces: 0, latency: { ...overview.latency, samples: 0 } });
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const wrapper = mountDashboard(); await flushPromises();
+    const values = wrapper.findAll(".metric-card .value");
+    expect(values.map((item) => item.text())).toEqual(["0", "—", "—", "—"]);
+    expect(wrapper.text()).not.toContain("0.0%");
+  });
+
+  it("does not overwrite a new knowledge base with late metrics or readiness", async () => {
+    let resolveOld!: (value: MetricsOverview) => void;
+    vi.spyOn(adminApi, "getMetricsOverview").mockImplementation(async (params) => params?.knowledgeId === "kb-a" ? new Promise((resolve) => { resolveOld = resolve; }) : { ...overview, total_traces: 999 });
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    adminStore.selectedKnowledgeId = "kb-a";
+    const wrapper = mountDashboard(); await flushPromises();
+    adminStore.selectedKnowledgeId = "kb-b"; await flushPromises();
+    resolveOld(overview); await flushPromises();
+    expect(wrapper.text()).toContain("请求 999 次");
+    expect(wrapper.text()).not.toContain("请求 120 次");
+    expect(wrapper.text()).toContain("尚未对外上线");
+  });
+
+  it("opens the selected knowledge base's checklist and distinguishes online from ready", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    vi.mocked(adminApi.getKnowledgeAssistant).mockResolvedValue({ knowledge_id: "kb-a", assistant_online: true, ready: false, blockers: ["卡片未确认"], revision: 0, suggestions: [] });
+    adminStore.selectedKnowledgeId = "kb-a";
+    const navigate = vi.spyOn(adminStore, "navigate").mockImplementation(() => {});
+    const wrapper = mountDashboard(); await flushPromises();
+    expect(wrapper.text()).toContain("已上线 · 暂不可用");
+    await wrapper.findAll("button").find((item) => item.text() === "打开上线检查清单")!.trigger("click");
+    expect(navigate).toHaveBeenCalledWith("knowledge", "id=kb-a");
   });
 });

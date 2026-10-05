@@ -34,7 +34,7 @@ const views: Record<string, Component> = {
 };
 
 const viewProps = computed(() =>
-  ["logs", "configuration"].includes(props.view)
+  ["logs", "configuration", "knowledge"].includes(props.view)
     ? { navigationQuery: props.navigationQuery ?? "" }
     : {},
 );
