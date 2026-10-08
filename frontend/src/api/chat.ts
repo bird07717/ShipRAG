@@ -3,6 +3,7 @@ import {
   announceServiceCredentialRejected,
   readServiceCredential,
 } from "@/api/serviceCredential";
+import { trackedFetch } from "@/api/connectivity";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -117,7 +118,7 @@ export interface WelcomePayload {
 }
 
 export async function fetchWelcome(knowledgeId: string): Promise<WelcomePayload> {
-  const response = await fetch(
+  const response = await trackedFetch(
     apiBaseUrl + `/api/v1/chat/welcome?knowledge_id=${encodeURIComponent(knowledgeId)}`,
     { headers: authHeaders() },
   );
@@ -183,7 +184,7 @@ export async function streamChat(
   options: { choiceId?: string } = {},
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(apiBaseUrl + "/api/v1/chat/stream", {
+  const response = await trackedFetch(apiBaseUrl + "/api/v1/chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -255,7 +256,7 @@ export async function streamChat(
 }
 
 export async function fetchImageBlobUrl(imageAssetId: string, signal?: AbortSignal): Promise<string> {
-  const response = await fetch(
+  const response = await trackedFetch(
     apiBaseUrl + "/api/v1/image-assets/" + imageAssetId + "/content",
     { headers: authHeaders(), signal },
   );
@@ -271,7 +272,7 @@ export async function downloadDocument(
   documentId: string,
   filename: string,
 ): Promise<void> {
-  const response = await fetch(
+  const response = await trackedFetch(
     apiBaseUrl + "/api/v1/documents/" + documentId + "/content?download=true",
     { headers: authHeaders() },
   );

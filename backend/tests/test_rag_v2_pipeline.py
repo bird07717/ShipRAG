@@ -23,7 +23,7 @@ from app.rag.models import (
     Turn,
 )
 from app.rag.repository import RagRepository, SearchQueryUnsupportedError
-from app.rag.rerank import RerankError
+from app.rag.rerank import RerankError, create_rerank_provider
 from app.rag.v2.answer_generator import GeneratedAnswer, apply_scope_authority
 from app.rag.v2.document_context import DocumentContext, ImageBinding, build_document_context
 from app.rag.v2.document_retrieval import DocumentCandidate, retrieve_documents
@@ -1482,6 +1482,48 @@ async def test_v2_document_level_rerank_reorders_and_degrades_safely(
     expected_id = second_id if expected_first == "second" else first_id
     assert candidates[0].document_id == expected_id
     assert trace["document_rerank"]["status"] == expected_status
+
+
+@pytest.mark.asyncio
+async def test_v2_rerank_without_key_is_recorded_as_unconfigured_degradation() -> None:
+    """Pins the trace shape the admin metrics rely on: a Rerank row without a
+    usable key makes the real factory raise MODEL_NOT_CONFIGURED inside the
+    retrieval try-block, so it lands as DEGRADED with that reason — never as
+    SKIPPED (metrics.py counts it as "unconfigured", not as a call failure)."""
+    first = replace(_candidate(), chunk_id=uuid4(), document_id=uuid4(), document="first")
+    second = replace(_candidate(), chunk_id=uuid4(), document_id=uuid4(), document="second")
+    repository = _MultiDocumentRepository([first, second])
+    repository.turn = replace(
+        _turn(), rerank=ModelSnapshot("siliconflow", "BAAI/bge-reranker-v2-m3", {})
+    )
+    settings = Settings.model_construct(
+        **{
+            **Settings(_env_file=None, app_env="test").model_dump(),
+            "app_env": "production",
+            "siliconflow_api_key": None,
+            "zhipu_api_key": None,
+            "dashscope_api_key": None,
+        }
+    )
+
+    _, trace = await retrieve_documents(
+        repository,
+        settings=settings,
+        turn=repository.turn,
+        question="检查设备",
+        interpretation=QueryInterpretation(
+            resolved_question="检查设备",
+            search_queries=[],
+            key_constraints=[],
+            scope="IN_SCOPE",
+            response_path="KNOWLEDGE",
+        ),
+        embedding_selector=lambda _turn: FakeEmbeddingProvider(1024),
+        rerank_factory=create_rerank_provider,
+    )
+
+    assert trace["document_rerank"]["status"] == "DEGRADED"
+    assert trace["document_rerank"]["reason"] == "MODEL_NOT_CONFIGURED"
 
 
 @pytest.mark.asyncio

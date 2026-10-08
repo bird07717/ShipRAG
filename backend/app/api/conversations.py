@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -37,8 +37,11 @@ async def list_conversations(
     repository: Annotated[GatewayRepository, Depends(get_gateway_repository)],
     user_id: Annotated[str | None, Query(max_length=100)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    source: Annotated[
+        Literal["ASSISTANT_API", "INTERNAL_CHAT", "PLAYGROUND"] | None, Query()
+    ] = None,
 ) -> dict[str, Any]:
-    rows = await repository.list_conversations(knowledge_id, user_id, limit)
+    rows = await repository.list_conversations(knowledge_id, user_id, limit, source=source)
     return {"items": rows}
 
 

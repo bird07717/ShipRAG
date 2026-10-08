@@ -17,6 +17,7 @@ from app.rag.model_providers import (
     environment_base_url,
     get_provider_capability,
     normalize_provider,
+    resolve_provider_kind,
 )
 from app.rag.models import ModelSnapshot
 
@@ -156,15 +157,19 @@ class SiliconFlowEmbeddingProvider:
 def create_embedding_provider(
     settings: Settings, snapshot: ModelSnapshot | None = None
 ) -> EmbeddingProvider:
-    mode = settings.m2_embedding_provider
     provider = normalize_provider(snapshot.provider) if snapshot else "siliconflow"
     api_key = (snapshot.api_key if snapshot else None) or environment_api_key(
         settings, "EMBEDDING", provider
     )
-    if mode == "fake":
+    resolution = resolve_provider_kind(
+        settings, "EMBEDDING", provider, has_key=settings.has_secret(api_key)
+    )
+    if resolution.kind == "FAKE":
         return FakeEmbeddingProvider(settings.embedding_dimension)
-    if mode == "auto" and not settings.has_secret(api_key):
-        if settings.app_env in {"staging", "production"}:
-            raise EmbeddingError(f"{provider} Embedding 未配置，部署环境禁止回退到 fake")
-        return FakeEmbeddingProvider(settings.embedding_dimension)
+    if resolution.reason == "FAKE_FORBIDDEN":
+        raise EmbeddingError(
+            "当前环境禁止使用模拟 Embedding（M2_EMBEDDING_PROVIDER=fake），禁止回退到 fake"
+        )
+    if resolution.kind == "NOT_CONFIGURED":
+        raise EmbeddingError(f"{provider} Embedding 未配置 API Key，禁止回退到 fake")
     return SiliconFlowEmbeddingProvider(settings, snapshot=snapshot)

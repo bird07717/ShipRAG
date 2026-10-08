@@ -74,7 +74,7 @@ async function save(): Promise<void> {
   if (!store.error) { editorOpen.value = false; lastCheck.value = null; }
 }
 async function regenerate(row?: DocumentProfileSummary): Promise<void> { if (row) await store.generateDocumentProfile(row.document_id); else await store.generateKnowledgeProfiles(); }
-async function check(): Promise<void> { lastCheck.value = await store.checkKnowledgeProfiles(); if (lastCheck.value?.publishable) store.notice = "待上线变更检查通过，可以上线"; }
+async function check(): Promise<void> { lastCheck.value = await store.checkKnowledgeProfiles(); if (lastCheck.value?.publishable) store.announce("待上线变更检查通过，可以上线"); }
 async function publish(): Promise<void> {
   if (publishReason.value) return;
   lastCheck.value = lastCheck.value ?? await store.checkKnowledgeProfiles();

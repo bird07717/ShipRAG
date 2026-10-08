@@ -231,6 +231,35 @@ describe("knowledge Assistant settings", () => {
     expect(save).toHaveBeenCalledWith("kb-a", 0, ["如何重启设备系统", ...questions.slice(1)]);
   });
 
+  it("confirms discarding unsaved questions with a popconfirm before reloading", async () => {
+    const load = vi.mocked(adminApi.getKnowledgeAssistant);
+    const wrapper = editor();
+    await flushPromises();
+    const loads = load.mock.calls.length;
+
+    // Clean editor: reload immediately, no confirmation.
+    await button(wrapper, "重新加载配置").trigger("click");
+    await flushPromises();
+    expect(load).toHaveBeenCalledTimes(loads + 1);
+
+    await wrapper.findAll("input")[0]!.setValue("未保存的问题");
+    await button(wrapper, "重新加载配置").trigger("click");
+    await flushPromises();
+    expect(load).toHaveBeenCalledTimes(loads + 1);
+    expect(ElMessageBox.confirm).not.toHaveBeenCalled();
+    // Element Plus opens the popper on a timer; wait for it instead of racing it.
+    const popconfirm = await vi.waitFor(() => {
+      const found = Array.from(document.body.querySelectorAll<HTMLElement>(".el-popconfirm"))
+        .find((item) => item.textContent?.includes("丢弃尚未保存的问题"));
+      if (!found) throw new Error("popconfirm not open yet");
+      return found;
+    });
+    popconfirm.querySelector<HTMLButtonElement>(".el-button--primary")!.click();
+    await flushPromises();
+    expect(load).toHaveBeenCalledTimes(loads + 2);
+    expect(wrapper.findAll("input")[0]!.element.value).not.toBe("未保存的问题");
+  });
+
   it("explains empty trial questions without requiring online publication", async () => {
     vi.mocked(adminApi.getKnowledgeAssistant).mockResolvedValue({ ...configuration(), suggestions: [] });
     const wrapper = editor();

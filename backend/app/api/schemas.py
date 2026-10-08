@@ -521,6 +521,9 @@ class ConversationListItem(BaseModel):
     conversation_mode: str | None = None
     created_at: datetime
     updated_at: datetime
+    # Channel of the latest turn (rag_trace.source); None for conversations
+    # without traces. Only populated by the list endpoint.
+    last_source: str | None = None
 
 
 class ConversationListResponse(BaseModel):
@@ -722,6 +725,20 @@ class MetricsLatencySummary(BaseModel):
     samples: int
 
 
+class MetricsV2Quality(BaseModel):
+    """Stage degradation read from runtime_snapshot.generation (RAG V2)."""
+
+    query_interpreter_total: int
+    query_interpreter_degraded: int
+    query_interpreter_degraded_rate: float
+    document_rerank_attempted: int
+    document_rerank_degraded: int
+    document_rerank_degraded_rate: float
+    # Knowledge turns with >=2 candidates where no Rerank model was usable
+    # (no key → MODEL_NOT_CONFIGURED); excluded from the degraded/attempted pair.
+    document_rerank_unconfigured: int
+
+
 class MetricsOverviewResponse(BaseModel):
     range: MetricsRange
     total_traces: int
@@ -741,8 +758,11 @@ class MetricsOverviewResponse(BaseModel):
     out_of_scope_rate: float
     doc_delivered_rate: float
     failure_rate: float
+    # Legacy columns: V2 never writes citation_missing nor rerank_result, so
+    # both rates stay 0 for current traffic. Use v2_quality instead.
     citation_missing_rate: float
     rerank_degraded_rate: float
+    v2_quality: MetricsV2Quality
     unique_users: int
     latency: MetricsLatencySummary
     tokens: dict[str, int]
@@ -877,6 +897,28 @@ class RuntimeDatabasePoolStat(BaseModel):
     checked_in: int
     checked_out: int
     overflow: int
+
+
+class ModelRuntimeItem(BaseModel):
+    """What one model type will actually run with (see resolve_provider_kind)."""
+
+    model_type: Literal["LLM", "EMBEDDING", "RERANK", "OCR", "VISION"]
+    # ENV_FALLBACK: an enabled row with an unsupported provider is ignored by
+    # index builds, which then use the environment provider.
+    source: Literal["DATABASE", "ENV", "ENV_FALLBACK", "NONE"]
+    provider: str | None
+    model_name: str | None
+    stored_key_configured: bool
+    environment_key_configured: bool
+    kind: Literal["REAL", "FAKE", "NOT_CONFIGURED", "DISABLED", "UNAVAILABLE"]
+    reason: str
+
+
+class ModelRuntimeResponse(BaseModel):
+    environment: str
+    models: list[ModelRuntimeItem]
+    simulated_active_index_count: int
+    simulated: bool
 
 
 class RuntimeMetricsResponse(BaseModel):

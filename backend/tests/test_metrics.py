@@ -56,6 +56,15 @@ class _StubMetricsRepository:
             "failure_rate": 0.05,
             "citation_missing_rate": 0.02,
             "rerank_degraded_rate": 0.01,
+            "v2_quality": {
+                "query_interpreter_total": 90,
+                "query_interpreter_degraded": 3,
+                "query_interpreter_degraded_rate": 0.0333,
+                "document_rerank_attempted": 70,
+                "document_rerank_degraded": 7,
+                "document_rerank_degraded_rate": 0.1,
+                "document_rerank_unconfigured": 0,
+            },
             "unique_users": 42,
             "latency": {
                 "p50_ms": 1200,
@@ -675,6 +684,11 @@ def _overview_row(**overrides: Any) -> dict[str, Any]:
         "unique_users": 4,
         "citation_missing": 2,
         "rerank_degraded": 1,
+        "v2_query_total": 8,
+        "v2_query_degraded": 2,
+        "v2_rerank_attempted": 5,
+        "v2_rerank_degraded": 1,
+        "v2_rerank_unconfigured": 3,
         "p50_ms": 100,
         "p95_ms": 200,
         "p99_ms": 300,
@@ -746,6 +760,15 @@ class TestMetricsAggregation:
         assert result["failure_rate"] == 0.1
         assert result["citation_missing_rate"] == round(2 / 9, 4)
         assert result["rerank_degraded_rate"] == 0.1
+        assert result["v2_quality"] == {
+            "query_interpreter_total": 8,
+            "query_interpreter_degraded": 2,
+            "query_interpreter_degraded_rate": 0.25,
+            "document_rerank_attempted": 5,
+            "document_rerank_degraded": 1,
+            "document_rerank_degraded_rate": 0.2,
+            "document_rerank_unconfigured": 3,
+        }
         assert result["tokens"]["llm_total"] == 1200
         assert result["tokens"]["rerank_total"] == 50
         assert result["latency"] == {
@@ -772,6 +795,11 @@ class TestMetricsAggregation:
             technical_completed=0,
             citation_missing=0,
             rerank_degraded=0,
+            v2_query_total=0,
+            v2_query_degraded=0,
+            v2_rerank_attempted=0,
+            v2_rerank_degraded=0,
+            v2_rerank_unconfigured=0,
         )
         result = await MetricsRepository(_FakeEngine([row])).overview()  # type: ignore[arg-type]
         assert result["direct_answer_rate"] == 0.0
@@ -781,6 +809,8 @@ class TestMetricsAggregation:
         assert result["product_explained_rate"] == 0.0
         assert result["product_general_rate"] == 0.0
         assert result["failure_rate"] == 0.0
+        assert result["v2_quality"]["query_interpreter_degraded_rate"] == 0.0
+        assert result["v2_quality"]["document_rerank_degraded_rate"] == 0.0
 
     async def test_overview_applies_filters_to_query(self) -> None:
         engine = _FakeEngine([_overview_row()])

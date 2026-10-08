@@ -73,6 +73,14 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - 当前索引复用和就绪一致性主要按 `embedding_model_name` 判断，不是完整 Provider/Base URL/模型指纹；同名模型换供应商或地址不能仅凭重建成功证明向量空间一致。查询选择器在旧会话模型名不匹配时回退环境 Provider，并未读取旧索引的完整历史模型凭据，因此“会话冻结索引”不等于“旧 Embedding 配置完整保留”。这些限制见 `known-issues.md`。
 - 证据入口：`api/rag.py:update_model`、`rag/repository.py:begin_turn`、`services/rag.py:_select_query_embedding_provider`、`ingestion/model_config.py:load_build_models`、`ingestion/repository.py:_create_build_locked`、`gateway/repository.py:get_readiness`。
 
+## 模型实际运行判定与管理侧可见性（2026-10-08）
+
+- `rag/model_providers.py:resolve_provider_kind(settings, model_type, provider, has_key)` 是“真实 / 模拟 / 不可用”的唯一判定表，LLM、Embedding、Rerank、OCR、Vision 五个工厂（`create_*_provider`）都调用它，异常类型与消息保持原样。`kind` 为 `REAL`/`FAKE`/`NOT_CONFIGURED`/`DISABLED`/`UNAVAILABLE`，`reason` 为 `CONFIGURED`/`EXPLICIT_PROVIDER`/`FAKE_MODE`/`AUTO_NO_KEY`/`FAKE_FORBIDDEN`/`NO_API_KEY`/`MODE_DISABLED`/`UNSUPPORTED_PROVIDER`。新增模型类型或改回退规则时只改这张表。
+- 规则（ADR-0034，2026-10-08 起禁止静默模拟）：五类模型 `auto` 无 Key 时仅 `APP_ENV=test` 返回 `FAKE/AUTO_NO_KEY`，其他环境 LLM/Embedding/Rerank 为 `NOT_CONFIGURED/NO_API_KEY`（工厂抛错，文案含“未配置 API Key，禁止回退到 fake”），OCR/Vision 为 `UNAVAILABLE/NO_API_KEY`（逐图 `FAILED`，构建继续，不再写入模拟识别文本）。显式 `fake` 在 development/test 为 `FAKE/FAKE_MODE`，在 staging/production 为 `FAKE_FORBIDDEN`，且配置校验对五类 `fake` 均拒绝启动。`gateway/repository.py:get_readiness` 的 Embedding 判断也改用该表：缺 Key 时新增就绪阻塞“Embedding API Key 未配置”，不再假设按模拟向量对齐。
+- `GET /api/v1/system/model-runtime`（管理认证，`rag/model_runtime.py`）按启用的 `model_config` 行（无行时按工厂的环境默认提供方；Embedding/OCR/Vision 行的提供方不受支持时与 `load_build_models` 一致忽略该行，`source=ENV_FALLBACK`；LLM/Rerank 不受支持时报 `UNAVAILABLE/UNSUPPORTED_PROVIDER`）逐类型返回实际判定，Key 只报告“数据库已存/环境已配”的存在性、不解密；另统计 `embedding_model_name = deterministic-shake256` 的 ACTIVE 索引数。与 `/system/info` 分开，数据库故障不影响版本标识显示。
+- `GET /api/v1/conversations`（管理端，非 Assistant 外部接口）新增可选 `source`（`ASSISTANT_API`/`INTERNAL_CHAT`/`PLAYGROUND`，非法值 422）与列表项 `last_source`。会话表本身没有渠道列：`last_source` 取该会话最近一轮 `rag_trace.source`，`source` 过滤保留“任一轮来自该渠道”的会话，使用既有 `ix_rag_trace_conversation_created`；无链路的会话 `last_source=null`。其他参数（`user_id` 精确匹配、`limit≤200`）不变。外部 Assistant 的 `/assistant/v1/conversations` 是另一套凭据和契约，管理台不调用。
+- `/metrics/overview` 新增 `v2_quality`：查询理解（`runtime_snapshot.generation.query_interpreter.status`）总数/降级数/降级率、文档级重排（`generation.retrieval.document_rerank.status`）实际调用数/调用失败降级数/降级率，以及未执行重排次数。注意：`Turn.rerank` 总有快照（无启用行时 `begin_turn` 直接 503），缺 Key 时是真实工厂在检索 try 块内抛 `MODEL_NOT_CONFIGURED`，记录为 `DEGRADED` + `reason=MODEL_NOT_CONFIGURED`（`test_v2_rerank_without_key_is_recorded_as_unconfigured_degradation` 固定此形态）；因此“未执行重排”统计 `SKIPPED` 或 `DEGRADED` 且原因为 `MODEL_NOT_CONFIGURED`，并从调用数与降级数中排除，降级率只反映真实调用失败；随 overview 的知识库/时间/引擎/来源过滤。旧 `citation_missing_rate`、`rerank_degraded_rate` 读取 V2 不写入的旧列，对 V2 流量恒为 0，保留字段兼容但不应展示。
+
 ## 已删除的 RAG legacy 约束（历史记录）
 
 本节到“通用实现约束”之前仅解释历史 Trace 和旧验收资料，V5 后不再对应运行时代码；当前 RAG 以“RAG V2 边界与当前实现”为准。
@@ -139,7 +147,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 ## 并发观测
 
 - `/api/v1/metrics/assistant` 响应新增 `concurrency` 段：当前 `RUNNING` 请求数、最老 RUNNING 年龄、超过陈旧窗口的计数，以及窗口期内 `CONVERSATION_BUSY`/`REQUEST_IN_PROGRESS`/`SERVICE_BUSY` 拒绝计数（来自 `request_error_log`，仅管理认证）。
-- `/api/v1/metrics/runtime`（管理认证）返回本进程快照：准入闸门 `limit`/`in_flight` 与数据库连接池 `size/checked_in/checked_out/overflow`；多 uvicorn Worker 时每个实例只报告自身，需按实例抓取。
+- `/api/v1/metrics/runtime`（管理认证）返回本进程快照：准入闸门 `limit`/`in_flight` 与数据库连接池 `size/checked_in/checked_out/overflow`；多 uvicorn Worker 时每个实例只报告自身，需按实例抓取（生产默认 `BACKEND_WORKERS=2`）。`overflow` 是 SQLAlchemy `QueuePool` 语义：从 `-size` 起随建立连接递增，已建立连接数 = `size + overflow`，仅正值表示超出常驻池；管理台已按此换算展示。
 
 ## RAG V2 边界与当前实现
 

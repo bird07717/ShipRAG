@@ -15,6 +15,7 @@ from app.rag.model_providers import (
     environment_base_url,
     get_provider_capability,
     normalize_provider,
+    resolve_provider_kind,
 )
 from app.rag.models import ModelSnapshot
 from app.rag.security import RAG_SYSTEM_GUARD
@@ -653,22 +654,20 @@ async def _complete_structured(
 
 
 def create_llm_provider(settings: Settings, snapshot: ModelSnapshot) -> LlmProvider:
-    mode = settings.m3_llm_provider
     provider = normalize_provider(snapshot.provider)
     has_any_key = settings.has_secret(
         environment_api_key(settings, "LLM", provider)
     ) or settings.has_secret(snapshot.api_key)
-    if mode == "fake":
-        if settings.app_env in {"staging", "production"}:
-            raise LlmError(
-                "FAKE_PROVIDER_FORBIDDEN",
-                "当前环境禁止使用模拟模型",
-                retryable=False,
-            )
+    resolution = resolve_provider_kind(settings, "LLM", provider, has_key=has_any_key)
+    if resolution.kind == "FAKE":
         return FakeLlmProvider()
-    if mode == "auto" and not has_any_key:
-        if settings.app_env == "test":
-            return FakeLlmProvider()
+    if resolution.reason == "FAKE_FORBIDDEN":
+        raise LlmError(
+            "FAKE_PROVIDER_FORBIDDEN",
+            "当前环境禁止使用模拟模型",
+            retryable=False,
+        )
+    if resolution.kind == "NOT_CONFIGURED":
         raise LlmError(
             "MODEL_NOT_CONFIGURED",
             "LLM 模型或 API Key 未配置",

@@ -636,8 +636,12 @@ export interface MetricsOverview {
   out_of_scope_rate: number;
   doc_delivered_rate: number;
   failure_rate: number;
+  /** Legacy column never written by V2 — always 0 for current traffic; do not display. */
   citation_missing_rate: number;
+  /** Legacy column never written by V2 — always 0 for current traffic; use v2_quality. */
   rerank_degraded_rate: number;
+  /** Absent on backends older than this field. */
+  v2_quality?: MetricsV2Quality;
   unique_users: number;
   latency: MetricsLatencySummary;
   tokens: {
@@ -646,6 +650,18 @@ export interface MetricsOverview {
     llm_total: number;
     rerank_total: number;
   };
+}
+
+/** RAG V2 stage degradation, read from runtime_snapshot.generation. */
+export interface MetricsV2Quality {
+  query_interpreter_total: number;
+  query_interpreter_degraded: number;
+  query_interpreter_degraded_rate: number;
+  document_rerank_attempted: number;
+  document_rerank_degraded: number;
+  document_rerank_degraded_rate: number;
+  /** Knowledge turns with >=2 candidates where no Rerank model was usable. */
+  document_rerank_unconfigured: number;
 }
 
 export interface MetricsTimeseriesPoint {
@@ -812,4 +828,48 @@ export interface SupportMessage {
 
 export interface ConversationMessageListResponse {
   items: SupportMessage[];
+}
+
+export type ModelRuntimeKind = "REAL" | "FAKE" | "NOT_CONFIGURED" | "DISABLED" | "UNAVAILABLE";
+
+/** What one model type actually runs with (backend resolve_provider_kind). */
+export interface ModelRuntimeItem {
+  model_type: "LLM" | "EMBEDDING" | "RERANK" | "OCR" | "VISION";
+  /** ENV_FALLBACK: an unsupported provider row is ignored by index builds. */
+  source: "DATABASE" | "ENV" | "ENV_FALLBACK" | "NONE";
+  provider: string | null;
+  model_name: string | null;
+  stored_key_configured: boolean;
+  environment_key_configured: boolean;
+  kind: ModelRuntimeKind;
+  reason: string;
+}
+
+export interface ModelRuntimeStatus {
+  environment: string;
+  models: ModelRuntimeItem[];
+  simulated_active_index_count: number;
+  simulated: boolean;
+}
+
+export type TraceSource = "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND";
+
+export interface ConversationListItem {
+  id: string;
+  knowledge_id: string;
+  user_id: string | null;
+  title: string | null;
+  message_count: number;
+  last_execution_engine: string | null;
+  conversation_mode: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Channel of the latest turn; null when the conversation has no traces. */
+  last_source: TraceSource | null;
+}
+
+/** Snapshot of the API process that served the request (not the whole service). */
+export interface RuntimeMetrics {
+  turn_gate: { limit: number; in_flight: number };
+  database_pool: { size: number; checked_in: number; checked_out: number; overflow: number };
 }

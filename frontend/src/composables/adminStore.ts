@@ -34,6 +34,7 @@ import type {
   ReleaseRebaseResult,
   SystemInfo,
   TaskRecord,
+  ModelRuntimeStatus,
   TaskSubmission,
   TraceSummary,
 } from "@/types/admin";
@@ -42,9 +43,17 @@ const SELECTED_KNOWLEDGE_STORAGE_KEY = "rag_admin_selected_knowledge_id";
 const TRACKED_TASKS_STORAGE_KEY = "rag_admin_tracked_tasks";
 let systemInfoLoadGeneration = 0;
 let modelListLoadGeneration = 0;
+let modelRuntimeLoadGeneration = 0;
 let modelActionGeneration = 0;
 
 export type ModelActionResult = { ok: true } | { ok: false; error: string };
+/**
+ * How a notice is presented: `success` is a short transient toast; `caveat`
+ * is a completed action whose effect boundary must be read (stays until
+ * closed); `warning` means the outcome needs attention.
+ */
+export type NoticeLevel = "success" | "caveat" | "warning";
+type ModelActionNotice = string | { message: string; level: NoticeLevel };
 
 type TrackedTask = {
   taskId: string;
@@ -127,6 +136,8 @@ export const adminStore = reactive({
   releaseDetails: {} as Record<string, KnowledgeRelease | undefined>,
   profileFeedback: [] as ProfileFeedback[],
   systemInfo: null as SystemInfo | null,
+  /** Actual provider per model type (null = not loaded / unknown). */
+  modelRuntime: null as ModelRuntimeStatus | null,
 
   /* selection / ui state */
   selectedKnowledgeId: "",
@@ -150,6 +161,7 @@ export const adminStore = reactive({
   trackedTasks: [] as TrackedTask[],
   error: "",
   notice: "",
+  noticeLevel: "success" as NoticeLevel,
   credentialRejected: false,
 
   /* forms */
@@ -254,14 +266,21 @@ export const adminStore = reactive({
   },
 
   /* ---------- core ---------- */
+  /** Set a notice together with its presentation level (see NoticeLevel). */
+  announce(message: string, level: NoticeLevel = "success"): void {
+    this.noticeLevel = level;
+    this.notice = message;
+  },
+
   async run(action: () => Promise<void>, success = ""): Promise<void> {
     this.activeRequestCount += 1;
     this.loading = true;
     this.error = "";
     this.notice = "";
+    this.noticeLevel = "success";
     try {
       await action();
-      if (success) this.notice = success;
+      if (success) this.announce(success);
     } catch (cause) {
       this.error = cause instanceof Error ? cause.message : "操作失败";
     } finally {
@@ -323,7 +342,8 @@ export const adminStore = reactive({
           : cancelled
             ? "生成任务已停止；已完成文档的待上线属性保留，可继续编辑或重新生成"
             : task.error_message || "后台任务执行失败，请在任务中心查看详情";
-      this.notice = message;
+      // Task completion is announced once, as a notification; it is not
+      // duplicated into the transient success notice.
       ElNotification({
         title: cancelled
           ? "任务已停止"
@@ -492,7 +512,7 @@ export const adminStore = reactive({
       });
       const index = this.knowledgeBases.findIndex((item) => item.id === updated.id);
       if (index >= 0) this.knowledgeBases[index] = updated;
-      this.notice = "知识库说明已保存；启用专业技术助手后，新请求将使用新的范围";
+      this.announce("知识库说明已保存；启用专业技术助手后，新请求将使用新的范围", "caveat");
       return updated;
     } catch (cause) {
       this.error = cause instanceof Error ? cause.message : "知识库说明保存失败";
@@ -509,6 +529,28 @@ export const adminStore = reactive({
       if (generation === systemInfoLoadGeneration) this.systemInfo = info;
     } catch {
       if (generation === systemInfoLoadGeneration) this.systemInfo = null;
+    }
+  },
+
+  /**
+   * Which model each type really runs with, including silent fallbacks to
+   * simulated models. Failures leave the status unknown (null) rather than
+   * keeping an older answer that may no longer be true.
+   */
+  async loadModelRuntime(): Promise<void> {
+    const generation = ++modelRuntimeLoadGeneration;
+    const credential = this.serviceToken;
+    const isCurrent = () => generation === modelRuntimeLoadGeneration
+      && this.hasServiceCredential && this.serviceToken === credential;
+    if (!this.hasServiceCredential) {
+      this.modelRuntime = null;
+      return;
+    }
+    try {
+      const status = await adminApi.getModelRuntime();
+      if (isCurrent()) this.modelRuntime = Array.isArray(status?.models) ? status : null;
+    } catch {
+      if (isCurrent()) this.modelRuntime = null;
     }
   },
 
@@ -635,6 +677,7 @@ export const adminStore = reactive({
       this.loadModels(),
       adminApi.listPrompts().then((value) => (this.prompts = value)),
       this.loadSystemInfo(),
+      this.loadModelRuntime(),
     ]);
   },
 
@@ -696,7 +739,7 @@ export const adminStore = reactive({
       });
       await this.loadKnowledgeBases();
     });
-    if (!this.error) this.notice = "知识库删除任务已提交；完成后将弹出提醒";
+    if (!this.error) this.announce("知识库删除任务已提交；完成后将弹出提醒");
   },
 
   async uploadFile(file: File, idempotencyKey: string, requestBuild: boolean): Promise<void> {
@@ -751,7 +794,7 @@ export const adminStore = reactive({
         ? "文档已删除，将在当前构建完成后更新索引"
         : "文档已删除，索引更新已提交";
     });
-    if (successMessage) this.notice = successMessage;
+    if (successMessage) this.announce(successMessage);
   },
 
   async inspectDocument(document: DocumentItem): Promise<void> {
@@ -829,7 +872,7 @@ export const adminStore = reactive({
       };
       await this.hydrateTrackedTask(submission.task_id);
     });
-    if (!this.error) this.notice = "RAG 文档理解生成任务已提交";
+    if (!this.error) this.announce("RAG 文档理解生成任务已提交");
   },
 
   async saveRagDocumentCard(payload: RagDocumentCardPayload): Promise<void> {
@@ -844,7 +887,7 @@ export const adminStore = reactive({
       const index = this.ragDocumentCards.findIndex((item) => item.document_id === document.id);
       if (index >= 0) this.ragDocumentCards[index] = this.ragDocumentCard;
     });
-    if (!this.error) this.notice = "卡片已保存，请确认后用于后续上线检查";
+    if (!this.error) this.announce("卡片已保存，请确认后用于后续上线检查", "caveat");
   },
 
   async reviewRagDocumentCard(reviewStatus: "CONFIRMED" | "REJECTED"): Promise<void> {
@@ -864,7 +907,7 @@ export const adminStore = reactive({
         );
       }
     });
-    if (!this.error) this.notice = reviewStatus === "CONFIRMED" ? "卡片已确认" : "卡片已拒绝";
+    if (!this.error) this.announce(reviewStatus === "CONFIRMED" ? "卡片已确认" : "卡片已拒绝");
   },
 
   async confirmRagDocumentCards(): Promise<void> {
@@ -889,7 +932,7 @@ export const adminStore = reactive({
         .catch(() => null);
       this.ragDocumentCards = cardList?.cards ?? this.ragDocumentCards;
     });
-    if (!this.error) this.notice = `已确认 ${autoCount} 份 RAG 理解卡片`;
+    if (!this.error) this.announce(`已确认 ${autoCount} 份 RAG 理解卡片`);
   },
 
   goToCandidateReview(indexId: string): void {
@@ -919,7 +962,7 @@ export const adminStore = reactive({
       });
       if (knowledge.id === this.selectedKnowledgeId) await this.loadKnowledgeDetails();
     });
-    if (!this.error) this.notice = "全部待上线 Profile 属性生成任务已提交；完成后将弹出提醒";
+    if (!this.error) this.announce("全部待上线 Profile 属性生成任务已提交；完成后将弹出提醒");
   },
 
   async generateKnowledgeProfiles(): Promise<void> {
@@ -955,7 +998,7 @@ export const adminStore = reactive({
     await this.runAction(`task-cancel:${taskId}`, async () => {
       const task = await adminApi.cancelTask(taskId);
       this.syncPolledTask(task);
-      this.notice = "已请求停止任务；正在处理的文档完成后即停止";
+      this.announce("已请求停止任务；正在处理的文档完成后即停止");
     });
   },
 
@@ -981,7 +1024,7 @@ export const adminStore = reactive({
     await this.runAction(`document-profile-publish:${this.selectedKnowledgeId}`, async () => {
       const result = await adminApi.publishKnowledgeProfiles(this.selectedKnowledgeId);
       this.knowledgeProfileSummary = result.summary;
-      this.notice = `已上线 ${result.published_count} 项 Profile 属性`;
+      this.announce(`已上线 ${result.published_count} 项 Profile 属性`);
     });
   },
 
@@ -990,7 +1033,7 @@ export const adminStore = reactive({
     await this.runAction(`document-profile-discard:${this.selectedKnowledgeId}`, async () => {
       const result = await adminApi.discardPendingKnowledgeProfiles(this.selectedKnowledgeId);
       await this.loadKnowledgeProfiles();
-      this.notice = `已取消 ${result.discarded_count} 项待上线变更`;
+      this.announce(`已取消 ${result.discarded_count} 项待上线变更`);
     });
   },
 
@@ -1040,7 +1083,7 @@ export const adminStore = reactive({
       await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
     });
     if (!this.error) {
-      this.notice = "重建已提交；完成后需明确设为当前 RAG 索引";
+      this.announce("重建已提交；完成后需明确设为当前 RAG 索引", "caveat");
     }
   },
 
@@ -1055,7 +1098,7 @@ export const adminStore = reactive({
     await this.runAction(`task-cancel:${task.id}`, async () => {
       const cancelled = await adminApi.cancelTask(task.id);
       this.syncPolledTask(cancelled);
-      this.notice = "已请求停止构建；正在处理的文档完成后即停止";
+      this.announce("已请求停止构建；正在处理的文档完成后即停止");
     });
   },
 
@@ -1074,7 +1117,7 @@ export const adminStore = reactive({
       }
       await this.hydrateTrackedTask(submission.task_id);
     });
-    if (!this.error) this.notice = "Profile 重建任务已提交；完成后将弹出提醒";
+    if (!this.error) this.announce("Profile 重建任务已提交；完成后将弹出提醒");
   },
 
   async regenerateProfileDraft(draftId: string): Promise<void> {
@@ -1087,7 +1130,7 @@ export const adminStore = reactive({
       await this.hydrateTrackedTask(submission.task_id);
       await this.loadIndexTasks();
     });
-    if (!this.error) this.notice = "Profile 草稿重新生成任务已提交";
+    if (!this.error) this.announce("Profile 草稿重新生成任务已提交");
   },
 
   async updateProfileDraft(draftId: string, payload: ProfileDraftPatch): Promise<void> {
@@ -1099,7 +1142,7 @@ export const adminStore = reactive({
         item.id === release.id ? { ...item, ...release } : item,
       );
       if (payload.status === "APPROVED") {
-        this.notice = "草稿已批准；全部草稿完成后请执行发布前验证";
+        this.announce("草稿已批准；全部草稿完成后请执行发布前验证", "caveat");
       }
     });
   },
@@ -1113,11 +1156,11 @@ export const adminStore = reactive({
         item.id === releaseId ? { ...item, ...release, validation_result: validation } : item,
       );
       if (validation.publishable) {
-        this.notice = "发布前验证通过，当前 Support Release 可以发布";
+        this.announce("发布前验证通过，当前 Support Release 可以发布");
       } else if (validation.review_required_count) {
-        this.notice = `发布前验证完成：仍有 ${validation.review_required_count} 篇草稿待审核或批准`;
+        this.announce(`发布前验证完成：仍有 ${validation.review_required_count} 篇草稿待审核或批准`, "warning");
       } else if (validation.valid) {
-        this.notice = "发布前验证完成，但当前候选暂不可发布";
+        this.announce("发布前验证完成，但当前候选暂不可发布", "warning");
       }
     });
   },
@@ -1158,7 +1201,7 @@ export const adminStore = reactive({
       await adminApi.activateIndex(indexId);
       await Promise.all([this.loadKnowledgeBases(), this.loadKnowledgeDetails()]);
     });
-    if (!this.error) this.notice = "当前 RAG 索引已切换";
+    if (!this.error) this.announce("当前 RAG 索引已切换");
   },
 
   async gcIndexes(): Promise<void> {
@@ -1172,7 +1215,7 @@ export const adminStore = reactive({
       if (result.skipped_count) {
         parts.push(`${result.skipped_count} 个索引因新增引用被跳过`);
       }
-      this.notice = parts.join("；");
+      this.announce(parts.join("；"), result.skipped_count ? "warning" : "success");
       await this.loadKnowledgeDetails();
     });
   },
@@ -1210,11 +1253,7 @@ export const adminStore = reactive({
         released = (await adminApi.deleteIndex(indexId, true)).released_conversation_count ?? 0;
       }
       await this.loadKnowledgeDetails();
-      this.notice = forced
-        ? released
-          ? `索引已删除；解绑 ${released} 个冻结会话引用`
-          : "索引已删除"
-        : "索引已删除";
+      this.announce(forced && released ? `索引已删除；解绑 ${released} 个冻结会话引用` : "索引已删除");
     });
   },
 
@@ -1249,7 +1288,7 @@ export const adminStore = reactive({
     ]);
   },
 
-  async runModelAction(action: () => Promise<string>): Promise<ModelActionResult> {
+  async runModelAction(action: () => Promise<ModelActionNotice>): Promise<ModelActionResult> {
     const generation = ++modelActionGeneration;
     const credential = this.serviceToken;
     const isCurrent = () => generation === modelActionGeneration
@@ -1258,7 +1297,12 @@ export const adminStore = reactive({
     await this.run(async () => {
       try {
         const notice = await action();
-        if (isCurrent()) this.notice = notice;
+        if (isCurrent()) {
+          if (typeof notice === "string") this.announce(notice);
+          else this.announce(notice.message, notice.level);
+          // Keys and providers may have changed what actually runs.
+          void this.loadModelRuntime();
+        }
       } catch (cause) {
         const error = cause instanceof Error ? cause.message : "模型配置操作失败";
         result = { ok: false, error };
@@ -1270,16 +1314,25 @@ export const adminStore = reactive({
 
   async saveModelConfig(modelId: string, payload: ModelConfigUpdatePayload): Promise<ModelActionResult> {
     let successMessage = "模型配置已保存，下一轮对话生效";
+    // Only the plain LLM/Rerank save is a simple confirmation; the others
+    // carry effect boundaries the administrator has to read.
+    let level: NoticeLevel = "success";
     const modelType = this.models.find((model) => model.id === modelId)?.model_type;
-    if (modelType === "EMBEDDING") successMessage = "Embedding 配置已保存；查询侧后续请求读取新配置，请核对索引向量与模型一致性";
-    else if (modelType === "OCR" || modelType === "VISION") successMessage = "模型配置已保存，知识库已标记待重建；仅实际重新解析的文档使用新配置，旧解析可能复用";
+    if (modelType === "EMBEDDING") {
+      successMessage = "Embedding 配置已保存；查询侧后续请求读取新配置，请核对索引向量与模型一致性";
+      level = "caveat";
+    } else if (modelType === "OCR" || modelType === "VISION") {
+      successMessage = "模型配置已保存，知识库已标记待重建；仅实际重新解析的文档使用新配置，旧解析可能复用";
+      level = "caveat";
+    }
     return this.runModelAction(async () => {
       const result = await adminApi.updateModel(modelId, payload);
       await this.loadModels();
       if (payload.rebuild_all_confirmed && result.rebuilds?.length) {
         successMessage = `模型配置已保存；已对 ${result.rebuilds.length} 个知识库提交 RAG 重建，请核对构建结果、活动索引及文档理解确认状态`;
+        level = "caveat";
       }
-      return successMessage;
+      return { message: successMessage, level };
     });
   },
 
@@ -1295,7 +1348,7 @@ export const adminStore = reactive({
     return this.runModelAction(async () => {
       await adminApi.deleteApiKey(modelId);
       await this.loadModels();
-      return "数据库密钥已清除；有环境密钥时回退，否则模型调用可能不可用";
+      return { message: "数据库密钥已清除；有环境密钥时回退，否则模型调用可能不可用", level: "warning" as const };
     });
   },
 
@@ -1326,20 +1379,22 @@ export const adminStore = reactive({
     this.serviceToken = token;
     this.credentialRejected = false;
     saveServiceCredential(token);
-    this.notice = "访问凭据仅保存在当前浏览器会话";
+    this.announce("访问凭据仅保存在当前浏览器会话");
   },
 
   clearToken(): void {
     clearServiceCredential();
     this.serviceToken = "";
     this.credentialRejected = false;
-    this.notice = "本地访问凭据已清除";
+    this.announce("本地访问凭据已清除");
   },
 
   rejectCredential(reason: ServiceCredentialRejectionReason = "invalid"): void {
     clearServiceCredential();
     this.serviceToken = "";
     this.credentialRejected = true;
+    modelRuntimeLoadGeneration++;
+    this.modelRuntime = null;
     // "missing" fires the first time any request layer finds no token
     // configured yet — an onboarding state, not a failure, so it gets a
     // neutral prompt instead of the "invalid" wording used for a real 401.

@@ -25,6 +25,7 @@ const statusMap: Record<string, { label: string; tone: Tone }> = {
   OK: { label: "正常", tone: "success" },
   BUILDING: { label: "构建中", tone: "processing" },
   RUNNING: { label: "运行中", tone: "processing" },
+  QUEUED: { label: "排队中", tone: "processing" },
   VALIDATING: { label: "验证中", tone: "processing" },
   UPDATING: { label: "更新中", tone: "processing" },
   PARSING: { label: "解析中", tone: "processing" },

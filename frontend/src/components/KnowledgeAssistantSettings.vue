@@ -96,14 +96,11 @@ async function checkReadiness(): Promise<void> {
   finally { if (mounted) busy.value = false; }
 }
 
+// Unsaved edits are confirmed through the button's popconfirm before this runs.
 async function reload(): Promise<void> {
   if (busy.value) return;
   busy.value = true;
   try {
-    if (dirty.value) {
-      try { await ElMessageBox.confirm("重新加载会丢弃尚未保存的问题，是否继续？", "重新加载"); }
-      catch { return; }
-    }
     error.value = "";
     const response = await adminApi.getKnowledgeAssistant(props.knowledgeId);
     if (!mounted) return;
@@ -196,7 +193,19 @@ onUnmounted(() => { mounted = false; controller?.abort(); });
       <h4>Assistant 上线与推荐问题</h4>
       <div class="settings-actions">
         <el-button :disabled="busy || testing" @click="checkReadiness">检查就绪</el-button>
-        <el-button :disabled="busy || testing" @click="reload">重新加载配置</el-button>
+        <el-popconfirm
+          v-if="dirty"
+          title="重新加载会丢弃尚未保存的问题，是否继续？"
+          confirm-button-text="丢弃并重新加载"
+          cancel-button-text="取消"
+          width="260"
+          @confirm="reload"
+        >
+          <template #reference>
+            <el-button :disabled="busy || testing">重新加载配置</el-button>
+          </template>
+        </el-popconfirm>
+        <el-button v-else :disabled="busy || testing" @click="reload">重新加载配置</el-button>
       </div>
     </div>
     <p class="muted">维护该知识库的三条快捷提问。活动索引中的 RAG 文档理解须全部人工确认，试问检查回答后才能上线；已上线时保存立即生效。</p>

@@ -267,10 +267,10 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         <el-tag :type="ragState.type" size="small">{{ ragState.label }}</el-tag>
         <small>技术构建成功后，新会话自动使用</small>
       </button>
-      <button type="button" class="lifecycle-card" @click="store.navigate('support-review')">
-        <span>技术支持（Support）</span>
+      <button type="button" class="lifecycle-card is-legacy" @click="store.navigate('support-review')">
+        <span>技术支持（Support · 已冻结）</span>
         <el-tag :type="supportState.type" size="small">{{ supportState.label }}</el-tag>
-        <small>Profile 属性待上线前不影响 RAG</small>
+        <small>遗留能力，仅历史兼容；Profile 属性不影响 RAG</small>
       </button>
     </section>
 
@@ -375,9 +375,6 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
               </div>
             </div>
           </template>
-        </el-table-column>
-        <el-table-column label="类型" width="90">
-          <template #default><span class="muted">Word 文档</span></template>
         </el-table-column>
         <el-table-column label="大小" width="100">
           <template #default="scope">{{ formatSize(scope.row.file_size) }}</template>
@@ -761,6 +758,8 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
 }
 
 .lifecycle-card:hover { border-color: var(--brand-primary); }
+.lifecycle-card.is-legacy { border-style: dashed; background: var(--bg-subtle); }
+.lifecycle-card.is-legacy > span { color: var(--text-secondary); }
 .lifecycle-card > span { font-size: 13px; font-weight: 650; }
 .lifecycle-card > small { grid-column: 1 / -1; color: var(--text-tertiary); }
 

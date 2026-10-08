@@ -46,6 +46,10 @@ import type {
   SupportReleaseRollbackResult,
   SystemInfo,
   TaskRecord,
+  TraceSource,
+  ConversationListItem,
+  ModelRuntimeStatus,
+  RuntimeMetrics,
   TaskSubmission,
   TraceSummary,
 } from "@/types/admin";
@@ -55,6 +59,7 @@ import {
   announceServiceCredentialRejected,
   readServiceCredential,
 } from "@/api/serviceCredential";
+import { trackedFetch } from "@/api/connectivity";
 
 // Re-exported so existing `import { ApiRequestError } from "@/api/admin"`
 // call sites keep working; the class now lives in the shared credential
@@ -74,6 +79,25 @@ function buildMetricsQuery(params: Record<string, string | undefined>): string {
   return query ? `?${query}` : "";
 }
 
+interface TaskListFilters {
+  status?: string;
+  knowledgeId?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+}
+
+function taskListQuery(filters: TaskListFilters): string {
+  const search = new URLSearchParams();
+  if (filters.status) search.set("status", filters.status);
+  if (filters.knowledgeId) search.set("knowledge_id", filters.knowledgeId);
+  if (filters.from) search.set("from", filters.from);
+  if (filters.to) search.set("to", filters.to);
+  if (filters.limit) search.set("limit", String(filters.limit));
+  const query = search.toString();
+  return query ? `?${query}` : "";
+}
+
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = readServiceCredential();
   if (!token) {
@@ -86,7 +110,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   headers.set("Accept", "application/json");
   headers.set("Authorization", `Bearer ${token}`);
   if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
-  const response = await fetch(`${apiBaseUrl}/api/v1${path}`, { ...init, headers });
+  const response = await trackedFetch(`${apiBaseUrl}/api/v1${path}`, { ...init, headers });
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
       error?: { message?: string; details?: Record<string, unknown> };
@@ -378,18 +402,23 @@ export const adminApi = {
     apiRequest<RequestErrorLog>(`/logs/request-errors/${errorId}`),
   getFailureSummary: (params: { knowledgeId?: string; from?: string; to?: string } = {}) =>
     apiRequest<FailureSummary>(`/logs/failure-summary${buildMetricsQuery(params)}`),
-  listTasks: (
-    filters: { status?: string; knowledgeId?: string; from?: string; to?: string; limit?: number } = {},
+  listTasks: (filters: TaskListFilters = {}) => apiRequest<IndexTask[]>(`/tasks${taskListQuery(filters)}`),
+  /** Same endpoint as listTasks, typed with the full row (kb_id, timestamps) it returns. */
+  listTaskRecords: (filters: TaskListFilters = {}) =>
+    apiRequest<TaskRecord[]>(`/tasks${taskListQuery(filters)}`),
+  listConversations: (
+    knowledgeId: string,
+    filters: { userId?: string; source?: TraceSource; limit?: number } = {},
+    init: RequestInit = {},
   ) => {
-    const search = new URLSearchParams();
-    if (filters.status) search.set("status", filters.status);
-    if (filters.knowledgeId) search.set("knowledge_id", filters.knowledgeId);
-    if (filters.from) search.set("from", filters.from);
-    if (filters.to) search.set("to", filters.to);
+    const search = new URLSearchParams({ knowledge_id: knowledgeId });
+    if (filters.userId) search.set("user_id", filters.userId);
+    if (filters.source) search.set("source", filters.source);
     if (filters.limit) search.set("limit", String(filters.limit));
-    const query = search.toString();
-    return apiRequest<IndexTask[]>(`/tasks${query ? `?${query}` : ""}`);
+    return apiRequest<{ items: ConversationListItem[] }>(`/conversations?${search.toString()}`, init);
   },
+  getModelRuntime: () => apiRequest<ModelRuntimeStatus>("/system/model-runtime"),
+  getRuntimeMetrics: () => apiRequest<RuntimeMetrics>("/metrics/runtime"),
   listConversationMessages: (conversationId: string, init: RequestInit = {}) =>
     apiRequest<ConversationMessageListResponse>(`/conversations/${conversationId}/messages`, init),
   runPlayground: (knowledgeId: string, question: string, options: Record<string, number>) =>

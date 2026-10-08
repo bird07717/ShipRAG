@@ -688,6 +688,8 @@ class Settings(BaseSettings):
             fake_modes = {
                 "M2_EMBEDDING_PROVIDER": self.m2_embedding_provider,
                 "M3_LLM_PROVIDER": self.m3_llm_provider,
+                "M4_OCR_PROVIDER": self.m4_ocr_provider,
+                "M4_VISION_PROVIDER": self.m4_vision_provider,
                 "M5_RERANK_PROVIDER": self.m5_rerank_provider,
             }
             forbidden = [name for name, value in fake_modes.items() if value == "fake"]

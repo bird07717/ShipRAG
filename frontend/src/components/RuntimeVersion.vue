@@ -1,15 +1,28 @@
 <script setup lang="ts">
+import { Cpu } from "@element-plus/icons-vue";
 import { computed } from "vue";
 import { useAdminStore } from "@/composables/adminStore";
 import type { BuildInfo } from "@/types/admin";
+withDefaults(defineProps<{ compact?: boolean }>(), { compact: false });
 const store = useAdminStore();
 const frontend: BuildInfo = import.meta.env.APP_BUILD_INFO;
 const backend = computed(() => store.hasServiceCredential ? store.systemInfo?.build : undefined);
 function label(build?: BuildInfo) { return build?.commit ? `${build.commit.slice(0, 8)}${build.dirty ? ' · 未提交改动' : ''}` : '未标注'; }
 const mismatch = computed(() => !!frontend.commit && !!backend.value?.commit && frontend.commit !== backend.value.commit);
+const compactSummary = computed(() => `运行版本 · 前端 ${label(frontend)} · 后端 ${label(backend.value)}${mismatch.value ? " · 前后端不一致" : ""}`);
 </script>
 <template>
-  <details class="runtime-version">
+  <el-tooltip v-if="compact" :content="compactSummary" placement="right">
+    <button
+      type="button"
+      class="runtime-version-compact"
+      :class="{ warn: mismatch }"
+      :aria-label="compactSummary"
+    >
+      <el-icon><Cpu /></el-icon><i v-if="mismatch" class="dot" />
+    </button>
+  </el-tooltip>
+  <details v-else class="runtime-version">
     <summary>运行版本<span v-if="mismatch" class="version-warning">前后端不一致</span></summary>
     <dl>
       <dt>前端构建</dt><dd :title="frontend.commit || ''">{{ label(frontend) }}</dd>
@@ -31,4 +44,7 @@ dt { color: var(--sidebar-text); }
 dd { margin: 0 0 6px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; color: var(--sidebar-text-hover); }
 p { line-height: 1.6; }
 .version-warning { color: var(--warning-bg); margin-left: 4px; }
+.runtime-version-compact { position: relative; display: grid; width: 40px; height: 36px; margin: 8px auto; place-items: center; flex-shrink: 0; border: 0; border-radius: var(--radius-sm); color: var(--sidebar-text); background: transparent; cursor: pointer; }
+.runtime-version-compact:hover { color: var(--sidebar-text-hover); background: var(--sidebar-item-hover); }
+.runtime-version-compact .dot { position: absolute; top: 7px; right: 8px; width: 7px; height: 7px; border-radius: 50%; background: #e7b54a; }
 </style>

@@ -116,4 +116,18 @@ describe("failed trace request consistency", () => {
     expect(wrapper.text()).not.toContain("已有记录");
     expect(refreshButton(wrapper).props("loading")).toBe(false);
   });
+
+  it("falls back from a removed escalation deep-link without loading escalation records", async () => {
+    const list = vi.spyOn(adminApi, "listTraces").mockResolvedValue([]);
+    const wrapper = editor("tab=escalations");
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "ElTabs" }).props("modelValue")).toBe("request-errors");
+    expect(wrapper.findAllComponents({ name: "ElTabPane" }).map((pane) => pane.props("name")))
+      .not.toContain("escalations");
+    expect(wrapper.text()).not.toContain("升级详情");
+    expect(adminApi.listRequestErrors).toHaveBeenCalled();
+    adminStore.selectedKnowledgeId = "kb-2";
+    await flushPromises();
+    expect(list).not.toHaveBeenCalled();
+  });
 });

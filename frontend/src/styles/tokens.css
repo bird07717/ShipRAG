@@ -46,6 +46,14 @@
   --info: #4f6b8f;
   --info-bg: #e9eff7;
 
+  /* ---------- Chart series ---------- */
+  --chart-direct: #2f8a64;
+  --chart-needs-info: #d9a43c;
+  --chart-out-of-scope: #8ea3c4;
+  --chart-other: #cfd6d1;
+  --chart-failed: #d0605b;
+  --chart-line: #4c5fb8;
+
   /* ---------- Radius ---------- */
   --radius-sm: 7px;
   --radius-md: 10px;
@@ -115,7 +123,7 @@
   --el-text-color-placeholder: #9aa59d;
   --el-border-color: var(--border-default);
   --el-border-color-light: var(--border-subtle);
-  --el-border-color-lighter: #edefera;
+  --el-border-color-lighter: #edefea;
   --el-fill-color: var(--bg-subtle);
   --el-fill-color-light: var(--bg-subtle);
   --el-fill-color-lighter: #f8faf8;

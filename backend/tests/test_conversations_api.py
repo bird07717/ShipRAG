@@ -18,7 +18,7 @@ class _ConversationRepositoryStub:
         self.conversations: dict[UUID, dict[str, Any]] = {}
         self.deleted: list[UUID] = []
         self.messages: dict[UUID, list[dict[str, Any]]] = {}
-        self.list_filters: list[tuple[UUID, str | None, int]] = []
+        self.list_filters: list[tuple[UUID, str | None, int, str | None]] = []
 
     def add_conversation(self, **row: Any) -> UUID:
         conversation_id = uuid4()
@@ -31,14 +31,15 @@ class _ConversationRepositoryStub:
         return conversation_id
 
     async def list_conversations(
-        self, knowledge_id: UUID, user_id: str | None, limit: int
+        self, knowledge_id: UUID, user_id: str | None, limit: int, source: str | None = None
     ) -> list[dict[str, Any]]:
-        self.list_filters.append((knowledge_id, user_id, limit))
+        self.list_filters.append((knowledge_id, user_id, limit, source))
         return [
             row
             for row in self.conversations.values()
             if row["knowledge_id"] == knowledge_id
             and (user_id is None or row.get("user_id") == user_id)
+            and (source is None or row.get("last_source") == source)
         ]
 
     async def get_conversation(self, conversation_id: UUID) -> dict[str, Any] | None:
@@ -80,7 +81,41 @@ def test_list_conversations_scopes_by_user(client: TestClient) -> None:
     items = response.json()["items"]
     assert [item["id"] for item in items] == [str(mine)]
     assert items[0]["title"] == "我的会话"
-    assert repository.list_filters[-1] == (knowledge_id, "user-a", 50)
+    assert repository.list_filters[-1] == (knowledge_id, "user-a", 50, None)
+
+
+def test_list_conversations_filters_by_channel_and_reports_last_source(
+    client: TestClient,
+) -> None:
+    repository = _ConversationRepositoryStub()
+    knowledge_id = repository.knowledge_id
+    external = repository.add_conversation(
+        knowledge_id=knowledge_id,
+        user_id="biz-user",
+        message_count=2,
+        last_source="ASSISTANT_API",
+    )
+    repository.add_conversation(
+        knowledge_id=knowledge_id, message_count=2, last_source="INTERNAL_CHAT"
+    )
+    _install(client, repository)
+
+    response = client.get(
+        f"/api/v1/conversations?knowledge_id={knowledge_id}&source=ASSISTANT_API&limit=200",
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert [item["id"] for item in items] == [str(external)]
+    assert items[0]["last_source"] == "ASSISTANT_API"
+    assert repository.list_filters[-1] == (knowledge_id, None, 200, "ASSISTANT_API")
+
+    rejected = client.get(
+        f"/api/v1/conversations?knowledge_id={knowledge_id}&source=UNKNOWN",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert rejected.status_code == 422
 
 
 def test_get_conversation_hidden_from_other_user(client: TestClient) -> None:

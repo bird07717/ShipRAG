@@ -15,6 +15,7 @@ from app.rag.model_providers import (
     environment_base_url,
     get_provider_capability,
     normalize_provider,
+    resolve_provider_kind,
 )
 from app.rag.models import ModelSnapshot, RerankDocument, RerankItem, RerankOutcome
 
@@ -323,21 +324,20 @@ class DashScopeRerankProvider:
 
 
 def create_rerank_provider(settings: Settings, snapshot: ModelSnapshot) -> RerankProvider:
-    mode = settings.m5_rerank_provider
     provider = normalize_provider(snapshot.provider)
     has_any_key = settings.has_secret(
         environment_api_key(settings, "RERANK", provider)
     ) or settings.has_secret(snapshot.api_key)
-    if mode == "fake":
+    resolution = resolve_provider_kind(settings, "RERANK", provider, has_key=has_any_key)
+    if resolution.kind == "FAKE":
         return FakeRerankProvider()
-    if mode == "auto" and not has_any_key:
-        if settings.app_env in {"staging", "production"}:
-            raise RerankError(
-                "MODEL_NOT_CONFIGURED",
-                f"{provider} Rerank 未配置，部署环境禁止回退到 fake",
-                degradable=False,
-            )
-        return FakeRerankProvider()
+    if resolution.kind == "NOT_CONFIGURED":
+        message = (
+            "当前环境禁止使用模拟 Rerank（M5_RERANK_PROVIDER=fake），禁止回退到 fake"
+            if resolution.reason == "FAKE_FORBIDDEN"
+            else f"{provider} Rerank 未配置 API Key，禁止回退到 fake"
+        )
+        raise RerankError("MODEL_NOT_CONFIGURED", message, degradable=False)
     if provider == "dashscope":
         return DashScopeRerankProvider(settings, snapshot)
     return SiliconFlowRerankProvider(settings, snapshot)

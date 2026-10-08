@@ -12,8 +12,8 @@ from app.ingestion.models import ImageUnderstandingResult
 from app.rag.model_providers import (
     environment_api_key,
     environment_base_url,
-    get_provider_capability,
     normalize_provider,
+    resolve_provider_kind,
 )
 from app.rag.models import ModelSnapshot
 
@@ -209,20 +209,22 @@ class OpenAiCompatibleImageProvider:
 def create_ocr_provider(
     settings: Settings, snapshot: ModelSnapshot | None = None
 ) -> ImageUnderstandingProvider:
-    mode = settings.m4_ocr_provider
-    if mode == "disabled":
-        return DisabledImageUnderstandingProvider("OCR")
     provider = normalize_provider(snapshot.provider) if snapshot else "siliconflow"
-    if get_provider_capability("OCR", provider) is None:
-        return UnavailableImageUnderstandingProvider(
-            "OCR", (snapshot.model_name if snapshot else None) or "unconfigured"
-        )
     api_key = (snapshot.api_key if snapshot else None) or environment_api_key(
         settings, "OCR", provider
     )
-    if mode == "fake" or (mode == "auto" and not settings.has_secret(api_key)):
+    resolution = resolve_provider_kind(
+        settings, "OCR", provider, has_key=settings.has_secret(api_key)
+    )
+    if resolution.kind == "DISABLED":
+        return DisabledImageUnderstandingProvider("OCR")
+    if resolution.reason == "UNSUPPORTED_PROVIDER":
+        return UnavailableImageUnderstandingProvider(
+            "OCR", (snapshot.model_name if snapshot else None) or "unconfigured"
+        )
+    if resolution.kind == "FAKE":
         return FakeImageUnderstandingProvider("OCR")
-    if not settings.has_secret(api_key):
+    if resolution.kind == "UNAVAILABLE":
         return UnavailableImageUnderstandingProvider(
             "OCR",
             (snapshot.model_name if snapshot else None) or settings.siliconflow_ocr_model,
@@ -245,20 +247,22 @@ def create_ocr_provider(
 def create_vision_provider(
     settings: Settings, snapshot: ModelSnapshot | None = None
 ) -> ImageUnderstandingProvider:
-    mode = settings.m4_vision_provider
-    if mode == "disabled":
-        return DisabledImageUnderstandingProvider("VISION")
     provider = normalize_provider(snapshot.provider) if snapshot else "zhipu"
-    if get_provider_capability("VISION", provider) is None:
-        return UnavailableImageUnderstandingProvider(
-            "VISION", (snapshot.model_name if snapshot else None) or "unconfigured"
-        )
     api_key = (snapshot.api_key if snapshot else None) or environment_api_key(
         settings, "VISION", provider
     )
-    if mode == "fake" or (mode == "auto" and not settings.has_secret(api_key)):
+    resolution = resolve_provider_kind(
+        settings, "VISION", provider, has_key=settings.has_secret(api_key)
+    )
+    if resolution.kind == "DISABLED":
+        return DisabledImageUnderstandingProvider("VISION")
+    if resolution.reason == "UNSUPPORTED_PROVIDER":
+        return UnavailableImageUnderstandingProvider(
+            "VISION", (snapshot.model_name if snapshot else None) or "unconfigured"
+        )
+    if resolution.kind == "FAKE":
         return FakeImageUnderstandingProvider("VISION")
-    if not settings.has_secret(api_key):
+    if resolution.kind == "UNAVAILABLE":
         return UnavailableImageUnderstandingProvider(
             "VISION",
             (snapshot.model_name if snapshot else None) or settings.zhipu_vision_model,

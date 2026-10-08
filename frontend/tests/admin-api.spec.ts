@@ -418,3 +418,28 @@ describe("logs & review API", () => {
     expect(url).toContain("conversation_id=conv-1");
   });
 });
+
+describe("admin API: runtime, conversations and tasks", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("builds the conversation list, task list and runtime URLs", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ items: [] }) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminApi.listConversations("kb-1", { source: "ASSISTANT_API", userId: "u 1", limit: 200 });
+    await adminApi.listConversations("kb-2");
+    await adminApi.listTaskRecords({ status: "QUEUED", limit: 200 });
+    await adminApi.listTasks({ status: "FAILED", knowledgeId: "kb-1" });
+    await adminApi.getModelRuntime();
+    await adminApi.getRuntimeMetrics();
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "/api/v1/conversations?knowledge_id=kb-1&user_id=u+1&source=ASSISTANT_API&limit=200",
+      "/api/v1/conversations?knowledge_id=kb-2",
+      "/api/v1/tasks?status=QUEUED&limit=200",
+      "/api/v1/tasks?status=FAILED&knowledge_id=kb-1",
+      "/api/v1/system/model-runtime",
+      "/api/v1/metrics/runtime",
+    ]);
+  });
+});

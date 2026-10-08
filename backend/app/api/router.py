@@ -10,6 +10,7 @@ from app.api.chat import router as chat_router
 from app.api.conversations import router as conversations_router
 from app.api.dependencies import (
     get_app_settings,
+    get_resources,
     require_assistant_service_token,
     require_service_token,
 )
@@ -20,8 +21,11 @@ from app.api.metrics import router as metrics_router
 from app.api.rag import router as rag_router
 from app.api.rag_document_cards import router as rag_document_cards_router
 from app.api.releases import router as releases_router
+from app.api.schemas import ModelRuntimeResponse
 from app.api.support import router as support_router
 from app.core.config import Settings
+from app.core.resources import AppResources
+from app.rag.model_runtime import model_runtime_status
 
 router = APIRouter(dependencies=[Depends(require_service_token)])
 router.include_router(answer_reviews_router)
@@ -53,3 +57,14 @@ async def system_info(
         "version": "1.0.0",
         "build": request.app.state.build_info,
     }
+
+
+@router.get("/system/model-runtime", response_model=ModelRuntimeResponse, tags=["system"])
+async def system_model_runtime(
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    resources: Annotated[AppResources, Depends(get_resources)],
+) -> dict[str, Any]:
+    """Actual provider per model type, including silent fallbacks to
+    simulated models. Kept separate from /system/info so a database outage
+    never hides the build identity."""
+    return await model_runtime_status(resources.database, settings)

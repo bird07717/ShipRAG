@@ -332,11 +332,11 @@ async function selectTrace(traceId: string): Promise<void> {
           @click="selectTrace(trace.trace_id)"
         >
           <div class="trace-row-main">
-            <b class="trace-question">{{ trace.question }}</b>
+            <b class="trace-question" :title="trace.question">{{ trace.question }}</b>
             <small class="trace-meta">
               {{ trace.source ? sourceLabel[trace.source] : "DemoChat / 内部聊天" }} ·
               {{ trace.engine ?? "RAG" }} ·
-              {{ trace.mode }} · {{ store.formatDate(trace.created_at) }}
+              {{ trace.mode }}
               <template v-if="trace.user_id"> · {{ trace.user_id }}</template>
               <template v-if="trace.error?.code"> · ⚠ {{ trace.error.code }}</template>
             </small>
@@ -349,6 +349,9 @@ async function selectTrace(traceId: string): Promise<void> {
             <StatusBadge :status="trace.status" />
             <small class="mono">{{ trace.latency.total_ms ?? "—" }} ms</small>
           </div>
+          <time class="trace-time mono" :datetime="trace.created_at" :title="store.formatDate(trace.created_at)">
+            {{ store.formatDate(trace.created_at) }}
+          </time>
         </button>
         <EmptyState
           v-if="!loadingTraces && !loadError && !filteredTraces.length"
@@ -610,10 +613,10 @@ async function selectTrace(traceId: string): Promise<void> {
 }
 
 .trace-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 4px 12px;
   padding: 10px 18px;
   border: 0;
   border-top: 1px solid var(--border-subtle);
@@ -663,6 +666,15 @@ async function selectTrace(traceId: string): Promise<void> {
 .trace-row-side small {
   color: var(--text-tertiary);
   font-size: 11px;
+}
+
+.trace-time {
+  grid-column: 1 / -1;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .detail-question {

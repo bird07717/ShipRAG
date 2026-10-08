@@ -22,7 +22,7 @@ const props = defineProps<{ navigationQuery?: string }>();
 const store = useAdminStore();
 const loadError = ref("");
 
-const LOG_TABS = new Set(["assistant-answers", "request-errors", "failed-turns", "task-failures", "escalations", "traces"]);
+const LOG_TABS = new Set(["assistant-answers", "request-errors", "failed-turns", "task-failures", "traces"]);
 type TraceSource = "" | "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND";
 
 function navigationState(query = ""): {
@@ -270,66 +270,6 @@ async function loadFailedTasks(): Promise<void> {
   }
 }
 
-/* ---------------- escalations ---------------- */
-
-const escalations = ref<TraceSummary[]>([]);
-const loadingEscalations = ref(false);
-const selectedEscalation = ref<RagTrace | null>(null);
-const escalationDrawerOpen = ref(false);
-const loadingEscalationDetail = ref(false);
-
-async function loadEscalations(): Promise<void> {
-  loadingEscalations.value = true;
-  loadError.value = "";
-  try {
-    escalations.value = await adminApi.listTraces(store.selectedKnowledgeId || undefined, {
-      responseType: "ESCALATION_REQUIRED",
-      limit: 200,
-    });
-  } catch (error) {
-    escalations.value = [];
-    loadError.value = errorMessage(error);
-  } finally {
-    loadingEscalations.value = false;
-  }
-}
-
-async function openEscalation(traceId: string): Promise<void> {
-  loadingEscalationDetail.value = true;
-  escalationDrawerOpen.value = true;
-  loadError.value = "";
-  try {
-    selectedEscalation.value = await adminApi.getTrace(traceId);
-  } catch (error) {
-    selectedEscalation.value = null;
-    loadError.value = errorMessage(error);
-  } finally {
-    loadingEscalationDetail.value = false;
-  }
-}
-
-type EscalationTrace = {
-  escalation?: {
-    required?: boolean;
-    reason?: string | null;
-    summary?: {
-      problem_code?: string;
-      current_step?: number | null;
-      completed_steps?: number[];
-      observations?: Array<Record<string, unknown>>;
-      checks_performed?: Array<Record<string, unknown>>;
-      missing_information?: string[];
-    };
-  };
-};
-
-const escalationRecord = computed(() => {
-  const result = selectedEscalation.value?.retrieval_result as EscalationTrace | undefined;
-  return result?.escalation ?? null;
-});
-
-const escalationSummary = computed(() => escalationRecord.value?.summary ?? null);
-
 /* ---------------- tabs ---------------- */
 
 const activeTab = ref(initialNavigation.tab);
@@ -340,7 +280,6 @@ function handleTabChange(tab: string | number): void {
   if (name === "request-errors" && !requestErrors.value.length) void loadRequestErrors();
   if (name === "failed-turns" && !failedTraces.value.length && !loadingFailedTraces.value) void loadFailedTraces();
   if (name === "task-failures" && !failedTasks.value.length) void loadFailedTasks();
-  if (name === "escalations" && !escalations.value.length) void loadEscalations();
 }
 
 onMounted(() => {
@@ -367,7 +306,6 @@ watch(
     void loadSummary();
     if (activeTab.value === "failed-turns") void loadFailedTraces();
     if (activeTab.value === "task-failures") void loadFailedTasks();
-    if (activeTab.value === "escalations") void loadEscalations();
   },
 );
 </script>
@@ -697,52 +635,6 @@ watch(
             />
           </el-tab-pane>
 
-          <!-- 4. Escalations -->
-          <el-tab-pane label="升级记录（遗留）" name="escalations">
-            <div class="tab-toolbar">
-              <span class="muted tab-hint">
-                触发升级人工的轮次（只读记录，处理线下进行）。升级响应仅来自已冻结的 Support 链路（ADR-0021），新轮次不会产生升级记录；此页签仅用于查询历史数据。
-              </span>
-              <el-button :icon="Refresh" :loading="loadingEscalations" @click="loadEscalations">
-                刷新
-              </el-button>
-            </div>
-            <el-table
-              v-loading="loadingEscalations"
-              :data="escalations"
-              size="small"
-              class="clickable-table"
-              @row-click="(row: TraceSummary) => openEscalation(row.trace_id)"
-            >
-              <el-table-column label="时间" width="160">
-                <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
-              </el-table-column>
-              <el-table-column
-                prop="question"
-                label="问题"
-                min-width="240"
-                show-overflow-tooltip
-              />
-              <el-table-column label="用户" width="120" show-overflow-tooltip>
-                <template #default="scope">{{ scope.row.user_id ?? "—" }}</template>
-              </el-table-column>
-              <el-table-column label="知识库" width="200">
-                <template #default="scope">
-                  <span class="mono muted">{{ scope.row.kb_id }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="110">
-                <template #default="scope">
-                  <StatusBadge :status="scope.row.status" />
-                </template>
-              </el-table-column>
-            </el-table>
-            <EmptyState
-              v-if="!loadingEscalations && !loadError && !escalations.length"
-              title="没有升级记录"
-              description="指定条件下没有触发升级人工的轮次。"
-            />
-          </el-tab-pane>
           <el-tab-pane label="全部链路追踪（Trace）" name="traces" lazy>
             <TracesView />
           </el-tab-pane>
@@ -880,65 +772,6 @@ watch(
         <CodeBlock :code="store.formatJson(selectedTask.metadata)" max-height="320px" />
       </template>
     </el-drawer>
-
-    <!-- Escalation detail drawer -->
-    <el-drawer
-      v-model="escalationDrawerOpen"
-      title="升级详情"
-      size="600px"
-    >
-      <div v-loading="loadingEscalationDetail" class="drawer-loading-body">
-        <template v-if="selectedEscalation">
-          <h3 class="drawer-question">{{ selectedEscalation.question }}</h3>
-          <div class="drawer-meta">
-            <StatusBadge :status="selectedEscalation.status" />
-            <span class="muted">{{ store.formatDate(selectedEscalation.created_at) }}</span>
-            <span v-if="selectedEscalation.user_id" class="muted">
-              用户 {{ selectedEscalation.user_id }}
-            </span>
-          </div>
-          <el-alert
-            v-if="escalationRecord?.reason"
-            :title="escalationRecord.reason"
-            type="warning"
-            :closable="false"
-            show-icon
-            class="drawer-alert"
-          />
-          <template v-if="escalationSummary">
-            <el-descriptions
-              :column="1"
-              border
-              size="small"
-              class="drawer-descriptions"
-            >
-              <el-descriptions-item label="问题编码">
-                {{ escalationSummary.problem_code ?? "—" }}
-              </el-descriptions-item>
-              <el-descriptions-item label="当前步骤">
-                {{ escalationSummary.current_step ?? "—" }}
-              </el-descriptions-item>
-              <el-descriptions-item label="已完成步骤">
-                {{ (escalationSummary.completed_steps ?? []).join("、") || "—" }}
-              </el-descriptions-item>
-              <el-descriptions-item label="缺失信息">
-                {{ (escalationSummary.missing_information ?? []).join("；") || "—" }}
-              </el-descriptions-item>
-            </el-descriptions>
-            <h4 class="section-label">升级摘要 JSON</h4>
-            <CodeBlock :code="store.formatJson(escalationSummary)" max-height="360px" />
-          </template>
-          <div v-if="selectedEscalation.conversation_id" class="drawer-actions">
-            <el-button
-              type="primary"
-              @click="store.openConversation(selectedEscalation.conversation_id!)"
-            >
-              查看会话回放
-            </el-button>
-          </div>
-        </template>
-      </div>
-    </el-drawer>
   </div>
 </template>
 
@@ -1032,26 +865,8 @@ watch(
   min-height: 180px;
 }
 
-.drawer-alert {
-  margin-bottom: 14px;
-}
-
 .drawer-actions {
   margin: 4px 0 14px;
-}
-
-.drawer-question {
-  color: var(--text-primary);
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.4;
-}
-
-.drawer-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 6px 0 14px;
 }
 
 .section-label {

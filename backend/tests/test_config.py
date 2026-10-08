@@ -180,6 +180,8 @@ def test_production_rejects_duplicate_assistant_rotation_token() -> None:
     [
         ("m2_embedding_provider", "M2_EMBEDDING_PROVIDER"),
         ("m3_llm_provider", "M3_LLM_PROVIDER"),
+        ("m4_ocr_provider", "M4_OCR_PROVIDER"),
+        ("m4_vision_provider", "M4_VISION_PROVIDER"),
         ("m5_rerank_provider", "M5_RERANK_PROVIDER"),
     ],
 )

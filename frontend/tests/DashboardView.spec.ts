@@ -71,8 +71,13 @@ function mountDashboard() {
   return wrapper;
 }
 
+// Trend windows are aligned to "now"; pin it so bucket fills are deterministic.
+const NOW = new Date("2026-08-21T12:30:00Z");
+
 describe("DashboardView metrics", () => {
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
     adminStore.serviceToken = "test-service-token";
     adminStore.credentialRejected = false;
     vi.spyOn(adminApi, "getAssistantMetrics").mockResolvedValue({ days: 7, sources: [], idempotency: { assistant_protected: 0, assistant_replays: 0, internal_protected: 0 }, retention: { active: 0, expired: 0, retention_days: 7 }, top_users: [], turn_error_codes: [], request_error_codes: [], running: {} } as never);
@@ -128,8 +133,30 @@ describe("DashboardView metrics", () => {
     expect(wrapper.text()).toContain("如何配置？"); // drilldown question
     expect(wrapper.text()).toContain("mobile-user-1");
     expect(wrapper.findAll(".metric-card")).toHaveLength(4);
-    expect(wrapper.find("details.advanced-details").attributes("open")).toBeUndefined();
+    expect(wrapper.find("details.advanced-details:not(.review-details)").attributes("open")).toBeUndefined();
     expect(wrapper.text()).toContain("直接回答率不是答案正确率");
+  });
+
+  it("collapses manual review by default and preserves its actions after expansion", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([trace]);
+    const openTrace = vi.spyOn(adminStore, "openTrace").mockResolvedValue();
+    const navigate = vi.spyOn(adminStore, "navigate").mockImplementation(() => {});
+    const wrapper = mountDashboard();
+    await flushPromises();
+
+    const review = wrapper.get("details.review-details");
+    expect((review.element as HTMLDetailsElement).open).toBe(false);
+    expect(review.get("summary").text()).toContain("值得人工复核的问题");
+    // jsdom does not implement the browser's native summary click toggle.
+    (review.element as HTMLDetailsElement).open = true;
+    await review.trigger("toggle");
+    expect(review.attributes("open")).toBeDefined();
+    await review.get(".el-table__row").trigger("click");
+    expect(openTrace).toHaveBeenCalledWith(trace.trace_id);
+    await review.findAll("button").find((button) => button.text().includes("进入回答复核"))!.trigger("click");
+    expect(navigate).toHaveBeenCalledWith("logs", "tab=assistant-answers");
   });
 
   it("opens a bucket drilldown dialog with that bucket's traces on bar click", async () => {
@@ -143,7 +170,7 @@ describe("DashboardView metrics", () => {
     const wrapper = mountDashboard();
     await flushPromises();
 
-    const bar = wrapper.find("svg.chart-svg rect.bar");
+    const bar = wrapper.find('svg.chart-svg rect.bar-hit[data-bucket="2026-08-20T00:00:00Z"]');
     expect(bar.exists()).toBe(true);
     await bar.trigger("click");
     await flushPromises();
@@ -177,7 +204,9 @@ describe("DashboardView metrics", () => {
   });
 
   it("refreshes backend build identity manually, without polling system info", async () => {
+    vi.useRealTimers(); // replace the Date-only fake from beforeEach
     vi.useFakeTimers();
+    vi.setSystemTime(NOW);
     vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
     vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
     vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
@@ -198,19 +227,218 @@ describe("DashboardView metrics", () => {
     expect(getSystemInfo).toHaveBeenCalledTimes(1);
   });
 
-  it("shows hourly labels when timeseries buckets are hourly", async () => {
+  it("requests 24 whole hourly buckets for the 24-hour range and labels them by hour", async () => {
     vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
-    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([
-      { ...dailyPoint, bucket: "2026-08-20T05:00:00Z" },
-      { ...dailyPoint, bucket: "2026-08-20T06:00:00Z" },
-    ]);
+    const timeseries = vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([dailyPoint]);
     vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
 
     const wrapper = mountDashboard();
     await flushPromises();
+    // 7 whole server days (today included), starting at a bucket boundary.
+    expect(timeseries).toHaveBeenLastCalledWith(expect.objectContaining({
+      granularity: "day", from: "2026-08-15T00:00:00.000Z", to: NOW.toISOString(), engine: "RAG", source: "ASSISTANT_API",
+    }));
+    expect(wrapper.findAll("rect.bar-hit")).toHaveLength(7);
+    expect(wrapper.find(".trend-summary").text()).toContain("不含今天");
+    const overviewCalls = vi.mocked(adminApi.getMetricsOverview).mock.calls.length;
 
-    const ticks = wrapper.findAll("text.axis-label.bottom");
-    expect(ticks[0]?.text()).toBe("08-20 05");
+    timeseries.mockResolvedValue([
+      { ...dailyPoint, bucket: "2026-08-21T05:00:00Z" },
+      { ...dailyPoint, bucket: "2026-08-21T06:00:00Z" },
+    ]);
+    await wrapper.get('input[value="24h"]').setValue(true);
+    await flushPromises();
+
+    expect(timeseries).toHaveBeenLastCalledWith(expect.objectContaining({
+      granularity: "hour", from: "2026-08-20T13:00:00.000Z", to: NOW.toISOString(),
+    }));
+    // Changing the trend range only reloads the trend, not the 7-day overview.
+    expect(adminApi.getMetricsOverview).toHaveBeenCalledTimes(overviewCalls);
+    expect(wrapper.findAll("rect.bar-hit")).toHaveLength(24);
+    expect(wrapper.find('rect.bar-hit[data-bucket="2026-08-21T05:00:00Z"]').exists()).toBe(true);
+    expect(wrapper.findAll("text.axis-label.bottom")[0]?.text()).toBe("08-20 13:00");
+    expect(wrapper.text()).toContain("每小时平均");
+    // 24 hours is always hourly; the day/hour toggle is not offered.
+    expect(wrapper.find('input[value="hour"]').exists()).toBe(false);
+  });
+
+  it("offers hourly buckets for a 7-day range and day buckets only beyond 7 days", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    const timeseries = vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([dailyPoint]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const wrapper = mountDashboard();
+    await flushPromises();
+
+    await wrapper.get('input[value="hour"]').setValue(true);
+    await flushPromises();
+    expect(timeseries).toHaveBeenLastCalledWith(expect.objectContaining({ granularity: "hour", from: "2026-08-14T13:00:00.000Z" }));
+
+    timeseries.mockResolvedValue([dailyPoint, { ...dailyPoint, bucket: "2026-08-17T00:00:00Z", queries: 4 }]);
+    await wrapper.get('input[value="30d"]').setValue(true);
+    await flushPromises();
+    expect(timeseries).toHaveBeenLastCalledWith(expect.objectContaining({ granularity: "day", from: "2026-07-23T00:00:00.000Z" }));
+    expect(wrapper.find('input[value="hour"]').exists()).toBe(false);
+    // Exactly 30 day buckets; quiet days are filled with zero.
+    expect(wrapper.findAll("rect.bar-hit")).toHaveLength(30);
+    for (const bucket of ["2026-08-18T00:00:00Z", "2026-08-19T00:00:00Z"]) {
+      expect(wrapper.find(`rect.bar-hit[data-bucket="${bucket}"]`).exists()).toBe(true);
+    }
+    const summary = wrapper.find(".trend-summary").text();
+    expect(summary).toContain("24"); // 20 + 4 requests in range
+    // Direct answers (12+2)*2=28 of in-scope (12+2+5)*2=38 → 73.7%, a real ratio.
+    expect(summary).toContain("73.7%");
+    expect(summary).not.toMatch(/\d{4,}\.\d%/);
+    expect(wrapper.text()).toContain("按 UTC+00:00 分桶");
+  });
+
+  it("realigns the window once to a non-UTC backend bucket offset", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const timeseries = vi.spyOn(adminApi, "getMetricsTimeseries")
+      .mockResolvedValue([{ ...dailyPoint, bucket: "2026-08-20T00:00:00+08:00" }]);
+    const wrapper = mountDashboard();
+    await flushPromises();
+
+    // First request assumes UTC; the +08:00 buckets trigger one realigned request
+    // starting at the server's midnight six days before today (08-21 20:00 +08:00).
+    expect(timeseries).toHaveBeenCalledTimes(2);
+    expect(timeseries.mock.calls[1]![0]).toMatchObject({ from: "2026-08-14T16:00:00.000Z" });
+    expect(wrapper.findAll("rect.bar-hit")).toHaveLength(7);
+    expect(wrapper.text()).toContain("按 UTC+08:00 分桶");
+    expect(wrapper.text()).not.toContain("部分质量指标暂时无法加载");
+
+    await wrapper.get('input[value="14d"]').setValue(true);
+    await flushPromises();
+    expect(timeseries).toHaveBeenCalledTimes(3); // offset already known: no extra request
+    expect(timeseries.mock.calls[2]![0]).toMatchObject({ from: "2026-08-07T16:00:00.000Z" });
+  });
+
+  it("maps picked calendar dates to whole server days and rejects ranges beyond the limit", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    const timeseries = vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([dailyPoint]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const wrapper = mountDashboard();
+    await flushPromises();
+
+    await wrapper.get('input[value="custom"]').setValue(true);
+    await flushPromises();
+    // The date picker forwards its events from the inner common picker.
+    const picker = wrapper.findComponent({ name: "ElDatePicker" }).findComponent({ name: "Picker" });
+    expect(picker.exists()).toBe(true);
+    const pick = async (range: [Date, Date]) => {
+      picker.vm.$emit("update:modelValue", range);
+      picker.vm.$emit("change", range);
+      await flushPromises();
+    };
+
+    await pick([new Date(2026, 7, 10), new Date(2026, 7, 12)]);
+    expect(timeseries).toHaveBeenLastCalledWith(expect.objectContaining({
+      granularity: "day", from: "2026-08-10T00:00:00.000Z", to: "2026-08-13T00:00:00.000Z",
+    }));
+    expect(wrapper.findAll("rect.bar-hit")).toHaveLength(11); // 08-10..08-20: returned 08-20 bucket is kept
+    const calls = timeseries.mock.calls.length;
+
+    await pick([new Date(2026, 3, 1), new Date(2026, 7, 20)]);
+    expect(timeseries).toHaveBeenCalledTimes(calls);
+    expect(wrapper.text()).toContain("时间范围不能超过 92 天");
+    // The picker is restored to the range the chart still shows.
+    const restored = wrapper.findComponent({ name: "ElDatePicker" }).props("modelValue") as Date[];
+    expect(restored.map((date) => date.getDate())).toEqual([10, 12]);
+  });
+
+  it("ignores a late trend response after the range changed", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    let resolveOld!: (value: MetricsTimeseriesPoint[]) => void;
+    const timeseries = vi.spyOn(adminApi, "getMetricsTimeseries")
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValue([{ ...dailyPoint, bucket: "2026-08-21T00:00:00Z", queries: 7 }]);
+    const wrapper = mountDashboard();
+    await flushPromises();
+
+    await wrapper.get('input[value="14d"]').setValue(true);
+    await flushPromises();
+    resolveOld([{ ...dailyPoint, queries: 99 }]);
+    await flushPromises();
+
+    expect(timeseries).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('rect.bar-hit[data-bucket="2026-08-21T00:00:00Z"]').exists()).toBe(true);
+    expect(wrapper.find(".trend-summary").text()).not.toContain("99");
+    expect(wrapper.text()).not.toContain("部分质量指标暂时无法加载");
+  });
+
+  it("shows a trend empty state, and a trend failure only once inside the trend panel", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    const timeseries = vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const wrapper = mountDashboard();
+    await flushPromises();
+    expect(wrapper.text()).toContain("该时段没有外部请求");
+
+    timeseries.mockRejectedValue(new Error("boom"));
+    await wrapper.get('input[value="90d"]').setValue(true);
+    await flushPromises();
+    expect(wrapper.text()).toContain("趋势数据暂时无法加载");
+  });
+
+  it("does not duplicate a trend failure into the page-level warning on refresh", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockRejectedValue(new Error("boom"));
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const wrapper = mountDashboard();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("趋势数据暂时无法加载");
+    expect(wrapper.text()).not.toContain("部分质量指标暂时无法加载");
+    expect(wrapper.findAll(".el-alert")).toHaveLength(1);
+    // The refresh is still not complete while the trend is missing.
+    expect(wrapper.text()).toContain("上次完整刷新 尚未加载");
+  });
+
+  it("lists V2 stage degradation as to-dos only above the threshold and explains it in diagnostics", async () => {
+    const quality = {
+      query_interpreter_total: 40,
+      query_interpreter_degraded: 4,
+      query_interpreter_degraded_rate: 0.1,
+      document_rerank_attempted: 30,
+      document_rerank_degraded: 2,
+      document_rerank_degraded_rate: 0.0667,
+      document_rerank_unconfigured: 3,
+    };
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue({ ...overview, failed: 0, v2_quality: quality });
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const wrapper = mountDashboard();
+    await flushPromises();
+
+    const rows = wrapper.findAll(".attention-row").map((row) => row.text());
+    expect(rows.some((text) => text.includes("检索未执行文档重排") && text.includes("3 次"))).toBe(true);
+    expect(rows.some((text) => text.includes("查询理解失败后使用兜底") && text.includes("10.0%"))).toBe(true);
+    // 2 degraded reranks is below the minimum count, even at 6.7%.
+    expect(rows.some((text) => text.includes("文档重排调用失败后降级"))).toBe(false);
+
+    const diagnostics = wrapper.get("details.advanced-details:not(.review-details)");
+    expect(diagnostics.attributes("open")).toBeUndefined();
+    await wrapper.findAll(".attention-row").find((row) => row.text().includes("查询理解"))!.trigger("click");
+    expect(diagnostics.attributes("open")).toBeDefined();
+    const section = wrapper.get(".quality-section").text();
+    expect(section).toContain("10.0%");
+    expect(section).toContain("4 / 40");
+    expect(section).toContain("2 / 30");
+    // Legacy always-zero fields are not shown anywhere.
+    expect(wrapper.text()).not.toContain("引用缺失");
+  });
+
+  it("says when the backend does not provide stage quality instead of showing zeros", async () => {
+    const legacy = { ...overview };
+    delete legacy.v2_quality;
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(legacy);
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const wrapper = mountDashboard();
+    await flushPromises();
+    expect(wrapper.get(".quality-section").text()).toContain("当前后端版本未提供阶段质量统计");
+    expect(wrapper.findAll(".attention-row").some((row) => row.text().includes("重排"))).toBe(false);
   });
 
   it("degrades to a current, implementation-neutral warning when metrics are unavailable", async () => {
@@ -241,7 +469,9 @@ describe("DashboardView metrics", () => {
   });
 
   it("stops the 60s auto-refresh once the service credential is rejected, instead of spamming 401s forever", async () => {
+    vi.useRealTimers(); // replace the Date-only fake from beforeEach
     vi.useFakeTimers();
+    vi.setSystemTime(NOW);
     const overviewSpy = vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
     vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
     vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
@@ -261,7 +491,9 @@ describe("DashboardView metrics", () => {
   });
 
   it("marks a malformed refresh as partial even if previous overview data exists", async () => {
+    vi.useRealTimers(); // replace the Date-only fake from beforeEach
     vi.useFakeTimers();
+    vi.setSystemTime(NOW);
     const api = vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValueOnce(overview).mockResolvedValue([] as never);
     vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
     vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
@@ -274,7 +506,9 @@ describe("DashboardView metrics", () => {
   });
 
   it("does not load or poll any metrics without a credential", async () => {
+    vi.useRealTimers(); // replace the Date-only fake from beforeEach
     vi.useFakeTimers();
+    vi.setSystemTime(NOW);
     adminStore.serviceToken = "";
     const api = vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
     mountDashboard(); await flushPromises();

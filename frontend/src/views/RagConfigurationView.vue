@@ -62,11 +62,15 @@ onMounted(() => void load());
       show-icon
     />
     <el-alert
-      title="RAG V2 为文档级检索：Rerank 候选数量与隐藏全文上下文预算由环境变量控制，不在此调整；会话固定在创建时的索引版本。"
-      type="warning"
+      title="本页参数用于调整文档检索的召回范围，保存后从下一轮使用对应策略的检索请求生效。"
+      type="info"
       :closable="false"
       show-icon
-    />
+    >
+      <p>无需重启服务或重建索引。向量与 BM25 参数控制每个查询召回的片段数，融合参数控制合并后的候选片段上限；不代表最终回答使用的文档数量。</p>
+      <p>最终候选文档数量和全文上下文预算由后端运行配置控制，不在本页调整。寒暄和非文档对话不执行检索，不受这些参数影响。</p>
+      <p>已有会话也会使用新召回参数，但仍沿用创建时的索引版本。切换索引后，需开启新会话验收新索引。</p>
+    </el-alert>
     <section class="panel">
       <header class="panel-header">
         <div>

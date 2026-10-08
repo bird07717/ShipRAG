@@ -14,8 +14,9 @@ from app.assistant.readiness import ReadinessBlockers
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.gateway.models import ChatEngine, ConversationMode, ExecutionPolicy, ResolvedPolicy
+from app.ingestion.embedding import FakeEmbeddingProvider
 from app.rag.document_card_repository import DocumentCardRepository
-from app.rag.model_providers import environment_api_key
+from app.rag.model_providers import environment_api_key, resolve_provider_kind
 
 _DEFAULT_FALLBACK_CONDITIONS = ("NO_MATCH",)
 
@@ -253,17 +254,23 @@ class GatewayRepository:
             rag_blockers.add("MODELS", "Embedding 模型未启用")
             query_embedding_model = ""
         else:
-            embedding_uses_fake = self.settings.m2_embedding_provider == "fake" or (
-                self.settings.m2_embedding_provider == "auto"
-                and not (
-                    bool(embedding["stored_key_configured"])
-                    or self.settings.has_secret(
-                        environment_api_key(self.settings, "EMBEDDING", str(embedding["provider"]))
-                    )
-                )
+            # Same decision the query-side factory makes (resolve_provider_kind),
+            # so readiness never assumes a simulated embedder that is not used.
+            embedding_resolution = resolve_provider_kind(
+                self.settings,
+                "EMBEDDING",
+                str(embedding["provider"]),
+                has_key=bool(embedding["stored_key_configured"])
+                or self.settings.has_secret(
+                    environment_api_key(self.settings, "EMBEDDING", str(embedding["provider"]))
+                ),
             )
+            if embedding_resolution.kind == "NOT_CONFIGURED":
+                rag_blockers.add("MODELS", "Embedding API Key 未配置")
             query_embedding_model = (
-                "deterministic-shake256" if embedding_uses_fake else str(embedding["model_name"])
+                FakeEmbeddingProvider.model_name
+                if embedding_resolution.kind == "FAKE"
+                else str(embedding["model_name"])
             )
         if (
             kb["rag_active_index_id"] is not None
@@ -513,13 +520,22 @@ class GatewayRepository:
             )
 
     async def list_conversations(
-        self, knowledge_id: UUID, user_id: str | None, limit: int
+        self,
+        knowledge_id: UUID,
+        user_id: str | None,
+        limit: int,
+        source: str | None = None,
     ) -> list[dict[str, Any]]:
         """List conversations for platform-side history, newest activity first.
 
         ``user_id`` is the caller-side isolation key; when provided only
         conversations owned by that user are returned.  Anonymous rows
         (DemoChat, legacy) are visible only without the filter.
+
+        The conversation table has no channel column; the channel is recorded
+        per turn on ``rag_trace.source``.  ``last_source`` is the source of the
+        latest turn and ``source`` keeps conversations with any turn from that
+        channel (both served by ix_rag_trace_conversation_created).
         """
         async with self.engine.connect() as connection:
             result = await connection.execute(
@@ -529,15 +545,32 @@ class GatewayRepository:
                            conversation_mode, created_at, updated_at,
                            (SELECT count(*) FROM message m
                             WHERE m.conversation_id = conversation.id
-                              AND m.status = 'COMPLETED') AS message_count
+                              AND m.status = 'COMPLETED') AS message_count,
+                           (SELECT t.source FROM rag_trace t
+                            WHERE t.conversation_id = conversation.id
+                            ORDER BY t.created_at DESC
+                            LIMIT 1) AS last_source
                     FROM conversation
                     WHERE knowledge_id = :knowledge_id
                       AND (CAST(:user_id AS varchar) IS NULL OR user_id = :user_id)
+                      AND (
+                          CAST(:source AS varchar) IS NULL
+                          OR EXISTS (
+                              SELECT 1 FROM rag_trace t
+                              WHERE t.conversation_id = conversation.id
+                                AND t.source = :source
+                          )
+                      )
                     ORDER BY updated_at DESC
                     LIMIT :limit
                     """
                 ),
-                {"knowledge_id": knowledge_id, "user_id": user_id, "limit": limit},
+                {
+                    "knowledge_id": knowledge_id,
+                    "user_id": user_id,
+                    "limit": limit,
+                    "source": source,
+                },
             )
             return [dict(row) for row in result.mappings()]
 

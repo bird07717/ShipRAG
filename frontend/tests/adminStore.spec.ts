@@ -340,7 +340,9 @@ describe("adminStore", () => {
     await adminStore.pollTrackedTasks();
 
     expect(adminStore.trackedTasks).toEqual([]);
-    expect(adminStore.notice).toBe("Profile 重建已完成");
+    // Completion is announced once as a notification, not duplicated as a notice.
+    expect(document.body.textContent).toContain("Profile 重建已完成");
+    expect(adminStore.notice).toBe("");
   });
 
   it("warns when a RAG card batch only partially succeeds", async () => {
@@ -376,7 +378,9 @@ describe("adminStore", () => {
 
     await adminStore.pollTrackedTasks();
 
-    expect(adminStore.notice).toContain("成功 7 份，失败 2 份");
+    expect(document.body.textContent).toContain("任务部分失败");
+    expect(document.body.textContent).toContain("成功 7 份，失败 2 份");
+    expect(adminStore.notice).toBe("");
     expect(adminStore.trackedTasks).toEqual([]);
   });
 
@@ -865,8 +869,10 @@ describe("adminStore", () => {
     expect(adminStore.notice).toContain("可以发布");
     await adminStore.validateKnowledgeRelease("release-1");
     expect(adminStore.notice).toContain("2 篇草稿待审核");
+    expect(adminStore.noticeLevel).toBe("warning");
     await adminStore.validateKnowledgeRelease("release-1");
     expect(adminStore.notice).toContain("暂不可发布");
+    expect(adminStore.noticeLevel).toBe("warning");
     await adminStore.publishKnowledgeRelease("release-1");
     expect(adminStore.releaseDetails["release-1"]?.status).toBe("PUBLISHED");
     expect(await adminStore.rebaseKnowledgeRelease("release-1")).toEqual({
@@ -890,9 +896,12 @@ describe("adminStore", () => {
     await adminStore.saveRagConfig({ vector_top_k: 12 });
     await adminStore.saveModelConfig("model-1", { rebuild_all_confirmed: true });
     expect(adminStore.notice).toContain("1 个知识库");
+    expect(adminStore.noticeLevel).toBe("caveat");
     await adminStore.putModelApiKey("model-1", "test-key");
+    expect(adminStore.noticeLevel).toBe("success");
     await adminStore.clearModelApiKey("model-1");
     expect(adminStore.notice).toContain("有环境密钥时回退，否则模型调用可能不可用");
+    expect(adminStore.noticeLevel).toBe("warning");
     expect(await adminStore.probeModel("model-1")).toEqual({ success: true });
   });
 
@@ -901,6 +910,8 @@ describe("adminStore", () => {
     vi.spyOn(adminApi, "updateModel").mockResolvedValue({ rebuilds: [] } as never);
     vi.spyOn(adminApi, "listModels").mockResolvedValue([]);
     await adminStore.saveModelConfig("model-1", { enabled: true });
+    // Saves that carry an effect boundary must stay visible until read.
+    expect(adminStore.noticeLevel).toBe(["EMBEDDING", "OCR", "VISION"].includes(modelType) ? "caveat" : "success");
     if (modelType === "EMBEDDING") {
       expect(adminStore.notice).toContain("索引向量与模型一致性");
       expect(adminStore.notice).not.toContain("下一轮对话生效");

@@ -19,7 +19,7 @@ bash scripts/bootstrap.sh
 
 千问（阿里云百炼 / DashScope）可在管理台模型配置中用于全部五类模型（LLM、Embedding、Rerank、OCR、Vision），填写模型名称、Base URL 和 API Key；默认 Base URL 为 `https://dashscope.aliyuncs.com/compatible-mode/v1/`。数据库加密密钥优先，也可用 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL` 作为环境兜底。不同地域或业务空间的 Base URL 与 API Key 必须匹配；生产推荐按阿里云百炼实际业务空间配置专属域名。Rerank 不在兼容地址上提供服务：后端会把保存的 compatible-mode 地址自动映射到原生 `/api/v1` 根并调用 `services/rerank/text-rerank/text-rerank`（模型如 `gte-rerank`/`gte-rerank-v2`）；Embedding 走兼容 `/embeddings`（模型如 `text-embedding-v3/v4`，仅文本、必须输出 1024 维，单请求批量上限 10 条，`M2_EMBEDDING_BATCH_SIZE` 默认 8 已在限内、调大需保持 ≤10）；OCR/Vision 使用 qwen-vl 系列模型的兼容 `chat/completions` 多模态调用。`M2_EMBEDDING_PROVIDER`、`M4_OCR_PROVIDER`、`M4_VISION_PROVIDER`、`M5_RERANK_PROVIDER` 均接受 `dashscope` 显式值。
 
-staging/production 的 M2 Embedding、M3 LLM、M5 Rerank 不允许显式或隐式使用 fake。`auto` 必须能从对应环境变量或可解密的 `model_config` 快照取得有效凭据；否则相关摄取/问答请求明确失败。部署校验还要确认在线查询模型与 Active Index 的 Embedding 模型一致，不能只确认服务进程已启动。
+禁止静默使用模拟模型（ADR-0034，2026-10-08）：五类模型（M2 Embedding、M3 LLM、M4 OCR/Vision、M5 Rerank）在 `auto` 下找不到 Key 时，只有自动化测试环境 `APP_ENV=test` 使用模拟实现；development/staging/production 一律明确失败（LLM/Embedding/Rerank 报未配置，OCR/Vision 逐图标记失败、构建继续）。显式 `*_PROVIDER=fake` 仅允许在 development/test 使用（管理台横幅会醒目提示），staging/production 的配置校验拒绝全部五类 `fake`。`auto` 必须能从对应环境变量或可解密的 `model_config` 快照取得有效凭据。本地开发若想离线跑通，应显式设置 `*_PROVIDER=fake`，不要依赖缺 Key 时的自动回退。生产冒烟脚本 `scripts/smoke-production.sh` 五类均使用 `auto`（不发起模型调用）。部署校验还要确认在线查询模型与 Active Index 的 Embedding 模型一致，不能只确认服务进程已启动。
 
 ## 本地启动
 

@@ -37,6 +37,17 @@ _LATENCY_SAMPLE = (
 # operational volume, but they are not technical questions. Low-information
 # guards intentionally remain technical signals because the following turn
 # may supply the requested condition.
+# RAG V2 records stage outcomes in runtime_snapshot.generation; the legacy
+# rerank_result / citation_result columns are not written by V2, so quality
+# signals for current traffic must be read from these paths.
+_V2_QUERY_STATUS = "runtime_snapshot #>> '{generation,query_interpreter,status}'"
+_V2_RERANK_STATUS = "runtime_snapshot #>> '{generation,retrieval,document_rerank,status}'"
+_V2_RERANK_REASON = "runtime_snapshot #>> '{generation,retrieval,document_rerank,reason}'"
+# A Rerank row without a usable key makes create_rerank_provider raise
+# MODEL_NOT_CONFIGURED inside the retrieval try-block, which is recorded as
+# DEGRADED. That is a configuration problem, not a failed call, so it is
+# counted as "unconfigured" and kept out of the call-failure rate.
+_V2_RERANK_CALL_FAILURE = f"COALESCE({_V2_RERANK_REASON}, '') <> 'MODEL_NOT_CONFIGURED'"
 _TECHNICAL_SAMPLE = (
     "COALESCE(citation_result ->> 'shortcut', '') NOT IN ('GREETING', 'META_ACK') "
     "AND COALESCE(citation_result ->> 'response_path', 'KNOWLEDGE') <> 'CONVERSATION'"
@@ -180,6 +191,19 @@ class MetricsRepository:
                     WHERE {_TECHNICAL_SAMPLE}
                       AND rerank_result ->> 'status' = 'DEGRADED'
                 ) AS rerank_degraded,
+                count(*) FILTER (WHERE {_V2_QUERY_STATUS} IS NOT NULL) AS v2_query_total,
+                count(*) FILTER (WHERE {_V2_QUERY_STATUS} = 'DEGRADED') AS v2_query_degraded,
+                count(*) FILTER (
+                    WHERE {_V2_RERANK_STATUS} = 'PASSED'
+                       OR ({_V2_RERANK_STATUS} = 'DEGRADED' AND {_V2_RERANK_CALL_FAILURE})
+                ) AS v2_rerank_attempted,
+                count(*) FILTER (
+                    WHERE {_V2_RERANK_STATUS} = 'DEGRADED' AND {_V2_RERANK_CALL_FAILURE}
+                ) AS v2_rerank_degraded,
+                count(*) FILTER (
+                    WHERE {_V2_RERANK_STATUS} IN ('SKIPPED', 'DEGRADED')
+                      AND {_V2_RERANK_REASON} = 'MODEL_NOT_CONFIGURED'
+                ) AS v2_rerank_unconfigured,
                 {_total_latency_select()},
                 COALESCE(sum((model_usage ->> 'prompt_tokens')::bigint), 0) AS llm_prompt_tokens,
                 COALESCE(sum((model_usage ->> 'completion_tokens')::bigint), 0)
@@ -241,6 +265,19 @@ class MetricsRepository:
                 int(row["citation_missing"]), int(row["technical_completed"])
             ),
             "rerank_degraded_rate": _rate(int(row["rerank_degraded"]), int(row["technical_total"])),
+            "v2_quality": {
+                "query_interpreter_total": int(row["v2_query_total"]),
+                "query_interpreter_degraded": int(row["v2_query_degraded"]),
+                "query_interpreter_degraded_rate": _rate(
+                    int(row["v2_query_degraded"]), int(row["v2_query_total"])
+                ),
+                "document_rerank_attempted": int(row["v2_rerank_attempted"]),
+                "document_rerank_degraded": int(row["v2_rerank_degraded"]),
+                "document_rerank_degraded_rate": _rate(
+                    int(row["v2_rerank_degraded"]), int(row["v2_rerank_attempted"])
+                ),
+                "document_rerank_unconfigured": int(row["v2_rerank_unconfigured"]),
+            },
             "unique_users": int(row["unique_users"]),
             "latency": _latency_summary(row, samples=row["latency_samples"]),
             "tokens": {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ElMessage, ElNotification } from "element-plus";
 import { computed, onMounted, onUnmounted, watch, type Component } from "vue";
 
 import { useAdminStore } from "@/composables/adminStore";
@@ -15,6 +16,7 @@ import PlaygroundView from "@/views/PlaygroundView.vue";
 import ConfigurationView from "@/views/ConfigurationView.vue";
 import EngineRoutingView from "@/views/EngineRoutingView.vue";
 import SupportReviewView from "@/views/SupportReviewView.vue";
+import ConversationsView from "@/views/ConversationsView.vue";
 import ConversationTimeline from "@/components/ConversationTimeline.vue";
 
 const props = defineProps<{ view: string; navigationQuery?: string }>();
@@ -31,10 +33,11 @@ const views: Record<string, Component> = {
   configuration: ConfigurationView,
   "engine-routing": EngineRoutingView,
   "support-review": SupportReviewView,
+  conversations: ConversationsView,
 };
 
 const viewProps = computed(() =>
-  ["logs", "configuration", "knowledge"].includes(props.view)
+  ["logs", "configuration", "knowledge", "conversations"].includes(props.view)
     ? { navigationQuery: props.navigationQuery ?? "" }
     : {},
 );
@@ -63,6 +66,47 @@ function startAutomaticRequests(): void {
   void store.pollTrackedTasks();
 }
 
+// Notices are graded by store.noticeLevel (see ADR-0032): a plain success is a
+// short toast; a caveat or warning is a notification that stays until closed,
+// because it carries effect boundaries or a result that needs attention. Only
+// one sticky notice is kept: a newer notice replaces it.
+const SUCCESS_TOAST_MAX_MS = 6_000;
+let stickyNotice: { close: () => void } | undefined;
+
+function clearNoticeIfCurrent(message: string): void {
+  // Let an identical follow-up notice (e.g. saving twice) be shown again.
+  if (store.notice === message) store.notice = "";
+}
+
+watch(
+  () => store.notice,
+  (message) => {
+    if (!message) return;
+    const level = store.noticeLevel;
+    store.noticeLevel = "success";
+    stickyNotice?.close();
+    stickyNotice = undefined;
+    if (level === "success") {
+      ElMessage({
+        type: "success",
+        message,
+        showClose: true,
+        grouping: true,
+        duration: Math.min(3_000 + message.length * 60, SUCCESS_TOAST_MAX_MS),
+        onClose: () => clearNoticeIfCurrent(message),
+      });
+      return;
+    }
+    stickyNotice = ElNotification({
+      type: level === "warning" ? "warning" : "success",
+      title: level === "warning" ? "需要注意" : "已完成，请留意生效范围",
+      message,
+      duration: 0,
+      onClose: () => clearNoticeIfCurrent(message),
+    });
+  },
+);
+
 watch(
   () => store.hasServiceCredential,
   (available) => {
@@ -78,6 +122,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopAutomaticRequests();
+  stickyNotice?.close();
 });
 </script>
 
@@ -87,17 +132,9 @@ onUnmounted(() => {
       v-if="store.error"
       :title="store.error"
       type="error"
-      :closable="false"
       show-icon
       class="studio-alert"
-    />
-    <el-alert
-      v-if="store.notice"
-      :title="store.notice"
-      type="success"
-      show-icon
-      class="studio-alert"
-      @close="store.notice = ''"
+      @close="store.error = ''"
     />
     <EmptyState
       v-if="!store.hasServiceCredential && props.view !== 'configuration'"

@@ -113,7 +113,51 @@ describe("AdminStudio settings", () => {
       expect.objectContaining({ type: "warning" }),
     );
     expect(deleteSpy).toHaveBeenCalledWith("doc-1");
-    expect(wrapper.text()).toContain("文档已删除，索引更新已提交");
+    // Success feedback is a transient toast rendered outside the view.
+    expect(adminStore.notice).toBe("文档已删除，索引更新已提交");
+    const toasts = Array.from(document.body.querySelectorAll(".el-message"), (item) => item.textContent ?? "");
+    expect(toasts.some((text) => text.includes("文档已删除，索引更新已提交"))).toBe(true);
+    expect(wrapper.find(".el-alert--success").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("grades notices: short toast for success, one sticky notification for caveats and warnings", async () => {
+    // No credential: the view stays gated, but the notice presenter is still mounted.
+    const wrapper = mount(AdminStudio, {
+      props: { view: "dashboard" },
+      global: { plugins: [ElementPlus] },
+    });
+    await flushPromises();
+    const notificationTexts = () => Array.from(document.body.querySelectorAll(".el-notification"), (item) => item.textContent ?? "");
+
+    adminStore.announce("提示等级-警告：仍有 2 篇草稿待审核", "warning");
+    await flushPromises();
+    expect(notificationTexts().some((text) => text.includes("需要注意") && text.includes("提示等级-警告"))).toBe(true);
+    expect(adminStore.noticeLevel).toBe("success"); // consumed and reset
+
+    adminStore.announce("提示等级-说明：仅实际重新解析的文档使用新配置", "caveat");
+    await flushPromises();
+    expect(notificationTexts().some((text) => text.includes("请留意生效范围") && text.includes("提示等级-说明"))).toBe(true);
+
+    adminStore.announce("提示等级-成功：已保存");
+    await flushPromises();
+    const toasts = Array.from(document.body.querySelectorAll(".el-message"), (item) => item.textContent ?? "");
+    expect(toasts.some((text) => text.includes("提示等级-成功"))).toBe(true);
+    expect(notificationTexts().some((text) => text.includes("提示等级-成功"))).toBe(false);
+    expect(wrapper.find(".el-alert--success").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("lets the administrator close the error alert", async () => {
+    adminStore.error = "保存失败";
+    const wrapper = mount(AdminStudio, {
+      props: { view: "dashboard" },
+      global: { plugins: [ElementPlus] },
+    });
+    await flushPromises();
+    // ElIcon (the close button) is stubbed globally in tests; emit the alert's close.
+    wrapper.findComponent({ name: "ElAlert" }).vm.$emit("close");
+    expect(adminStore.error).toBe("");
     wrapper.unmount();
   });
 

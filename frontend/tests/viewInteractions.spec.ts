@@ -259,40 +259,6 @@ const requestError = {
   created_at: "2026-08-17T00:00:00Z",
 };
 
-const escalationTraceSummary = {
-  ...failedTraceSummary,
-  trace_id: "t-esc",
-  question: "设备完全无法启动",
-  status: "COMPLETED",
-  response_type: "ESCALATION_REQUIRED",
-  error: {},
-};
-
-const escalationTraceDetail = {
-  ...escalationTraceSummary,
-  retrieval_result: {
-    support_version: 1,
-    escalation: {
-      required: true,
-      reason: "多次重启后仍然无法进入系统",
-      summary: {
-        problem_code: "VDR600_BOOT_FAILURE",
-        current_step: 4,
-        completed_steps: [1, 2, 3],
-        observations: [],
-        checks_performed: [],
-        missing_information: ["电源指示灯状态"],
-      },
-    },
-  },
-  rerank_result: {},
-  selected_context: [],
-  prompt: null,
-  answer: null,
-  sources: [],
-  citation_result: {},
-  model_usage: {},
-};
 
 const failedTask = {
   id: "task-1",
@@ -905,6 +871,27 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("0.8");
   });
 
+  it("logs: keeps the full timestamp separate from a long question and metadata", async () => {
+    const question = "设备无法启动，需要检查哪些项目？".repeat(20);
+    const record = { ...traceSummary, question, user_id: "long-user-id-".repeat(20), error: { code: "LONG_ERROR_CODE" } };
+    vi.mocked(adminApi.listTraces).mockResolvedValue([record]);
+    vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
+    vi.spyOn(adminApi, "listRequestErrors").mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
+    const wrapper = await mountView("logs");
+    await wrapper.findAll(".el-tabs__item").find((tab) => tab.text().includes("全部链路追踪"))!.trigger("click");
+    await flushPromises();
+
+    const row = wrapper.get(".trace-row");
+    const timestamp = row.get("time.trace-time");
+    const formatted = adminStore.formatDate(record.created_at);
+    expect(timestamp.text()).toBe(formatted);
+    expect(timestamp.attributes("datetime")).toBe(record.created_at);
+    expect(timestamp.attributes("title")).toBe(formatted);
+    expect(timestamp.element.parentElement).toBe(row.element);
+    expect(row.get(".trace-meta").text()).not.toContain(formatted);
+    expect(row.get(".trace-question").attributes("title")).toBe(question);
+  });
+
   it("logs: keeps the legacy rerank panel for a non-V2 trace", async () => {
     vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
     vi.spyOn(adminApi, "listRequestErrors").mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
@@ -1067,7 +1054,7 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("当前步骤 3");
   });
 
-  it("logs: reviews failed tasks and escalation records", async () => {
+  it("logs: reviews failed tasks without the removed escalation tab", async () => {
     vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
     vi.spyOn(adminApi, "listRequestErrors").mockResolvedValue({
       items: [],
@@ -1076,8 +1063,6 @@ describe("view interactions", () => {
       offset: 0,
     });
     vi.spyOn(adminApi, "listTasks").mockResolvedValue([failedTask]);
-    vi.spyOn(adminApi, "listTraces").mockResolvedValue([escalationTraceSummary]);
-    vi.spyOn(adminApi, "getTrace").mockResolvedValue(escalationTraceDetail);
 
     const wrapper = await mountView("logs");
 
@@ -1104,22 +1089,7 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("任务失败详情");
     expect(wrapper.text()).toContain("MANUAL");
 
-    // escalations tab: read-only escalation records with the handover summary
-    const escalationTab = wrapper
-      .findAll(".el-tabs__item")
-      .find((tab) => tab.text().includes("升级记录"));
-    await escalationTab!.trigger("click");
-    await flushPromises();
-    expect(wrapper.text()).toContain("设备完全无法启动");
-    const escalationRow = wrapper
-      .findAll(".el-table__row")
-      .find((row) => row.text().includes("设备完全无法启动"));
-    await escalationRow!.trigger("click");
-    await flushPromises();
-    expect(wrapper.text()).toContain("升级详情");
-    expect(wrapper.text()).toContain("VDR600_BOOT_FAILURE");
-    expect(wrapper.text()).toContain("电源指示灯状态");
-    expect(wrapper.text()).toContain("多次重启后仍然无法进入系统");
+    expect(wrapper.findAll(".el-tabs__item").some((tab) => tab.text().includes("升级记录"))).toBe(false);
   });
 
   it("configuration: switches tabs and picks a prompt", async () => {
@@ -1145,6 +1115,28 @@ describe("view interactions", () => {
     await ragTab!.trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("RAG only 检索配置");
+    expect(wrapper.text()).toContain("下一轮使用对应策略的检索请求生效");
+    expect(wrapper.text()).toContain("无需重启服务或重建索引");
+    expect(wrapper.text()).toContain("已有会话也会使用新召回参数");
+    expect(wrapper.text()).toContain("寒暄和非文档对话不执行检索");
+    expect(wrapper.text()).not.toContain("Rerank 候选数量与隐藏全文上下文预算由环境变量控制");
+    expect(wrapper.findComponent({ name: "RagConfigurationView" }).findComponent({ name: "ElAlert" }).props("type")).toBe("info");
+  });
+
+  it("configuration: retrieval hints keep the three-parameter save contract unchanged", async () => {
+    const save = vi.spyOn(adminApi, "updateEngineRetrievalConfig").mockResolvedValue({
+      execution_policy: "RAG_ONLY", vector_top_k: 11, bm25_top_k: 10,
+      fusion_top_k: 20, rerank_top_n: 10, context_max_chunks: 8,
+    });
+    const wrapper = await mountView("configuration");
+    await wrapper.findAll(".el-tabs__item").find((tab) => tab.text().includes("RAG 检索参数"))!.trigger("click");
+    await flushPromises();
+    const rag = wrapper.findComponent({ name: "RagConfigurationView" });
+    expect(rag.findAllComponents({ name: "ElInputNumber" })).toHaveLength(3);
+    await rag.findAllComponents({ name: "ElInputNumber" })[0]!.vm.$emit("update:modelValue", 11);
+    await rag.findAll("button").find((button) => button.text().includes("保存当前策略配置"))!.trigger("click");
+    await flushPromises();
+    expect(save).toHaveBeenCalledWith("RAG_ONLY", { vector_top_k: 11, bm25_top_k: 10, fusion_top_k: 20 });
   });
 
   it("configuration: offers DashScope and applies its default endpoint", async () => {

@@ -156,6 +156,17 @@ describe("RAG index operations workspace", () => {
     expect(button).toBeDefined();
     await button!.trigger("click");
     await flushPromises();
+    // Stopping goes through a lightweight popconfirm first.
+    expect(cancel).not.toHaveBeenCalled();
+    // Element Plus opens the popper on a timer; wait for it instead of racing it.
+    const popconfirm = await vi.waitFor(() => {
+      const found = Array.from(document.body.querySelectorAll<HTMLElement>(".el-popconfirm"))
+        .find((item) => item.textContent?.includes("停止本次构建"));
+      if (!found) throw new Error("popconfirm not open yet");
+      return found;
+    });
+    popconfirm.querySelector<HTMLButtonElement>(".el-button--danger")!.click();
+    await flushPromises();
 
     expect(cancel).toHaveBeenCalledWith("task-building");
     expect(adminStore.notice).toContain("已请求停止构建");

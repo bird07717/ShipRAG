@@ -201,6 +201,55 @@ async def test_conversation_lifecycle_list_messages_delete() -> None:
             everything = await repository.list_conversations(knowledge_id, None, 50)
             assert {row["id"] for row in everything} == {mine, other, anonymous}
 
+            # Channel comes from the latest trace; conversations without traces
+            # report None and are excluded by any source filter.
+            async with engine.begin() as connection:
+                for conversation_id, source, minutes_ago in (
+                    (mine, "INTERNAL_CHAT", 10),
+                    (mine, "ASSISTANT_API", 1),
+                    (other, "INTERNAL_CHAT", 5),
+                ):
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO rag_trace (
+                                id, trace_id, request_id, kb_id, index_id, conversation_id,
+                                question, mode, status, engine, stage, source, created_at
+                            ) VALUES (
+                                :id, :trace_id, 'conversations-source', :kb_id, :index_id,
+                                :conversation_id, '问', 'CHAT', 'COMPLETED', 'RAG', 'done',
+                                :source, now() - make_interval(mins => :minutes_ago)
+                            )
+                            """
+                        ),
+                        {
+                            "id": uuid4(),
+                            "trace_id": uuid4(),
+                            "kb_id": knowledge_id,
+                            "index_id": index_id,
+                            "conversation_id": conversation_id,
+                            "source": source,
+                            "minutes_ago": minutes_ago,
+                        },
+                    )
+            by_id = {
+                row["id"]: row["last_source"]
+                for row in await repository.list_conversations(knowledge_id, None, 50)
+            }
+            assert by_id == {mine: "ASSISTANT_API", other: "INTERNAL_CHAT", anonymous: None}
+            external = await repository.list_conversations(
+                knowledge_id, None, 50, source="ASSISTANT_API"
+            )
+            assert {row["id"] for row in external} == {mine}
+            internal = await repository.list_conversations(
+                knowledge_id, None, 50, source="INTERNAL_CHAT"
+            )
+            assert {row["id"] for row in internal} == {mine, other}
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text("DELETE FROM rag_trace WHERE request_id = 'conversations-source'")
+                )
+
             messages = await repository.list_conversation_messages(mine, 100)
             assert [item["status"] for item in messages] == [
                 "COMPLETED",

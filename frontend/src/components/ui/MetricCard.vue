@@ -7,7 +7,7 @@ withDefaults(
     value: string | number;
     context?: string;
     icon?: Component;
-    tone?: "default" | "warning" | "danger";
+    tone?: "default" | "success" | "warning" | "danger";
   }>(),
   { context: undefined, icon: undefined, tone: "default" },
 );
@@ -59,6 +59,24 @@ withDefaults(
   font-weight: 600;
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
+}
+
+.tone-success .metric-icon {
+  border-color: transparent;
+  color: var(--success);
+  background: var(--success-bg);
+}
+
+.tone-warning .metric-icon {
+  border-color: transparent;
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.tone-danger .metric-icon {
+  border-color: transparent;
+  color: var(--error);
+  background: var(--error-bg);
 }
 
 .tone-warning .value {

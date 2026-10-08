@@ -52,6 +52,10 @@ function canDelete(index: KnowledgeIndex): boolean {
   );
 }
 
+// Stopping is cooperative and recoverable (rebuild), so a light popconfirm
+// suffices; switching/rolling back the online index keeps a modal confirm.
+const STOP_BUILD_CONFIRM = "停止本次构建？正在处理的文档完成后即停止，之后可重新构建。";
+
 function activeBuildTaskId(index: KnowledgeIndex): string | null {
   if (index.status !== "BUILDING") return null;
   const task = store.latestIndexTasks[index.id];
@@ -215,15 +219,26 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
             >
               回滚 RAG
             </el-button>
-            <el-button
+            <el-popconfirm
               v-if="activeBuildTaskId(scope.row)"
-              link
-              type="danger"
-              :loading="store.isActionLoading(`task-cancel:${activeBuildTaskId(scope.row)}`)"
-              @click.stop="store.cancelIndexBuild(scope.row.id)"
+              :title="STOP_BUILD_CONFIRM"
+              confirm-button-text="停止构建"
+              cancel-button-text="继续构建"
+              confirm-button-type="danger"
+              width="280"
+              @confirm="store.cancelIndexBuild(scope.row.id)"
             >
-              停止
-            </el-button>
+              <template #reference>
+                <el-button
+                  link
+                  type="danger"
+                  :loading="store.isActionLoading(`task-cancel:${activeBuildTaskId(scope.row)}`)"
+                  @click.stop
+                >
+                  停止
+                </el-button>
+              </template>
+            </el-popconfirm>
             <el-button
               v-if="canRetry(scope.row)"
               link
@@ -381,15 +396,25 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
           >
             回滚 RAG 到此版本
           </el-button>
-          <el-button
+          <el-popconfirm
             v-if="activeBuildTaskId(detailIndex)"
-            type="danger"
-            plain
-            :loading="store.isActionLoading(`task-cancel:${activeBuildTaskId(detailIndex)}`)"
-            @click="store.cancelIndexBuild(detailIndex.id)"
+            :title="STOP_BUILD_CONFIRM"
+            confirm-button-text="停止构建"
+            cancel-button-text="继续构建"
+            confirm-button-type="danger"
+            width="280"
+            @confirm="store.cancelIndexBuild(detailIndex.id)"
           >
-            停止构建
-          </el-button>
+            <template #reference>
+              <el-button
+                type="danger"
+                plain
+                :loading="store.isActionLoading(`task-cancel:${activeBuildTaskId(detailIndex)}`)"
+              >
+                停止构建
+              </el-button>
+            </template>
+          </el-popconfirm>
           <el-button
             v-if="canRetry(detailIndex)"
             type="primary"

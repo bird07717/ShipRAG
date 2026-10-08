@@ -1,9 +1,10 @@
+import { trackedFetch } from "@/api/connectivity";
 import type { ReadinessResponse } from "@/types/health";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
 export async function fetchReadiness(signal?: AbortSignal): Promise<ReadinessResponse> {
-  const response = await fetch(`${apiBaseUrl}/health/ready`, {
+  const response = await trackedFetch(`${apiBaseUrl}/health/ready`, {
     headers: { Accept: "application/json" },
     signal,
   });
