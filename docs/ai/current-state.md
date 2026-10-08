@@ -4,6 +4,11 @@
 >
 > **最后一次已记录生产快照（2026-09-29）**：生产 HEAD `9cd6569`，当时与本地代码一致；Alembic `0047 (head)`；backend/frontend/两个 Worker 健康。共 7 个知识库，只有 `VDR600产品` 上线 Assistant（活动索引 v6），文档以 PDF 为主、均在活动索引中 READY。LLM/Rerank/Embedding 均为 DashScope（LLM `qwen3.7-flash`）。这是历史快照，不证明当前本地提交或后续工作区改动已部署；“已部署”也不等于完成真实模型/浏览器验收。
 
+## 生产仍为旧版本的原因与构建修复（2026-10-08）
+
+- 生产 `/home/cm/ShipRAG` 已 `git pull` 到 `ff40de3`（含本日全部改动），但运行中的前端/后端/两个 Worker 仍是 2026-09-30 构建的 `1.0.1` 镜像（对应当时的 `1321d79`，`7bcc8e9` 从未部署），旧镜像无构建标记。当日 `up --build` 因前端 `npm ci` 访问官方 npm 源超时/中断而失败，容器未被替换。生产无新迁移、无进行中任务；五类模型均为 DashScope 且数据库存有密钥，部署后不受 ADR-0034 影响。
+- 修复：`frontend/Dockerfile` 统一使用 `NPM_REGISTRY`（默认 npmmirror）。在生产主机以临时目录、仅缓存输出的方式验证：`npm ci` 9 秒、完整前端镜像 31 秒成功。该修改尚未提交；部署需提交推送后在服务器拉取，再执行带版本标记的构建与 `up --force-recreate`（不加 `--build`）。
+
 ## 禁止静默使用模拟模型（2026-10-08，本地已实施，待部署，ADR-0034）
 
 - 共享判定表 `resolve_provider_kind` 改为：`auto` 缺 Key 仅在 `APP_ENV=test` 模拟，其他环境明确失败（OCR/Vision 逐图失败、构建继续）；显式 `fake` 仅限 development/test，staging/production 配置校验拒绝全部五类。就绪检查的 Embedding 判断改用同一判定表（缺 Key 新增阻塞项）；生产冒烟脚本 OCR/Vision 改为 `auto`；管理台原因文案同步。开发环境当前五类模型均为真实模型，不受影响；临时实例清空 SiliconFlow 环境 Key 实测 Embedding 显示“未配置”、OCR 显示“不可用”，不再是模拟。

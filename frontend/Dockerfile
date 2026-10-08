@@ -2,7 +2,13 @@ FROM node:20.20.0-bookworm-slim AS build
 
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+# Download every package from one stable registry. The lockfile mixes
+# registry.npmmirror.com and registry.npmjs.org URLs; from the production host
+# the official registry intermittently resets or stalls (EIDLETIMEOUT), which
+# breaks `npm ci`. Setting --registry makes npm rewrite the official-registry
+# URLs to this host (replace-registry-host=npmjs, the default).
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+RUN npm ci --registry="$NPM_REGISTRY"
 COPY frontend/ ./
 ARG VITE_API_BASE_URL=""
 ARG BUILD_COMMIT=unknown

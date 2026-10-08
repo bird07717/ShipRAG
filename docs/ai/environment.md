@@ -98,6 +98,14 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 
 ## 生产核验与待确认
 
+### 生产构建排障要点（2026-10-08 实测）
+
+- 生产服务器（`/home/cm/ShipRAG`）使用根目录 `.env`，不存在 `.env.production`；命令不要加 `--env-file .env.production`。
+- 构建失败时 `docker compose up --build` 不会替换容器，旧版本继续运行；`git pull` 本身也不会改变运行版本。用 `docker buildx history ls` 查看最近构建是 `Completed` 还是 `Error`，用 `docker buildx history logs <ID>` 看失败原因；用镜像/容器创建时间核对是否真的替换。
+- 前端 `npm ci` 统一从 `NPM_REGISTRY`（构建参数，默认 `https://registry.npmmirror.com`）下载：lockfile 混有 npmmirror 与官方 registry 地址，生产主机到 `registry.npmjs.org` 间歇性重置/停滞（实测单请求 90.7 秒、`EIDLETIMEOUT`），曾导致前端构建反复失败；指定镜像后 `npm ci` 约 9 秒、整个前端镜像约 31 秒。需要官方源时传 `--build-arg NPM_REGISTRY=https://registry.npmjs.org/`。
+- 后端 Dockerfile 在 `COPY backend/app` 之后才 `pip install`，任何代码改动都会重新下载 Python 依赖，构建依赖当时 PyPI 网络；2026-10-08 曾出现一次 `Network is unreachable` 失败，重试成功。可选优化（未实施）：依赖安装前置到复制代码之前、为 pip 增加镜像构建参数。
+- 直接 `up -d --build` 不写入构建版本标记（运行版本显示“未标注”），推荐使用下方带版本标记的流程。
+
 ### 带版本标记的构建（2026-10-03）
 
 ```bash
