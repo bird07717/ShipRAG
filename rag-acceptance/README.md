@@ -118,7 +118,7 @@ V2 不要求公开引用，评测器使用同一轮内部 Trace 的 `used_docume
 
 ### 无断言的回答体验对照
 
-五个体验采集工具（`run_context_review.py`、`run_fixed_context_review.py`、`run_evidence_input_review.py`、`run_thinking_card_review.py`、`run_condition_stage_review.py`）启动时均拒绝已存在的 `--output` 路径；每次实验使用新文件名，保留历史原始答案用于对照。同一输出路径不要并发运行；该保护不改变评分方式，也不代表回答质量提高。
+六个体验采集工具（`run_context_review.py`、`run_fixed_context_review.py`、`run_evidence_input_review.py`、`run_thinking_card_review.py`、`run_condition_stage_review.py`、`run_suggestions_review.py`）启动时均拒绝已存在的 `--output` 路径；每次实验使用新文件名，保留历史原始答案用于对照。同一输出路径不要并发运行；该保护不改变评分方式，也不代表回答质量提高。
 
 部分相关文档的体验实验使用 `context-applicability-questions.jsonl` 与
 `run_context_review.py`：只采集真实 Assistant 完整回答与诊断，不评分、不调用模型评委。
@@ -133,6 +133,8 @@ V2 不要求公开引用，评测器使用同一轮内部 Trace 的 `used_docume
 2026-10-09 复用上述历史结果，独立测试思考模式与“全文＋已有卡片五字段”：六组全文输入每方向各三次，新增 36 个样本/40 次供应商请求。思考 16/18 返回有效结构、卡片 18/18，但均未证明稳定整体收益，未接入业务代码；正确 LRU 仍答错阶段、卡片仍泛化 PDC 条件。新工具 `run_thinking_card_review.py` 不评分、不改卡片，不重跑旧基线；逐题判断、历史指纹核验、结构失败及跨日比较限制见 [`thinking-card-review.md`](thinking-card-review.md)。
 
 同日继续测试“全文＋人工条件—动作—阶段说明”：七题、原版/候选各三次，共 42 次同期真实 LLM2，未证明稳定整体收益，不接入业务。LRU 错误前提仍未纠正、PDC 仍泛化氧化处理，MU 仍有未请求的网络隔离建议；条件成立对照能作答、PSU 核心保留不等于新增收益或安全验收。`run_condition_stage_review.py` 只采集，`condition-stage-annotations.json` 是原文引用可核验的人工诊断输入，不是自动提取器或正式卡片变更。详见 [`condition-stage-review.md`](condition-stage-review.md)。
+
+2026-10-09 另测 `next_suggestions` 字段：该字段在 Prompt 中从未定义，而 MU/PDC 回答 20/20 带越界建议。`run_suggestions_review.py` 对 4 题做 BASELINE/DEFINED/EMPTY 三臂单因素对比，共 96 次真实调用，判读规则采集前写定。MU+PDC 越界建议 14/16 → 14/16，未达到减半标准，且 DEFINED 让对照题也总是给出相邻流程建议；EMPTY 臂主回答不变，说明建议字段不是主回答越界的原因。不修改生产 Prompt。详见 [`suggestions-review.md`](suggestions-review.md)。
 
 | 类别 | 数量 | 考什么 |
 | --- | --- | --- |

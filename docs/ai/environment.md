@@ -106,6 +106,27 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 
 **旧审计行的边界**：`0048` 之前的表单保存会把 `provider/model_name/base_url` 一并记入 `model_config_history.changed_fields`，即使值未变；该表只存字段名、不存新旧值，因此这类旧行无法被代码区分为“真变更”，旧索引一律失败关闭（要求重建）。需要在其他环境部署前预检时，只读执行：`SELECT i.id, h.created_at, h.changed_fields FROM knowledge_index i JOIN model_config_history h ON h.model_config_id = i.embedding_model_id AND h.created_at >= i.created_at AND h.changed_fields ?| ARRAY['provider','model_name','base_url'] WHERE i.build_models = '{}'::jsonb AND i.status IN ('ACTIVE','READY');`，返回行即表示升级后该旧索引会被判为身份已变更。
 
+查询向量化降级的只读核验（2026-10-09 新增指标的生产基线；本地开发库同口径结果见 `current-state.md`，生产未执行，需在服务器上由有权限者运行）：
+
+```bash
+cd /home/cm/ShipRAG && docker compose -f compose.production.yaml exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+BEGIN READ ONLY;
+SELECT date_trunc('day', created_at)::date AS day, source,
+       count(*) FILTER (WHERE runtime_snapshot #>> '{generation,retrieval,query_count}' IS NOT NULL) AS retrieval_ran,
+       count(*) FILTER (WHERE (runtime_snapshot #>> '{generation,retrieval,query_count}' IS NOT NULL) AND (
+            runtime_snapshot #>> '{generation,retrieval,query_embedding,status}' = 'DEGRADED' OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(runtime_snapshot #> '{generation,retrieval,degradations}') = 'array' THEN runtime_snapshot #> '{generation,retrieval,degradations}' ELSE '[]'::jsonb END) AS d(value)
+              WHERE d.value IN ('EmbeddingError', 'TimeoutError', 'QUERY_EMBEDDING_INVALID')))) AS embedding_degraded
+FROM rag_trace
+WHERE mode = 'CHAT' AND engine = 'RAG' AND created_at >= now() - interval '30 days'
+GROUP BY 1, 2 HAVING count(*) FILTER (WHERE runtime_snapshot #>> '{generation,retrieval,query_count}' IS NOT NULL) > 0
+ORDER BY 1 DESC, 2;
+ROLLBACK;
+SQL
+```
+
+完整 Trace 默认只保留 7 天，之后脱敏会把 `runtime_snapshot` 置为 `{}`（`ingestion/repository.py` 的保留清理），这些行没有检索信息，不会被计入；所以该查询（及 Dashboard 的近 7 天口径）实际只覆盖完整 Trace 保留窗口内的轮次，查询里的 30 天范围不会得到更早的数据。
+
 服务器 `/home/cm/ShipRAG`，使用根目录 `.env`。推荐一键执行 `bash scripts/deploy-production.sh`：依次 `git pull --ff-only`、检查工作区干净、检查后台任务、确认、备份运行中应用容器的实际镜像 ID 为 `rollback-<时间>`（每个镜像仓库保留最近 3 个）、带构建标记构建、`run --rm migrate`、再次检查后台任务、`up --no-deps --force-recreate --wait` 替换应用容器，最后核对后端 `build_info` 与前端静态资源中的提交号等于 `HEAD`。构建/迁移失败或替换前复查未通过时不替换容器；已执行的迁移不会因此撤销。不能以可变镜像标签代替运行镜像备份：它可能已指向上次未发布的构建。没有运行容器时明确跳过该服务备份；容器读取失败或同服务多容器镜像不一致时停止。
 
 后台任务检查仅在替换 Worker 时执行，仍按近 30 分钟更新过的 `QUEUED/RUNNING` 记录统计，不阻断长期未更新的孤儿记录；`--force` 允许中断已知进行中任务，但不允许忽略查询失败。回滚在改标签/替换容器前执行同一检查。此复查缩短构建期间新增任务的风险窗口，不是原子停写/队列排空；发布时仍需避免提交新任务，超过 30 分钟未更新的真实长任务需人工核对。

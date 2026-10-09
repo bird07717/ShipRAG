@@ -4,6 +4,19 @@
 >
 > **最后一次已记录生产快照（2026-10-09 只读核验）**：生产 HEAD `e07165d`，数据库 `0048`，backend/frontend/两个 Worker 容器 2026-10-09 03:23 UTC 重建且健康（上一快照为 2026-10-08 `ed0038d`/`0047`，五类模型均为 DashScope）。模型/索引一致性（`b113ae2`）、会话筛选/复核降噪（`85faaa3`）与部署工具（`396bc12`）已包含；历史预算 4,000 Token（`01c09c4`，生产实际仍为 2,000）及之后提交均未部署；同日管理台前端优化（ADR-0037）及管理列表服务端分页/按库回收范围修正（ADR-0038，含后端改动）已提交（`0ae9f18`/`f3d7689`），未部署。本轮生产核验仅为只读，不含真实模型/浏览器验收；“已部署”不等于完成真实模型/浏览器验收。9 月 29 日及更早记录均为历史状态。
 
+## RAG V2 管线三处收口（2026-10-09，本地，未提交、未部署，ADR-0039）
+
+- 来源：深入阅读 `rag/v2/` 源码后确认三处实现偏差，经用户确认全部处理。仅改 `pipeline.py`、`document_retrieval.py` 与 `tests/test_rag_v2_pipeline.py`；无迁移、无前端、无对外契约变化。
+- 内容：范围外轮次在检索前收口；Rerank 降级时为追问继承文档保留最后一个名额；LLM 工厂失败不再被伪装成 LLM 1 降级。细节与指标口径见 `backend.md` 的“管线收口”条目和 ADR-0039。
+- 同轮评审中用户明确接受、不处理：无代表性评测基线、事实适用性（LRU/PDC/MU 类）、SSE 非真流式、上下文预算截断（用户判断文档较短，线上 `SECTION_FALLBACK` 比例从未统计）。
+- 实际验证：Ruff lint/format、Mypy（145 源文件）通过；`test_rag_v2_pipeline.py` **69 passed**（新增 6 项并更新 1 项既有断言）；关闭数据库集成变量的完整后端 Pytest **906 passed / 124 skipped**。撤销修复后新增 6 项均失败（其中范围外短路、工厂失败、名额保留 3 项验证行为，另 3 项仅因缺少新 trace 键失败，属守卫而非证明）。未运行 PostgreSQL 集成测试、Golden、真实模型、浏览器或生产部署。
+
+## 查询向量化降级指标与 `next_suggestions` 实验（2026-10-09，本地，未提交、未部署）
+
+- **查询向量化降级可见（已实现）**：检索 Trace 新增 `query_embedding={status, reason}`，`/metrics/overview` 的 `v2_quality` 新增 `query_embedding_attempted/degraded/degraded_rate`，Dashboard 超过 5% 且不少于 3 次时列待办，明细格显示比例。SQL 同时兼容旧 Trace 的 `degradations`（`TimeoutError` 为近似匹配）。本地开发库只读核验：近 30 天检索 46 轮、6 轮降级，全部是 2026-10-08 实验日的 `TimeoutError`。**生产比例未查**（本机无生产 SSH 别名与密钥），只读 SQL 在 `environment.md`，需有权限者在服务器运行。
+- **验证**：Ruff、Mypy（145 源文件）通过；管线、指标与真实 PostgreSQL 指标用例共 101 项通过（PG 用例实际执行）；前端 lint、`vue-tsc -b`、**44 文件 / 388 项**、生产构建通过。全量后端 Pytest 一次出现 2 项失败，均在 `test_deploy_production_script.py`，当时 `scripts/deploy-production.sh` 正被他人修改（改动量在会话中从 26 行涨到 118 行）；事后单独复跑该文件 29 项全部通过，与本次改动无关。
+- **`next_suggestions` 实验（结论：不采用）**：该字段 Prompt 未定义，历史上 MU/PDC 回答 20/20 带越界建议。预先写定判读规则后对 BASELINE/DEFINED/EMPTY 三臂、4 题、每格 8 次共 96 次真实调用对比：MU+PDC 越界建议 14/16 → 14/16，未达到减半标准；DEFINED 让对照题也总是给相邻流程建议；EMPTY 臂主回答不变。**生产 Prompt 未改**。局限：评阅人为同一开发代理、非盲评、仅 4 个场景（MU/PDC 为刻意挑选的难题）。机械正则筛查曾显示改善、逐条阅读后证伪。新增工具 `rag-acceptance/run_suggestions_review.py` 与记录 `suggestions-review.md`，原始结果在 Git 忽略的 `reports/suggestions-20261009/`。是否对外保留该字段属产品决策，未实施。
+
 ## 两轮管理台改动的代码 Review 修复（2026-10-09，已提交 `0ae9f18`/`f3d7689`，未部署）
 
 - Review 范围：ADR-0037 与 ADR-0038 两轮未提交改动。确认 10 项（逐项对照代码核实），全部处理：
