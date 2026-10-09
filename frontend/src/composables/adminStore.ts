@@ -57,14 +57,15 @@ let documentQueryGeneration = 0;
 /** Skipped documents listed in the alert; the total is shown when there are more. */
 const SKIPPED_ALERT_LIMIT = 50;
 
-export type ModelActionResult = { ok: true } | { ok: false; error: string };
+/** `listStale`: the write succeeded but the follow-up list refresh failed, so `models` may be outdated. */
+export type ModelActionResult = { ok: true; listStale?: boolean } | { ok: false; error: string };
 /**
  * How a notice is presented: `success` is a short transient toast; `caveat`
  * is a completed action whose effect boundary must be read (stays until
  * closed); `warning` means the outcome needs attention.
  */
 export type NoticeLevel = "success" | "caveat" | "warning";
-type ModelActionNotice = string | { message: string; level: NoticeLevel };
+type ModelActionNotice = string | { message: string; level: NoticeLevel; listStale?: boolean };
 
 const TASK_FOLLOW_UPS: Record<string, { view: string; label: string } | undefined> = {
   INDEX_BUILD: { view: "indexes", label: "前往索引管理（检查后设为当前 RAG）" },
@@ -1511,6 +1512,7 @@ export const adminStore = reactive({
     await this.run(async () => {
       try {
         const notice = await action();
+        if (typeof notice !== "string" && notice.listStale) result = { ok: true, listStale: true };
         if (isCurrent()) {
           if (typeof notice === "string") this.announce(notice);
           else this.announce(notice.message, notice.level);
@@ -1524,6 +1526,26 @@ export const adminStore = reactive({
       }
     });
     return result;
+  },
+
+  /**
+   * Reload the model list after a write the server has already accepted. A refresh
+   * failure must not turn that success into a failed action (the dialog would stay open
+   * and a repeat save would re-trigger the rebuild confirmation), so it is reported
+   * as a warning on the success notice instead.
+   */
+  async refreshModelsAfterWrite(notice: { message: string; level: NoticeLevel }): Promise<ModelActionNotice> {
+    try {
+      await this.loadModels();
+      return notice;
+    } catch (cause) {
+      const reason = cause instanceof Error ? cause.message : "未知错误";
+      return {
+        message: `${notice.message}；但刷新模型列表失败（${reason}），页面可能仍显示旧配置，请手动刷新`,
+        level: "warning",
+        listStale: true,
+      };
+    }
   },
 
   async saveModelConfig(modelId: string, payload: ModelConfigUpdatePayload): Promise<ModelActionResult> {
@@ -1541,28 +1563,31 @@ export const adminStore = reactive({
     }
     return this.runModelAction(async () => {
       const result = await adminApi.updateModel(modelId, payload);
-      await this.loadModels();
       if (payload.rebuild_all_confirmed && result.rebuilds?.length) {
         successMessage = `模型配置已保存；已对 ${result.rebuilds.length} 个知识库提交 RAG 重建，请核对构建结果、活动索引及文档理解确认状态`;
         level = "caveat";
       }
-      return { message: successMessage, level };
+      return this.refreshModelsAfterWrite({ message: successMessage, level });
     });
   },
 
   async putModelApiKey(modelId: string, apiKey: string): Promise<void> {
     await this.runModelAction(async () => {
       await adminApi.putApiKey(modelId, apiKey);
-      await this.loadModels();
-      return "API 密钥已加密保存（数据库密钥优先于环境变量）";
+      return this.refreshModelsAfterWrite({
+        message: "API 密钥已加密保存（数据库密钥优先于环境变量）",
+        level: "success",
+      });
     });
   },
 
   async clearModelApiKey(modelId: string): Promise<ModelActionResult> {
     return this.runModelAction(async () => {
       await adminApi.deleteApiKey(modelId);
-      await this.loadModels();
-      return { message: "数据库密钥已清除；有环境密钥时回退，否则模型调用可能不可用", level: "warning" as const };
+      return this.refreshModelsAfterWrite({
+        message: "数据库密钥已清除；有环境密钥时回退，否则模型调用可能不可用",
+        level: "warning",
+      });
     });
   },
 

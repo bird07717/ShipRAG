@@ -21,7 +21,7 @@
 
 管理端 `GET /conversations` 可选 `activity_from` / `activity_to` 按会话 `updated_at`（最近活动时间）范围筛选，再按最近活动倒序（同时间按 `id`）和 `limit`/`offset` 返回；这不改变 Assistant 外部会话 API。数据库未新增列或迁移，查询复用既有会话活动时间索引。
 
-### 管理列表服务端分页（2026-10-09，本地，待部署，ADR-0038）
+### 管理列表服务端分页（2026-10-09，已随 `4ccf19a` 部署到生产，ADR-0038）
 
 - 契约：`GET /traces`、`GET /tasks`、`GET /knowledge-bases/{id}/documents` 的响应体仍是原 JSON 数组，新增 `offset`（0–1,000,000）与响应头 `X-Total-Count`（满足筛选条件的总行数）；`app.main` 的 CORS `expose_headers` 已包含该头。管理 `GET /conversations` 本就是 `{items}` 信封，新增 `offset` 与 `total`。不传 `offset` 时行为与原来一致；首页且返回行数小于 `limit`（或不限条数）时直接以行数为总数，不再执行计数查询。共享实现：`app/api/pagination.py`（`OffsetQuery`、`paged_total`、`set_total_count`）。所有分页排序都带唯一次级键（Trace/任务 `created_at DESC, id DESC`，会话 `updated_at DESC, id DESC`，文档 `<排序列>, id`），同一时间戳的行跨页不会重复或遗漏。
 - `/traces` 新增 `q`：按 `question` 做大小写不敏感子串匹配（`ILIKE`，`%`/`_`/`\` 经 `common.text.escape_like` 转义后按字面匹配）。列表与计数共用 `RagRepository._trace_filters`。
@@ -29,7 +29,7 @@
 - 文档列表新增可选 `q`（显示名/文件名子串）、`build_status`（最近一次构建的 `index_document.status`）、`card_index_id` + `card_state`（该索引 RAG 理解状态：`MISSING`/`GENERATING`/`FAILED`/`PENDING_REVIEW`/`REJECTED`/`CONFIRMED`，与管理台标签一一对应；`card_state` 缺少 `card_index_id` 返回 422）、`sort`（`created_at`/`display_name`/`file_size`，白名单）与 `order`、`limit`（1–200，可选）。不传 `limit` 时仍返回全部文档（原行为，`LIMIT ALL`），但会遵守单独传入的 `offset`；带 `card_index_id` 时每行附 `card_state`。查询为 `_document_query` 子查询，计数与列表同源。
 - 已在本地开发库只读执行验证：文档 44 份、卡片状态分组之和等于总数、`q`/`build_status`/分页与排序结果一致；Trace 2,468 条分页与 `q` 计数一致。
 
-### 按知识库回收的保留范围（2026-10-09，本地，待部署）
+### 按知识库回收的保留范围（2026-10-09，已随 `4ccf19a` 部署到生产）
 
 `POST /knowledge-bases/{id}/indexes/gc` 调用 `collect_garbage(kb_id)` 时，过期会话清理、Trace 脱敏/删除（`retain_traces(kb_id=...)`）与终态任务记录修剪（`prune_terminal_tasks(kb_id=...)`）都只作用于该知识库；没有知识库的全局任务不会被按库回收删除。全局 `POST /gc` 与维护 Worker 的周期 GC 仍以 `kb_id=None` 处理全部数据，行为不变。此前按库回收会顺带执行全局 Trace 与任务记录清理。
 
@@ -70,7 +70,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 外部服务包括 PostgreSQL、Redis、MinIO，以及可配置的模型服务。代码支持 SiliconFlow 嵌入/重排/OCR、智谱 LLM/视觉，以及阿里云百炼 DashScope；2026-09-15 起 DashScope 注册为全部五类模型类型（LLM/EMBEDDING/RERANK/OCR/VISION）的 Provider：LLM、Embedding、OCR、Vision 走 OpenAI 兼容 `chat/completions` / `embeddings`，Rerank 使用 DashScope 专有 `/api/v1/services/rerank/text-rerank/text-rerank` 端点（`model_providers.dashscope_rerank_base_url` 把管理台保存的 compatible-mode 地址映射到原生 API 根），Embedding 仅文本输入且沿用 1024 维契约。`auto` 模式会按环境或数据库模型快照中的凭据选择。Embedding、LLM、Rerank 在 staging/production 中禁止显式或隐式回退到 fake，缺少凭据时失败关闭；fake 仅用于开发/测试的受控场景。实际模型、超时和阈值来自 Settings、模型快照及环境变量，不能仅根据本文推断部署值。
 
-## 管理模型配置与 Assistant 生效边界（2026-10-09 一致性修复，已部署到生产 `e07165d`）
+## 管理模型配置与 Assistant 生效边界（2026-10-09 一致性修复，已部署到生产，`e07165d` 起）
 
 两类凭据区分 API 权限，不区分模型配置。管理台 `PATCH /models/{id}` 保存到共享 `model_config`；Assistant 经 `AssistantFacade → ChatGatewayService → RagService` 使用同一套问答实现。前提是管理台和业务 Assistant 请求连接的是同一套后端及数据库，不是不同部署。
 
@@ -86,13 +86,15 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - DB 密钥优先于对应 Provider 环境密钥；DB 无密钥时才用环境兜底。网页模型配置不要求容器重启；修改 `.env`/Settings 则须重建相应容器。历史消息与幂等重放读取保存的终态，不按新模型重生成。
 - `ingestion/model_identity.py` 统一生成实际身份、复用指纹及查询/就绪/卡片一致性判断。密钥、超时、批大小和未消费的参数 JSON 不进入指纹；单纯密钥轮换不会让解析缓存失效（现有配置写路径仍可能标记待重建）。端点仅归一化格式，不假设同名跨供应商/端点等价。任务开始前的配置变化以 Worker 实际身份为准，覆盖排队时的索引模型标签/关联 ID，逐文档再校验复用计划。
 - `0048` 不回填历史身份。`build_models={}` 的索引仅在同名、原关联模型行且创建之后的审计无 Provider/模型/Base URL 修改时兼容；无效或未知版本的非空快照不得退回只比名字。保存表单重复提交未变身份不记为身份修改。无法追溯旧环境或绕过审计的修改，不能宣称历史向量空间已证明一致，首次重建建立可信快照。
+- 索引必须绑定实际生成向量的 Embedding 行：构建启动时若 Embedding 来源为 `ENV`（无启用行）或 `ENV_FALLBACK`（提供方不受支持），`IndexPipeline._record_build_models` 在任何解析/向量计算/数据库写入之前抛 `EmbeddingModelUnavailableError`，索引走既有失败流程并重新置位 `rebuild_required`。原先会用环境默认模型构建，却因 `knowledge_index.embedding_model_id`（NOT NULL）保留入队时的旧行，查询侧按该行判定身份而误报 409。OCR/Vision 的环境回退不变（它们不绑定模型行）。
+- 就绪检查额外要求“Active Index 关联的 Embedding 行”能鉴权：查询与卡片生成读取该行的凭据，即使它之后被停用；若它不是当前启用行且既无库内密钥也无环境密钥，就绪出现 `MODELS` 阻断（否则就绪为绿而查询静默降级为仅 BM25）。身份判定仍按当前启用行：配置变化保持“未就绪，待重建”的既有语义，不改为按关联行判定。
 - 证据入口：`api/rag.py:update_model`、`rag/repository.py:begin_turn`、`services/rag.py:_select_query_embedding_provider`、`ingestion/model_config.py:load_build_models`、`ingestion/repository.py:_create_build_locked`、`gateway/repository.py:get_readiness`。
 
 ## 模型实际运行判定与管理侧可见性（2026-10-08）
 
 - `rag/model_providers.py:resolve_provider_kind(settings, model_type, provider, has_key)` 是“真实 / 模拟 / 不可用”的唯一判定表，LLM、Embedding、Rerank、OCR、Vision 五个工厂（`create_*_provider`）都调用它，异常类型与消息保持原样。`kind` 为 `REAL`/`FAKE`/`NOT_CONFIGURED`/`DISABLED`/`UNAVAILABLE`，`reason` 为 `CONFIGURED`/`EXPLICIT_PROVIDER`/`FAKE_MODE`/`AUTO_NO_KEY`/`FAKE_FORBIDDEN`/`NO_API_KEY`/`MODE_DISABLED`/`UNSUPPORTED_PROVIDER`。新增模型类型或改回退规则时只改这张表。
 - 规则（ADR-0034，2026-10-08 起禁止静默模拟）：五类模型 `auto` 无 Key 时仅 `APP_ENV=test` 返回 `FAKE/AUTO_NO_KEY`，其他环境 LLM/Embedding/Rerank 为 `NOT_CONFIGURED/NO_API_KEY`（工厂抛错，文案含“未配置 API Key，禁止回退到 fake”），OCR/Vision 为 `UNAVAILABLE/NO_API_KEY`（逐图 `FAILED`，构建继续，不再写入模拟识别文本）。显式 `fake` 在 development/test 为 `FAKE/FAKE_MODE`，在 staging/production 为 `FAKE_FORBIDDEN`，且配置校验对五类 `fake` 均拒绝启动。`gateway/repository.py:get_readiness` 的 Embedding 判断也改用该表：缺 Key 时新增就绪阻塞“Embedding API Key 未配置”，不再假设按模拟向量对齐。
-- `GET /api/v1/system/model-runtime`（管理认证，`rag/model_runtime.py`）按启用的 `model_config` 行（无行时按工厂的环境默认提供方；Embedding/OCR/Vision 行的提供方不受支持时与 `load_build_models` 一致忽略该行，`source=ENV_FALLBACK`；LLM/Rerank 不受支持时报 `UNAVAILABLE/UNSUPPORTED_PROVIDER`）逐类型返回实际判定，Key 只报告“数据库已存/环境已配”的存在性、不解密；另统计 `embedding_model_name = deterministic-shake256` 的 ACTIVE 索引数。与 `/system/info` 分开，数据库故障不影响版本标识显示。
+- `GET /api/v1/system/model-runtime`（管理认证，`rag/model_runtime.py`）按启用的 `model_config` 行（无行时按工厂的环境默认提供方；Embedding/OCR/Vision 行的提供方不受支持时与 `load_build_models` 一致忽略该行，`source=ENV_FALLBACK`（该视图只描述解析结果：实际构建时 Embedding 来源不是 `DATABASE` 会被 `IndexPipeline._record_build_models` 直接拒绝，见下；OCR/Vision 仍按环境提供方继续）；LLM/Rerank 不受支持时报 `UNAVAILABLE/UNSUPPORTED_PROVIDER`）逐类型返回实际判定，Key 只报告“数据库已存/环境已配”的存在性、不解密；另统计 `embedding_model_name = deterministic-shake256` 的 ACTIVE 索引数。与 `/system/info` 分开，数据库故障不影响版本标识显示。
 - `GET /api/v1/conversations`（管理端，非 Assistant 外部接口）新增可选 `source`（`ASSISTANT_API`/`INTERNAL_CHAT`/`PLAYGROUND`，非法值 422）与列表项 `last_source`。会话表本身没有渠道列：`last_source` 取该会话最近一轮 `rag_trace.source`，`source` 过滤保留“任一轮来自该渠道”的会话，使用既有 `ix_rag_trace_conversation_created`；无链路的会话 `last_source=null`。其他参数（`user_id` 精确匹配、`limit≤200`）不变。外部 Assistant 的 `/assistant/v1/conversations` 是另一套凭据和契约，管理台不调用。
 - `/metrics/overview` 新增 `v2_quality`：查询理解（`runtime_snapshot.generation.query_interpreter.status`）总数/降级数/降级率、文档级重排（`generation.retrieval.document_rerank.status`）实际调用数/调用失败降级数/降级率，以及未执行重排次数。注意：`Turn.rerank` 总有快照（无启用行时 `begin_turn` 直接 503），缺 Key 时是真实工厂在检索 try 块内抛 `MODEL_NOT_CONFIGURED`，记录为 `DEGRADED` + `reason=MODEL_NOT_CONFIGURED`（`test_v2_rerank_without_key_is_recorded_as_unconfigured_degradation` 固定此形态）；因此“未执行重排”统计 `SKIPPED` 或 `DEGRADED` 且原因为 `MODEL_NOT_CONFIGURED`，并从调用数与降级数中排除，降级率只反映真实调用失败；随 overview 的知识库/时间/引擎/来源过滤。旧 `citation_missing_rate`、`rerank_degraded_rate` 读取 V2 不写入的旧列，对 V2 流量恒为 0，保留字段兼容但不应展示。
 

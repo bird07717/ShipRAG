@@ -60,6 +60,10 @@ class IndexBuildResult:
     prev_index_id: UUID | None = None
 
 
+class EmbeddingModelUnavailableError(RuntimeError):
+    """The build has no enabled, supported Embedding config row to bind the index to."""
+
+
 class IndexPipeline:
     def __init__(
         self,
@@ -190,6 +194,18 @@ class IndexPipeline:
         return dict(row)
 
     async def _record_build_models(self, index_id: UUID, task_id: UUID) -> None:
+        source = self.model_sources.get("EMBEDDING", "DATABASE")
+        if source != "DATABASE":
+            # knowledge_index.embedding_model_id is NOT NULL and the query side
+            # resolves its credentials and identity from that row. A build that
+            # ran on env settings (no enabled row, or an unsupported provider)
+            # would stay linked to the stale enqueue-time row, so every query would
+            # be judged against a model that did not produce the vectors. Fail
+            # before any parsing or embedding cost is spent.
+            raise EmbeddingModelUnavailableError(
+                f"构建启动时没有可用的已启用 Embedding 模型配置（来源 {source}）；"
+                "索引必须绑定实际生成向量的模型配置，请启用受支持的 Embedding 配置后重新构建"
+            )
         async with self.engine.begin() as connection:
             await connection.execute(
                 text(

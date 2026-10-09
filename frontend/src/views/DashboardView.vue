@@ -226,8 +226,20 @@ function startOfDay(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
-function isFutureDate(date: Date): boolean {
-  return date.getTime() > Date.now();
+/*
+ * Picked dates are read as the server's calendar days (see resolveTrendWindow), so
+ * "today" and "future" must be judged on the server's calendar as well. With the
+ * browser ahead of the database time zone (e.g. UTC+8 against a UTC database, before
+ * 08:00 local) the browser's today has not started on the server yet; offering it
+ * would select a window that begins after "now" and silently leave the old chart up.
+ */
+function serverToday(): Date {
+  const shifted = new Date(Date.now() + serverOffsetMinutes.value * 60_000);
+  return new Date(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate());
+}
+
+function isAfterServerToday(date: Date): boolean {
+  return startOfDay(date).getTime() > serverToday().getTime();
 }
 
 /*
@@ -328,7 +340,14 @@ async function loadMetrics() {
 async function loadTrend(): Promise<"ok" | "failed" | "stale"> {
   if (!active || !store.hasServiceCredential) return "stale";
   const window = resolveTrendWindow();
-  if (!window) return "stale";
+  if (!window) {
+    const [start, end] = trendRange.value === "custom" ? customRange.value ?? [] : [];
+    if (!start || !end) return "stale";
+    // A complete selection that starts after the server's "now" would otherwise be
+    // dropped without any sign, leaving the previous chart under the new dates.
+    trendError.value = `所选日期在服务端时区（${formatOffset(serverOffsetMinutes.value)}）尚未开始，图表仍为上次的范围，请选择更早的日期。`;
+    return "failed";
+  }
   const generation = ++trendGeneration;
   const knowledgeId = store.selectedKnowledgeId;
   const isCurrent = () => active && generation === trendGeneration && store.selectedKnowledgeId === knowledgeId;
@@ -365,8 +384,8 @@ async function loadTrend(): Promise<"ok" | "failed" | "stale"> {
 function onTrendRangeChange() {
   if (trendRange.value === "custom") {
     if (!customRange.value) {
-      const today = startOfDay(new Date());
-      customRange.value = [new Date(today.getTime() - 6 * DAY_MS), today];
+      const today = serverToday();
+      customRange.value = [new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6), today];
     }
     appliedCustomRange = customRange.value;
   } else trendGranularity.value = trendRange.value === "24h" ? "hour" : "day";
@@ -577,7 +596,7 @@ watch(() => store.hasServiceCredential, (available) => {
             start-placeholder="开始日期"
             end-placeholder="结束日期"
             :clearable="false"
-            :disabled-date="isFutureDate"
+            :disabled-date="isAfterServerToday"
             @change="onCustomRangeChange"
           />
           <el-radio-group

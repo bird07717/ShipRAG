@@ -142,15 +142,64 @@ describe("model editor with real Store operations and mocked HTTP APIs", () => {
     expect(adminStore.models[1]?.model_name).toBe("new-b");
   });
 
-  it("reports the latest list refresh failure without applying an older successful list", async () => {
+  it("reports the latest list refresh failure as a warning without applying an older successful list", async () => {
     const older = deferred<ModelConfig[]>();
     vi.mocked(adminApi.listModels).mockReturnValueOnce(older.promise).mockRejectedValueOnce(new Error("最新列表失败"));
     const first = adminStore.clearModelApiKey(modelA.id); await flushPromises();
-    await adminStore.saveModelConfig(modelB.id, { enabled: true });
+    const saved = await adminStore.saveModelConfig(modelB.id, { enabled: true });
     older.resolve(latestModels); await first;
-    expect(adminStore.error).toBe("最新列表失败");
+    expect(saved).toEqual({ ok: true, listStale: true });
+    expect(adminStore.error).toBe("");
+    expect(adminStore.notice).toContain("模型配置已保存");
+    expect(adminStore.notice).toContain("刷新模型列表失败（最新列表失败）");
+    expect(adminStore.noticeLevel).toBe("warning");
     expect(adminStore.models[1]?.model_name).toBe("saved-b");
-    expect(adminStore.notice).toBe("");
+  });
+
+  it.each([
+    ["save", () => adminStore.saveModelConfig(modelA.id, { enabled: true })],
+    ["clear", () => adminStore.clearModelApiKey(modelA.id)],
+  ] as const)("keeps a successful %s successful when only the list refresh fails", async (_name, act) => {
+    vi.mocked(adminApi.listModels).mockRejectedValueOnce(new Error("HTTP 500"));
+    expect(await act()).toEqual({ ok: true, listStale: true });
+    expect(adminStore.error).toBe("");
+    expect(adminStore.noticeLevel).toBe("warning");
+    expect(adminStore.notice).toContain("刷新模型列表失败（HTTP 500）");
+  });
+
+  it("does not report a stale list for the same operations when the refresh works", async () => {
+    expect(await adminStore.saveModelConfig(modelA.id, { enabled: true })).toEqual({ ok: true });
+    expect(adminStore.notice).not.toContain("刷新模型列表失败");
+  });
+
+  it("keeps the rebuild submission visible when the list refresh fails after an Embedding change", async () => {
+    const embedding: ModelConfig = { ...modelA, id: "emb", model_type: "EMBEDDING" };
+    adminStore.models = [embedding];
+    vi.mocked(adminApi.updateModel).mockResolvedValueOnce({ ...embedding, rebuilds: [{ knowledge_id: "kb-1" }] } as never);
+    vi.mocked(adminApi.listModels).mockRejectedValueOnce(new Error("HTTP 500"));
+    await adminStore.saveModelConfig("emb", { model_name: "other", rebuild_all_confirmed: true });
+    expect(adminStore.notice).toContain("已对 1 个知识库提交 RAG 重建");
+    expect(adminStore.notice).toContain("刷新模型列表失败（HTTP 500）");
+    expect(adminStore.error).toBe("");
+  });
+
+  it("closes the editor after a successful save even though the list refresh failed", async () => {
+    vi.mocked(adminApi.listModels).mockRejectedValueOnce(new Error("HTTP 500"));
+    editor(); await open();
+    await button("保存").trigger("click"); await flushPromises();
+    expect(wrapper!.findComponent({ name: "ElDialog" }).props("modelValue")).toBe(false);
+    expect(adminStore.error).toBe("");
+    expect(adminStore.notice).toContain("刷新模型列表失败");
+    expect(vi.mocked(adminApi.updateModel)).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the editor instead of showing an outdated key state after clearing the key with a failed refresh", async () => {
+    vi.mocked(adminApi.listModels).mockRejectedValueOnce(new Error("HTTP 500"));
+    editor(); await open();
+    await button("清除数据库密钥").trigger("click"); await flushPromises();
+    expect(wrapper!.findComponent({ name: "ElDialog" }).props("modelValue")).toBe(false);
+    expect(adminStore.error).toBe("");
+    expect(adminStore.notice).toContain("数据库密钥已清除");
   });
 
   it("ignores list and operation status after the credential changes", async () => {

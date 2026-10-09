@@ -204,7 +204,10 @@ async function clearStoredKey(): Promise<void> {
   try {
     const result = await store.clearModelApiKey(model.id);
     if (!isCurrentEdit(generation, model.id, credential)) return;
-    if (result.ok) {
+    if (result.ok && result.listStale) {
+      // The key is gone but the list could not be reloaded; the row shown here would be outdated.
+      editDialogOpen.value = false;
+    } else if (result.ok) {
       editingModel.value = store.models.find((item) => item.id === model.id) ?? model;
       resetProbe();
     } else editError.value = result.error;

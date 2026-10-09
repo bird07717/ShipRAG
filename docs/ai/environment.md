@@ -98,11 +98,11 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 
 ## 生产核验与待确认
 
-### 生产更新流程（2026-10-09 `0048` 与部署工具已部署；历史预算 4,000 及之后提交待部署）
+### 生产更新流程（2026-10-09 `0048`、部署工具、历史预算 4,000 与管理台分页均已部署于 `4ccf19a`）
 
 模型/索引一致性修复新增 `0048`：必须先运行一次性迁移到 head，再替换后端和两个 Worker，不能只更新前端或重启旧镜像。本地已执行 `0047 -> 0048`；2026-10-09 已由 `deploy-production.sh` 部署到生产（只读核验见下一段）。迁移只加身份列、不调用模型、不重写历史向量。旧索引无完整历史身份，首次重建会重新解析全部缺指纹文档并产生真实模型费用；先处置已知解析问题、确认 OCR/Vision 可用及维护窗口，再构建、核对实际模型身份、确认卡片并用新会话试问。未匹配时失败关闭，不保证切换无中断。回滚旧镜像前核对迁移兼容，不能把删身份列当作常规部署回滚。
 
-2026-10-09 生产只读核验（ssh 只读命令，未写库、未改容器）：工作树 HEAD `e07165d`（包含 `b113ae2`/`396bc12`，不含 `01c09c4` 及之后提交）；Alembic 为 `0048`；backend/frontend/两个 Worker 容器创建于 2026-10-09 03:23 UTC，存在回滚标签 `rollback-20261009032220`；全部 10 个索引（7 个 ACTIVE）均为 `build_models='{}'` 的旧索引，7 个 ACTIVE 的 `legacy_embedding_unchanged` 全为真（Embedding 行最后修改 2026-09-15，早于全部索引，无晚于索引创建的身份类审计行），因此当前不会因旧审计行被误拦；重建任一知识库后该索引转为有 `build_models` 的新身份记录。
+2026-10-09 生产只读核验（ssh 只读命令，未写库、未改容器）：先后核验 `e07165d`（03:23 UTC 部署）与 `4ccf19a`（PR #3 合并，06:33 UTC 重建 backend/frontend/两个 Worker，无新迁移；回滚标签 `rollback-20261009063212` 与 `rollback-20261009032220`）；Alembic 为 `0048`；以下索引与审计核验取自 `e07165d` 时点，之后未再改动模型配置；全部 10 个索引（7 个 ACTIVE）均为 `build_models='{}'` 的旧索引，7 个 ACTIVE 的 `legacy_embedding_unchanged` 全为真（Embedding 行最后修改 2026-09-15，早于全部索引，无晚于索引创建的身份类审计行），因此当前不会因旧审计行被误拦；重建任一知识库后该索引转为有 `build_models` 的新身份记录。
 
 **旧审计行的边界**：`0048` 之前的表单保存会把 `provider/model_name/base_url` 一并记入 `model_config_history.changed_fields`，即使值未变；该表只存字段名、不存新旧值，因此这类旧行无法被代码区分为“真变更”，旧索引一律失败关闭（要求重建）。需要在其他环境部署前预检时，只读执行：`SELECT i.id, h.created_at, h.changed_fields FROM knowledge_index i JOIN model_config_history h ON h.model_config_id = i.embedding_model_id AND h.created_at >= i.created_at AND h.changed_fields ?| ARRAY['provider','model_name','base_url'] WHERE i.build_models = '{}'::jsonb AND i.status IN ('ACTIVE','READY');`，返回行即表示升级后该旧索引会被判为身份已变更。
 
@@ -127,7 +127,7 @@ SQL
 
 完整 Trace 默认只保留 7 天，之后脱敏会把 `runtime_snapshot` 置为 `{}`（`ingestion/repository.py` 的保留清理），这些行没有检索信息，不会被计入；所以该查询（及 Dashboard 的近 7 天口径）实际只覆盖完整 Trace 保留窗口内的轮次，查询里的 30 天范围不会得到更早的数据。
 
-服务器 `/home/cm/ShipRAG`，使用根目录 `.env`。推荐一键执行 `bash scripts/deploy-production.sh`：依次 `git pull --ff-only`、检查工作区干净、检查后台任务、确认、备份运行中应用容器的实际镜像 ID 为 `rollback-<时间>`（每个镜像仓库保留最近 3 个）、带构建标记构建、`run --rm migrate`、再次检查后台任务、`up --no-deps --force-recreate --wait` 替换应用容器，最后核对后端 `build_info` 与前端静态资源中的提交号等于 `HEAD`。构建/迁移失败或替换前复查未通过时不替换容器；已执行的迁移不会因此撤销。不能以可变镜像标签代替运行镜像备份：它可能已指向上次未发布的构建。没有运行容器时明确跳过该服务备份；容器读取失败或同服务多容器镜像不一致时停止。
+服务器 `/home/cm/ShipRAG`，使用根目录 `.env`。推荐一键执行 `bash scripts/deploy-production.sh`：依次 `git fetch`（不动工作区，`--dry-run` 也执行，用于预览将部署的上游提交）、核对上游可快进、检查工作区干净、检查后台任务、确认、确认后才 `git merge --ff-only` 到该提交（选 N 取消时检出不变）、只读检查各服务当前运行的镜像 ID（读不到或同服务镜像不一致则在构建前停止）、带构建标记构建、`run --rm migrate`、再次检查后台任务、此时才把运行中应用容器的实际镜像 ID 备份为 `rollback-<时间>`（每个镜像仓库保留最近 3 个；构建或迁移失败不创建、不裁剪备份）、`up --no-deps --force-recreate --wait` 替换应用容器；全程持有 `flock` 互斥锁（并发运行会被拒绝），postgres 未运行（首次部署）时跳过任务检查，最后核对后端 `build_info` 与前端静态资源中的提交号等于 `HEAD`。构建/迁移失败或替换前复查未通过时不替换容器；已执行的迁移不会因此撤销。不能以可变镜像标签代替运行镜像备份：它可能已指向上次未发布的构建。没有运行容器时明确跳过该服务备份；容器读取失败或同服务多容器镜像不一致时停止。
 
 后台任务检查仅在替换 Worker 时执行，仍按近 30 分钟更新过的 `QUEUED/RUNNING` 记录统计，不阻断长期未更新的孤儿记录；`--force` 允许中断已知进行中任务，但不允许忽略查询失败。回滚在改标签/替换容器前执行同一检查。此复查缩短构建期间新增任务的风险窗口，不是原子停写/队列排空；发布时仍需避免提交新任务，超过 30 分钟未更新的真实长任务需人工核对。
 
@@ -221,7 +221,7 @@ RAG V2 为唯一主路径，开发与 Production Compose 使用同一执行逻�
 
 V2 配置见上表。Query 与 Answer 两段超时之和必须小于 `M3_TURN_DEADLINE_SECONDS`；开发和生产示例总时限均为 90 秒。
 
-表中默认值来自 Settings，不代表所有值都能只改生产 `.env` 覆盖。当前 Production Compose 显式转发历史轮次上限 `M3_RAG_HISTORY_MAX_ROUNDS` 和历史 Token 预算 `M3_HISTORY_TOKEN_BUDGET`（默认 4,000，`01c09c4` 起），但未转发历史消息数 `M3_HISTORY_MAX_MESSAGES`；镜像也不带项目 `.env`。调整未转发的变量须同时为容器声明环境变量并重建容器。注意 `01c09c4` 尚未部署：2026-10-09 只读核验生产 `e07165d` 容器内实际历史 Token 预算仍为 2,000（未转发该变量，取镜像内默认值）。
+表中默认值来自 Settings，不代表所有值都能只改生产 `.env` 覆盖。当前 Production Compose 显式转发历史轮次上限 `M3_RAG_HISTORY_MAX_ROUNDS` 和历史 Token 预算 `M3_HISTORY_TOKEN_BUDGET`（默认 4,000，`01c09c4` 起），但未转发历史消息数 `M3_HISTORY_MAX_MESSAGES`；镜像也不带项目 `.env`。调整未转发的变量须同时为容器声明环境变量并重建容器。`01c09c4` 已于 2026-10-09 随 `4ccf19a` 部署：容器内已设置 `M3_HISTORY_TOKEN_BUDGET`，Settings 有效值 4,000（部署 `e07165d` 时该变量未转发，实际为 2,000）。
 
 V4.1 文档级排序复用现有 Rerank Provider、`M3_RERANK_TIMEOUT_SECONDS` 和模型快照，不增加环境变量或第三次 LLM。候选池内部最多取 `max(M3_RAG_FULL_DOCUMENT_LIMIT, M3_RAG_DOCUMENT_CARD_TOP_K)` 份用于排序，最终全文上限仍由 `M3_RAG_FULL_DOCUMENT_LIMIT=3` 控制。当前未调整 Chunk、向量/BM25 Top-K、卡片 Top-K 或 20,000 Token 全文预算；后续只有在多轮 Trace 显示稳定的召回或上下文问题时才单变量调整。
 

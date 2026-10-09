@@ -350,6 +350,56 @@ describe("DashboardView metrics", () => {
     expect(restored.map((date) => date.getDate())).toEqual([10, 12]);
   });
 
+  it("judges custom dates on the server calendar when the browser is ahead of the database zone", async () => {
+    // Browser: 03:00 on 08-21. Database zone: 10 hours behind the browser, i.e. still
+    // 17:00 on 08-20, so the browser's "today" has not started on the server yet.
+    vi.setSystemTime(new Date(2026, 7, 21, 3, 0, 0));
+    const serverOffset = -new Date(2026, 7, 21, 3).getTimezoneOffset() - 600;
+    const abs = Math.abs(serverOffset);
+    const zone = `${serverOffset < 0 ? "-" : "+"}${String(Math.trunc(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const timeseries = vi.spyOn(adminApi, "getMetricsTimeseries")
+      .mockResolvedValue([{ ...dailyPoint, bucket: `2026-08-20T00:00:00${zone}` }]);
+    const wrapper = mountDashboard();
+    await flushPromises();
+
+    await wrapper.get('input[value="custom"]').setValue(true);
+    await flushPromises();
+    const datePicker = wrapper.findComponent({ name: "ElDatePicker" });
+    // Default range ends on the server's today, not the browser's.
+    const [start, end] = datePicker.props("modelValue") as Date[];
+    expect([start!.getMonth(), start!.getDate(), end!.getMonth(), end!.getDate()]).toEqual([7, 14, 7, 20]);
+    const disabled = datePicker.props("disabledDate") as (date: Date) => boolean;
+    expect(disabled(new Date(2026, 7, 21))).toBe(true); // not started on the server yet
+    expect(disabled(new Date(2026, 7, 20))).toBe(false);
+
+    // A selection that still reaches the server's future is reported, not dropped silently.
+    const calls = timeseries.mock.calls.length;
+    const picker = datePicker.findComponent({ name: "Picker" });
+    const range: [Date, Date] = [new Date(2026, 7, 21), new Date(2026, 7, 21)];
+    picker.vm.$emit("update:modelValue", range);
+    picker.vm.$emit("change", range);
+    await flushPromises();
+    expect(timeseries).toHaveBeenCalledTimes(calls);
+    expect(wrapper.text()).toContain("尚未开始");
+    expect(wrapper.text()).toContain(zone);
+  });
+
+  it("keeps the previous behaviour for dates that have started on the server", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([dailyPoint]); // UTC database
+    const wrapper = mountDashboard();
+    await flushPromises();
+    await wrapper.get('input[value="custom"]').setValue(true);
+    await flushPromises();
+    const disabled = wrapper.findComponent({ name: "ElDatePicker" }).props("disabledDate") as (date: Date) => boolean;
+    expect(disabled(new Date(2026, 7, 21))).toBe(false); // server today (UTC 12:30 on 08-21)
+    expect(disabled(new Date(2026, 7, 22))).toBe(true);
+    expect(wrapper.text()).not.toContain("尚未开始");
+  });
+
   it("ignores a late trend response after the range changed", async () => {
     vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
     vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);

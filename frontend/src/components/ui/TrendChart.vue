@@ -203,7 +203,7 @@ function columnLabel(point: TrendPoint): string {
         :height="HEIGHT"
         :viewBox="`0 0 ${width} ${HEIGHT}`"
         class="chart-svg"
-        role="img"
+        role="group"
         aria-label="外部请求结果分布与趋势图"
       >
         <g class="grid">

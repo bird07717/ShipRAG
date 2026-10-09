@@ -9,6 +9,7 @@ import StatusBadge from "@/components/ui/StatusBadge.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
 import { createLatestRequest } from "@/utils/latestRequest";
+import { rangeDefaultTime } from "@/utils/dateRange";
 import { clampedPage } from "@/utils/paging";
 import ListPagination from "@/components/ui/ListPagination.vue";
 import { traceDiagnostics } from "@/utils/traceDiagnostics";
@@ -370,6 +371,7 @@ onBeforeUnmount(() => {
         <el-date-picker
           v-model="traceFilter.range"
           type="datetimerange"
+          :default-time="rangeDefaultTime"
           range-separator="→"
           start-placeholder="开始时间"
           end-placeholder="结束时间"
