@@ -6,23 +6,28 @@ import { EditPen, RefreshRight } from "@element-plus/icons-vue";
 import { useAdminStore } from "@/composables/adminStore";
 import type { DocumentProfileIntent, DocumentProfileSummary, ProfilePublishCheck } from "@/types/admin";
 import EmptyState from "@/components/ui/EmptyState.vue";
+import { createPoller } from "@/utils/poller";
 
 const store = useAdminStore();
 const editorOpen = ref(false);
 const editing = ref<DocumentProfileSummary | null>(null);
 const lastCheck = ref<ProfilePublishCheck | null>(null);
 const form = ref<DocumentProfileIntent>(emptyIntent());
-let profileRefreshTimer: ReturnType<typeof setInterval> | undefined;
+// Serial 3s refresh that pauses while the tab is hidden or the backend is offline.
+const profilePoller = createPoller(() => store.loadKnowledgeProfiles(), {
+  intervalMs: 3_000,
+  enabled: () => store.hasServiceCredential,
+});
 
 onMounted(() => {
   // RAG builds enqueue document Profile generation from a worker, so this
   // page may not have a browser-originated task to poll. Keep the review
   // snapshot current while it is open.
   void store.loadKnowledgeProfiles();
-  profileRefreshTimer = setInterval(() => void store.loadKnowledgeProfiles(), 3_000);
+  profilePoller.start();
 });
 
-onUnmounted(() => clearInterval(profileRefreshTimer));
+onUnmounted(() => profilePoller.stop());
 
 function emptyIntent(): DocumentProfileIntent {
   return { canonical_question: "", aliases: [], routing_summary: "", enabled: true };

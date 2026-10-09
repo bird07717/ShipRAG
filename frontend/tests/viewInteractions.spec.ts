@@ -1,6 +1,6 @@
 import ElementPlus from "element-plus";
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
@@ -11,6 +11,9 @@ import type {
   RagDocumentCard,
 } from "@/types/admin";
 import AdminStudio from "@/components/AdminStudio.vue";
+import { preloadLazyViews } from "./helpers/lazyViews";
+
+beforeAll(preloadLazyViews);
 
 const kb = {
   id: "kb-1",
@@ -380,6 +383,7 @@ const ragDocumentCardList = {
 function stubApi() {
   vi.spyOn(adminApi, "listKnowledgeBases").mockResolvedValue([kb]);
   vi.spyOn(adminApi, "listDocuments").mockResolvedValue([doc]);
+  vi.spyOn(adminApi, "listDocumentsPage").mockResolvedValue({ items: [doc], total: 1 });
   vi.spyOn(adminApi, "listIndexes").mockResolvedValue([index, candidateIndex]);
   vi.spyOn(adminApi, "listIndexTasks").mockResolvedValue([]);
   vi.spyOn(adminApi, "listKnowledgeReleases").mockResolvedValue([supportRelease]);
@@ -389,6 +393,7 @@ function stubApi() {
     ...patch,
   }));
   vi.spyOn(adminApi, "listTraces").mockResolvedValue([traceSummary]);
+  vi.spyOn(adminApi, "listTracesPage").mockResolvedValue({ items: [traceSummary], total: 1 });
   vi.spyOn(adminApi, "listModels").mockResolvedValue([model]);
   vi.spyOn(adminApi, "listPrompts").mockResolvedValue([prompt]);
   vi.spyOn(adminApi, "getRagConfig").mockResolvedValue({
@@ -493,7 +498,6 @@ describe("view interactions", () => {
     adminStore.selectedDocument = null;
     adminStore.documentProfileContext = null;
     adminStore.ragDocumentCard = null;
-    adminStore.ragDocumentCards = [];
     adminStore.ragDocumentCardReadiness = null;
     adminStore.latestRagDocumentCardTasks = {};
     adminStore.requestedIndexDetailId = "";
@@ -532,9 +536,14 @@ describe("view interactions", () => {
     expect(wrapper.text()).toContain("元素（Elements）· 1");
     expect(wrapper.text()).toContain("切片（Chunks）· 1");
 
+    // Search runs on the server: the new query is sent and an empty page shows the no-match state.
+    vi.mocked(adminApi.listDocumentsPage).mockResolvedValue({ items: [], total: 0 });
     adminStore.documentSearch = "nothing";
+    await adminStore.reloadDocuments();
     await flushPromises();
-    expect(wrapper.text()).toContain("暂无文档");
+    expect(adminApi.listDocumentsPage).toHaveBeenLastCalledWith("kb-1", expect.objectContaining({ search: "nothing", offset: 0 }));
+    expect(wrapper.text()).toContain("没有匹配的文档");
+    expect(wrapper.text()).not.toContain("暂无文档");
     adminStore.documentSearch = "";
   });
 
@@ -874,7 +883,7 @@ describe("view interactions", () => {
   it("logs: keeps the full timestamp separate from a long question and metadata", async () => {
     const question = "设备无法启动，需要检查哪些项目？".repeat(20);
     const record = { ...traceSummary, question, user_id: "long-user-id-".repeat(20), error: { code: "LONG_ERROR_CODE" } };
-    vi.mocked(adminApi.listTraces).mockResolvedValue([record]);
+    vi.mocked(adminApi.listTracesPage).mockResolvedValue({ items: [record], total: 1 });
     vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
     vi.spyOn(adminApi, "listRequestErrors").mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
     const wrapper = await mountView("logs");
@@ -941,7 +950,7 @@ describe("view interactions", () => {
 
   it("logs: applies the retired RAG errors deep-link state", async () => {
     vi.spyOn(adminApi, "getFailureSummary").mockResolvedValue(failureSummary);
-    const listTraces = vi.mocked(adminApi.listTraces);
+    const listTraces = vi.mocked(adminApi.listTracesPage);
     const wrapper = await mountView("logs", "tab=failed-turns&engine=RAG");
 
     expect(wrapper.find(".el-tabs__item.is-active").text()).toContain("失败轮次");
@@ -953,7 +962,8 @@ describe("view interactions", () => {
       status: "FAILED",
       engine: "RAG",
       errorCode: undefined,
-      limit: 200,
+      limit: 50,
+      offset: 0,
     });
   });
 
@@ -962,11 +972,11 @@ describe("view interactions", () => {
     const from = "2026-08-14T00:00:00Z";
     const to = "2026-08-21T00:00:00Z";
     const query = new URLSearchParams({ tab: "failed-turns", engine: "RAG", source: "ASSISTANT_API", from, to }).toString();
-    const listTraces = vi.mocked(adminApi.listTraces);
+    const listTraces = vi.mocked(adminApi.listTracesPage);
     const wrapper = await mountView("logs", query);
     expect(listTraces).toHaveBeenCalledWith("kb-1", {
       status: "FAILED", engine: "RAG", source: "ASSISTANT_API", from, to,
-      errorCode: undefined, limit: 200,
+      errorCode: undefined, limit: 50, offset: 0,
     });
     expect(wrapper.text()).toContain("外部 Assistant");
     const failedPane = wrapper.findAllComponents({ name: "ElTabPane" }).find((item) => item.props("name") === "failed-turns")!;
@@ -977,7 +987,7 @@ describe("view interactions", () => {
     await wrapper.setProps({ navigationQuery: "tab=failed-turns&engine=SUPPORT" });
     await flushPromises();
     expect(listTraces).toHaveBeenLastCalledWith("kb-1", {
-      status: "FAILED", engine: "SUPPORT", errorCode: undefined, limit: 200,
+      status: "FAILED", engine: "SUPPORT", errorCode: undefined, limit: 50, offset: 0,
     });
     wrapper.unmount();
   });
@@ -994,8 +1004,8 @@ describe("view interactions", () => {
       ...requestError,
       detail: { exception_type: "LlmError", stack: "Traceback (most recent call last)" },
     });
-    vi.spyOn(adminApi, "listTasks").mockResolvedValue([]);
-    const listTraces = vi.spyOn(adminApi, "listTraces").mockResolvedValue([failedTraceSummary]);
+    vi.spyOn(adminApi, "listTasksPage").mockResolvedValue({ items: [], total: 0 });
+    const listTraces = vi.spyOn(adminApi, "listTracesPage").mockResolvedValue({ items: [failedTraceSummary], total: 1 });
     vi.spyOn(adminApi, "getTrace").mockResolvedValue(failedTraceDetail);
     vi.spyOn(adminApi, "listConversationMessages").mockResolvedValue({ items: conversationMessages });
 
@@ -1030,7 +1040,8 @@ describe("view interactions", () => {
       status: "FAILED",
       engine: "SUPPORT",
       errorCode: undefined,
-      limit: 200,
+      limit: 50,
+      offset: 0,
     });
     const failedRow = wrapper
       .findAll(".el-table__row")
@@ -1073,7 +1084,7 @@ describe("view interactions", () => {
       limit: 20,
       offset: 0,
     });
-    vi.spyOn(adminApi, "listTasks").mockResolvedValue([failedTask]);
+    vi.spyOn(adminApi, "listTasksPage").mockResolvedValue({ items: [failedTask] as never, total: 1 });
 
     const wrapper = await mountView("logs");
 

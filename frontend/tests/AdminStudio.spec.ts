@@ -1,10 +1,13 @@
 import ElementPlus, { ElMessageBox } from "element-plus";
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminApi } from "@/api/admin";
 import AdminStudio from "@/components/AdminStudio.vue";
 import { adminStore } from "@/composables/adminStore";
+import { preloadLazyViews } from "./helpers/lazyViews";
+
+beforeAll(preloadLazyViews);
 
 describe("AdminStudio settings", () => {
   beforeEach(() => {
@@ -67,7 +70,7 @@ describe("AdminStudio settings", () => {
         updated_at: "2026-08-17T00:00:00Z",
       },
     ]);
-    vi.spyOn(adminApi, "listDocuments").mockResolvedValue([
+    const documents = [
       {
         id: "doc-1",
         knowledge_id: "kb-1",
@@ -78,7 +81,9 @@ describe("AdminStudio settings", () => {
         created_at: "2026-08-17T00:00:00Z",
         updated_at: "2026-08-17T00:00:00Z",
       },
-    ]);
+    ];
+    vi.spyOn(adminApi, "listDocuments").mockResolvedValue(documents);
+    vi.spyOn(adminApi, "listDocumentsPage").mockResolvedValue({ items: documents, total: documents.length });
     vi.spyOn(adminApi, "listIndexes").mockResolvedValue([]);
     vi.spyOn(adminApi, "listTraces").mockResolvedValue([]);
     vi.spyOn(adminApi, "listModels").mockResolvedValue([]);

@@ -19,6 +19,22 @@ const buildInfo = {
 export default defineConfig({
   define: { "import.meta.env.APP_BUILD_INFO": JSON.stringify(buildInfo) },
   plugins: [vue()],
+  build: {
+    rollupOptions: {
+      output: {
+        // Long-lived vendor chunks stay cached across admin releases; views
+        // are split separately through dynamic imports in AdminStudio/App.
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("element-plus") || id.includes("@element-plus")) return "vendor-element-plus";
+          if (id.includes("markdown-it") || id.includes("dompurify") || id.includes("linkify-it")
+            || id.includes("mdurl") || id.includes("uc.micro") || id.includes("punycode")
+            || id.includes("entities")) return "vendor-markdown";
+          return "vendor";
+        },
+      },
+    },
+  },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

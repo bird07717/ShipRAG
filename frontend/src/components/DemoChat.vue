@@ -55,16 +55,39 @@ const conversationId = ref<string | undefined>(undefined);
 const messagesContainer = ref<HTMLElement | null>(null);
 const abortController = ref<AbortController | null>(null);
 
-// 防抖滚动
+// 防抖滚动：只有用户停留在底部附近时才跟随流式输出；用户向上翻看历史时不强制拉回。
+// 发送新问题等主动操作使用 force 立即回到底部。
+const FOLLOW_THRESHOLD_PX = 80;
+let followOutput = true;
+function onMessagesScroll(): void {
+  const el = messagesContainer.value;
+  if (!el) return;
+  followOutput = el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_THRESHOLD_PX;
+}
 let scrollTimer: ReturnType<typeof setTimeout> | null = null;
-async function scrollToBottomDebounce() {
+async function scrollToBottomDebounce(force = false) {
+  if (force) followOutput = true;
+  if (!followOutput) return;
   if (scrollTimer) clearTimeout(scrollTimer);
   scrollTimer = setTimeout(async () => {
     await nextTick();
-    if (messagesContainer.value) {
+    if (messagesContainer.value && followOutput) {
       messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
     }
   }, 40);
+}
+
+// 已完成消息的 Markdown 渲染结果按原文缓存：流式增量只重新渲染正在生成的那一条，
+// 而不是每个 delta 都重新解析并消毒全部历史消息。
+const MARKDOWN_CACHE_LIMIT = 400;
+const markdownCache = new Map<string, string>();
+function renderMarkdownCached(text: string): string {
+  const cached = markdownCache.get(text);
+  if (cached !== undefined) return cached;
+  const html = renderMarkdown(text);
+  if (markdownCache.size >= MARKDOWN_CACHE_LIMIT) markdownCache.clear();
+  markdownCache.set(text, html);
+  return html;
 }
 
 const modeLabels: Record<string, string> = {
@@ -139,6 +162,7 @@ watch(selectedKb, (kbId) => {
   abortController.value = null;
   loading.value = false;
   messages.value = [];
+  followOutput = true;
   conversationId.value = undefined;
   if (kbId) {
     void loadWelcome(kbId);
@@ -177,7 +201,7 @@ async function send(choiceId?: string) {
   const generation = streamGeneration;
   const controller = new AbortController();
   abortController.value = controller;
-  scrollToBottomDebounce();
+  scrollToBottomDebounce(true);
   try {
     await streamChat(selectedKb.value, q, conversationId.value, {
       onTrace: (_traceId, convId) => {
@@ -321,6 +345,7 @@ function clearChat() {
   abortController.value = null;
   loading.value = false;
   messages.value = [];
+  followOutput = true;
   conversationId.value = undefined;
   suggestions.value = [];
   if (selectedKb.value) {
@@ -391,7 +416,15 @@ onMounted(async () => {
       </div>
 
       <!-- Conversation -->
-      <div v-else ref="messagesContainer" class="chat-messages">
+      <div
+        v-else
+        ref="messagesContainer"
+        class="chat-messages"
+        role="log"
+        aria-live="polite"
+        :aria-busy="loading"
+        @scroll.passive="onMessagesScroll"
+      >
         <div
           v-for="msg in visibleMessages"
           :key="msg.id"
@@ -430,7 +463,7 @@ onMounted(async () => {
                     class="content-block"
                   >
                     <!-- eslint-disable-next-line vue/no-v-html -- DOMPurify 消毒后的 Markdown 输出 -->
-                    <div v-if="isText(block)" class="text-block" v-html="renderMarkdown(block.text || '')"></div>
+                    <div v-if="isText(block)" class="text-block" v-html="msg.streaming ? renderMarkdown(block.text || '') : renderMarkdownCached(block.text || '')"></div>
                     <ReviewImage v-else-if="block.type === 'image' && block.image_asset_id" :asset-id="block.image_asset_id" :caption="block.caption" />
                   </div>
                   <span v-if="msg.streaming" class="cursor">●●●</span>
@@ -438,7 +471,7 @@ onMounted(async () => {
                 <!-- eslint-disable-next-line vue/no-v-html -- DOMPurify 消毒后的 Markdown 输出 -->
                 <div v-else-if="msg.text" class="text-block">
                   <!-- eslint-disable-next-line vue/no-v-html -- DOMPurify 消毒后的 Markdown 输出 -->
-                  <span v-html="renderMarkdown(msg.text)"></span><span v-if="msg.streaming" class="cursor">●●●</span>
+                  <span v-html="msg.streaming ? renderMarkdown(msg.text) : renderMarkdownCached(msg.text)"></span><span v-if="msg.streaming" class="cursor">●●●</span>
                 </div>
                 <p v-if="msg.stopped && !msg.text" class="text-block stopped-note">已停止生成</p>
               </div>

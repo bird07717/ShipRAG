@@ -1,12 +1,15 @@
 import ElementPlus from "element-plus";
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ElMessageBox } from "element-plus";
 
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
 import AdminStudio from "@/components/AdminStudio.vue";
 import type { KnowledgeBase, SystemInfo } from "@/types/admin";
+import { preloadLazyViews } from "./helpers/lazyViews";
+
+beforeAll(preloadLazyViews);
 
 const kb = {
   id: "kb-1",
@@ -102,6 +105,7 @@ const traceDetail = {
 function stubApi() {
   vi.spyOn(adminApi, "listKnowledgeBases").mockResolvedValue([kb]);
   vi.spyOn(adminApi, "listDocuments").mockResolvedValue([]);
+  vi.spyOn(adminApi, "listDocumentsPage").mockResolvedValue({ items: [], total: 0 });
   vi.spyOn(adminApi, "listIndexes").mockResolvedValue([index]);
   vi.spyOn(adminApi, "listIndexTasks").mockResolvedValue([task]);
   vi.spyOn(adminApi, "listTraces").mockResolvedValue([]);
@@ -135,6 +139,15 @@ describe("adminStore", () => {
     adminStore.actionLoading = {};
     adminStore.knowledgeSearch = "";
     adminStore.knowledgeStatusFilter = "";
+    adminStore.documentSearch = "";
+    adminStore.documentFilters = { buildStatus: "", cardState: "", sort: "created_at", order: "desc" };
+    adminStore.documentPage = 1;
+    adminStore.documentPageSize = 50;
+    adminStore.documents = [];
+    adminStore.documentTotal = 0;
+    adminStore.documentsLoading = false;
+    adminStore.skippedDocuments = [];
+    adminStore.skippedDocumentTotal = 0;
     adminStore.systemInfo = null;
     localStorage.clear();
   });
@@ -343,6 +356,189 @@ describe("adminStore", () => {
     // Completion is announced once as a notification, not duplicated as a notice.
     expect(document.body.textContent).toContain("Profile 重建已完成");
     expect(adminStore.notice).toBe("");
+  });
+
+  it("shares one in-flight poll so overlapping callers announce a finished task once", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.trackTask(
+      { task_id: "task-overlap", task_type: "PROFILE_REFRESH", status: "QUEUED", replayed: false },
+      { successMessage: "重叠轮询只提示一次", knowledgeId: kb.id },
+    );
+    let resolveTask!: (value: never) => void;
+    const getTask = vi.spyOn(adminApi, "getTask").mockImplementation(
+      () => new Promise((resolve) => { resolveTask = resolve as never; }),
+    );
+    const first = adminStore.pollTrackedTasks();
+    const second = adminStore.pollTrackedTasks();
+    resolveTask({
+      id: "task-overlap", task_type: "PROFILE_REFRESH", status: "SUCCEEDED", stage: "COMPLETED",
+      progress: 100, attempt: 1, kb_id: kb.id, index_id: "idx-1", document_id: null,
+      error_code: null, error_message: null, metadata: {}, created_at: "2026-08-26T00:00:00Z",
+      started_at: null, finished_at: null, updated_at: "2026-08-26T00:00:02Z",
+    } as never);
+    await Promise.all([first, second]);
+
+    expect(getTask).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent?.split("重叠轮询只提示一次").length).toBe(2);
+    expect(adminStore.trackedTasks).toEqual([]);
+  });
+
+  it("offers the next step from a finished index build notification", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.knowledgeBases = [kb];
+    adminStore.requestedView = "";
+    adminStore.trackTask(
+      { task_id: "task-build-done", task_type: "INDEX_BUILD", status: "QUEUED", replayed: false },
+      { successMessage: "候选索引构建完成", knowledgeId: kb.id },
+    );
+    vi.spyOn(adminApi, "getTask").mockResolvedValue({
+      id: "task-build-done", task_type: "INDEX_BUILD", status: "SUCCEEDED", stage: "COMPLETED",
+      progress: 100, attempt: 1, kb_id: kb.id, index_id: "idx-1", document_id: null,
+      error_code: null, error_message: null, metadata: {}, created_at: "2026-08-26T00:00:00Z",
+      started_at: null, finished_at: null, updated_at: "2026-08-26T00:00:02Z",
+    } as never);
+    await adminStore.pollTrackedTasks();
+    await flushPromises();
+
+    const action = [...document.body.querySelectorAll(".task-follow-up button")]
+      .find((button) => button.textContent?.includes("前往索引管理"));
+    expect(action).toBeTruthy();
+    (action as HTMLButtonElement).click();
+    await flushPromises();
+    expect(adminStore.requestedView).toBe("indexes");
+    adminStore.requestedView = "";
+  });
+
+  it("pages, filters and sorts documents on the server and drops stale pages", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.knowledgeBases = [{ ...kb, rag_active_index_id: "idx-1" } as never];
+    const doc = (id: string) => ({ id, display_name: id, filename: `${id}.pdf` }) as never;
+    let resolveOld!: (value: { items: never[]; total: number }) => void;
+    const listPage = vi.spyOn(adminApi, "listDocumentsPage")
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValue({ items: [doc("new")], total: 61 });
+
+    adminStore.documentPage = 2;
+    const stale = adminStore.loadDocumentPage();
+    adminStore.documentSearch = "  PSU ";
+    adminStore.documentFilters.cardState = "PENDING_REVIEW";
+    adminStore.documentFilters.sort = "file_size";
+    adminStore.documentFilters.order = "asc";
+    await adminStore.reloadDocuments();
+    resolveOld({ items: [doc("old")], total: 99 });
+    await stale;
+
+    expect(listPage).toHaveBeenLastCalledWith(kb.id, {
+      search: "PSU",
+      buildStatus: undefined,
+      cardState: "PENDING_REVIEW",
+      cardIndexId: "idx-1",
+      sort: "file_size",
+      order: "asc",
+      limit: 50,
+      offset: 0,
+    });
+    expect(adminStore.documentPage).toBe(1);
+    expect(adminStore.documents.map((item) => item.id)).toEqual(["new"]);
+    expect(adminStore.documentTotal).toBe(61);
+
+    // Without an active index the card filter cannot apply and is not sent.
+    adminStore.knowledgeBases = [{ ...kb, rag_active_index_id: null, active_index_id: null } as never];
+    expect(adminStore.documentListQuery(null)).toMatchObject({ cardState: undefined, cardIndexId: undefined });
+    // With an active index every row carries card_state, even without a card filter.
+    adminStore.documentFilters.cardState = "";
+    expect(adminStore.documentListQuery("idx-1")).toMatchObject({ cardState: undefined, cardIndexId: "idx-1" });
+  });
+
+  it("clears the document loading overlay when a building poll supersedes a page load", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.knowledgeBases = [kb];
+    adminStore.indexes = [{ ...index, id: "idx-new", status: "BUILDING" }] as never;
+    vi.spyOn(adminApi, "listIndexes").mockResolvedValue([{ ...index, id: "idx-new", status: "BUILDING" }] as never);
+    let resolvePage!: (value: { items: never[]; total: number }) => void;
+    vi.spyOn(adminApi, "listDocumentsPage")
+      .mockImplementationOnce(() => new Promise((resolve) => { resolvePage = resolve; }))
+      .mockResolvedValue({ items: [], total: 0 });
+
+    const userLoad = adminStore.loadDocumentPage();
+    expect(adminStore.documentsLoading).toBe(true);
+    await adminStore.refreshBuildingState();
+    resolvePage({ items: [], total: 0 });
+    await userLoad;
+
+    expect(adminStore.documentsLoading).toBe(false);
+  });
+
+  it("moves back to the last page when the current page empties", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.knowledgeBases = [kb];
+    adminStore.documentPageSize = 20;
+    adminStore.documentPage = 2;
+    const list = vi.spyOn(adminApi, "listDocumentsPage")
+      .mockResolvedValueOnce({ items: [], total: 20 })
+      .mockResolvedValue({ items: [{ id: "doc-1" }] as never, total: 20 });
+
+    await adminStore.loadDocumentPage();
+    await flushPromises();
+
+    expect(adminStore.documentPage).toBe(1);
+    expect(list).toHaveBeenLastCalledWith(kb.id, expect.objectContaining({ offset: 0 }));
+    expect(adminStore.documents).toHaveLength(1);
+    expect(adminStore.documentTotal).toBe(20);
+  });
+
+  it("scopes the skipped-document alert to the selected knowledge base and keeps its total", async () => {
+    stubApi();
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.knowledgeBases = [kb, { ...kb, id: "kb-2", rag_active_index_id: null, active_index_id: null }];
+    const skipped = Array.from({ length: 50 }, (_, i) => ({ id: `s${i}`, last_build_status: "SKIPPED" })) as never[];
+    vi.spyOn(adminApi, "listDocumentsPage").mockImplementation(async (_kb, query) =>
+      query?.buildStatus === "SKIPPED" ? { items: skipped, total: 73 } : { items: [], total: 0 });
+    await adminStore.loadKnowledgeDetails();
+    expect(adminStore.skippedDocuments).toHaveLength(50);
+    expect(adminStore.skippedDocumentTotal).toBe(73);
+
+    // Switching to a knowledge base whose skipped query fails must not keep kb-1's alert.
+    vi.spyOn(adminApi, "listDocumentsPage").mockImplementation(async (_kb, query) => {
+      if (query?.buildStatus === "SKIPPED") throw new Error("boom");
+      return { items: [], total: 0 };
+    });
+    adminStore.documentFilters.cardState = "FAILED";
+    adminStore.selectedKnowledgeId = "kb-2";
+    await adminStore.selectKnowledge();
+    expect(adminStore.skippedDocuments).toEqual([]);
+    expect(adminStore.skippedDocumentTotal).toBe(0);
+    // kb-2 has no active index: the card filter is cleared instead of silently ignored.
+    expect(adminStore.documentFilters.cardState).toBe("");
+  });
+
+  it("polls only building indexes' tasks and refreshes fully once a build settles", async () => {
+    stubApi();
+    const building = { ...index, id: "idx-new", version: 4, status: "BUILDING" };
+    adminStore.selectedKnowledgeId = kb.id;
+    adminStore.knowledgeBases = [kb];
+    adminStore.indexes = [index, building];
+    vi.spyOn(adminApi, "listIndexes").mockResolvedValue([index, building]);
+    const listTasks = vi.spyOn(adminApi, "listIndexTasks").mockResolvedValue([{ ...task, index_id: "idx-new" }]);
+    const profiles = vi.spyOn(adminApi, "getKnowledgeProfiles").mockResolvedValue(null as never);
+
+    await adminStore.refreshBuildingState();
+    expect(listTasks).toHaveBeenCalledTimes(1);
+    expect(listTasks).toHaveBeenCalledWith("idx-new");
+    expect(profiles).not.toHaveBeenCalled();
+    expect(adminStore.latestIndexTasks["idx-new"]?.stage).toBe("CHUNKING");
+
+    listTasks.mockClear();
+    vi.spyOn(adminApi, "listIndexes").mockResolvedValue([index, { ...building, status: "READY" }]);
+    await adminStore.refreshBuildingState();
+    // The build settled: one full detail refresh reloads every index's tasks.
+    expect(listTasks).toHaveBeenCalledTimes(2);
+    expect(profiles).toHaveBeenCalledTimes(1);
   });
 
   it("warns when a RAG card batch only partially succeeds", async () => {
@@ -673,7 +869,7 @@ describe("adminStore", () => {
       rebuild_required: false,
     });
     const activate = vi.spyOn(adminApi, "activateIndex").mockResolvedValue(index);
-    vi
+    const gc = vi
       .spyOn(adminApi, "gcIndexes")
       .mockResolvedValue({ deleted_index_ids: ["old"], deleted_count: 1 });
     const del = vi
@@ -684,9 +880,18 @@ describe("adminStore", () => {
     expect(build).toHaveBeenCalledWith("kb-1");
     await adminStore.activateIndex("idx-1");
     expect(activate).toHaveBeenCalledWith("idx-1");
+    const confirm = vi.spyOn(ElMessageBox, "confirm").mockRejectedValueOnce("cancel");
     await adminStore.gcIndexes();
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("不可恢复"),
+      "回收旧索引",
+      expect.objectContaining({ type: "warning" }),
+    );
+    expect(gc).not.toHaveBeenCalled();
+    confirm.mockImplementation(async () => "confirm" as never);
+    await adminStore.gcIndexes();
+    expect(gc).toHaveBeenCalledWith("kb-1");
     expect(adminStore.notice).toBe("已回收 1 个旧索引");
-    vi.spyOn(ElMessageBox, "confirm").mockImplementation(async () => "confirm" as never);
     await adminStore.deleteIndex("idx-old");
     expect(del).toHaveBeenCalledWith("idx-old");
   });
@@ -774,16 +979,6 @@ describe("adminStore", () => {
     expect(adminStore.isActionableReleaseIndex(supportIndex.id)).toBe(true);
     expect(adminStore.isActionableReleaseIndex("missing")).toBe(false);
 
-    adminStore.documents = [
-      { display_name: "数据库手册", filename: "db.docx" },
-      { display_name: "部署说明", filename: "server.docx" },
-    ] as never;
-    adminStore.documentSearch = "server";
-    expect(adminStore.filteredDocuments).toHaveLength(1);
-    adminStore.documentSearch = "数据库";
-    expect(adminStore.filteredDocuments).toHaveLength(1);
-    adminStore.documentSearch = "";
-    expect(adminStore.filteredDocuments).toHaveLength(2);
     expect(adminStore.formatDate(null)).toBe("—");
     expect(adminStore.formatDate("2026-09-11T00:00:00Z")).not.toBe("—");
     expect(adminStore.formatJson(undefined)).toBe("(empty)");
@@ -882,18 +1077,14 @@ describe("adminStore", () => {
     expect(loadKnowledgeBases).toHaveBeenCalled();
   });
 
-  it("loads and updates model and RAG configuration", async () => {
-    const ragConfig = { vector_top_k: 12 } as never;
-    vi.spyOn(adminApi, "getRagConfig").mockResolvedValue(ragConfig);
-    vi.spyOn(adminApi, "updateRagConfig").mockResolvedValue(ragConfig);
+  // RAG retrieval configuration lives in ragAdminStore (configStores.spec.ts).
+  it("loads and updates model configuration", async () => {
     vi.spyOn(adminApi, "updateModel").mockResolvedValue({ rebuilds: ["kb-1"] } as never);
     vi.spyOn(adminApi, "listModels").mockResolvedValue([]);
     vi.spyOn(adminApi, "putApiKey").mockResolvedValue({} as never);
     vi.spyOn(adminApi, "deleteApiKey").mockResolvedValue({} as never);
     vi.spyOn(adminApi, "probeModel").mockResolvedValue({ success: true } as never);
 
-    await adminStore.loadRagConfig();
-    await adminStore.saveRagConfig({ vector_top_k: 12 });
     await adminStore.saveModelConfig("model-1", { rebuild_all_confirmed: true });
     expect(adminStore.notice).toContain("1 个知识库");
     expect(adminStore.noticeLevel).toBe("caveat");

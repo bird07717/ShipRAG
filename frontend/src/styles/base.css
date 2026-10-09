@@ -623,6 +623,10 @@ p {
    -------------------------------------------------------------------------- */
 
 .panel {
+  /* Grid/flex children default to min-width:auto, which lets a wide table or
+     toolbar stretch the panel past the viewport; tables scroll inside instead. */
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
@@ -1081,5 +1085,49 @@ p {
   .toolbar .search-input,
   .toolbar .el-select {
     width: 100%;
+  }
+}
+
+/* Drawers/dialogs are sized in px per view; never let them exceed the viewport,
+   and use the full width on phones (the mobile navigation drawer opens from
+   the left and keeps its own width). */
+.el-drawer.rtl {
+  max-width: 100vw;
+}
+
+.el-dialog {
+  max-width: calc(100vw - 32px);
+}
+
+@media (max-width: 720px) {
+  .el-drawer.rtl {
+    width: 100% !important;
+  }
+}
+
+/* Server-paged lists share one pagination bar below the rows. */
+.list-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+@media (max-width: 720px) {
+  .list-pagination {
+    justify-content: center;
+  }
+}
+
+/* Narrow screens: filter controls take the full row instead of fixed widths
+   (several views size date pickers/selects in px). */
+@media (max-width: 720px) {
+  .toolbar .el-date-editor,
+  .list-toolbar .el-date-editor,
+  .list-toolbar .el-select,
+  .list-toolbar .el-input {
+    width: 100% !important;
   }
 }

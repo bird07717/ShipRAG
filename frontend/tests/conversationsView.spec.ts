@@ -62,7 +62,8 @@ describe("ConversationsView", () => {
       {
         source: "ASSISTANT_API",
         userId: undefined,
-        limit: 200,
+        limit: 50,
+        offset: 0,
         activityFrom: undefined,
         activityTo: undefined,
       },
@@ -93,19 +94,33 @@ describe("ConversationsView", () => {
     expect(list.mock.lastCall![1]).toMatchObject({ userId: "biz-user-9" });
   });
 
-  it("reads source and user from the deep link and notes the 200-row limit", async () => {
-    const many = Array.from({ length: 200 }, (_, i) => conversation({ id: `c${i}` }));
-    const list = vi.spyOn(adminApi, "listConversations").mockResolvedValue({ items: many });
+  it("reads source and user from the deep link and pages on the server", async () => {
+    const firstPage = Array.from({ length: 50 }, (_, i) => conversation({ id: `c${i}` }));
+    const list = vi.spyOn(adminApi, "listConversations").mockResolvedValue({ items: firstPage, total: 120 });
     const wrapper = mountView("source=INTERNAL_CHAT&user=tester");
     await flushPromises();
     expect(list.mock.lastCall![1]).toEqual({
       source: "INTERNAL_CHAT",
       userId: "tester",
-      limit: 200,
+      limit: 50,
+      offset: 0,
       activityFrom: undefined,
       activityTo: undefined,
     });
-    expect(wrapper.text()).toContain("仅显示最近活动的 200 个");
+    expect(wrapper.text()).toContain("共 120 个会话");
+
+    // Next page keeps the filters and asks the server for the following rows.
+    const pagination = wrapper.findComponent({ name: "ElPagination" });
+    expect(pagination.exists()).toBe(true);
+    pagination.vm.$emit("update:current-page", 3);
+    pagination.vm.$emit("current-change", 3);
+    await flushPromises();
+    expect(list.mock.lastCall![1]).toMatchObject({ source: "INTERNAL_CHAT", userId: "tester", limit: 50, offset: 100 });
+
+    // A filter change restarts from the first page.
+    await wrapper.findAll("button").find((button) => button.text() === "查询")!.trigger("click");
+    await flushPromises();
+    expect(list.mock.lastCall![1]).toMatchObject({ offset: 0 });
   });
 
   it("drops a late response after switching knowledge base", async () => {

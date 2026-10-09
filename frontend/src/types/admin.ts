@@ -69,6 +69,35 @@ export interface DocumentItem {
   last_build_status?: string | null;
   last_build_error?: string | null;
   last_build_version?: number | null;
+  /** Present only when listed with card_index_id. */
+  card_state?: DocumentCardState | null;
+}
+
+/** RAG card review state of a document for one index (server-side filter). */
+export type DocumentCardState =
+  | "MISSING"
+  | "GENERATING"
+  | "FAILED"
+  | "PENDING_REVIEW"
+  | "REJECTED"
+  | "CONFIRMED";
+
+export interface DocumentListQuery {
+  search?: string;
+  buildStatus?: string;
+  cardState?: DocumentCardState;
+  /** Required with cardState; normally the active RAG index. */
+  cardIndexId?: string;
+  sort?: "created_at" | "display_name" | "file_size";
+  order?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+}
+
+/** One page of a server-paged admin list plus the total matching rows. */
+export interface Page<T> {
+  items: T[];
+  total: number;
 }
 
 export interface BuildRequestResult {

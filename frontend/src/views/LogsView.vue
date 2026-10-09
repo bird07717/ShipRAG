@@ -6,9 +6,9 @@ import { adminApi } from "@/api/admin";
 import { useAdminStore } from "@/composables/adminStore";
 import type {
   FailureSummary,
-  IndexTask,
   RagTrace,
   RequestErrorLog,
+  TaskRecord,
   TraceSummary,
 } from "@/types/admin";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
@@ -17,6 +17,11 @@ import CodeBlock from "@/components/ui/CodeBlock.vue";
 import MetricCard from "@/components/ui/MetricCard.vue";
 import AnswerReviewsView from "@/views/AnswerReviewsView.vue";
 import TracesView from "@/views/TracesView.vue";
+import { createLatestRequest } from "@/utils/latestRequest";
+import { clampedPage } from "@/utils/paging";
+import ListPagination from "@/components/ui/ListPagination.vue";
+import { replaceViewQuery } from "@/utils/viewQuery";
+import { isTraceSource, TRACE_SOURCE_LABELS } from "@/utils/statusLabels";
 
 const props = defineProps<{ navigationQuery?: string }>();
 const store = useAdminStore();
@@ -39,7 +44,7 @@ function navigationState(query = ""): {
   return {
     tab: LOG_TABS.has(requestedTab) ? requestedTab : "request-errors",
     engine: requestedEngine === "SUPPORT" || requestedEngine === "RAG" ? requestedEngine : "",
-    source: requestedSource === "ASSISTANT_API" || requestedSource === "INTERNAL_CHAT" || requestedSource === "PLAYGROUND" ? requestedSource : "",
+    source: isTraceSource(requestedSource) ? requestedSource : "",
     from: params.get("from") ?? "",
     to: params.get("to") ?? "",
   };
@@ -163,8 +168,7 @@ const failedTraceFilter = ref<{ engine: "" | "SUPPORT" | "RAG"; errorCode: strin
 });
 const failedTraceScope = computed(() => {
   const { source, from, to } = failedTraceFilter.value;
-  const labels = { ASSISTANT_API: "外部 Assistant", INTERNAL_CHAT: "内部聊天", PLAYGROUND: "检索试验台" };
-  return [source ? labels[source] : "", from || to ? `${from ? store.formatDate(from) : "不限起始时间"} ～ ${to ? store.formatDate(to) : "不限结束时间"}` : ""].filter(Boolean).join(" · ");
+  return [source ? TRACE_SOURCE_LABELS[source] : "", from || to ? `${from ? store.formatDate(from) : "不限起始时间"} ～ ${to ? store.formatDate(to) : "不限结束时间"}` : ""].filter(Boolean).join(" · ");
 });
 const failedTraces = ref<TraceSummary[]>([]);
 const loadingFailedTraces = ref(false);
@@ -183,7 +187,18 @@ const failedTraceCodes = computed(() =>
   (summary.value?.trace_failures ?? []).map((group) => group.error_code),
 );
 
+// Failed turns and failed tasks page on the server (X-Total-Count).
+const failedTracePage = ref(1);
+const failedTracePageSize = ref(50);
+const failedTraceTotal = ref(0);
+
+/** Reload failed turns from the first page (filters, scope or tab changed). */
 async function loadFailedTraces(): Promise<void> {
+  failedTracePage.value = 1;
+  await loadFailedTracePage();
+}
+
+async function loadFailedTracePage(): Promise<void> {
   const generation = ++failedTraceLoadGeneration;
   const knowledgeId = store.selectedKnowledgeId;
   const isCurrent = () => generation === failedTraceLoadGeneration && knowledgeId === store.selectedKnowledgeId;
@@ -191,19 +206,30 @@ async function loadFailedTraces(): Promise<void> {
   failedTraces.value = [];
   loadError.value = "";
   try {
-    const traces = await adminApi.listTraces(knowledgeId || undefined, {
+    const result = await adminApi.listTracesPage(knowledgeId || undefined, {
       status: "FAILED",
       engine: failedTraceFilter.value.engine || undefined,
       errorCode: failedTraceFilter.value.errorCode || undefined,
       ...(failedTraceFilter.value.source ? { source: failedTraceFilter.value.source } : {}),
       ...(failedTraceFilter.value.from ? { from: failedTraceFilter.value.from } : {}),
       ...(failedTraceFilter.value.to ? { to: failedTraceFilter.value.to } : {}),
-      limit: 200,
+      limit: failedTracePageSize.value,
+      offset: (failedTracePage.value - 1) * failedTracePageSize.value,
     });
-    if (isCurrent()) failedTraces.value = traces;
+    if (isCurrent()) {
+      const target = clampedPage(failedTracePage.value, failedTracePageSize.value, result.items.length, result.total);
+      if (target !== null) {
+        failedTracePage.value = target;
+        void loadFailedTracePage();
+        return;
+      }
+      failedTraces.value = result.items;
+      failedTraceTotal.value = result.total;
+    }
   } catch (error) {
     if (isCurrent()) {
       failedTraces.value = [];
+      failedTraceTotal.value = 0;
       loadError.value = errorMessage(error);
     }
   } finally {
@@ -248,25 +274,52 @@ const failedSupportTrace = computed(() => {
 
 /* ---------------- failed tasks ---------------- */
 
-const failedTasks = ref<IndexTask[]>([]);
+const failedTasks = ref<TaskRecord[]>([]);
 const loadingFailedTasks = ref(false);
-const selectedTask = ref<IndexTask | null>(null);
+const selectedTask = ref<TaskRecord | null>(null);
 const taskDrawerOpen = ref(false);
 
+const failedTaskRequest = createLatestRequest();
+const failedTaskPage = ref(1);
+const failedTaskPageSize = ref(50);
+const failedTaskTotal = ref(0);
+
+/** Reload failed tasks from the first page. */
 async function loadFailedTasks(): Promise<void> {
+  failedTaskPage.value = 1;
+  await loadFailedTaskPage();
+}
+
+async function loadFailedTaskPage(): Promise<void> {
+  const request = failedTaskRequest.begin();
   loadingFailedTasks.value = true;
   loadError.value = "";
   try {
-    failedTasks.value = await adminApi.listTasks({
-      status: "FAILED",
-      knowledgeId: store.selectedKnowledgeId || undefined,
-      limit: 100,
-    });
+    const result = await adminApi.listTasksPage(
+      {
+        status: "FAILED",
+        knowledgeId: store.selectedKnowledgeId || undefined,
+        limit: failedTaskPageSize.value,
+        offset: (failedTaskPage.value - 1) * failedTaskPageSize.value,
+      },
+      { signal: request.signal },
+    );
+    if (!request.isCurrent()) return;
+    const target = clampedPage(failedTaskPage.value, failedTaskPageSize.value, result.items.length, result.total);
+    if (target !== null) {
+      failedTaskPage.value = target;
+      void loadFailedTaskPage();
+      return;
+    }
+    failedTasks.value = result.items;
+    failedTaskTotal.value = result.total;
   } catch (error) {
+    if (!request.isCurrent()) return;
     failedTasks.value = [];
+    failedTaskTotal.value = 0;
     loadError.value = errorMessage(error);
   } finally {
-    loadingFailedTasks.value = false;
+    if (request.isCurrent()) loadingFailedTasks.value = false;
   }
 }
 
@@ -274,8 +327,22 @@ async function loadFailedTasks(): Promise<void> {
 
 const activeTab = ref(initialNavigation.tab);
 
+// Keep the open tab (and the failed-turn scope from a Dashboard deep link) in
+// the URL so refresh/share/back return to the same place.
+function syncLogsUrl(tab: string): void {
+  const scope = tab === "failed-turns" ? failedTraceFilter.value : null;
+  replaceViewQuery("logs", {
+    tab,
+    engine: scope?.engine,
+    source: scope?.source,
+    from: scope?.from,
+    to: scope?.to,
+  });
+}
+
 function handleTabChange(tab: string | number): void {
   const name = String(tab);
+  syncLogsUrl(name);
   if (name !== "failed-turns") invalidateFailedTraces();
   if (name === "request-errors" && !requestErrors.value.length) void loadRequestErrors();
   if (name === "failed-turns" && !failedTraces.value.length && !loadingFailedTraces.value) void loadFailedTraces();
@@ -286,13 +353,25 @@ onMounted(() => {
   void loadSummary();
   handleTabChange(activeTab.value);
 });
-onUnmounted(invalidateFailedTraces);
+onUnmounted(() => {
+  invalidateFailedTraces();
+  failedTaskRequest.cancel();
+});
 
 watch(
   () => props.navigationQuery,
   (query) => {
-    invalidateFailedTraces();
     const next = navigationState(query);
+    const current = failedTraceFilter.value;
+    // Our own URL write-back (syncLogsUrl) comes back here unchanged.
+    if (
+      next.tab === activeTab.value
+      && (next.tab !== "failed-turns" || (
+        next.engine === current.engine && next.source === current.source
+        && next.from === current.from && next.to === current.to
+      ))
+    ) return;
+    invalidateFailedTraces();
     activeTab.value = next.tab;
     failedTraceFilter.value = { engine: next.engine, errorCode: "", source: next.source, from: next.from, to: next.to };
     if (next.tab === "failed-turns") void loadFailedTraces();
@@ -517,7 +596,7 @@ watch(
 
           <!-- 2. Failed support turns -->
           <el-tab-pane label="失败轮次" name="failed-turns">
-            <p v-if="failedTraceScope" class="muted">列表范围：{{ failedTraceScope }} · 最多显示 200 条</p>
+            <p v-if="failedTraceScope" class="muted">列表范围：{{ failedTraceScope }} · 共 {{ failedTraceTotal }} 条</p>
             <div class="tab-toolbar">
               <el-select
                 v-model="failedTraceFilter.engine"
@@ -580,6 +659,13 @@ watch(
                 </template>
               </el-table-column>
             </el-table>
+            <ListPagination
+              v-model:page="failedTracePage"
+              v-model:page-size="failedTracePageSize"
+              :total="failedTraceTotal"
+              @page-change="loadFailedTracePage"
+              @size-change="loadFailedTraces"
+            />
             <EmptyState
               v-if="!loadingFailedTraces && !loadError && !failedTraces.length"
               title="没有失败轮次"
@@ -591,7 +677,7 @@ watch(
           <el-tab-pane label="任务失败" name="task-failures">
             <div class="tab-toolbar">
               <span class="muted tab-hint">
-                索引构建、GC 与恢复任务的失败记录（跨全部索引）
+                索引构建、GC 与恢复任务的失败记录（跨全部索引）· 共 {{ failedTaskTotal }} 条
               </span>
               <el-button :icon="Refresh" :loading="loadingFailedTasks" @click="loadFailedTasks">
                 刷新
@@ -602,7 +688,7 @@ watch(
               :data="failedTasks"
               size="small"
               class="clickable-table"
-              @row-click="(row: IndexTask) => { selectedTask = row; taskDrawerOpen = true; }"
+              @row-click="(row: TaskRecord) => { selectedTask = row; taskDrawerOpen = true; }"
             >
               <el-table-column label="时间" width="160">
                 <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
@@ -628,6 +714,13 @@ watch(
                 </template>
               </el-table-column>
             </el-table>
+            <ListPagination
+              v-model:page="failedTaskPage"
+              v-model:page-size="failedTaskPageSize"
+              :total="failedTaskTotal"
+              @page-change="loadFailedTaskPage"
+              @size-change="loadFailedTasks"
+            />
             <EmptyState
               v-if="!loadingFailedTasks && !loadError && !failedTasks.length"
               title="没有失败任务"
@@ -793,6 +886,19 @@ watch(
   width: 220px;
 }
 
+@media (max-width: 720px) {
+  .scope-actions {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .scope-actions .el-select,
+  .tab-toolbar .el-select,
+  .tab-toolbar .el-input {
+    width: 100%;
+  }
+}
+
 .overview-body {
   display: grid;
   gap: 14px;
@@ -800,13 +906,13 @@ watch(
 
 .metric-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
   gap: 14px;
 }
 
 .distribution-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   gap: 14px;
 }
 

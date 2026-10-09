@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { CircleCheckFilled, CircleCloseFilled, Document, Loading, Search, UploadFilled } from "@element-plus/icons-vue";
 
 import { useAdminStore } from "@/composables/adminStore";
 import { randomUUID } from "@/utils/uuid";
 import type {
+  DocumentCardState,
+  DocumentItem,
+  DocumentListQuery,
   DocumentProfileStatus,
   ProfileQualityStatus,
 } from "@/types/admin";
@@ -13,8 +16,18 @@ import RagDocumentCardEditor from "@/components/RagDocumentCardEditor.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import ListSkeleton from "@/components/ui/ListSkeleton.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
+import { DOCUMENT_CARD_STATES, statusLabel } from "@/utils/statusLabels";
+import ListPagination from "@/components/ui/ListPagination.vue";
 
 const store = useAdminStore();
+
+// Serialized once per inspection load (not on every re-render from polling).
+const elementJson = computed(() =>
+  store.elements.map((item) => ({ key: String(item.id), json: store.formatJson(item) })),
+);
+const chunkJson = computed(() =>
+  store.chunks.map((item) => ({ key: String(item.id), json: store.formatJson(item) })),
+);
 
 type UploadItem = {
   key: string;
@@ -45,8 +58,10 @@ const batchSummary = computed(() => {
   return `已上传 ${done} 份文档`;
 });
 
+// Loaded by a separate build_status=SKIPPED query, so the alert does not
+// depend on which page of the list is shown.
 const skippedDocuments = computed(() =>
-  store.documents.filter((item) => item.last_build_status === "SKIPPED"),
+  store.skippedDocuments.filter((item) => item.last_build_status === "SKIPPED"),
 );
 
 const processingState = computed(() => {
@@ -74,10 +89,6 @@ const supportState = computed(() => {
 
 const profileByDocument = computed(() =>
   Object.fromEntries((store.knowledgeProfileSummary?.profiles ?? []).map((item) => [item.document_id, item])),
-);
-
-const ragCardByDocument = computed(() =>
-  Object.fromEntries(store.ragDocumentCards.map((item) => [item.document_id, item])),
 );
 
 const ragCardTask = computed(() => {
@@ -116,6 +127,14 @@ const ragCardTaskProgressStatus = computed<"success" | "exception" | "warning" |
   return undefined;
 });
 
+// The full progress block is for a running task or one that needs attention;
+// a clean finished run is summarized in one line of the RAG strip instead.
+const ragCardTaskShowsProgress = computed(() => {
+  const task = ragCardTask.value;
+  if (!task) return false;
+  return ragCardTaskActive.value || task.status !== "SUCCEEDED" || ragCardTaskCounts.value.failed > 0;
+});
+
 const ragCardTaskLabel = computed(() => {
   const task = ragCardTask.value;
   if (!task) return "";
@@ -126,23 +145,41 @@ const ragCardTaskLabel = computed(() => {
   return ragCardTaskCounts.value.failed > 0 ? "生成完成（含失败）" : "生成完成";
 });
 
-function ragCardLabel(documentId: string): string {
-  const card = ragCardByDocument.value[documentId];
-  if (!card) return "未生成";
-  if (card.generation_status === "FAILED") return "生成失败";
-  if (card.generation_status !== "READY") return "生成中";
-  if (card.review_status === "CONFIRMED") return "已确认";
-  if (card.review_status === "REJECTED") return "已拒绝";
-  return "待确认";
+// Row card state comes from the server (the list always carries the active index).
+function ragCardDisplay(row: DocumentItem): { label: string; tag: "success" | "warning" | "danger" | "info" } {
+  return row.card_state ? DOCUMENT_CARD_STATES[row.card_state] : { label: "—", tag: "info" };
 }
 
-function ragCardTagType(documentId: string): "success" | "warning" | "danger" | "info" {
-  const card = ragCardByDocument.value[documentId];
-  if (!card) return "info";
-  if (card.generation_status === "FAILED" || card.review_status === "REJECTED") return "danger";
-  if (card.generation_status === "READY" && card.review_status === "CONFIRMED") return "success";
-  return "warning";
+// Search, filters, sorting and paging run on the server (store.documentFilters).
+const BUILD_STATUS_FILTERS = ["READY", "FAILED", "SKIPPED", "CANCELLED", "QUEUED", "PARSING", "EMBEDDING"];
+const RAG_CARD_FILTERS = (Object.keys(DOCUMENT_CARD_STATES) as DocumentCardState[])
+  .map((value) => ({ value, label: DOCUMENT_CARD_STATES[value].label }));
+const hasDocumentFilters = computed(() => Boolean(
+  store.documentSearch.trim() || store.documentFilters.buildStatus || store.documentFilters.cardState,
+));
+
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+watch(() => store.documentSearch, () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => void store.reloadDocuments(), 400);
+});
+onBeforeUnmount(() => clearTimeout(searchTimer));
+
+const SORT_FIELDS: Record<string, NonNullable<DocumentListQuery["sort"]>> = {
+  name: "display_name",
+  size: "file_size",
+  created: "created_at",
+};
+function onSortChange({ prop, order }: { prop: string | null; order: "ascending" | "descending" | null }): void {
+  const field = prop ? SORT_FIELDS[prop] : undefined;
+  store.documentFilters.sort = field && order ? field : "created_at";
+  store.documentFilters.order = field && order === "ascending" ? "asc" : "desc";
+  void store.reloadDocuments();
 }
+const defaultSort = computed(() => {
+  const prop = Object.entries(SORT_FIELDS).find(([, field]) => field === store.documentFilters.sort)?.[0];
+  return { prop: prop ?? "created", order: store.documentFilters.order === "asc" ? "ascending" as const : "descending" as const };
+});
 
 const profileLabels: Record<DocumentProfileStatus, string> = {
   NOT_GENERATED: "未生成", GENERATING: "生成中", PENDING_ONLINE: "待上线", ONLINE: "已上线",
@@ -288,6 +325,9 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
           <span>（构建 v{{ doc.last_build_version ?? "-" }}）：{{ doc.last_build_error || "未知原因" }}</span>
         </li>
       </ul>
+      <p v-if="store.skippedDocumentTotal > skippedDocuments.length" class="skipped-documents-more">
+        另有 {{ store.skippedDocumentTotal - skippedDocuments.length }} 份未列出，共 {{ store.skippedDocumentTotal }} 份；可在下方“最近构建”筛选“已跳过”查看全部。
+      </p>
     </el-alert>
 
     <div class="panel">
@@ -312,33 +352,84 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
             clearable
             :prefix-icon="Search"
           />
+          <el-select
+            v-model="store.documentFilters.buildStatus"
+            class="filter-select"
+            placeholder="最近构建：全部"
+            clearable
+            aria-label="按最近构建状态筛选"
+            @change="store.reloadDocuments()"
+          >
+            <el-option
+              v-for="value in BUILD_STATUS_FILTERS"
+              :key="value"
+              :label="statusLabel(value)"
+              :value="value"
+            />
+          </el-select>
+          <el-tooltip
+            :disabled="Boolean(store.activeIndex)"
+            content="没有当前 RAG 索引，无法按 RAG 理解状态筛选"
+            placement="top"
+          >
+            <el-select
+              v-model="store.documentFilters.cardState"
+              class="filter-select"
+              placeholder="RAG 理解：全部"
+              clearable
+              :disabled="!store.activeIndex"
+              aria-label="按 RAG 理解状态筛选"
+              @change="store.reloadDocuments()"
+            >
+              <el-option
+                v-for="option in RAG_CARD_FILTERS"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
+            </el-select>
+          </el-tooltip>
           <div class="spacer" />
-          <span v-if="store.ragDocumentCardReadiness" class="muted result-count">
-            RAG 理解：{{ store.ragDocumentCardReadiness.confirmed_count }}/{{ store.ragDocumentCardReadiness.expected_count }} 已确认
+          <span class="muted result-count">
+            {{ hasDocumentFilters ? "匹配" : "共" }} {{ store.documentTotal }} 个文档
           </span>
-          <el-button
-            :disabled="
-              !store.activeIndex
-                || !store.ragDocumentCardReadiness
-                || store.ragDocumentCardReadiness.auto_count === 0
-            "
-            :loading="Boolean(store.actionLoading[`rag-document-card-confirm-batch:${store.activeIndex?.id ?? ''}`])"
-            @click="store.confirmRagDocumentCards()"
-          >
-            一键确认待确认（{{ store.ragDocumentCardReadiness?.auto_count ?? 0 }}）
-          </el-button>
-          <el-button
-            :disabled="!store.activeIndex"
-            :loading="Boolean(store.actionLoading[`rag-document-card-generate:${store.activeIndex?.id ?? ''}`]) || ragCardTaskActive"
-            @click="store.generateRagDocumentCards()"
-          >
-            生成/补齐 RAG 理解
-          </el-button>
-          <span class="muted result-count">{{ store.filteredDocuments.length }} 个文档</span>
         </div>
       </div>
 
-      <div v-if="ragCardTask" class="rag-card-task-progress">
+      <!-- RAG understanding: readiness, bulk actions and the running task together. -->
+      <div class="rag-card-strip" aria-label="RAG 文档理解">
+        <span class="rag-card-strip-label">RAG 文档理解</span>
+        <span v-if="store.ragDocumentCardReadiness" class="muted result-count">
+          {{ store.ragDocumentCardReadiness.confirmed_count }}/{{ store.ragDocumentCardReadiness.expected_count }} 已确认<template v-if="store.ragDocumentCardReadiness.auto_count"> · {{ store.ragDocumentCardReadiness.auto_count }} 份待确认</template>
+        </span>
+        <span v-else class="muted result-count">{{ store.activeIndex ? "加载中…" : "没有当前 RAG 索引" }}</span>
+        <span v-if="ragCardTask && !ragCardTaskShowsProgress" class="muted result-count">
+          · 最近一次生成已完成（成功 {{ ragCardTaskCounts.generated }} 份）
+        </span>
+        <div class="spacer" />
+        <el-button
+          size="small"
+          :disabled="
+            !store.activeIndex
+              || !store.ragDocumentCardReadiness
+              || store.ragDocumentCardReadiness.auto_count === 0
+          "
+          :loading="Boolean(store.actionLoading[`rag-document-card-confirm-batch:${store.activeIndex?.id ?? ''}`])"
+          @click="store.confirmRagDocumentCards()"
+        >
+          一键确认待确认（{{ store.ragDocumentCardReadiness?.auto_count ?? 0 }}）
+        </el-button>
+        <el-button
+          size="small"
+          :disabled="!store.activeIndex"
+          :loading="Boolean(store.actionLoading[`rag-document-card-generate:${store.activeIndex?.id ?? ''}`]) || ragCardTaskActive"
+          @click="store.generateRagDocumentCards()"
+        >
+          生成/补齐 RAG 理解
+        </el-button>
+      </div>
+
+      <div v-if="ragCardTask && ragCardTaskShowsProgress" class="rag-card-task-progress">
         <div class="rag-card-task-summary">
           <b>{{ ragCardTaskLabel }}</b>
           <span class="muted">
@@ -357,50 +448,74 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         </small>
       </div>
 
-      <ListSkeleton v-if="store.loading && !store.documents.length" :columns="7" />
+      <ListSkeleton v-if="(store.loading || store.documentsLoading) && !store.documents.length" :columns="7" />
       <el-table
-        v-else-if="store.filteredDocuments.length"
-        :data="store.filteredDocuments"
-        @row-click="(row: any) => store.inspectDocument(row)"
+        v-else-if="store.documents.length"
+        v-loading="store.documentsLoading"
+        :data="store.documents"
+        :default-sort="defaultSort"
+        @sort-change="onSortChange"
+        @row-click="(row: DocumentItem) => store.inspectDocument(row)"
       >
-        <el-table-column label="文件" min-width="260">
+        <el-table-column
+          label="文件"
+          prop="name"
+          min-width="320"
+          sortable="custom"
+        >
           <template #default="scope">
             <div class="file-cell">
               <span class="file-type-badge">{{
                 scope.row.filename?.toLowerCase().endsWith(".pdf") ? "PDF" : "DOCX"
               }}</span>
-              <div class="cell-primary">
-                <b>{{ scope.row.display_name }}</b>
-                <small class="mono">{{ scope.row.filename }}</small>
+              <div class="cell-primary document-name">
+                <b :title="scope.row.display_name">{{ scope.row.display_name }}</b>
+                <small class="mono" :title="scope.row.filename">{{ scope.row.filename }}</small>
               </div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="大小" width="100">
+        <el-table-column
+          label="大小"
+          prop="size"
+          width="100"
+          sortable="custom"
+        >
           <template #default="scope">{{ formatSize(scope.row.file_size) }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="130">
-          <template #default="scope"><StatusBadge :status="scope.row.status" /></template>
+        <el-table-column label="最近构建" width="130">
+          <template #default="scope">
+            <span v-if="scope.row.last_build_status" :title="`Index v${scope.row.last_build_version ?? '-'}`">
+              <StatusBadge :status="scope.row.last_build_status" />
+            </span>
+            <span v-else class="muted">未参与构建</span>
+          </template>
         </el-table-column>
-        <el-table-column label="文档属性" width="130">
+        <el-table-column label="文档属性" width="110">
           <template #default="scope">
             <el-tag :type="profileTagType(documentProfileStatus(scope.row.id))" size="small">
               {{ profileLabels[documentProfileStatus(scope.row.id)] }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="RAG 理解" width="120">
+        <el-table-column label="RAG 理解" width="110">
           <template #default="scope">
-            <el-tag :type="ragCardTagType(scope.row.id)" size="small">
-              {{ ragCardLabel(scope.row.id) }}
+            <el-tag :type="ragCardDisplay(scope.row).tag" size="small">
+              {{ ragCardDisplay(scope.row).label }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="上传时间" min-width="170">
+        <el-table-column
+          label="上传时间"
+          prop="created"
+          width="168"
+          sortable="custom"
+        >
           <template #default="scope">{{ store.formatDate(scope.row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="" width="140" align="right">
+        <el-table-column label="操作" width="170" align="right">
           <template #default="scope">
+            <el-button link type="primary" @click.stop="store.inspectDocument(scope.row)">详情</el-button>
             <el-button
               link
               type="primary"
@@ -419,6 +534,12 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
         </el-table-column>
       </el-table>
       <EmptyState
+        v-else-if="!store.documents.length && hasDocumentFilters"
+        :icon="Search"
+        title="没有匹配的文档"
+        description="当前搜索或筛选条件下没有文档，请调整或清除条件。"
+      />
+      <EmptyState
         v-else
         :icon="Document"
         title="暂无文档"
@@ -434,6 +555,13 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
           </el-button>
         </template>
       </EmptyState>
+      <ListPagination
+        v-model:page="store.documentPage"
+        v-model:page-size="store.documentPageSize"
+        :total="store.documentTotal"
+        @page-change="store.loadDocumentPage()"
+        @size-change="store.reloadDocuments()"
+      />
     </div>
 
     <!-- Upload drawer -->
@@ -565,17 +693,17 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
           <el-tab-pane label="内容预览" lazy>
             <DocumentPreview v-if="store.documentDrawerOpen" :elements="store.elements" />
           </el-tab-pane>
-          <el-tab-pane :label="`元素（Elements）· ${store.elements.length}`">
+          <el-tab-pane :label="`元素（Elements）· ${store.elements.length}`" lazy>
             <div class="scroll-list">
-              <pre v-for="item in store.elements" :key="String(item.id)">{{ store.formatJson(item) }}</pre>
+              <pre v-for="item in elementJson" :key="item.key">{{ item.json }}</pre>
             </div>
           </el-tab-pane>
-          <el-tab-pane :label="`切片（Chunks）· ${store.chunks.length}`">
+          <el-tab-pane :label="`切片（Chunks）· ${store.chunks.length}`" lazy>
             <div class="scroll-list">
-              <pre v-for="item in store.chunks" :key="String(item.id)">{{ store.formatJson(item) }}</pre>
+              <pre v-for="item in chunkJson" :key="item.key">{{ item.json }}</pre>
             </div>
           </el-tab-pane>
-          <el-tab-pane label="Profile 与别名（Alias）">
+          <el-tab-pane label="Profile 与别名（Alias）" lazy>
             <div v-if="store.documentProfileContext" class="profile-context">
               <template v-if="store.documentProfileContext.active_profile || store.documentProfileContext.pending_profile">
                 <div class="profile-card">
@@ -770,6 +898,12 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
 .toolbar-row {
   padding-bottom: 0;
 }
+.toolbar .filter-select {
+  width: 150px;
+}
+@media (max-width: 720px) {
+  .toolbar .filter-select { width: 100%; }
+}
 .result-count {
   font-size: 12px;
 }
@@ -777,7 +911,7 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
 .rag-card-task-progress {
   display: grid;
   gap: 8px;
-  margin: 14px 0 0;
+  margin: 8px 18px 0;
   padding: 12px 14px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
@@ -812,6 +946,38 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
 
 :deep(.el-table__row) {
   cursor: pointer;
+}
+
+/* Titles get up to two lines instead of a one-line ellipsis. */
+.document-name b {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  white-space: normal;
+  line-height: 1.4;
+}
+
+.rag-card-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 12px 18px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+
+.rag-card-strip .spacer {
+  flex: 1;
+}
+
+.rag-card-strip-label {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .file-cell {
@@ -925,6 +1091,11 @@ function qualityTagType(status: ProfileQualityStatus): "success" | "warning" | "
 
 .skipped-documents-alert {
   margin-bottom: 16px;
+}
+
+.skipped-documents-more {
+  margin: 8px 0 0;
+  font-size: 12px;
 }
 
 .skipped-documents-list {

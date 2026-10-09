@@ -11,7 +11,14 @@ import CodeBlock from "@/components/ui/CodeBlock.vue";
 
 const store = useAdminStore();
 
-const detailIndex = ref<KnowledgeIndex | null>(null);
+// The drawer follows the live row in store.indexes (polling replaces the
+// array), so status/progress update while it is open. The snapshot is only a
+// fallback once the index has left the list (e.g. after deletion).
+const detailIndexId = ref("");
+const detailSnapshot = ref<KnowledgeIndex | null>(null);
+const detailIndex = computed<KnowledgeIndex | null>(
+  () => store.indexes.find((index) => index.id === detailIndexId.value) ?? detailSnapshot.value,
+);
 const detailOpen = ref(false);
 
 const PIPELINE_STAGES = ["PARSING", "PROCESSING_IMAGES", "CHUNKING", "EMBEDDING", "COMPLETED"];
@@ -23,8 +30,9 @@ const STAGE_LABELS: Record<string, string> = {
   COMPLETED: "完成",
 };
 
-async function openDetail(index: KnowledgeIndex): Promise<void> {
-  detailIndex.value = index;
+function openDetail(index: KnowledgeIndex): void {
+  detailIndexId.value = index.id;
+  detailSnapshot.value = index;
   detailOpen.value = true;
 }
 
@@ -172,7 +180,7 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
       <el-table
         v-else-if="store.indexes.length"
         :data="store.indexes"
-        @row-click="(row: any) => openDetail(row)"
+        @row-click="(row: KnowledgeIndex) => openDetail(row)"
       >
         <el-table-column label="索引" min-width="145">
           <template #default="scope">
@@ -183,8 +191,21 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="110">
-          <template #default="scope"><StatusBadge :status="scope.row.status" /></template>
+        <el-table-column label="状态" width="150">
+          <template #default="scope">
+            <div class="status-cell">
+              <StatusBadge :status="scope.row.status" />
+              <el-tag
+                v-if="isRagActive(scope.row)"
+                type="success"
+                size="small"
+                effect="dark"
+              >
+                当前 RAG
+              </el-tag>
+              <small v-else-if="scope.row.status === 'ACTIVE'" class="muted">非当前 RAG</small>
+            </div>
+          </template>
         </el-table-column>
         <el-table-column label="进度" width="120">
           <template #default="scope">
@@ -199,8 +220,9 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
         <el-table-column label="耗时" width="80">
           <template #default="scope">{{ formatDuration(scope.row) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="250" align="right">
+        <el-table-column label="操作" width="290" align="right">
           <template #default="scope">
+            <el-button link type="primary" @click.stop="openDetail(scope.row)">详情</el-button>
             <el-button
               v-if="canActivate(scope.row)"
               link
@@ -442,8 +464,9 @@ function buildingDocumentSummary(index: KnowledgeIndex): string | null {
 .index-build { min-width: 0; }
 .index-build > .panel { min-width: 0; overflow: hidden; }
 .index-build :deep(.el-table) { width: 100%; max-width: 100%; }
+.status-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .toolbar-row {
-  padding-bottom: 0;
+  padding-bottom: 14px;
 }
 
 .candidate-note {

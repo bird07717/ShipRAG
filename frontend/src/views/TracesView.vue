@@ -1,14 +1,23 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Refresh, Search, SetUp } from "@element-plus/icons-vue";
 
 import { adminApi } from "@/api/admin";
 import { useAdminStore } from "@/composables/adminStore";
-import type { RagTrace, TraceSummary } from "@/types/admin";
+import type { RagTrace, TraceSource, TraceSummary } from "@/types/admin";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
+import { createLatestRequest } from "@/utils/latestRequest";
+import { clampedPage } from "@/utils/paging";
+import ListPagination from "@/components/ui/ListPagination.vue";
 import { traceDiagnostics } from "@/utils/traceDiagnostics";
+import {
+  responseTypeLabel,
+  statusLabel,
+  TRACE_SOURCE_LABELS,
+  TRACE_SOURCES,
+} from "@/utils/statusLabels";
 
 const store = useAdminStore();
 
@@ -32,19 +41,12 @@ const RESPONSE_TYPES = [
   "ESCALATION_REQUIRED",
 ] as const;
 const STATUSES = ["RUNNING", "COMPLETED", "FAILED", "CANCELLED"] as const;
-const SOURCES = [
-  { value: "ASSISTANT_API", label: "线上 Assistant" },
-  { value: "INTERNAL_CHAT", label: "DemoChat / 内部聊天" },
-  { value: "PLAYGROUND", label: "调试台" },
-] as const;
-const sourceLabel: Record<(typeof SOURCES)[number]["value"], string> = Object.fromEntries(
-  SOURCES.map((item) => [item.value, item.label]),
-) as Record<(typeof SOURCES)[number]["value"], string>;
+const SOURCES = TRACE_SOURCES.map((value) => ({ value, label: TRACE_SOURCE_LABELS[value] }));
 
 const traceFilter = ref<{
   status: string;
   responseType: string;
-  source: "" | (typeof SOURCES)[number]["value"];
+  source: "" | TraceSource;
   userId: string;
   requestId: string;
   range: [Date, Date] | null;
@@ -59,27 +61,77 @@ const traceFilter = ref<{
 const traces = ref<TraceSummary[]>([]);
 const loadingTraces = ref(false);
 
+// Filters, knowledge switches, paging and row clicks can overlap: only the
+// latest list/detail request may write its result (older ones are dropped).
+const page = ref(1);
+// Search text of the last request; typing back to it is not a new search.
+const appliedSearch = ref("");
+const pageSize = ref(50);
+const total = ref(0);
+const hasFilters = computed(() => Boolean(
+  traceFilter.value.status || traceFilter.value.responseType || traceFilter.value.source
+  || traceFilter.value.userId.trim() || traceFilter.value.requestId.trim()
+  || traceFilter.value.range || traceSearch.value.trim(),
+));
+const listRequest = createLatestRequest();
+const detailRequest = createLatestRequest();
+
 async function loadTraces(): Promise<void> {
+  const request = listRequest.begin();
+  appliedSearch.value = traceSearch.value.trim();
   loadingTraces.value = true;
   loadError.value = "";
   try {
-    traces.value = await adminApi.listTraces(store.selectedKnowledgeId || undefined, {
-      status: traceFilter.value.status || undefined,
-      responseType: traceFilter.value.responseType || undefined,
-      source: traceFilter.value.source || undefined,
-      userId: traceFilter.value.userId.trim() || undefined,
-      requestId: traceFilter.value.requestId.trim() || undefined,
-      from: traceFilter.value.range?.[0]?.toISOString(),
-      to: traceFilter.value.range?.[1]?.toISOString(),
-      limit: 200,
-    });
+    const result = await adminApi.listTracesPage(
+      store.selectedKnowledgeId || undefined,
+      {
+        status: traceFilter.value.status || undefined,
+        responseType: traceFilter.value.responseType || undefined,
+        source: traceFilter.value.source || undefined,
+        userId: traceFilter.value.userId.trim() || undefined,
+        requestId: traceFilter.value.requestId.trim() || undefined,
+        question: appliedSearch.value || undefined,
+        from: traceFilter.value.range?.[0]?.toISOString(),
+        to: traceFilter.value.range?.[1]?.toISOString(),
+        limit: pageSize.value,
+        offset: (page.value - 1) * pageSize.value,
+      },
+      { signal: request.signal },
+    );
+    if (!request.isCurrent()) return;
+    const target = clampedPage(page.value, pageSize.value, result.items.length, result.total);
+    if (target !== null) {
+      // The page emptied under us (records expired or filters narrowed): show the last page.
+      page.value = target;
+      void loadTraces();
+      return;
+    }
+    traces.value = result.items;
+    total.value = result.total;
   } catch (error) {
+    if (!request.isCurrent()) return;
     traces.value = [];
+    total.value = 0;
     loadError.value = errorMessage(error);
   } finally {
-    loadingTraces.value = false;
+    if (request.isCurrent()) loadingTraces.value = false;
   }
 }
+
+/** Any filter change restarts from the first page. */
+function applyFilters(): void {
+  page.value = 1;
+  void loadTraces();
+}
+
+// The question search runs on the server across all pages; debounce typing.
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+watch(traceSearch, (value) => {
+  clearTimeout(searchTimer);
+  // Resetting filters already reloaded with the cleared text: no second request.
+  if (value.trim() === appliedSearch.value) return;
+  searchTimer = setTimeout(applyFilters, 400);
+});
 
 function resetFilters(): void {
   traceFilter.value = {
@@ -90,17 +142,17 @@ function resetFilters(): void {
     requestId: "",
     range: null,
   };
+  clearTimeout(searchTimer);
+  traceSearch.value = "";
+  page.value = 1;
   void loadTraces();
 }
 
 onMounted(() => {
-  if (store.traces.length) {
-    traces.value = store.traces;
-  }
   void loadTraces();
 });
 
-watch(() => store.selectedKnowledgeId, () => void loadTraces());
+watch(() => store.selectedKnowledgeId, applyFilters);
 
 const LATENCY_STEPS: Array<{ key: string; label: string }> = [
   { key: "v2_query_interpreter_ms", label: "查询理解（LLM 1）" },
@@ -120,11 +172,6 @@ const LATENCY_STEPS: Array<{ key: string; label: string }> = [
   { key: "total_ms", label: "Total" },
 ];
 
-const filteredTraces = computed(() => {
-  const keyword = traceSearch.value.trim().toLowerCase();
-  if (!keyword) return traces.value;
-  return traces.value.filter((trace) => trace.question.toLowerCase().includes(keyword));
-});
 
 const timeline = computed(() => {
   const trace = activeTraceDetail.value;
@@ -182,6 +229,20 @@ const v2Degradations = computed(() => {
 
 const v2RerankDetail = computed(() => diagnostics.value.rerank);
 
+// Detail panels render only while expanded, and each JSON string is computed
+// once per trace: typing in the list search must not re-serialize the trace.
+const openPanels = ref<string[]>([]);
+function panelOpen(name: string): boolean {
+  return openPanels.value.includes(name);
+}
+const panelJson = {
+  runtime: computed(() => store.formatJson(activeTraceDetail.value?.runtime_snapshot)),
+  retrieval: computed(() => store.formatJson(activeTraceDetail.value?.retrieval_result)),
+  rerankV2: computed(() => store.formatJson(v2RerankDetail.value)),
+  rerank: computed(() => store.formatJson(activeTraceDetail.value?.rerank_result)),
+  raw: computed(() => store.formatJson(activeTraceDetail.value)),
+};
+
 const citationWarning = computed(() => {
   const result = activeTraceDetail.value?.citation_result as
     | { citation_missing?: boolean; invalid_source_ids?: string[] }
@@ -212,17 +273,26 @@ const errorDescription = computed(() => {
 });
 
 async function selectTrace(traceId: string): Promise<void> {
+  const request = detailRequest.begin();
   loadingDetail.value = true;
   loadError.value = "";
   try {
-    activeTraceDetail.value = await store.openTraceSilent(traceId);
+    const detail = await store.openTraceSilent(traceId);
+    if (request.isCurrent()) activeTraceDetail.value = detail;
   } catch (error) {
+    if (!request.isCurrent()) return;
     activeTraceDetail.value = null;
     loadError.value = errorMessage(error);
   } finally {
-    loadingDetail.value = false;
+    if (request.isCurrent()) loadingDetail.value = false;
   }
 }
+
+onBeforeUnmount(() => {
+  clearTimeout(searchTimer);
+  listRequest.cancel();
+  detailRequest.cancel();
+});
 </script>
 
 <template>
@@ -236,25 +306,20 @@ async function selectTrace(traceId: string): Promise<void> {
       @close="loadError = ''"
     />
     <!-- Trace list -->
-    <section class="panel trace-list">
-      <header class="panel-header">
-        <div>
-          <h3>链路追踪（Traces）</h3>
-          <span class="sub">{{ filteredTraces.length }} 条记录</span>
-        </div>
-      </header>
+    <!-- Filters span both columns so the list keeps its width for records. -->
+    <section class="panel trace-filters" aria-label="链路筛选">
       <div class="panel-body list-toolbar">
         <el-select
           v-model="traceFilter.status"
           placeholder="状态"
           clearable
           class="filter-select"
-          @change="loadTraces"
+          @change="applyFilters"
         >
           <el-option
             v-for="s in STATUSES"
             :key="s"
-            :label="s"
+            :label="statusLabel(s)"
             :value="s"
           />
         </el-select>
@@ -263,7 +328,7 @@ async function selectTrace(traceId: string): Promise<void> {
           placeholder="调用来源"
           clearable
           class="filter-select"
-          @change="loadTraces"
+          @change="applyFilters"
         >
           <el-option
             v-for="item in SOURCES"
@@ -277,12 +342,12 @@ async function selectTrace(traceId: string): Promise<void> {
           placeholder="响应类型"
           clearable
           class="filter-select"
-          @change="loadTraces"
+          @change="applyFilters"
         >
           <el-option
             v-for="type in RESPONSE_TYPES"
             :key="type"
-            :label="type"
+            :label="responseTypeLabel(type)"
             :value="type"
           />
         </el-select>
@@ -291,16 +356,16 @@ async function selectTrace(traceId: string): Promise<void> {
           placeholder="用户 ID"
           clearable
           class="filter-user"
-          @keyup.enter="loadTraces"
-          @clear="loadTraces"
+          @keyup.enter="applyFilters"
+          @clear="applyFilters"
         />
         <el-input
           v-model="traceFilter.requestId"
           placeholder="请求 ID"
           clearable
           class="filter-user"
-          @keyup.enter="loadTraces"
-          @clear="loadTraces"
+          @keyup.enter="applyFilters"
+          @clear="applyFilters"
         />
         <el-date-picker
           v-model="traceFilter.range"
@@ -310,21 +375,32 @@ async function selectTrace(traceId: string): Promise<void> {
           end-placeholder="结束时间"
           class="filter-range"
         />
-        <el-button :icon="Refresh" :loading="loadingTraces" @click="loadTraces">
+        <el-button :icon="Refresh" :loading="loadingTraces" @click="applyFilters">
           查询
         </el-button>
         <el-button text @click="resetFilters">重置</el-button>
         <el-input
           v-model="traceSearch"
-          placeholder="在结果中搜索问题..."
+          placeholder="搜索问题（全部记录）..."
+          aria-label="按问题内容搜索链路"
           clearable
           :prefix-icon="Search"
           class="filter-search"
         />
       </div>
+    </section>
+    <section class="panel trace-list">
+      <header class="panel-header">
+        <div>
+          <h3>链路追踪（Traces）</h3>
+          <span class="sub">
+            共 {{ total }} 条记录<template v-if="total > pageSize"> · 第 {{ page }} / {{ Math.ceil(total / pageSize) }} 页</template>
+          </span>
+        </div>
+      </header>
       <div v-loading="loadingTraces" class="trace-rows">
         <button
-          v-for="trace in filteredTraces"
+          v-for="trace in traces"
           :key="trace.trace_id"
           type="button"
           class="trace-row"
@@ -334,7 +410,7 @@ async function selectTrace(traceId: string): Promise<void> {
           <div class="trace-row-main">
             <b class="trace-question" :title="trace.question">{{ trace.question }}</b>
             <small class="trace-meta">
-              {{ trace.source ? sourceLabel[trace.source] : "DemoChat / 内部聊天" }} ·
+              {{ TRACE_SOURCE_LABELS[trace.source ?? "INTERNAL_CHAT"] }} ·
               {{ trace.engine ?? "RAG" }} ·
               {{ trace.mode }}
               <template v-if="trace.user_id"> · {{ trace.user_id }}</template>
@@ -354,11 +430,18 @@ async function selectTrace(traceId: string): Promise<void> {
           </time>
         </button>
         <EmptyState
-          v-if="!loadingTraces && !loadError && !filteredTraces.length"
-          title="暂无链路追踪（Trace）"
-          description="发起 RAG 调试台（Playground）查询或问答测试（DemoChat）对话后，这里会记录完整链路。"
+          v-if="!loadingTraces && !loadError && !traces.length"
+          :title="hasFilters ? '没有符合条件的链路' : '暂无链路追踪（Trace）'"
+          :description="hasFilters ? '请调整或重置筛选条件。' : '发起 RAG 调试台（Playground）查询或问答测试（DemoChat）对话后，这里会记录完整链路。'"
         />
       </div>
+      <ListPagination
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :total="total"
+        @page-change="loadTraces"
+        @size-change="applyFilters"
+      />
     </section>
 
     <!-- Trace detail -->
@@ -528,25 +611,27 @@ async function selectTrace(traceId: string): Promise<void> {
             </li>
           </ol>
 
-          <el-collapse class="detail-collapse">
+          <el-collapse v-model="openPanels" class="detail-collapse">
             <el-collapse-item title="运行快照（模型、策略与索引）" name="runtime-snapshot">
-              <CodeBlock :code="store.formatJson(activeTraceDetail.runtime_snapshot)" max-height="280px" />
+              <CodeBlock v-if="panelOpen('runtime-snapshot')" :code="panelJson.runtime.value" max-height="280px" />
             </el-collapse-item>
             <el-collapse-item title="检索（Retrieval）" name="retrieval">
-              <CodeBlock :code="store.formatJson(activeTraceDetail.retrieval_result)" max-height="280px" />
+              <CodeBlock v-if="panelOpen('retrieval')" :code="panelJson.retrieval.value" max-height="280px" />
             </el-collapse-item>
             <el-collapse-item v-if="v2Generation" title="文档级重排（RAG V2）" name="rerank-v2">
-              <CodeBlock v-if="v2RerankDetail" :code="store.formatJson(v2RerankDetail)" max-height="280px" />
-              <p v-else class="muted detail-empty">（本轮未记录文档级重排详情）</p>
+              <template v-if="panelOpen('rerank-v2')">
+                <CodeBlock v-if="v2RerankDetail" :code="panelJson.rerankV2.value" max-height="280px" />
+                <p v-else class="muted detail-empty">（本轮未记录文档级重排详情）</p>
+              </template>
             </el-collapse-item>
             <el-collapse-item v-else title="重排序（Rerank · 遗留）" name="rerank">
-              <CodeBlock :code="store.formatJson(activeTraceDetail.rerank_result)" max-height="280px" />
+              <CodeBlock v-if="panelOpen('rerank')" :code="panelJson.rerank.value" max-height="280px" />
             </el-collapse-item>
             <el-collapse-item v-if="activeTraceDetail.prompt" title="提示词（Prompt · 遗留）" name="prompt">
-              <CodeBlock :code="activeTraceDetail.prompt" max-height="280px" />
+              <CodeBlock v-if="panelOpen('prompt')" :code="activeTraceDetail.prompt" max-height="280px" />
             </el-collapse-item>
             <el-collapse-item title="原始 JSON（Raw JSON）" name="raw">
-              <CodeBlock :code="store.formatJson(activeTraceDetail)" />
+              <CodeBlock v-if="panelOpen('raw')" :code="panelJson.raw.value" />
             </el-collapse-item>
           </el-collapse>
         </div>
@@ -581,6 +666,14 @@ async function selectTrace(traceId: string): Promise<void> {
   overflow: hidden;
 }
 
+.trace-filters {
+  grid-column: 1 / -1;
+}
+
+.trace-filters .list-toolbar {
+  padding-bottom: 16px;
+}
+
 .list-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -597,8 +690,9 @@ async function selectTrace(traceId: string): Promise<void> {
   width: 140px;
 }
 
-.filter-range {
-  width: 340px;
+.list-toolbar .filter-range {
+  flex: 0 1 360px;
+  width: 360px;
 }
 
 .filter-search {
