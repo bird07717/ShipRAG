@@ -742,6 +742,12 @@ class MetricsV2Quality(BaseModel):
     # Knowledge turns with >=2 candidates where no Rerank model was usable
     # (no key → MODEL_NOT_CONFIGURED); excluded from the degraded/attempted pair.
     document_rerank_unconfigured: int
+    # Knowledge turns whose retrieval ran, and how many of them lost the query
+    # vector (timeout/upstream failure/invalid response) and fell back to
+    # BM25-only evidence while still answering.
+    query_embedding_attempted: int
+    query_embedding_degraded: int
+    query_embedding_degraded_rate: float
 
 
 class MetricsOverviewResponse(BaseModel):

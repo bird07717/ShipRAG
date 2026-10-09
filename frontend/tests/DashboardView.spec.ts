@@ -433,6 +433,51 @@ describe("DashboardView metrics", () => {
     expect(wrapper.text()).not.toContain("引用缺失");
   });
 
+  it("lists a lost query vector as a to-do only above the threshold, and omits the row for an older backend", async () => {
+    const base = {
+      query_interpreter_total: 40,
+      query_interpreter_degraded: 0,
+      query_interpreter_degraded_rate: 0,
+      document_rerank_attempted: 30,
+      document_rerank_degraded: 0,
+      document_rerank_degraded_rate: 0,
+      document_rerank_unconfigured: 0,
+    };
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const overviewSpy = vi.spyOn(adminApi, "getMetricsOverview");
+
+    overviewSpy.mockResolvedValue({
+      ...overview,
+      failed: 0,
+      v2_quality: { ...base, query_embedding_attempted: 40, query_embedding_degraded: 6, query_embedding_degraded_rate: 0.15 },
+    });
+    let wrapper = mountDashboard();
+    await flushPromises();
+    expect(wrapper.findAll(".attention-row").some((row) => row.text().includes("查询向量化失败") && row.text().includes("15.0%"))).toBe(true);
+    expect(wrapper.get(".quality-section").text()).toContain("6 / 40");
+    wrapper.unmount();
+
+    // 2 lost vectors is below the minimum count even at 20%.
+    overviewSpy.mockResolvedValue({
+      ...overview,
+      failed: 0,
+      v2_quality: { ...base, query_embedding_attempted: 10, query_embedding_degraded: 2, query_embedding_degraded_rate: 0.2 },
+    });
+    wrapper = mountDashboard();
+    await flushPromises();
+    expect(wrapper.findAll(".attention-row").some((row) => row.text().includes("查询向量化失败"))).toBe(false);
+    expect(wrapper.get(".quality-section").text()).toContain("2 / 10");
+    wrapper.unmount();
+
+    // A backend that predates the field: no row, no zeros, no to-do.
+    overviewSpy.mockResolvedValue({ ...overview, failed: 0, v2_quality: base });
+    wrapper = mountDashboard();
+    await flushPromises();
+    expect(wrapper.findAll(".attention-row").some((row) => row.text().includes("查询向量化"))).toBe(false);
+    expect(wrapper.get(".quality-section").text()).not.toContain("查询向量化");
+  });
+
   it("says when the backend does not provide stage quality instead of showing zeros", async () => {
     const legacy = { ...overview };
     delete legacy.v2_quality;

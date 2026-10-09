@@ -64,6 +64,9 @@ class _StubMetricsRepository:
                 "document_rerank_degraded": 7,
                 "document_rerank_degraded_rate": 0.1,
                 "document_rerank_unconfigured": 0,
+                "query_embedding_attempted": 70,
+                "query_embedding_degraded": 4,
+                "query_embedding_degraded_rate": 0.0571,
             },
             "unique_users": 42,
             "latency": {
@@ -691,6 +694,8 @@ def _overview_row(**overrides: Any) -> dict[str, Any]:
         "v2_rerank_attempted": 5,
         "v2_rerank_degraded": 1,
         "v2_rerank_unconfigured": 3,
+        "v2_embedding_attempted": 6,
+        "v2_embedding_degraded": 2,
         "p50_ms": 100,
         "p95_ms": 200,
         "p99_ms": 300,
@@ -770,6 +775,9 @@ class TestMetricsAggregation:
             "document_rerank_degraded": 1,
             "document_rerank_degraded_rate": 0.2,
             "document_rerank_unconfigured": 3,
+            "query_embedding_attempted": 6,
+            "query_embedding_degraded": 2,
+            "query_embedding_degraded_rate": round(2 / 6, 4),
         }
         assert result["tokens"]["llm_total"] == 1200
         assert result["tokens"]["rerank_total"] == 50
@@ -802,6 +810,8 @@ class TestMetricsAggregation:
             v2_rerank_attempted=0,
             v2_rerank_degraded=0,
             v2_rerank_unconfigured=0,
+            v2_embedding_attempted=0,
+            v2_embedding_degraded=0,
         )
         result = await MetricsRepository(_FakeEngine([row])).overview()  # type: ignore[arg-type]
         assert result["direct_answer_rate"] == 0.0
@@ -813,6 +823,7 @@ class TestMetricsAggregation:
         assert result["failure_rate"] == 0.0
         assert result["v2_quality"]["query_interpreter_degraded_rate"] == 0.0
         assert result["v2_quality"]["document_rerank_degraded_rate"] == 0.0
+        assert result["v2_quality"]["query_embedding_degraded_rate"] == 0.0
 
     async def test_overview_applies_filters_to_query(self) -> None:
         engine = _FakeEngine([_overview_row()])

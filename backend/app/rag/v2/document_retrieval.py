@@ -124,6 +124,10 @@ async def retrieve_documents(
     queries = _queries(question, interpretation)
     embeddings: dict[int, list[float]] = {}
     degradations: list[str] = []
+    # Recorded explicitly (not only inside `degradations`) so the admin metrics can
+    # tell a lost query vector from the other retrieval degradations: without it the
+    # turn silently falls back to BM25-only evidence and still returns an answer.
+    query_embedding: dict[str, str] = {"status": "PASSED"}
     provider: EmbeddingProvider | None = None
     try:
         provider = embedding_selector(turn)
@@ -135,8 +139,11 @@ async def retrieve_documents(
             embeddings = dict(enumerate(vectors))
         else:
             degradations.append("QUERY_EMBEDDING_INVALID")
+            query_embedding = {"status": "DEGRADED", "reason": "QUERY_EMBEDDING_INVALID"}
     except (EmbeddingError, TimeoutError) as exc:
-        degradations.append(str(getattr(exc, "code", type(exc).__name__))[:100])
+        reason = str(getattr(exc, "code", type(exc).__name__))[:100]
+        degradations.append(reason)
+        query_embedding = {"status": "DEGRADED", "reason": reason}
     finally:
         if provider is not None:
             try:
@@ -331,9 +338,31 @@ async def retrieve_documents(
             )
         )
 
-    candidates = candidates[: settings.m3_rag_full_document_limit]
+    document_limit = settings.m3_rag_full_document_limit
+    inherited_ids = set(inherited_requested)
+    reserved_inherited: list[str] = []
+    if (
+        document_rerank["status"] == "DEGRADED"
+        and document_limit >= 2
+        and len(candidates) > document_limit
+        and not any(item.document_id in inherited_ids for item in candidates[:document_limit])
+    ):
+        # Inherited documents are appended after fusion with a zero score, so they
+        # only reach the final top-N through the document Rerank. When that call
+        # degraded to the RRF order they would always fall off the tail, which
+        # makes the follow-up lose the previous task's evidence exactly when the
+        # ranking is least trustworthy. Hand the last slot to the most recent one;
+        # the best fused documents keep every other slot.
+        carried = next(
+            (item for item in candidates[document_limit:] if item.document_id in inherited_ids),
+            None,
+        )
+        if carried is not None:
+            candidates = [*candidates[: document_limit - 1], carried]
+            reserved_inherited.append(str(carried.document_id))
+    candidates = candidates[:document_limit]
     inherited_selected = [
-        str(item.document_id) for item in candidates if item.document_id in set(inherited_requested)
+        str(item.document_id) for item in candidates if item.document_id in inherited_ids
     ]
     return candidates, {
         "query_count": len(queries),
@@ -346,7 +375,9 @@ async def retrieve_documents(
             "requested_document_ids": [str(value) for value in inherited_requested],
             "loaded_document_ids": inherited_loaded,
             "selected_document_ids": inherited_selected,
+            "reserved_after_rerank_degradation": reserved_inherited,
         },
+        "query_embedding": query_embedding,
         "degradations": list(dict.fromkeys(degradations)),
         "document_rerank": document_rerank,
     }

@@ -691,6 +691,14 @@ export interface MetricsV2Quality {
   document_rerank_degraded_rate: number;
   /** Knowledge turns with >=2 candidates where no Rerank model was usable. */
   document_rerank_unconfigured: number;
+  /**
+   * Knowledge turns whose retrieval ran, and how many lost the query vector and
+   * answered from BM25-only evidence. Optional: a backend older than this field
+   * does not send them, and the console must say so instead of showing zeros.
+   */
+  query_embedding_attempted?: number;
+  query_embedding_degraded?: number;
+  query_embedding_degraded_rate?: number;
 }
 
 export interface MetricsTimeseriesPoint {

@@ -144,6 +144,9 @@ const attentionItems = computed(() => {
     if (quality.document_rerank_degraded >= QUALITY_ALERT_MIN_COUNT && quality.document_rerank_degraded_rate >= QUALITY_ALERT_RATE) {
       items.push({ key: "rerank-degraded", label: "文档重排调用失败后降级", value: percent(quality.document_rerank_degraded_rate, 1), tone: "warning", icon: WarningFilled, action: openQualityDiagnostics });
     }
+    if ((quality.query_embedding_degraded ?? 0) >= QUALITY_ALERT_MIN_COUNT && (quality.query_embedding_degraded_rate ?? 0) >= QUALITY_ALERT_RATE) {
+      items.push({ key: "embedding-degraded", label: "查询向量化失败，检索仅用关键词召回", value: percent(quality.query_embedding_degraded_rate ?? 0, 1), tone: "warning", icon: WarningFilled, action: openQualityDiagnostics });
+    }
     if (quality.query_interpreter_degraded >= QUALITY_ALERT_MIN_COUNT && quality.query_interpreter_degraded_rate >= QUALITY_ALERT_RATE) {
       items.push({ key: "query-degraded", label: "查询理解失败后使用兜底", value: percent(quality.query_interpreter_degraded_rate, 1), tone: "warning", icon: WarningFilled, action: openQualityDiagnostics });
     }
@@ -674,6 +677,7 @@ watch(() => store.hasServiceCredential, (available) => {
           <div v-if="overview.v2_quality" class="detail-grid">
             <div><span>查询理解降级率</span><b>{{ percent(overview.v2_quality.query_interpreter_degraded_rate, overview.v2_quality.query_interpreter_total) }}</b><small>{{ overview.v2_quality.query_interpreter_degraded }} / {{ overview.v2_quality.query_interpreter_total }} · 有查询理解记录的轮次</small></div>
             <div><span>文档重排降级率</span><b>{{ percent(overview.v2_quality.document_rerank_degraded_rate, overview.v2_quality.document_rerank_attempted) }}</b><small>{{ overview.v2_quality.document_rerank_degraded }} / {{ overview.v2_quality.document_rerank_attempted }} · 实际调用重排的检索</small></div>
+            <div v-if="overview.v2_quality.query_embedding_attempted !== undefined"><span>查询向量化降级率</span><b>{{ percent(overview.v2_quality.query_embedding_degraded_rate ?? 0, overview.v2_quality.query_embedding_attempted) }}</b><small>{{ overview.v2_quality.query_embedding_degraded ?? 0 }} / {{ overview.v2_quality.query_embedding_attempted }} · 已执行检索的轮次；失败时只用关键词召回，回答仍会返回</small></div>
             <div :class="{ 'is-danger': overview.v2_quality.document_rerank_unconfigured > 0 }"><span>未执行重排（模型不可用）</span><b>{{ overview.v2_quality.document_rerank_unconfigured }}</b><small>候选 ≥2 但没有可用 Rerank 模型的检索次数</small></div>
           </div>
           <p v-else class="muted">当前后端版本未提供阶段质量统计，请更新后端后查看。</p>

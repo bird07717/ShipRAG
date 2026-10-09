@@ -9,8 +9,9 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.common.errors import ApiError
 from app.core.config import Settings
-from app.ingestion.embedding import FakeEmbeddingProvider
+from app.ingestion.embedding import EmbeddingError, FakeEmbeddingProvider
 from app.ingestion.models import EmbeddingInput
 from app.rag.llm import FakeLlmProvider
 from app.rag.models import (
@@ -1608,6 +1609,7 @@ async def test_v2_follow_up_adds_previous_evidence_as_soft_rerank_candidate() ->
         "requested_document_ids": [str(previous.document_id)],
         "loaded_document_ids": [str(previous.document_id)],
         "selected_document_ids": [str(previous.document_id)],
+        "reserved_after_rerank_degradation": [],
     }
 
 
@@ -1708,3 +1710,282 @@ def test_scrub_keeps_real_component_labels_and_unrelated_codes() -> None:
     answer, count = _scrub(original, allowed_text=context_text)
     assert answer == original
     assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_v2_out_of_scope_interpretation_skips_retrieval_and_answer_model() -> None:
+    """LLM 1 owns the scope decision, so a KNOWLEDGE-routed out-of-scope turn must
+    not spend Embedding, Rerank, document loading or LLM 2 on an answer that
+    ``apply_scope_authority`` would overwrite anyway."""
+
+    repository = _ForbiddenRetrievalRepository(_candidate())
+    completions = [
+        '{"resolved_question":"帮我写一首关于大海的诗","scope":"OUT_OF_SCOPE",'
+        '"relation":"NEW_TASK","response_path":"KNOWLEDGE"}',
+    ]
+    llm_calls = 0
+
+    def llm_factory(_settings: Settings, _snapshot: ModelSnapshot) -> FakeLlmProvider:
+        nonlocal llm_calls
+        llm_calls += 1
+        return FakeLlmProvider(completions=[completions.pop(0)])
+
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: (_ for _ in ()).throw(
+            AssertionError("out-of-scope turn must not call embedding")
+        ),
+        llm_factory=llm_factory,
+        rerank_factory=lambda _settings, _snapshot: (_ for _ in ()).throw(
+            AssertionError("out-of-scope turn must not call rerank")
+        ),
+    )
+
+    payload = await service.generate(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=repository.turn.conversation_id,
+        question="帮我写一首关于大海的诗",
+        request_id="v2-out-of-scope-short-circuit",
+    )
+
+    assert completions == []
+    assert llm_calls == 1
+    assert payload["response_type"] == "OUT_OF_SCOPE"
+    assert payload["answer_mode"] == "OUT_OF_SCOPE"
+    assert payload["disclaimer"] is None
+    assert repository.completed is not None
+    # Stays in the technical sample (out-of-scope rate) but never in latency samples.
+    citation = repository.completed["citation_result"]
+    assert citation["response_path"] == "KNOWLEDGE"
+    assert citation["shortcut"] == "OUT_OF_SCOPE"
+    generation = repository.completed["doc_routing"]["generation"]
+    assert generation["response_path"] == "KNOWLEDGE"
+    assert generation["retrieval"] == {"status": "SKIPPED", "reason": "OUT_OF_SCOPE"}
+    assert generation["context"]["document_count"] == 0
+    assert generation["answer"]["used_document_ids"] == []
+    assert generation["answer"]["scope_authority"]["final_response_kind"] == "OUT_OF_SCOPE"
+    assert "v2_document_retrieval_ms" not in repository.completed["timings"]
+
+
+@pytest.mark.asyncio
+async def test_v2_llm_factory_failure_fails_before_retrieval() -> None:
+    """A missing LLM credential is deterministic: it must not be disguised as an
+    LLM 1 degradation that first spends Embedding/Rerank and then fails anyway."""
+
+    repository = _ForbiddenRetrievalRepository(_candidate())
+
+    def llm_factory(_settings: Settings, _snapshot: ModelSnapshot) -> FakeLlmProvider:
+        raise ApiError("MODEL_NOT_CONFIGURED", "LLM 模型未配置 API Key", 503)
+
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: (_ for _ in ()).throw(
+            AssertionError("factory failure must stop before embedding")
+        ),
+        llm_factory=llm_factory,
+    )
+
+    with pytest.raises(ApiError) as raised:
+        await service.generate(
+            knowledge_id=repository.turn.knowledge_id,
+            conversation_id=repository.turn.conversation_id,
+            question="如何配置 VAU 图像？",
+            request_id="v2-llm-factory-failure",
+        )
+
+    assert raised.value.code == "MODEL_NOT_CONFIGURED"
+    assert repository.completed is None
+    assert repository.failed is not None
+    assert repository.failed["code"] == "MODEL_NOT_CONFIGURED"
+
+
+class _PoolWithSeedRepository(_MultiDocumentRepository):
+    def __init__(self, candidates: list[RetrievalCandidate], seed: RetrievalCandidate) -> None:
+        super().__init__(candidates)
+        self.seed = seed
+        self.seed_calls = 0
+
+    async def get_document_retrieval_seeds(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.seed_calls += 1
+        assert kwargs["document_ids"] == (self.seed.document_id,)
+        return [
+            {
+                "document_id": str(self.seed.document_id),
+                "document": self.seed.document,
+                "score": 0.0,
+                "chunk_ids": [],
+                "representative_texts": [self.seed.content],
+                "card": {"document_type": "PROCEDURE", "summary": self.seed.content, "tasks": []},
+                "candidate_source": "PREVIOUS_EVIDENCE",
+            }
+        ]
+
+
+def _pool(count: int) -> list[RetrievalCandidate]:
+    return [
+        replace(
+            _candidate(),
+            chunk_id=uuid4(),
+            document_id=uuid4(),
+            document=f"相似文档{number}",
+            content=f"相似内容{number}",
+            rank=number,
+        )
+        for number in range(1, count + 1)
+    ]
+
+
+def _follow_up() -> QueryInterpretation:
+    return QueryInterpretation(
+        resolved_question="检查 LRU 通讯线缆时断电后要等待多久",
+        scope="IN_SCOPE",
+        relation="FOLLOW_UP",
+        active_task="检查 LRU 通讯线缆",
+        response_path="KNOWLEDGE",
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2_rerank_degradation_reserves_last_slot_for_previous_evidence() -> None:
+    pool = _pool(4)
+    previous = replace(
+        _candidate(), chunk_id=uuid4(), document_id=uuid4(), document="检查 LRU 通讯线缆"
+    )
+    repository = _PoolWithSeedRepository(pool, previous)
+    repository.turn = replace(_turn(), previous_document_ids=(previous.document_id,))
+
+    candidates, trace = await retrieve_documents(
+        repository,
+        settings=Settings(_env_file=None, app_env="test"),
+        turn=repository.turn,
+        question="断电后要等待多久？",
+        interpretation=_follow_up(),
+        previous_document_ids=repository.turn.previous_document_ids,
+        embedding_selector=lambda _turn: FakeEmbeddingProvider(1024),
+        rerank_factory=lambda _settings, _snapshot: _FailingRerankProvider(),
+    )
+
+    assert trace["document_rerank"]["status"] == "DEGRADED"
+    ids = [item.document_id for item in candidates]
+    assert len(ids) == 3
+    # The two best fused documents keep their slots; only the last one is handed over.
+    assert ids[-1] == previous.document_id
+    assert ids[:2] == [UUID(value) for value in trace["document_rerank"]["before_document_ids"][:2]]
+    assert trace["previous_evidence"]["reserved_after_rerank_degradation"] == [
+        str(previous.document_id)
+    ]
+    assert trace["previous_evidence"]["selected_document_ids"] == [str(previous.document_id)]
+
+
+@pytest.mark.asyncio
+async def test_v2_rerank_degradation_keeps_ranking_when_previous_evidence_already_in_top() -> None:
+    pool = _pool(4)
+    repository = _PoolWithSeedRepository(pool, pool[0])
+    repository.turn = replace(_turn(), previous_document_ids=(pool[0].document_id,))
+
+    candidates, trace = await retrieve_documents(
+        repository,
+        settings=Settings(_env_file=None, app_env="test"),
+        turn=repository.turn,
+        question="断电后要等待多久？",
+        interpretation=_follow_up(),
+        previous_document_ids=repository.turn.previous_document_ids,
+        embedding_selector=lambda _turn: FakeEmbeddingProvider(1024),
+        rerank_factory=lambda _settings, _snapshot: _FailingRerankProvider(),
+    )
+
+    assert repository.seed_calls == 0
+    assert trace["document_rerank"]["status"] == "DEGRADED"
+    assert [str(item.document_id) for item in candidates] == trace["document_rerank"][
+        "before_document_ids"
+    ][:3]
+    assert trace["previous_evidence"]["reserved_after_rerank_degradation"] == []
+
+
+@pytest.mark.asyncio
+async def test_v2_rerank_degradation_never_reserves_slot_for_a_new_task() -> None:
+    pool = _pool(4)
+    previous = replace(_candidate(), chunk_id=uuid4(), document_id=uuid4(), document="上一轮文档")
+    repository = _PoolWithSeedRepository(pool, previous)
+    repository.turn = replace(_turn(), previous_document_ids=(previous.document_id,))
+
+    candidates, trace = await retrieve_documents(
+        repository,
+        settings=Settings(_env_file=None, app_env="test"),
+        turn=repository.turn,
+        question="如何配置 VAU 图像？",
+        interpretation=QueryInterpretation(
+            resolved_question="如何配置 VAU 图像",
+            scope="IN_SCOPE",
+            relation="NEW_TASK",
+            response_path="KNOWLEDGE",
+        ),
+        previous_document_ids=repository.turn.previous_document_ids,
+        embedding_selector=lambda _turn: FakeEmbeddingProvider(1024),
+        rerank_factory=lambda _settings, _snapshot: _FailingRerankProvider(),
+    )
+
+    assert repository.seed_calls == 0
+    assert previous.document_id not in {item.document_id for item in candidates}
+    assert trace["previous_evidence"]["reserved_after_rerank_degradation"] == []
+
+
+class _FailingEmbeddingProvider(FakeEmbeddingProvider):
+    def __init__(self, error: Exception) -> None:
+        super().__init__(1024)
+        self.error = error
+
+    async def embed(self, inputs: Sequence[EmbeddingInput]) -> list[list[float]]:
+        raise self.error
+
+
+class _WrongDimensionEmbeddingProvider(FakeEmbeddingProvider):
+    async def embed(self, inputs: Sequence[EmbeddingInput]) -> list[list[float]]:
+        return [[0.1, 0.2] for _ in inputs]
+
+
+async def _query_embedding_trace(provider: FakeEmbeddingProvider) -> dict[str, Any]:
+    repository = _Repository(_candidate())
+    _, trace = await retrieve_documents(
+        repository,
+        settings=Settings(_env_file=None, app_env="test"),
+        turn=repository.turn,
+        question="如何配置 VAU 图像？",
+        interpretation=QueryInterpretation(
+            resolved_question="如何配置 VAU 图像",
+            scope="IN_SCOPE",
+            response_path="KNOWLEDGE",
+        ),
+        embedding_selector=lambda _turn: provider,
+        rerank_factory=lambda _settings, _snapshot: _ReverseRerankProvider(),
+    )
+    return trace
+
+
+@pytest.mark.asyncio
+async def test_v2_retrieval_trace_records_query_embedding_status() -> None:
+    """The metrics tell a lost query vector (BM25-only evidence) from other
+    retrieval degradations through this explicit status."""
+
+    passed = await _query_embedding_trace(FakeEmbeddingProvider(1024))
+    assert passed["query_embedding"] == {"status": "PASSED"}
+    assert passed["degradations"] == []
+
+    upstream = await _query_embedding_trace(
+        _FailingEmbeddingProvider(EmbeddingError("Embedding 上游调用失败"))
+    )
+    assert upstream["query_embedding"] == {"status": "DEGRADED", "reason": "EmbeddingError"}
+    assert upstream["degradations"] == ["EmbeddingError"]
+
+    timed_out = await _query_embedding_trace(_FailingEmbeddingProvider(TimeoutError()))
+    assert timed_out["query_embedding"] == {"status": "DEGRADED", "reason": "TimeoutError"}
+
+    invalid = await _query_embedding_trace(_WrongDimensionEmbeddingProvider(1024))
+    assert invalid["query_embedding"] == {
+        "status": "DEGRADED",
+        "reason": "QUERY_EMBEDDING_INVALID",
+    }
+    # A lost vector still answers from the lexical channels.
+    assert invalid["candidate_count"] >= 1
