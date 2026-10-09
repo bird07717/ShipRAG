@@ -41,6 +41,7 @@ Vue 管理台 / 业务后端
 1. 管理 API 接收知识库、文档和构建请求；原始对象存入 MinIO，元数据写入 PostgreSQL。
 2. 请求创建 `task_record` 并投递 Redis 队列。
 3. `index_build` Worker 使用摄取管线按文档格式校验/解析 DOCX 或 PDF（PDF 会剔除跨页重复的页眉/页脚）、处理图像、分块并生成 1024 维嵌入。
+   Worker 开始时读取一次构建配置，将实际 Embedding/OCR/Vision 的非密钥身份写入 `knowledge_index.build_models`；文档只有源哈希、解析版本与实际模型指纹全部匹配才可复用。旧文档无指纹时，下次构建重新解析，不补造历史身份。
 4. 结果写入按版本隔离的索引表；常规上传/手动构建产生候选索引，由管理员激活。Embedding 身份切换触发的全库重建默认携带 `activate_on_success=true`，是自动激活的例外。构建末尾会以独立维护任务为该冻结索引生成 RAG 文档理解卡片，失败不回滚已完成的技术索引；Support Profile 的审核发布仍是独立生命周期。
 
 ### 问答
@@ -64,7 +65,7 @@ Vue 管理台 / 业务后端
 - 聊天会话会冻结使用的索引/发布版本，避免在线版本切换改变既有会话语义。
 - 会话不冻结 LLM/Rerank：管理 Chat 与 Assistant 共用数据库 `model_config`，每轮准备重新读取启用配置，并在该轮内冻结；技术和非文档两种 LLM 2 与 LLM 1 使用同一份 LLM 快照。Embedding/OCR/Vision 的索引影响不能等同于下一轮问答立即生效，详见 `backend.md`。
 - RAG 索引激活与 Support Profile 人工审核发布彼此独立；是否自动激活取决于构建的 `activate_on_success`，不能概括为全部自动激活。
-- RAG 文档卡片绑定知识库、冻结索引和文档，使用索引关联的 Embedding 模型配置（`embedding_model_id` 指向可修改行，完整身份尚非不可变历史快照）；显示名称查询时联接 `document_source`。V2 使用有效卡片参与文档级召回；Assistant 上线和持续对外可用还要求活动索引中每份 `READY/STORED` 文档均存在当前结构版本、生成成功且人工确认为 `CONFIRMED` 的卡片。该门禁不改变管理 Chat 的内部调试能力。
+- RAG 文档卡片绑定知识库、冻结索引和文档。`0048` 后的新构建记录实际 Embedding 身份（Provider、模型、端点、维度，不含密钥），查询与卡片生成均校验它。关联模型行仍可修改，匹配身份的原配置可提供可轮换凭据；身份已漂移则明确报错，不静默回退至不同向量空间。历史无身份索引的兼容边界见 `backend.md`。显示名称查询时联接 `document_source`。V2 使用有效卡片参与文档级召回；Assistant 上线和持续对外可用还要求活动索引中每份 `READY/STORED` 文档均存在当前结构版本、生成成功且人工确认为 `CONFIRMED` 的卡片。该门禁不改变管理 Chat 的内部调试能力。
 - 生产运行时容器采用只读根文件系统与 `/tmp` tmpfs；部署细节见 [`environment.md`](environment.md)。
 
 ## RAG V2 实施状态

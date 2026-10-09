@@ -17,7 +17,9 @@
 
 路由模块位于 `app/api/`；请求/响应模型集中在 `schemas.py`。应用统一输出携带 `request_id` 的错误体，且会收敛用户聊天路径上的服务端错误信息。流式聊天使用 SSE，而非 WebSocket。
 
-管理指标 `/metrics/overview` 与 `/metrics/timeseries` 支持按 `engine`、`source`、知识库及时间范围过滤。RAG 回答结果口径为：直接回答率=`(ANSWERED + 遗留 DOC_DELIVERED) / 产品范围内已分类轮次`，待补充信息率=`UNCONFIRMED / 产品范围内已分类轮次`，范围外请求率=`OUT_OF_SCOPE / 全部已分类轮次`；`OUT_OF_SCOPE` 不再计作无答案，失败率独立计算。Overview 另按 `answer_mode` 聚合 `PRODUCT_KNOWLEDGE`、`PRODUCT_EXPLAINED`、`PRODUCT_GENERAL`，三者之和是回答依据分布的独立分母，不混入欢迎语、遗留文档交付或未分类历史。Dashboard 固定使用外部 `ASSISTANT_API`、`RAG` 和同一个近 7 天窗口，趋势、待补充列表和趋势柱形下钻使用相同过滤条件；失败待办将已显示 Overview 的准确 from/to 和来源/引擎传给 `LogsView` 的 Trace 列表请求（2026-10-05 本地修复，未改后端契约）。失败列表最多 200 条，上方失败概览仍是独立汇总，不随列表筛选变化。`UNCONFIRMED` 只说明需要更多条件或输入信息不足，不能单独证明知识库覆盖缺口。
+管理指标 `/metrics/overview` 与 `/metrics/timeseries` 支持按 `engine`、`source`、知识库及时间范围过滤。RAG 回答结果口径为：直接回答率=`(ANSWERED + 遗留 DOC_DELIVERED) / 产品范围内已分类轮次`，待补充信息率=`UNCONFIRMED / 产品范围内已分类轮次`，范围外请求率=`OUT_OF_SCOPE / 全部已分类轮次`；`OUT_OF_SCOPE` 不再计作无答案，失败率独立计算。Overview 另按 `answer_mode` 聚合 `PRODUCT_KNOWLEDGE`、`PRODUCT_EXPLAINED`、`PRODUCT_GENERAL`，三者之和是回答依据分布的独立分母，不混入欢迎语、遗留文档交付或未分类历史。Dashboard 固定使用外部 `ASSISTANT_API`、`RAG` 和同一个近 7 天窗口，趋势、待补充列表和趋势柱形下钻使用相同过滤条件；待补充指标保留所有 `UNCONFIRMED`，Dashboard 人工复核列表可额外通过 `/traces?exclude_low_information=true` 排除 RAG V2 `diagnostic_reason=LOW_INFORMATION` 及历史确定性低信息门禁。失败待办将已显示 Overview 的准确 from/to 和来源/引擎传给 `LogsView` 的 Trace 列表请求（2026-10-05 本地修复，未改后端契约）。失败列表最多 200 条，上方失败概览仍是独立汇总，不随列表筛选变化。`UNCONFIRMED` 只说明需要更多条件或输入信息不足，不能单独证明知识库覆盖缺口。
+
+管理端 `GET /conversations` 可选 `activity_from` / `activity_to` 按会话 `updated_at`（最近活动时间）范围筛选，再按最近活动倒序和 `limit` 返回；这不改变 Assistant 外部会话 API。数据库未新增列或迁移，查询复用既有会话活动时间索引。
 
 ## 模块关系
 
@@ -50,13 +52,13 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 问答轮次准入闸门位于 `app/common/turn_gate.py`：管理 `/api/v1/chat`、`/chat/stream` 和对外 Assistant 流在预留请求/调用模型前获取每进程信号量（按事件循环隔离），超过 `CHAT_TURN_CONCURRENCY_LIMIT`（默认 64，0 禁用）的轮次在等待 `CHAT_TURN_WAIT_SECONDS` 后快速失败 503 `SERVICE_BUSY`；Assistant 路径在预留幂等请求前判定，容量拒绝不消耗幂等键，信号量随流收口释放。管理端复测（answer retest）不走该闸门，由其每标记单运行的唯一索引约束。
 
-`RAG_DOCUMENT_CARD_GENERATE` 运行在 `maintenance` 队列，可对活动/指定就绪索引全量回填或生成单文档卡片。同一索引只允许一个活动任务，支持合作取消和孤儿任务恢复；索引构建成功后会尽力提交该任务，但卡片或模型失败不改变索引成功状态。卡片 Prompt 携带实际 JSON Schema；仅对大小写及语义明确的类型别名做确定性归一化，其他非法结构仍失败。结构错误可使用离线重试预算；整批 0 成功必须把任务标为失败，部分失败保留成功卡片并报告计数。Embedding 按 `knowledge_index.embedding_model_id` 查询关联模型行；该行可被管理员原地修改，并非不可变的历史配置快照；每份保存必须使用该 `document_id` 对应 revision，失败卡片不可标为 `READY`。
+`RAG_DOCUMENT_CARD_GENERATE` 运行在 `maintenance` 队列，可对活动/指定就绪索引全量回填或生成单文档卡片。同一索引只允许一个活动任务，支持合作取消和孤儿任务恢复；索引构建成功后会尽力提交该任务，但卡片或模型失败不改变索引成功状态。卡片 Prompt 携带实际 JSON Schema；仅对大小写及语义明确的类型别名做确定性归一化，其他非法结构仍失败。结构错误可使用离线重试预算；整批 0 成功必须把任务标为失败，部分失败保留成功卡片并报告计数。Embedding 按 `knowledge_index.embedding_model_id` 查询关联模型行，并与 `build_models` 中的实际身份校验；身份漂移返回 `INDEX_EMBEDDING_MISMATCH`，不能用新空间向量补入旧索引；每份保存必须使用该 `document_id` 对应 revision，失败卡片不可标为 `READY`。
 
 管理 API 在 `/knowledge-bases/{knowledge_id}/rag-document-cards` 下提供列表、就绪检查和生成，在同一知识库的文档路径下提供单卡查看、编辑与审核。编辑/审核携带 `expected_revision`，冲突返回 409；自动生成是 `AUTO`，人工编辑后重新回到 `AUTO`，只有显式审核成为 `CONFIRMED/REJECTED`。已确认卡片默认不被自动生成覆盖，显式替换成功后也回到待确认状态。以上端点只属于管理认证，不加入外部 Assistant 契约。
 
 外部服务包括 PostgreSQL、Redis、MinIO，以及可配置的模型服务。代码支持 SiliconFlow 嵌入/重排/OCR、智谱 LLM/视觉，以及阿里云百炼 DashScope；2026-09-15 起 DashScope 注册为全部五类模型类型（LLM/EMBEDDING/RERANK/OCR/VISION）的 Provider：LLM、Embedding、OCR、Vision 走 OpenAI 兼容 `chat/completions` / `embeddings`，Rerank 使用 DashScope 专有 `/api/v1/services/rerank/text-rerank/text-rerank` 端点（`model_providers.dashscope_rerank_base_url` 把管理台保存的 compatible-mode 地址映射到原生 API 根），Embedding 仅文本输入且沿用 1024 维契约。`auto` 模式会按环境或数据库模型快照中的凭据选择。Embedding、LLM、Rerank 在 staging/production 中禁止显式或隐式回退到 fake，缺少凭据时失败关闭；fake 仅用于开发/测试的受控场景。实际模型、超时和阈值来自 Settings、模型快照及环境变量，不能仅根据本文推断部署值。
 
-## 管理模型配置与 Assistant 生效边界（2026-10-05 源码核对）
+## 管理模型配置与 Assistant 生效边界（2026-10-09 一致性修复，本地待部署）
 
 两类凭据区分 API 权限，不区分模型配置。管理台 `PATCH /models/{id}` 保存到共享 `model_config`；Assistant 经 `AssistantFacade → ChatGatewayService → RagService` 使用同一套问答实现。前提是管理台和业务 Assistant 请求连接的是同一套后端及数据库，不是不同部署。
 
@@ -64,13 +66,14 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 | --- | --- | --- |
 | LLM | `RagRepository.begin_turn()` 每轮重新读取启用配置；LLM 1、技术 LLM 2、非文档 LLM 2 共用该轮快照 | 下一轮生效，包括既有会话的新问题；不重建索引、不重启进程，已准备的轮次不被中途替换。 |
 | Rerank | 同样每轮读取；仅文档路径实际调用 | 下一次文档检索生效；寒暄/非文档路径不调用，不重建索引。 |
-| Embedding | 查询配置每轮读取，但索引向量不能原地变成新模型向量；查询选择器优先使用与会话冻结索引模型名匹配的数据库配置 | 改 Provider、模型名或 Base URL 必须确认全库重建并通过 1024 维探测；保存后向有有效文档的启用库提交重建，默认成功自动激活。模型名与活动索引不匹配期间 Assistant 可能 `ready=false`；新索引还须完成卡片生成/确认。旧会话不自动迁移，切换后应用新会话验收。 |
-| OCR / Vision | 索引 Worker 开始任务时读取数据库快照，影响实际重新解析文档时的识别/图片描述 | 保存标记各库 `rebuild_required`，不自动重跑原文；普通构建可能 `REUSE` 旧元素、图片和向量，不能保证改完模型点击重建就刷新旧图片描述。 |
+| Embedding | 查询优先读取会话冻结索引关联的模型行；按实际 Provider、模型名、归一化 Base URL 和维度校验新索引身份 | 改 Provider、模型名或 Base URL 必须确认全库重建并通过 1024 维探测；保存后向有有效文档的启用库提交重建，默认成功自动激活。身份与活动索引不匹配期间 Assistant `ready=false`，技术查询明确返回 409；新索引还须完成卡片生成/确认。旧会话不迁移，仅在仍可取得匹配身份的原配置时继续技术检索，否则须重建后开启新会话。 |
+| OCR / Vision | 索引 Worker 开始任务时读取数据库快照，其实际身份与真实输出预算参与文档复用指纹 | 保存仍只标记各库 `rebuild_required`，不自动重跑；下一次构建发现实际身份/预算变化会重新解析，不再复用旧图片描述。所有实际模型、源哈希和解析版本都未变时仍可 REUSE；旧文档无指纹首次重建重新解析。 |
 
 - Provider/模型/Base URL 的身份变更以及新 API Key 在写入前探测；保存成功不代表回答质量回归通过。`parameters`/`enabled` 的单独修改不执行这一身份探测。
 - “模型配置共用”不代表参数 JSON 中任意字段都被 V2 使用：V2 的结构化调用明确传入各阶段 `temperature/max_tokens/thinking`，`ZhipuLlmProvider._complete_response()` 不合并 `snapshot.parameters`；数据库同名字段不能覆盖这些阶段值。2026-10-05 管理台已移除这些编辑控件，改为只读来源说明，保存其他字段不覆盖历史参数 JSON；后端策略未改。模型名、Provider、Base URL 和密钥仍按轮次快照消费，阶段预算/思考开关以代码和 Settings 为准。
 - DB 密钥优先于对应 Provider 环境密钥；DB 无密钥时才用环境兜底。网页模型配置不要求容器重启；修改 `.env`/Settings 则须重建相应容器。历史消息与幂等重放读取保存的终态，不按新模型重生成。
-- 当前索引复用和就绪一致性主要按 `embedding_model_name` 判断，不是完整 Provider/Base URL/模型指纹；同名模型换供应商或地址不能仅凭重建成功证明向量空间一致。查询选择器在旧会话模型名不匹配时回退环境 Provider，并未读取旧索引的完整历史模型凭据，因此“会话冻结索引”不等于“旧 Embedding 配置完整保留”。这些限制见 `known-issues.md`。
+- `ingestion/model_identity.py` 统一生成实际身份、复用指纹及查询/就绪/卡片一致性判断。密钥、超时、批大小和未消费的参数 JSON 不进入指纹；单纯密钥轮换不会让解析缓存失效（现有配置写路径仍可能标记待重建）。端点仅归一化格式，不假设同名跨供应商/端点等价。任务开始前的配置变化以 Worker 实际身份为准，覆盖排队时的索引模型标签/关联 ID，逐文档再校验复用计划。
+- `0048` 不回填历史身份。`build_models={}` 的索引仅在同名、原关联模型行且创建之后的审计无 Provider/模型/Base URL 修改时兼容；无效或未知版本的非空快照不得退回只比名字。保存表单重复提交未变身份不记为身份修改。无法追溯旧环境或绕过审计的修改，不能宣称历史向量空间已证明一致，首次重建建立可信快照。
 - 证据入口：`api/rag.py:update_model`、`rag/repository.py:begin_turn`、`services/rag.py:_select_query_embedding_provider`、`ingestion/model_config.py:load_build_models`、`ingestion/repository.py:_create_build_locked`、`gateway/repository.py:get_readiness`。
 
 ## 模型实际运行判定与管理侧可见性（2026-10-08）
@@ -110,7 +113,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 ## 通用实现约束
 
 - 嵌入维度在 Settings 与数据库契约中固定为 1024，变更需要迁移与重建计划。
-- 查询嵌入优先使用与 Active Index 模型一致的数据库模型快照，无法使用时才尝试环境配置；Trace 的 `retrieval_result` 同时记录索引模型及实际查询 Embedding provider/model，便于识别索引与查询向量不一致。
+- 查询嵌入优先读取会话冻结索引关联的配置（包括仍匹配身份的停用行）；没有关联配置时环境配置也必须通过身份校验，不允许模型不匹配时静默回退。Trace 的 `retrieval_result` 同时记录索引模型及实际查询 Embedding provider/model，便于排查。
 - 明显低信息输入（纯符号、单字符、同字符重复、连续键盘字符）在检索和模型调用前返回 `UNCONFIRMED`；待确认选项存在时，`1` 等合法选择回复不受该门禁影响。
 - **已删除的 legacy 行为：**旧 RAG 在 Rerank 降级后不选文档并保留焦点；V2 的文档级 Rerank 降级会保留 RRF 顺序，由 LLM 2 在隐藏候选上下文内回答。
 - 运行策略有 `RAG_ONLY` 和 `SUPPORT_WITH_RAG_FALLBACK`；会话模式可覆盖引擎选择。Support 优先模式已冻结、不再使用（ADR-0021）：实际运行均为 RAG_ONLY，轮次被 `M3_TURN_DEADLINE_SECONDS` 严格包络；重新启用 Support 前必须重评 `ASSISTANT_REQUEST_STALE_SECONDS` 边界。
@@ -151,6 +154,8 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 ## RAG V2 边界与当前实现
 
+- 文档理解卡片的消费边界（2026-10-09 源码核对）：`build_routing_text()` 包含摘要、任务、适用问题、前提、主题及排除，用于卡片向量/BM25 召回，不是确定性前提过滤器；`DocumentCardCandidate`/文档重排输入只保留类型、摘要、任务及相关片段。`build_document_context()` 从所选文档加载正文/图片描述，不把完整卡片的前提/排除作为单独生成输入。隔离实验附加已有卡片五字段未证明整体收益（见 `current-state.md`），线上仍沿用现状，不新增路由判断或硬过滤。
+
 - 历史默认窗口为最近最多 4 个完整技术轮次、10 条消息、估算 2,000 Token；来自 `core/config.py`，部署可覆盖。选择器从最新往前按整对消息选取，最新有效轮次超预算时直接停止，不截断答案或跳过去拼更旧历史；因此可能得到空窗口。只在同一 `conversation_id` 读取，不使用长期记忆、LLM 摘要或 30 分钟自动分段。
 - 按 ADR-0030，技术 `build_answer_prompt()` 只接收标准化问题 `resolved_question`、`relation/active_task`、最近所选历史和本轮隐藏文档；本轮原话仍参与检索和服务端参数来源检查，不直接进入技术 LLM 2 Prompt。非文档 `build_conversation_prompt()` 则仍接收本轮原话及最近一个所选技术轮次，不能将“LLM 2 不看原话”推广到所有路径。改写丢失语言、否定或条件时，下游缺少直接纠正本轮改写的输入；已有英文作答失败记录见 ADR-0030。
 - ADR-0026 的保守二路由由 ADR-0027 修订：`KNOWLEDGE` 完整保留检索与技术 LLM 2；`CONVERSATION` 是无需文档依据的非检索 LLM 2，跳过 Embedding、检索、Rerank 和文档加载。是否需要作出新判断不再自动决定检索；一般性人工协助建议可不检索，但产品专有事实、操作/诊断、官方服务事实及明确询问文档规定必须检索。非检索 LLM 2 不得把统一免责声明或历史回答冒充文档依据，不得编造服务承诺。路由字段缺失/无效时保守降级 Knowledge；对话 LLM 2 失败使用固定兜底，不回跳 RAG；对外 Assistant/SSE 结构不变。
@@ -172,7 +177,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - 每条推荐问题去除首尾空白后为 4 至 200 字，最多三条，NFKC、忽略大小写/空白及末尾问号后不得重复。下线库可保存 0～3 条，线上库必须保留三条；上线检查完整性、当前执行策略，以及活动索引全部 RAG 文档理解已确认。缺失问题或任一运行/审核条件未就绪返回 409，文本校验失败返回 422。
 - `AssistantConfiguration` 在同一事务内锁定知识库、检查修订和执行写入；上线就绪检查复用该事务连接。冲突返回 409 `ASSISTANT_CONFIG_CONFLICT`，需重新加载；下线不查询运行就绪，问题保存不隐式切换上线状态。删除中的知识库拒绝配置写入。
 - 不建立审批状态机或冻结运行版本；管理员通过管理 Chat 试问后确认上线，修改线上问题立即生效。索引、模型和 Profile 调整后由管理员重新试问；需要检查期间停止对外时先下线。下线阻止后续入口访问，不承诺撤回已经发送或缓存的内容，也不主动中断已建立的流。
-- 使用方法：管理台“文档”→ 对活动索引生成/补齐 RAG 理解并逐份确认 → 管理 Chat 试问 → “知识库”→ “Assistant 上线与推荐问题”→ 填写并保存三条问题 → “检查就绪”→ “确认上线”。正式部署前执行 Alembic `upgrade head`（当前仓库 head 为 `0047`），再更新后端和前端。
+- 使用方法：管理台“文档”→ 对活动索引生成/补齐 RAG 理解并逐份确认 → 管理 Chat 试问 → “知识库”→ “Assistant 上线与推荐问题”→ 填写并保存三条问题 → “检查就绪”→ “确认上线”。正式部署前执行 Alembic `upgrade head`（当前仓库 head 为 `0048`），再更新后端、Worker 和前端。
 
 
 ## Assistant 回答优化（管理侧）

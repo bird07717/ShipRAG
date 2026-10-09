@@ -2,11 +2,13 @@
 
 ## 类型与迁移
 
-数据库是 PostgreSQL，开发和生产编排使用 ParadeDB PostgreSQL 17 镜像，并要求 `vector` 与 `pg_search` 扩展。Alembic 配置在 `backend/alembic.ini`，迁移位于 `backend/alembic/versions/`；2026-10-05 只读运行 `alembic heads` 确认当前仓库 head 为 `0047`（索引 CANCELLED 和文档 SKIPPED 状态约束）。实际环境是否已升级到 head，必须通过 `alembic current` 或数据库检查确认；仓库迁移图不等于当前生产数据库版本。
+数据库是 PostgreSQL，开发和生产编排使用 ParadeDB PostgreSQL 17 镜像，并要求 `vector` 与 `pg_search` 扩展。Alembic 配置在 `backend/alembic.ini`，迁移位于 `backend/alembic/versions/`；2026-10-09 当前仓库 head 为 `0048`（索引实际构建模型身份），本地已从 `0047` 升级；生产未操作。实际环境是否已升级到 head，必须通过 `alembic current` 或数据库检查确认；仓库迁移图不等于当前生产数据库版本。
 
 数据库访问使用 SQLAlchemy async/asyncpg，但业务 SQL 大多由 repository 层直接管理；迁移而不是本文是表结构和约束的权威来源。
 
 ## 核心数据模型
+
+`0048` 新增 `knowledge_index.build_models jsonb NOT NULL DEFAULT '{}'` 并限制为 JSON 对象。新构建写入版本号及实际 EMBEDDING/OCR/VISION 非密钥身份，READY/ACTIVE 后不随模型配置保存变动；文档 `metadata.model_fingerprint` 约束缓存复用。迁移保留旧索引空对象，不用今天的配置伪造历史；不更新向量、文档或卡片。关联 `embedding_model_id` 仍供读取可轮换凭据，身份校验独立于该可修改行。降级只删除新增列，已在独立测试 Schema 验证升级/降级，不在开发业务表执行降级。
 
 | 领域 | 主要表 | 关系与作用 |
 | --- | --- | --- |

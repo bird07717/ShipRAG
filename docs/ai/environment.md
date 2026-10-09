@@ -98,6 +98,38 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 
 ## 生产核验与待确认
 
+### 生产更新流程（2026-10-09 安全修复仅本地验证，待部署）
+
+模型/索引一致性修复新增 `0048`：必须先运行一次性迁移到 head，再替换后端和两个 Worker，不能只更新前端或重启旧镜像。本地已执行 `0047 -> 0048`，本次未连接生产。迁移只加身份列、不调用模型、不重写历史向量。旧索引无完整历史身份，首次重建会重新解析全部缺指纹文档并产生真实模型费用；先处置已知解析问题、确认 OCR/Vision 可用及维护窗口，再构建、核对实际模型身份、确认卡片并用新会话试问。未匹配时失败关闭，不保证切换无中断。回滚旧镜像前核对迁移兼容，不能把删身份列当作常规部署回滚。
+
+服务器 `/home/cm/ShipRAG`，使用根目录 `.env`。推荐一键执行 `bash scripts/deploy-production.sh`：依次 `git pull --ff-only`、检查工作区干净、检查后台任务、确认、备份运行中应用容器的实际镜像 ID 为 `rollback-<时间>`（每个镜像仓库保留最近 3 个）、带构建标记构建、`run --rm migrate`、再次检查后台任务、`up --no-deps --force-recreate --wait` 替换应用容器，最后核对后端 `build_info` 与前端静态资源中的提交号等于 `HEAD`。构建/迁移失败或替换前复查未通过时不替换容器；已执行的迁移不会因此撤销。不能以可变镜像标签代替运行镜像备份：它可能已指向上次未发布的构建。没有运行容器时明确跳过该服务备份；容器读取失败或同服务多容器镜像不一致时停止。
+
+后台任务检查仅在替换 Worker 时执行，仍按近 30 分钟更新过的 `QUEUED/RUNNING` 记录统计，不阻断长期未更新的孤儿记录；`--force` 允许中断已知进行中任务，但不允许忽略查询失败。回滚在改标签/替换容器前执行同一检查。此复查缩短构建期间新增任务的风险窗口，不是原子停写/队列排空；发布时仍需避免提交新任务，超过 30 分钟未更新的真实长任务需人工核对。
+
+选项：`--frontend-only`（不迁移、不查 Worker 任务）、`--backend-only`、`--skip-pull`、`--yes`、`--dry-run`（只读检查并打印将执行的命令）、`--rollback [TAG]`（不构建、不迁移；前端/后端单独回滚选对应仓库最新备份，整体回滚选目标仓库共有的最新标签；显式标签缺失时直接停止）、`--env-file FILE`。回滚不会撤销数据库迁移，必须先确认旧镜像与当前数据库兼容。脚本内所有 `compose exec/run` 都重定向标准输入，可通过 `ssh … 'cd /home/cm/ShipRAG && DEPLOY_ROOT=$PWD bash -s -- --dry-run' < scripts/deploy-production.sh` 远程预演。
+
+2026-10-08 旧版已在生产预演默认、`--backend-only`、`--frontend-only`、`--rollback`（无备份时停止）并核对版本逻辑，不代表上述修复已在生产验收。2026-10-09 当前修复仅通过模拟 Docker/Git 的隔离回归；复验命令：`PYTHONPATH=backend .venv/bin/pytest -q -o addopts='' backend/tests/test_deploy_production_script.py backend/tests/test_context_review_output_guard.py`，不会部署或调用付费模型。
+
+手动基础步骤（不包含脚本自动备份与任务复查，需另行完成）：
+
+```bash
+cd /home/cm/ShipRAG
+git pull                                           # 1. 拉取代码（不改变运行版本）
+git status --short                                 #    应为空，否则构建标记会是 dirty=true
+bash scripts/build-production.sh backend frontend  # 2. 构建镜像并写入构建标记（不启动、不替换）
+docker buildx history ls | head -4                 #    确认本次构建为 Completed
+docker compose -f compose.production.yaml run --rm migrate   # 3. 数据库迁移（无新迁移时秒级完成）
+docker compose -f compose.production.yaml up -d --no-deps --force-recreate \
+  --wait --wait-timeout 240 backend worker-index worker-maintenance frontend   # 4. 替换应用容器
+```
+
+- 第 4 步不要加 `--build`（会再次构建并把构建标记覆盖为 unknown）；`--no-deps` 避免牵动 PostgreSQL/Redis/MinIO。后端与两个 Worker 共用后端镜像，后端有改动时三个都要替换。
+- 只改前端：第 2 步只构建 `frontend`，跳过第 3 步，第 4 步只写 `frontend`。只改 `.env`：不需要构建，直接第 4 步替换受影响服务（环境变量在容器创建时读取，`restart` 不会生效）。
+- 替换 Worker 会中断正在执行的索引构建，先在管理台“后台任务”确认没有进行中的任务；替换后端时管理台和 Assistant API 会短暂中断。
+- 验证：`docker compose -f compose.production.yaml ps` 看创建时间与 healthy；`docker compose -f compose.production.yaml exec -T backend python -m app.core.build_info` 看后端提交；浏览器强制刷新后展开侧栏“运行版本”，前后端提交一致且与 `git log -1` 相同。
+- 回滚准备：构建会覆盖 `enterprise-rag-*:1.0.1` 标签，应在构建前读取运行容器的 `docker inspect --format '{{.Image}}' <容器ID>`，再把该不可变镜像 ID 标记为备份（前后端使用同一时间标签）；推荐直接使用部署脚本备份。回滚前确认无进行中任务、旧镜像与当前数据库兼容，再把备份标签重新标为 `1.0.1` 后执行第 4 步；脚本不自动回退数据库。
+- 避免 `docker system prune`/`builder prune`：会清掉构建缓存，下次构建需重新下载全部依赖。
+
 ### 生产构建排障要点（2026-10-08 实测）
 
 - 生产服务器（`/home/cm/ShipRAG`）使用根目录 `.env`，不存在 `.env.production`；命令不要加 `--env-file .env.production`。
@@ -131,7 +163,7 @@ docker compose --env-file .env.production -f compose.production.yaml up -d --for
 
 ## 回答优化功能验证
 
-管理侧回答优化的表由 `0044` 引入；部署执行 `cd backend && ../.venv/bin/python -m alembic upgrade head`（当前仓库 head 为 `0047`），不能把 `0044` 当作当前目标版本。再更新后端、前端；该功能本身无需重建业务索引，实际数据库版本另行核验。
+管理侧回答优化的表由 `0044` 引入；部署执行 `cd backend && ../.venv/bin/python -m alembic upgrade head`（当前仓库 head 为 `0048`），不能把 `0044` 当作当前目标版本。再更新后端、前端；该功能本身无需重建业务索引，实际数据库版本另行核验。
 
 定向后端验证：`cd backend && ../.venv/bin/python -m pytest -q -o addopts='' tests/test_answer_reviews.py tests/test_assistant_facade.py`；后端 PostgreSQL 测试复用测试环境连接并清理临时知识库。前端验证：`npm --prefix frontend run test -- tests/answer-reviews.spec.ts tests/reviews-api.spec.ts`。人工验收入口：管理台概览 → 查看回答与优化 → 选择知识库 → 查看 → 保存标记 → 按当前配置复测。复测会调用配置的模型，最多20轮、180秒。
 
