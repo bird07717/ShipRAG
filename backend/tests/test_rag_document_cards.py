@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.rag.document_cards import (
+    DOCUMENT_CARD_PROMPT_VERSION,
     DocumentCardGenerator,
     DocumentCardPayload,
     build_card_source,
@@ -95,6 +96,27 @@ def test_document_card_prompt_exposes_the_actual_schema_and_enum() -> None:
     assert "布尔字段必须输出 JSON boolean" in prompt
 
 
+def test_document_card_prompt_keeps_conditions_and_defines_prerequisites() -> None:
+    """Existing cards dropped the trigger conditions of conditional steps, listed tools as
+    "prerequisites" (the field was undefined) and expanded abbreviations the source does not."""
+
+    prompt = build_document_card_system_prompt()
+    rules = prompt[prompt.index("规则：") : prompt.index("document_type 只能")]
+
+    assert "必须连同条件一起写进 tasks 和" in rules
+    assert "不要自行概括成“一律”“必须”" in rules
+    assert "prerequisites 只写适用该文档的前提" in rules
+    assert "不写工具、备件或准备工作" in rules
+    assert "不要展开或猜测" in rules
+    # the same definitions reach the model through the JSON schema it must follow
+    schema = DocumentCardPayload.model_json_schema()["properties"]
+    assert "连同条件" in schema["tasks"]["description"]
+    assert "不是工具、备件或准备工作" in schema["prerequisites"]["description"]
+    # the rules stay generic: no document or product specifics
+    for specific in ("PDC", "LRU", "VDR600", "接线盒"):
+        assert specific not in prompt
+
+
 def test_content_fingerprint_ignores_display_name_but_tracks_frozen_content() -> None:
     document = {
         "index_id": uuid4(),
@@ -144,7 +166,7 @@ async def test_generator_uses_structured_schema_and_db_image_fact(settings) -> N
 
     assert payload.document_type == "TROUBLESHOOTING"
     assert payload.has_images is False
-    assert snapshot["prompt_version"] == "rag-document-card-v1"
+    assert snapshot["prompt_version"] == DOCUMENT_CARD_PROMPT_VERSION == "rag-document-card-v2"
     assert "api_key" not in snapshot
 
 
