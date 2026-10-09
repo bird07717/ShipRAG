@@ -35,7 +35,7 @@ bash scripts/bootstrap.sh
 | `M3_RAG_ANSWER_THINKING_BUDGET` | `2048` | 启用时 DashScope/Qwen 的最大内部思考 Token；关闭时不生效，与 `M3_RAG_ANSWER_MAX_TOKENS` 的最终回答预算分离。其他 Provider 当前不发送该扩展字段。 |
 | `M3_RAG_HISTORY_MAX_ROUNDS` | `4` | 最近完整问答轮次上限。 |
 | `M3_HISTORY_MAX_MESSAGES` | `10` | 技术历史消息上限，用户/助手成对选取；当前 Production Compose 未显式转发此变量。 |
-| `M3_HISTORY_TOKEN_BUDGET` | `2000` | 技术历史估算 Token 预算；最新完整轮次超预算时历史可能为空。当前 Production Compose 未显式转发此变量。 |
+| `M3_HISTORY_TOKEN_BUDGET` | `4000` | RAG 与冻结 Support 共用的历史估算 Token 预算，非 LLM 输出预算；最新完整轮次超预算时历史仍可能为空。Production Compose 显式转发，已有 `.env` 或进程环境值优先；部署前核对为 `4000`，重新构建/创建应用容器后生效。 |
 | `M3_RAG_ANSWER_REPAIR_ATTEMPTS` | `1` | 结构、证据白名单或真实实现信息违规后的最多修复次数。 |
 | `M3_RAG_SCOPE_MAX_TOKENS` | `800` | 每轮知识库名称/公开范围说明的 Prompt 快照估算 Token 上限；只截断运行时副本，不改数据库说明。 |
 | `M3_RAG_QUERY_INTERPRETER_MAX_TOKENS` | `512` | LLM 1 结构化查询理解输出上限。 |
