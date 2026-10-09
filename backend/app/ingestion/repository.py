@@ -1120,7 +1120,10 @@ class IngestionRepository:
                 {"id": prev_index_id},
             )
             prev_model_name = prev_model_result.scalar_one_or_none()
-            if prev_model_name == model["model_name"]:
+            if prev_model_name is not None:
+                # This is only a provisional reuse plan. The Worker checks
+                # the actual EMBEDDING/OCR/VISION fingerprint per document;
+                # an enqueue-time model-name comparison cannot do that.
                 # Reuse is gated per format: a stored document only reuses a
                 # previous parse result when its parser revision for that
                 # format still matches. Bumping the PDF revision must never

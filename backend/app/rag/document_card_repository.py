@@ -14,11 +14,17 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
+from app.ingestion.model_identity import (
+    configured_embedding_identity,
+    index_embedding_matches,
+    legacy_embedding_unchanged_sql,
+)
 from app.rag.document_cards import (
     DOCUMENT_CARD_SCHEMA_VERSION,
     DocumentCardPayload,
     build_routing_text,
 )
+from app.rag.model_providers import environment_api_key
 from app.rag.models import ModelSnapshot
 
 
@@ -570,7 +576,11 @@ class DocumentCardRepository:
                     await connection.execute(
                         text(
                             """
-                            SELECT m.provider, m.model_name, m.parameters, m.base_url,
+                            SELECT i.embedding_model_name, i.build_models,
+                                   """
+                            + legacy_embedding_unchanged_sql("i")
+                            + """,
+                                   m.provider, m.model_name, m.parameters, m.base_url,
                                    m.api_key_ciphertext, m.api_key_nonce, m.api_key_key_version
                             FROM knowledge_index i
                             JOIN model_config m ON m.id = i.embedding_model_id
@@ -601,6 +611,25 @@ class DocumentCardRepository:
                 bytes(raw["api_key_ciphertext"]),
                 bytes(raw["api_key_nonce"]),
                 int(raw["api_key_key_version"] or 1),
+            )
+        identity = configured_embedding_identity(
+            self.settings,
+            provider=str(raw["provider"]),
+            model_name=str(raw["model_name"]),
+            base_url=raw["base_url"],
+            has_key=self.settings.has_secret(api_key)
+            or self.settings.has_secret(
+                environment_api_key(self.settings, "EMBEDDING", str(raw["provider"]))
+            ),
+        )
+        if not index_embedding_matches(
+            dict(raw.get("build_models") or {}),
+            str(raw["embedding_model_name"]),
+            identity,
+            legacy_unchanged=bool(raw.get("legacy_embedding_unchanged", True)),
+        ):
+            raise ApiError(
+                "INDEX_EMBEDDING_MISMATCH", "索引与当前 Embedding 配置不一致，请先重建索引", 409
             )
         return ModelSnapshot(
             provider=str(raw["provider"]),

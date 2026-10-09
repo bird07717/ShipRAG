@@ -9,6 +9,7 @@ builds keep working while the misconfiguration stays visible in task metadata.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import UUID
 
 import structlog
 from sqlalchemy import text
@@ -29,6 +30,7 @@ BUILD_MODEL_TYPES = ("EMBEDDING", "OCR", "VISION")
 class BuildModelConfig:
     snapshot: ModelSnapshot | None
     source: str  # "DATABASE" | "ENV" | "ENV_FALLBACK"
+    model_id: UUID | None = None
 
 
 def _secret_box(settings: Settings) -> ModelSecretBox:
@@ -54,7 +56,7 @@ async def load_build_models(engine: AsyncEngine, settings: Settings) -> dict[str
     async with engine.connect() as connection:
         rows = await connection.execute(
             text(
-                "SELECT model_type, provider, model_name, parameters, base_url,"
+                "SELECT id, model_type, provider, model_name, parameters, base_url,"
                 " api_key_ciphertext, api_key_nonce, api_key_key_version"
                 " FROM model_config WHERE model_type = ANY(:types) AND enabled"
             ),
@@ -95,5 +97,6 @@ async def load_build_models(engine: AsyncEngine, settings: Settings) -> dict[str
                     api_key=api_key,
                 ),
                 "DATABASE",
+                UUID(str(row["id"])) if row.get("id") is not None else None,
             )
     return configs

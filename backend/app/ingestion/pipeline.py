@@ -27,6 +27,7 @@ from app.ingestion.image_understanding import (
     create_vision_provider,
 )
 from app.ingestion.legacy_text import restore_legacy_text
+from app.ingestion.model_identity import model_fingerprint, provider_identity
 from app.ingestion.models import (
     PDF_MIME_TYPE,
     EmbeddingInput,
@@ -69,6 +70,7 @@ class IndexPipeline:
         ocr_provider: ImageUnderstandingProvider | None = None,
         vision_provider: ImageUnderstandingProvider | None = None,
         model_sources: dict[str, str] | None = None,
+        embedding_model_id: UUID | None = None,
     ) -> None:
         self.engine = engine
         self.minio = minio
@@ -79,6 +81,14 @@ class IndexPipeline:
         # {"EMBEDDING": "DATABASE" | "ENV" | "ENV_FALLBACK", ...} — recorded
         # into task metadata so the build's model provenance is auditable.
         self.model_sources = model_sources or {}
+        self.embedding_model_id = embedding_model_id
+        self.build_models = {
+            "version": 1,
+            "EMBEDDING": provider_identity(self.embedding_provider, "EMBEDDING", settings),
+            "OCR": provider_identity(self.ocr_provider, "OCR", settings),
+            "VISION": provider_identity(self.vision_provider, "VISION", settings),
+        }
+        self.model_fingerprint = model_fingerprint(self.build_models)
         self.repository = IngestionRepository(engine, settings)
 
     async def run(self, index_id: UUID, task_id: UUID) -> IndexBuildResult:
@@ -99,6 +109,9 @@ class IndexPipeline:
         await self._update_task(task_id, "RUNNING", "PARSING", 1, increment_attempt=True)
         prev_index_id = await self.repository.get_active_index_id(kb_id)
         try:
+            # Persist actual Worker-start config, not the mutable enqueue-time
+            # label. Per-document fingerprints guard plans queued before edits.
+            await self._record_build_models(index_id, task_id)
             for position, document in enumerate(documents, start=1):
                 # 文档边界轮询取消：正在处理的文档会完成，其余文档停止。
                 if await self._task_cancelled(task_id):
@@ -176,6 +189,30 @@ class IndexPipeline:
             raise ValueError("仅 BUILDING 索引可以执行摄取")
         return dict(row)
 
+    async def _record_build_models(self, index_id: UUID, task_id: UUID) -> None:
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE knowledge_index SET build_models = CAST(:models AS jsonb), "
+                    "embedding_model_name = :model_name, "
+                    "embedding_model_id = COALESCE(:model_id, embedding_model_id) "
+                    "WHERE id = :id AND status = 'BUILDING'"
+                ),
+                {
+                    "id": index_id,
+                    "models": json.dumps(self.build_models),
+                    "model_name": self.embedding_provider.model_name,
+                    "model_id": self.embedding_model_id,
+                },
+            )
+        await self._update_task(
+            task_id,
+            "RUNNING",
+            "PARSING",
+            1,
+            metadata={"build_model_identity": self.build_models},
+        )
+
     async def _load_documents(self, index_id: UUID) -> list[dict[str, Any]]:
         async with self.engine.connect() as connection:
             result = await connection.execute(
@@ -224,6 +261,7 @@ class IndexPipeline:
             "current_document": str(document["filename"]),
             "current_document_position": position,
             "total_documents": total,
+            "reused": False,
         }
         if self.model_sources:
             task_metadata["build_models"] = self.model_sources
@@ -366,6 +404,7 @@ class IndexPipeline:
                     WHERE index_id = :index_id AND document_id = :document_id
                       AND status = 'READY' AND source_hash = :source_hash
                       AND metadata->>'content_revision' = :content_revision
+                      AND metadata->>'model_fingerprint' = :model_fingerprint
                     """
                 ),
                 {
@@ -373,6 +412,7 @@ class IndexPipeline:
                     "document_id": document_id,
                     "source_hash": document["source_hash"],
                     "content_revision": content_revision_for_mime(document.get("mime_type")),
+                    "model_fingerprint": self.model_fingerprint,
                 },
             )
             old_index_document_id = result.scalar_one_or_none()
@@ -586,6 +626,7 @@ class IndexPipeline:
                     "metadata": json.dumps(
                         {
                             "build_mode": "REUSE",
+                            "model_fingerprint": self.model_fingerprint,
                             "reused_from": str(old_index_document_id),
                             "content_revision": content_revision_for_mime(
                                 document.get("mime_type")
@@ -1035,6 +1076,8 @@ class IndexPipeline:
                                 document.get("mime_type")
                             ),
                             "parser_warnings": parser_warnings,
+                            "build_mode": "REBUILD",
+                            "model_fingerprint": self.model_fingerprint,
                             "element_count": len(elements),
                             "chunk_count": len(chunks),
                             "parent_chunk_count": len(parents),

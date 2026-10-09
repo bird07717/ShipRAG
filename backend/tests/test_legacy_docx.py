@@ -147,6 +147,7 @@ async def test_queued_reuse_falls_back_to_parse_when_revision_or_hash_no_longer_
     pipeline = object.__new__(IndexPipeline)
     pipeline.engine = Engine()
     pipeline.model_sources = {}
+    pipeline.model_fingerprint = "test-model-fingerprint"
     pipeline._update_task = AsyncMock()
     pipeline._update_document_status = AsyncMock()
     pipeline._process_document = AsyncMock()
@@ -164,6 +165,8 @@ async def test_queued_reuse_falls_back_to_parse_when_revision_or_hash_no_longer_
     assert "status = 'READY'" in str(query)
     assert "source_hash = :source_hash" in str(query)
     assert "metadata->>'content_revision' = :content_revision" in str(query)
+    assert "metadata->>'model_fingerprint' = :model_fingerprint" in str(query)
+    assert parameters["model_fingerprint"] == pipeline.model_fingerprint
     assert parameters["content_revision"] == content_revision_for_mime(DOCX_MIME_TYPE)
     assert parameters["source_hash"] == document["source_hash"]
     pipeline._process_document.assert_awaited_once_with(index, document, task, 1, 1)
@@ -195,6 +198,7 @@ async def test_queued_reuse_uses_pdf_revision_for_pdf_documents():
     pipeline = object.__new__(IndexPipeline)
     pipeline.engine = Engine()
     pipeline.model_sources = {}
+    pipeline.model_fingerprint = "test-model-fingerprint"
     pipeline._update_task = AsyncMock()
     pipeline._update_document_status = AsyncMock()
     pipeline._process_document = AsyncMock()

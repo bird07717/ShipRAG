@@ -44,6 +44,8 @@ class Turn:
     # Enabled EMBEDDING row snapshot at turn start.  Query-side embedding
     # prefers it when it matches the active index; None falls back to env.
     embedding: ModelSnapshot | None = None
+    index_build_models: dict[str, Any] = field(default_factory=dict)
+    legacy_embedding_unchanged: bool = True
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     knowledge_name: str = ""
     knowledge_description: str | None = None

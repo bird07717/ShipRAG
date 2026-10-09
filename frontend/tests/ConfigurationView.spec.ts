@@ -170,7 +170,10 @@ describe("model configuration editor", () => {
   it("requires embedding confirmation and explains interruption, index checks and new-session acceptance", async () => {
     const wrapper = editor([{ ...modelA, model_type: "EMBEDDING" }]); await open(wrapper);
     expect(wrapper.text()).toContain("查询向量生成");
-    expect(wrapper.text()).toContain("同名换供应商或地址");
+    expect(wrapper.text()).toContain("实际构建模型的供应商、名称、地址和维度");
+    expect(wrapper.text()).toContain("查询与卡片生成会校验身份");
+    expect(wrapper.text()).toContain("不匹配时停止，不改用另一模型检索旧向量");
+    expect(wrapper.text()).toContain("检查活动索引、文档理解生成/确认及上线就绪");
     expect(wrapper.text()).toContain("旧会话不会自动迁移");
     await wrapper.get('input[aria-label="模型名称"]').setValue("new-embedding");
     await button(wrapper, "保存").trigger("click"); await flushPromises();
@@ -190,7 +193,10 @@ describe("model configuration editor", () => {
 
   it.each(["OCR", "VISION"])("explains the %s build snapshot, reuse and environment fallback", async (type) => {
     const wrapper = editor([{ ...modelA, model_type: type }]); await open(wrapper);
-    expect(wrapper.text()).toContain("普通重建可能复用（REUSE）");
+    expect(wrapper.text()).toContain("重建会比较实际构建模型指纹");
+    expect(wrapper.text()).toContain("身份变化时不复用旧解析和图片描述");
+    expect(wrapper.text()).toContain("身份未变且文件及解析版本一致时才可复用");
+    expect(wrapper.text()).toContain("没有指纹的旧文档首次重建会重新解析");
     expect(wrapper.text()).toContain("不替换正在运行的任务快照");
     expect(wrapper.text()).toContain("并不代表关闭识别功能");
     expect(wrapper.text()).not.toContain("V2 生成参数（只读说明）");

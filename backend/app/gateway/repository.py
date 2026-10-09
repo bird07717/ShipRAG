@@ -14,7 +14,11 @@ from app.assistant.readiness import ReadinessBlockers
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.gateway.models import ChatEngine, ConversationMode, ExecutionPolicy, ResolvedPolicy
-from app.ingestion.embedding import FakeEmbeddingProvider
+from app.ingestion.model_identity import (
+    configured_embedding_identity,
+    index_embedding_matches,
+    legacy_embedding_unchanged_sql,
+)
 from app.rag.document_card_repository import DocumentCardRepository
 from app.rag.model_providers import environment_api_key, resolve_provider_kind
 
@@ -147,7 +151,10 @@ class GatewayRepository:
                                    COALESCE(kb.rag_active_index_id, kb.active_index_id)
                                        AS support_active_index_id,
                                    ri.status AS rag_index_status,
-                                   ri.embedding_model_name,
+                                   ri.embedding_model_name, ri.embedding_model_id, ri.build_models,
+                                   """
+                            + legacy_embedding_unchanged_sql("ri")
+                            + """,
                                    si.status AS support_index_status,
                                    (SELECT count(*) FROM document_profile p
                                     WHERE p.kb_id = kb.id AND p.active_payload IS NOT NULL
@@ -199,7 +206,7 @@ class GatewayRepository:
                 await connection.execute(
                     text(
                         """
-                        SELECT model_type, provider, model_name,
+                        SELECT id, model_type, provider, model_name, base_url,
                                api_key_ciphertext IS NOT NULL AS stored_key_configured
                         FROM model_config
                         WHERE enabled AND model_type IN ('LLM', 'RERANK', 'EMBEDDING')
@@ -252,7 +259,6 @@ class GatewayRepository:
         embedding = models.get("EMBEDDING")
         if embedding is None:
             rag_blockers.add("MODELS", "Embedding 模型未启用")
-            query_embedding_model = ""
         else:
             # Same decision the query-side factory makes (resolve_provider_kind),
             # so readiness never assumes a simulated embedder that is not used.
@@ -267,16 +273,31 @@ class GatewayRepository:
             )
             if embedding_resolution.kind == "NOT_CONFIGURED":
                 rag_blockers.add("MODELS", "Embedding API Key 未配置")
-            query_embedding_model = (
-                FakeEmbeddingProvider.model_name
-                if embedding_resolution.kind == "FAKE"
-                else str(embedding["model_name"])
+        if kb["rag_active_index_id"] is not None and embedding is not None:
+            identity = configured_embedding_identity(
+                self.settings,
+                provider=str(embedding["provider"]),
+                model_name=str(embedding["model_name"]),
+                base_url=embedding.get("base_url"),
+                has_key=bool(embedding["stored_key_configured"])
+                or self.settings.has_secret(
+                    environment_api_key(self.settings, "EMBEDDING", str(embedding["provider"]))
+                ),
             )
-        if (
-            kb["rag_active_index_id"] is not None
-            and str(kb["embedding_model_name"]) != query_embedding_model
-        ):
-            rag_blockers.add("INDEX", "查询 Embedding 模型与 Active Index 快照不一致")
+            legacy_unchanged = bool(kb.get("legacy_embedding_unchanged", True))
+            if kb.get("embedding_model_id") is not None:
+                legacy_unchanged = legacy_unchanged and kb["embedding_model_id"] == embedding.get(
+                    "id"
+                )
+            if not index_embedding_matches(
+                dict(kb.get("build_models") or {}),
+                str(kb["embedding_model_name"]),
+                identity,
+                legacy_unchanged=legacy_unchanged,
+            ):
+                rag_blockers.add(
+                    "INDEX", "查询 Embedding 身份与 Active Index 不一致，请重建并确认卡片"
+                )
 
         return {
             "support": {

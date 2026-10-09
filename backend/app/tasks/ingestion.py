@@ -132,6 +132,7 @@ async def _run_index_task(index_id: UUID, task_id: UUID) -> dict[str, int | str]
             ocr_provider=create_ocr_provider(settings, configs["OCR"].snapshot),
             vision_provider=create_vision_provider(settings, configs["VISION"].snapshot),
             model_sources={model_type: config.source for model_type, config in configs.items()},
+            embedding_model_id=configs["EMBEDDING"].model_id,
         )
         try:
             result = await pipeline.run(index_id, task_id)

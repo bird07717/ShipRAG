@@ -13,8 +13,10 @@ from minio import Minio
 
 from app.common.errors import SERVER_BUSY_MESSAGE, ApiError, user_safe_chat_message
 from app.core.config import Settings
-from app.ingestion.embedding import EmbeddingError, EmbeddingProvider, create_embedding_provider
+from app.ingestion.embedding import EmbeddingProvider, create_embedding_provider
+from app.ingestion.model_identity import configured_embedding_identity, index_embedding_matches
 from app.rag.llm import LlmError, LlmProvider, create_llm_provider
+from app.rag.model_providers import environment_api_key
 from app.rag.models import ModelSnapshot, PreparedRag, Turn
 from app.rag.repository import RagRepository
 from app.rag.rerank import RerankProvider, create_rerank_provider
@@ -170,17 +172,31 @@ class RagService:
 
     def _select_query_embedding_provider(self, turn: Turn) -> EmbeddingProvider:
         """Select the query embedder matching the conversation's frozen index."""
-
-        if turn.embedding is not None and self.embedding_factory is create_embedding_provider:
-            try:
-                db_provider = create_embedding_provider(self.settings, turn.embedding)
-            except EmbeddingError:
-                pass
-            else:
-                if db_provider.provider == "fake" or (
-                    db_provider.model_name == turn.embedding_model_name
-                ):
-                    return db_provider
+        snapshot = turn.embedding
+        provider = snapshot.provider if snapshot else "siliconflow"
+        identity = configured_embedding_identity(
+            self.settings,
+            provider=provider,
+            model_name=snapshot.model_name
+            if snapshot
+            else self.settings.siliconflow_embedding_model,
+            base_url=snapshot.base_url if snapshot else None,
+            has_key=self.settings.has_secret(snapshot.api_key if snapshot else None)
+            or self.settings.has_secret(environment_api_key(self.settings, "EMBEDDING", provider)),
+        )
+        if not index_embedding_matches(
+            turn.index_build_models,
+            turn.embedding_model_name,
+            identity,
+            legacy_unchanged=turn.legacy_embedding_unchanged,
+        ):
+            raise ApiError(
+                "INDEX_EMBEDDING_MISMATCH",
+                "会话索引与当前 Embedding 配置不一致，请完成重建后开启新会话",
+                409,
+            )
+        if snapshot is not None and self.embedding_factory is create_embedding_provider:
+            return create_embedding_provider(self.settings, snapshot)
         return self.embedding_factory(self.settings)
 
     async def prepare(

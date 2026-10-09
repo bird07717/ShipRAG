@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.common.errors import ApiError
 from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
+from app.ingestion.model_identity import legacy_embedding_unchanged_sql
 from app.rag.document_cards import DOCUMENT_CARD_SCHEMA_VERSION
 from app.rag.model_providers import environment_api_key, supported_providers
 from app.rag.models import (
@@ -149,7 +150,10 @@ class RagRepository:
                            COALESCE(kb.rag_active_index_id, kb.active_index_id)
                                AS rag_active_index_id,
                            i.status AS index_status, i.kb_id AS index_kb_id,
-                           i.embedding_model_name
+                           i.embedding_model_name, i.embedding_model_id, i.build_models,
+                           """
+                    + legacy_embedding_unchanged_sql("i")
+                    + """
                     FROM knowledge_base kb
                     LEFT JOIN knowledge_index i
                       ON i.id = COALESCE(kb.rag_active_index_id, kb.active_index_id)
@@ -172,6 +176,9 @@ class RagRepository:
             resolved_conversation_id = conversation_id or uuid4()
             effective_index_id = UUID(str(kb["rag_active_index_id"]))
             embedding_model_name = str(kb["embedding_model_name"])
+            index_build_models = dict(kb.get("build_models") or {})
+            index_embedding_model_id = kb.get("embedding_model_id")
+            legacy_embedding_unchanged = bool(kb.get("legacy_embedding_unchanged", True))
             scope = build_scope_snapshot(
                 kb["kb_description"], max_tokens=self.settings.m3_rag_scope_max_tokens
             )
@@ -212,8 +219,12 @@ class RagRepository:
                     frozen_result = await connection.execute(
                         text(
                             """
-                            SELECT kb_id, status, embedding_model_name
-                            FROM knowledge_index WHERE id = :index_id
+                            SELECT kb_id, status, embedding_model_name, embedding_model_id,
+                                   build_models,
+                            """
+                            + legacy_embedding_unchanged_sql("i")
+                            + """
+                            FROM knowledge_index i WHERE id = :index_id
                             """
                         ),
                         {"index_id": effective_index_id},
@@ -230,6 +241,11 @@ class RagRepository:
                             409,
                         )
                     embedding_model_name = str(frozen["embedding_model_name"])
+                    index_build_models = dict(frozen.get("build_models") or {})
+                    index_embedding_model_id = frozen.get("embedding_model_id")
+                    legacy_embedding_unchanged = bool(
+                        frozen.get("legacy_embedding_unchanged", True)
+                    )
                 else:
                     await connection.execute(
                         text("UPDATE conversation SET rag_index_id = :index_id WHERE id = :id"),
@@ -309,13 +325,21 @@ class RagRepository:
             embedding_result = await connection.execute(
                 text(
                     """
-                    SELECT provider, model_name, base_url,
+                    SELECT id, provider, model_name, base_url,
                            api_key_ciphertext, api_key_nonce, api_key_key_version
-                    FROM model_config WHERE model_type = 'EMBEDDING' AND enabled
+                    FROM model_config
+                    WHERE model_type = 'EMBEDDING' AND (id = :index_model_id OR enabled)
+                    ORDER BY (id = :index_model_id) DESC LIMIT 1
                     """
-                )
+                ),
+                {"index_model_id": index_embedding_model_id},
             )
             embedding_row = embedding_result.mappings().one_or_none()
+            if index_embedding_model_id is not None:
+                legacy_embedding_unchanged = legacy_embedding_unchanged and (
+                    embedding_row is not None
+                    and embedding_row.get("id") == index_embedding_model_id
+                )
             embedding_snapshot = (
                 ModelSnapshot(
                     provider=str(embedding_row["provider"]),
@@ -556,6 +580,8 @@ class RagRepository:
                 api_key=self._decrypt_api_key(dict(rerank_row)),
             ),
             embedding=embedding_snapshot,
+            index_build_models=index_build_models,
+            legacy_embedding_unchanged=legacy_embedding_unchanged,
             retrieval=retrieval,
             knowledge_name=normalize_scope_description(str(kb["kb_name"])),
             knowledge_description=(
@@ -1629,18 +1655,18 @@ class RagRepository:
         enabled: bool | None = None,
         actor: str = "system",
     ) -> dict[str, Any]:
-        """Admin write path for runtime model settings (LLM / RERANK only).
+        """Admin write path for shared model settings.
 
         begin_turn snapshots provider/model_name/parameters/base_url every
         turn, so committed changes take effect on the next request without
-        restarts. Embedding/OCR/VISION stay env-managed: they are bound to
-        index builds, not to the chat turn.
+        restarts. Embedding/OCR/VISION also use database settings, but are
+        build-bound; updating settings cannot rewrite existing index data.
         """
         async with self.engine.begin() as connection:
             existing_result = await connection.execute(
                 text(
                     """
-                    SELECT id, model_type FROM model_config
+                    SELECT id, model_type, provider, model_name, base_url FROM model_config
                     WHERE id = :id FOR UPDATE
                     """
                 ),
@@ -1708,6 +1734,14 @@ class RagRepository:
                 raise ApiError(
                     "MODEL_UPDATE_CONFLICT", "同一模型类型只能启用一个配置", 409
                 ) from exc
+            # Identity audit must distinguish a real change from a form that
+            # resubmits unchanged values, especially for legacy index checks.
+            changed_fields = [
+                field
+                for field in changed_fields
+                if field not in {"provider", "model_name", "base_url"}
+                or params[field] != existing.get(field)
+            ]
             await self._record_history(connection, model_id, "UPDATE_CONFIG", changed_fields, actor)
             if model_type in self._BUILD_BOUND_MODEL_TYPES and changed_fields:
                 # Config changes only take effect on the next build; flag
