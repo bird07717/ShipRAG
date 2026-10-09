@@ -350,6 +350,56 @@ describe("DashboardView metrics", () => {
     expect(restored.map((date) => date.getDate())).toEqual([10, 12]);
   });
 
+  it("judges custom dates on the server calendar when the browser is ahead of the database zone", async () => {
+    // Browser: 03:00 on 08-21. Database zone: 10 hours behind the browser, i.e. still
+    // 17:00 on 08-20, so the browser's "today" has not started on the server yet.
+    vi.setSystemTime(new Date(2026, 7, 21, 3, 0, 0));
+    const serverOffset = -new Date(2026, 7, 21, 3).getTimezoneOffset() - 600;
+    const abs = Math.abs(serverOffset);
+    const zone = `${serverOffset < 0 ? "-" : "+"}${String(Math.trunc(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const timeseries = vi.spyOn(adminApi, "getMetricsTimeseries")
+      .mockResolvedValue([{ ...dailyPoint, bucket: `2026-08-20T00:00:00${zone}` }]);
+    const wrapper = mountDashboard();
+    await flushPromises();
+
+    await wrapper.get('input[value="custom"]').setValue(true);
+    await flushPromises();
+    const datePicker = wrapper.findComponent({ name: "ElDatePicker" });
+    // Default range ends on the server's today, not the browser's.
+    const [start, end] = datePicker.props("modelValue") as Date[];
+    expect([start!.getMonth(), start!.getDate(), end!.getMonth(), end!.getDate()]).toEqual([7, 14, 7, 20]);
+    const disabled = datePicker.props("disabledDate") as (date: Date) => boolean;
+    expect(disabled(new Date(2026, 7, 21))).toBe(true); // not started on the server yet
+    expect(disabled(new Date(2026, 7, 20))).toBe(false);
+
+    // A selection that still reaches the server's future is reported, not dropped silently.
+    const calls = timeseries.mock.calls.length;
+    const picker = datePicker.findComponent({ name: "Picker" });
+    const range: [Date, Date] = [new Date(2026, 7, 21), new Date(2026, 7, 21)];
+    picker.vm.$emit("update:modelValue", range);
+    picker.vm.$emit("change", range);
+    await flushPromises();
+    expect(timeseries).toHaveBeenCalledTimes(calls);
+    expect(wrapper.text()).toContain("尚未开始");
+    expect(wrapper.text()).toContain(zone);
+  });
+
+  it("keeps the previous behaviour for dates that have started on the server", async () => {
+    vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([dailyPoint]); // UTC database
+    const wrapper = mountDashboard();
+    await flushPromises();
+    await wrapper.get('input[value="custom"]').setValue(true);
+    await flushPromises();
+    const disabled = wrapper.findComponent({ name: "ElDatePicker" }).props("disabledDate") as (date: Date) => boolean;
+    expect(disabled(new Date(2026, 7, 21))).toBe(false); // server today (UTC 12:30 on 08-21)
+    expect(disabled(new Date(2026, 7, 22))).toBe(true);
+    expect(wrapper.text()).not.toContain("尚未开始");
+  });
+
   it("ignores a late trend response after the range changed", async () => {
     vi.spyOn(adminApi, "getMetricsOverview").mockResolvedValue(overview);
     vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
@@ -431,6 +481,51 @@ describe("DashboardView metrics", () => {
     expect(section).toContain("2 / 30");
     // Legacy always-zero fields are not shown anywhere.
     expect(wrapper.text()).not.toContain("引用缺失");
+  });
+
+  it("lists a lost query vector as a to-do only above the threshold, and omits the row for an older backend", async () => {
+    const base = {
+      query_interpreter_total: 40,
+      query_interpreter_degraded: 0,
+      query_interpreter_degraded_rate: 0,
+      document_rerank_attempted: 30,
+      document_rerank_degraded: 0,
+      document_rerank_degraded_rate: 0,
+      document_rerank_unconfigured: 0,
+    };
+    vi.spyOn(adminApi, "getMetricsTimeseries").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listUnconfirmedTraces").mockResolvedValue([]);
+    const overviewSpy = vi.spyOn(adminApi, "getMetricsOverview");
+
+    overviewSpy.mockResolvedValue({
+      ...overview,
+      failed: 0,
+      v2_quality: { ...base, query_embedding_attempted: 40, query_embedding_degraded: 6, query_embedding_degraded_rate: 0.15 },
+    });
+    let wrapper = mountDashboard();
+    await flushPromises();
+    expect(wrapper.findAll(".attention-row").some((row) => row.text().includes("查询向量化失败") && row.text().includes("15.0%"))).toBe(true);
+    expect(wrapper.get(".quality-section").text()).toContain("6 / 40");
+    wrapper.unmount();
+
+    // 2 lost vectors is below the minimum count even at 20%.
+    overviewSpy.mockResolvedValue({
+      ...overview,
+      failed: 0,
+      v2_quality: { ...base, query_embedding_attempted: 10, query_embedding_degraded: 2, query_embedding_degraded_rate: 0.2 },
+    });
+    wrapper = mountDashboard();
+    await flushPromises();
+    expect(wrapper.findAll(".attention-row").some((row) => row.text().includes("查询向量化失败"))).toBe(false);
+    expect(wrapper.get(".quality-section").text()).toContain("2 / 10");
+    wrapper.unmount();
+
+    // A backend that predates the field: no row, no zeros, no to-do.
+    overviewSpy.mockResolvedValue({ ...overview, failed: 0, v2_quality: base });
+    wrapper = mountDashboard();
+    await flushPromises();
+    expect(wrapper.findAll(".attention-row").some((row) => row.text().includes("查询向量化"))).toBe(false);
+    expect(wrapper.get(".quality-section").text()).not.toContain("查询向量化");
   });
 
   it("says when the backend does not provide stage quality instead of showing zeros", async () => {

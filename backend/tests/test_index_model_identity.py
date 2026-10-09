@@ -32,7 +32,7 @@ from app.ingestion.model_identity import (
     provider_identity,
 )
 from app.ingestion.models import content_revision_for_mime
-from app.ingestion.pipeline import IndexPipeline
+from app.ingestion.pipeline import EmbeddingModelUnavailableError, IndexPipeline
 from app.rag.document_card_repository import DocumentCardRepository
 from app.rag.models import ModelSnapshot, Turn
 from app.rag.repository import RagRepository
@@ -345,6 +345,106 @@ async def test_assistant_readiness_checks_endpoint_not_just_model_name(compatibl
     assert readiness["rag"]["ready"] is compatible
     if not compatible:
         assert any("Embedding" in item for item in readiness["rag"]["blockers"])
+
+
+@pytest.mark.parametrize("linked_key_configured, ready", [(True, True), (False, False)])
+@pytest.mark.asyncio
+async def test_readiness_requires_the_index_linked_embedding_row_to_authenticate(
+    linked_key_configured: bool, ready: bool
+) -> None:
+    """Queries use the row linked to the Active Index even after it was disabled."""
+    linked_id, enabled_id, index_id = uuid4(), uuid4(), uuid4()
+    kb = {
+        "status": "ENABLED",
+        "rag_active_index_id": index_id,
+        "support_active_index_id": index_id,
+        "rag_index_status": "ACTIVE",
+        "support_index_status": "ACTIVE",
+        "profile_count": 1,
+        "ready_profile_count": 1,
+        "embedding_model_id": linked_id,
+        "embedding_model_name": "same-name",
+        "build_models": {"version": 1, "EMBEDDING": identity(snapshot())},
+        "linked_embedding_provider": "siliconflow",
+        "linked_embedding_key_configured": linked_key_configured,
+    }
+    models = [
+        {
+            "model_type": name,
+            "provider": "fake",
+            "model_name": "fake",
+            "stored_key_configured": False,
+        }
+        for name in ["LLM", "RERANK"]
+    ] + [
+        {
+            # Same identity as the index, so the identity check alone would pass.
+            "id": enabled_id,
+            "model_type": "EMBEDDING",
+            "provider": "siliconflow",
+            "model_name": "same-name",
+            "stored_key_configured": True,
+            "base_url": snapshot().base_url,
+        }
+    ]
+    # Outside APP_ENV=test a keyless real provider is NOT_CONFIGURED, not simulated.
+    no_key = Settings.model_construct(
+        **{**settings(siliconflow_api_key=None).model_dump(), "app_env": "development"}
+    )
+    repository = GatewayRepository(cast(AsyncEngine, _ReadinessEngine([[kb], models])), no_key)
+    readiness = await repository.get_readiness(uuid4())
+    assert readiness["rag"]["ready"] is ready
+    messages = " ".join(readiness["rag"]["blockers"])
+    assert ("Active Index 关联的 Embedding 配置" in messages) is (not ready)
+
+
+@pytest.mark.parametrize("source", ["ENV", "ENV_FALLBACK"])
+@pytest.mark.asyncio
+async def test_build_on_environment_embedding_fails_before_any_database_write(
+    source: str,
+) -> None:
+    """An index must stay bound to the config row that produced its vectors."""
+    pipeline = IndexPipeline(
+        cast(AsyncEngine, object()),  # any database access would raise AttributeError
+        cast(Minio, object()),
+        settings(),
+        embedding_provider=FakeEmbeddingProvider(1024),
+        model_sources={"EMBEDDING": source, "OCR": "ENV", "VISION": "ENV"},
+    )
+    with pytest.raises(EmbeddingModelUnavailableError, match=source):
+        await pipeline._record_build_models(uuid4(), uuid4())
+
+
+@pytest.mark.asyncio
+async def test_ocr_or_vision_environment_fallback_does_not_block_a_database_embedding_build(
+    identity_db: AsyncEngine,
+) -> None:
+    index_id, task_id, model_id = uuid4(), uuid4(), uuid4()
+    async with identity_db.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO knowledge_index "
+                "(id, embedding_model_id, embedding_model_name, status) "
+                "VALUES (:id, :model, 'queued-model', 'BUILDING')"
+            ),
+            {"id": index_id, "model": model_id},
+        )
+        await connection.execute(
+            text("INSERT INTO task_record (id, status) VALUES (:id, 'RUNNING')"), {"id": task_id}
+        )
+    pipeline = IndexPipeline(
+        identity_db,
+        cast(Minio, object()),
+        settings(),
+        embedding_provider=FakeEmbeddingProvider(1024),
+        model_sources={"EMBEDDING": "DATABASE", "OCR": "ENV_FALLBACK", "VISION": "ENV"},
+        embedding_model_id=model_id,
+    )
+    await pipeline._record_build_models(index_id, task_id)
+    async with identity_db.connect() as connection:
+        row = (await connection.execute(text("SELECT * FROM knowledge_index"))).mappings().one()
+        assert row["embedding_model_id"] == model_id
+        assert row["build_models"] == pipeline.build_models
 
 
 @pytest_asyncio.fixture

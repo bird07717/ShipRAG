@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shlex
@@ -18,9 +19,14 @@ NEW = "rollback-20261009010000"
 
 MOCK_COMMANDS = r"""
 git() {
+  printf 'git %s\n' "$*" >> "$TEST_LOG"
   case "$1" in
-    status|pull) return 0 ;;
-    rev-parse) printf 'abcdef123456\n' ;;
+    status|fetch|merge) return 0 ;;
+    merge-base) [[ "${TEST_NOT_FAST_FORWARD:-0}" != 1 ]] ;;
+    rev-parse)
+      [[ "$*" != *'@{upstream}'* || "${TEST_NO_UPSTREAM:-0}" != 1 ]] || return 1
+      printf 'abcdef123456\n'
+      ;;
     log) printf 'abcdef1 test build\n' ;;
     *) return 90 ;;
   esac
@@ -37,7 +43,10 @@ docker() {
       while [[ "$1" != '-f' ]]; do shift; done
       shift 2
       case "$1" in
-        config) printf '%s\n' "$TEST_CONFIG" ;;
+        config)
+          [[ "${TEST_CONFIG_STATUS:-0}" == 0 ]] || return 1
+          printf '%s\n' "$TEST_CONFIG"
+          ;;
         ps)
           if [[ "${2:-}" == '--status' ]]; then
             [[ "${TEST_PS_STATUS:-0}" == 0 ]] || return 1
@@ -59,7 +68,10 @@ docker() {
               printf '%s\n' "${counts[$index]}"
               printf '%s\n' "$((count + 1))" > "$TEST_COUNT_FILE"
               ;;
-            backend) printf '{"commit":"abcdef123456"}\n' ;;
+            backend)
+              [[ "${TEST_VERSION_STATUS:-0}" == 0 ]] || return 1
+              printf '{"commit":"abcdef123456"}\n'
+              ;;
             frontend) return 0 ;;
             *) return 90 ;;
           esac
@@ -97,12 +109,15 @@ docker() {
 """
 
 
-def deploy(tmp_path: Path, *args: str, **overrides: str) -> tuple[subprocess.CompletedProcess, str]:
+def deploy(
+    tmp_path: Path, *args: str, stdin_text: str | None = None, **overrides: str
+) -> tuple[subprocess.CompletedProcess, str]:
     log = tmp_path / "commands.log"
     env = {
         **os.environ,
         "DEPLOY_ROOT": str(ROOT),
         "TEST_LOG": str(log),
+        "DEPLOY_LOCK_FILE": str(tmp_path / "deploy.lock"),
         "TEST_COUNT_FILE": str(tmp_path / "task-check-count"),
         "TEST_CONFIG": json.dumps(
             {"services": {"backend": {"image": BACKEND}, "frontend": {"image": FRONTEND}}}
@@ -121,6 +136,7 @@ def deploy(tmp_path: Path, *args: str, **overrides: str) -> tuple[subprocess.Com
     result = subprocess.run(
         ["/bin/bash", "-c", command],
         env=env,
+        input=stdin_text,
         capture_output=True,
         text=True,
         timeout=15,
@@ -283,3 +299,209 @@ def test_build_or_migration_failure_keeps_old_containers(tmp_path: Path, failure
     result, log = deploy(tmp_path, "--skip-pull", "--backend-only", "--yes", **{failure: "1"})
     assert result.returncode != 0
     assert "up -d" not in log
+
+
+def position(log: str, needle: str) -> int:
+    assert needle in log, f"{needle!r} not in log:\n{log}"
+    return log.index(needle)
+
+
+def test_checkout_only_moves_after_confirmation(tmp_path: Path) -> None:
+    result, log = deploy(tmp_path, "--backend-only", "--yes")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert position(log, "git fetch") < position(log, "exec -T postgres")
+    assert position(log, "exec -T postgres") < position(log, "git merge --ff-only abcdef123456")
+    assert position(log, "git merge --ff-only abcdef123456") < position(log, "build scripts/")
+    assert "git pull" not in log
+
+
+def test_declining_confirmation_leaves_checkout_untouched(tmp_path: Path) -> None:
+    result, log = deploy(tmp_path, "--backend-only", stdin_text="n\n")
+    assert result.returncode != 0
+    assert "已取消" in result.stderr
+    assert "git fetch" in log
+    assert "git merge --ff-only" not in log
+    assert "docker tag " not in log
+    assert "build scripts/" not in log
+
+
+def test_dry_run_fetches_to_preview_but_never_merges(tmp_path: Path) -> None:
+    result, log = deploy(tmp_path, "--backend-only", "--dry-run")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "git fetch" in log
+    assert "git merge --ff-only" not in log
+    assert "[dry-run] git merge --ff-only abcdef123456" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "failure, message",
+    [
+        ({"TEST_NO_UPSTREAM": "1"}, "没有上游分支"),
+        ({"TEST_NOT_FAST_FORWARD": "1"}, "无法快进"),
+    ],
+)
+def test_unusable_upstream_stops_before_any_change(
+    tmp_path: Path, failure: dict[str, str], message: str
+) -> None:
+    result, log = deploy(tmp_path, "--backend-only", "--yes", **failure)
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert "git merge --ff-only" not in log
+    assert "build scripts/" not in log
+
+
+def test_rollback_accepts_yes_flag_right_after_it(tmp_path: Path) -> None:
+    result, log = deploy(tmp_path, "--rollback", "-y")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"docker tag {BACKEND.rsplit(':', 1)[0]}:{OLD} {BACKEND}" in log
+    assert ":-y" not in log
+
+
+def tag_lines(log: str) -> list[str]:
+    return [line for line in log.splitlines() if line.startswith("docker tag ")]
+
+
+def test_backup_happens_only_after_build_migration_and_task_recheck(tmp_path: Path) -> None:
+    result, log = deploy(tmp_path, "--skip-pull", "--backend-only", "--yes")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert position(log, "build scripts/") < position(log, "run --rm -T migrate")
+    assert position(log, "run --rm -T migrate") < position(log, "docker tag ")
+    assert position(log, "docker tag ") < position(log, "up -d --no-deps --force-recreate")
+    # one task check before the build, one right before the replacement (and the backup)
+    assert log.count("exec -T postgres") == 2
+
+
+@pytest.mark.parametrize("failure", ["TEST_BUILD_STATUS", "TEST_MIGRATE_STATUS"])
+def test_failed_build_or_migration_never_creates_or_prunes_backups(
+    tmp_path: Path, failure: str
+) -> None:
+    """Repeated failed deploys must not push the last good backups out of retention."""
+    tags = "\n".join(f"rollback-2026100{day}010000" for day in range(1, 5))
+    result, log = deploy(
+        tmp_path,
+        "--skip-pull",
+        "--backend-only",
+        "--yes",
+        TEST_BACKEND_TAGS=tags,
+        **{failure: "1"},
+    )
+    assert result.returncode != 0
+    assert "docker tag " not in log
+    assert "docker rmi " not in log
+    assert "up -d" not in log
+
+
+def test_successful_backup_prunes_only_beyond_retention(tmp_path: Path) -> None:
+    tags = "\n".join(f"rollback-2026100{day}010000" for day in range(1, 5))
+    result, log = deploy(tmp_path, "--skip-pull", "--backend-only", "--yes", TEST_BACKEND_TAGS=tags)
+    assert result.returncode == 0, result.stdout + result.stderr
+    removed = [line for line in log.splitlines() if line.startswith("docker rmi ")]
+    assert removed == [f"docker rmi {BACKEND.rsplit(':', 1)[0]}:rollback-20261001010000"]
+
+
+@pytest.mark.parametrize(
+    ("backend", "frontend"),
+    [
+        ("reg.example/app:backend", "reg.example/app:frontend"),
+        ("reg.example:5000/app", "reg.example:5000/app:frontend"),
+        ("reg.example/app@sha256:" + "a" * 64, "reg.example/app:frontend"),
+    ],
+)
+def test_images_sharing_a_repository_are_rejected_before_any_change(
+    tmp_path: Path, backend: str, frontend: str
+) -> None:
+    config = json.dumps(
+        {"services": {"backend": {"image": backend}, "frontend": {"image": frontend}}}
+    )
+    result, log = deploy(tmp_path, "--skip-pull", "--yes", TEST_CONFIG=config)
+    assert result.returncode != 0
+    assert "同属仓库" in result.stderr
+    assert "docker tag " not in log
+    assert "build scripts/" not in log
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected_repo"),
+    [
+        ("registry.example:5000/backend", "registry.example:5000/backend"),  # no tag, port kept
+        ("registry.example:5000/backend:current", "registry.example:5000/backend"),
+        ("registry.example/backend@sha256:" + "b" * 64, "registry.example/backend"),
+    ],
+)
+def test_backup_tag_uses_the_repository_without_tag_or_digest(
+    tmp_path: Path, backend: str, expected_repo: str
+) -> None:
+    config = json.dumps(
+        {"services": {"backend": {"image": backend}, "frontend": {"image": FRONTEND}}}
+    )
+    result, log = deploy(
+        tmp_path,
+        "--skip-pull",
+        "--backend-only",
+        "--yes",
+        TEST_CONFIG=config,
+        TEST_BACKEND_TAGS="",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert any(
+        line.startswith(f"docker tag sha256:live-backend-container {expected_repo}:rollback-")
+        for line in tag_lines(log)
+    ), log
+
+
+def test_concurrent_deploy_is_refused_while_the_lock_is_held(tmp_path: Path) -> None:
+    with (tmp_path / "deploy.lock").open("w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result, log = deploy(tmp_path, "--skip-pull", "--backend-only", "--yes")
+    assert result.returncode != 0
+    assert "另一个部署/回滚正在进行" in result.stderr
+    assert "docker tag " not in log
+    assert "build scripts/" not in log
+    assert "up -d" not in log
+
+
+def test_dry_run_does_not_take_the_lock(tmp_path: Path) -> None:
+    with (tmp_path / "deploy.lock").open("w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result, _ = deploy(tmp_path, "--skip-pull", "--backend-only", "--dry-run")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_first_deployment_skips_the_task_check_when_postgres_is_not_running(
+    tmp_path: Path,
+) -> None:
+    result, log = deploy(tmp_path, "--skip-pull", "--backend-only", "--yes", TEST_NO_CONTAINER="1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "postgres 未运行" in result.stdout
+    assert "exec -T postgres" not in log
+    assert "up -d --no-deps --force-recreate" in log
+
+
+def test_unreadable_postgres_state_blocks_even_with_force(tmp_path: Path) -> None:
+    result, log = deploy(
+        tmp_path, "--skip-pull", "--backend-only", "--yes", "--force", TEST_PS_STATUS="1"
+    )
+    assert result.returncode != 0
+    assert "up -d" not in log
+    assert "build scripts/" not in log
+
+
+def test_confirmation_without_input_explains_itself(tmp_path: Path) -> None:
+    result, log = deploy(tmp_path, "--skip-pull", "--backend-only", stdin_text="")
+    assert result.returncode != 0
+    assert "无法读取确认输入" in result.stderr
+    assert "docker tag " not in log
+
+
+def test_unresolvable_compose_config_explains_itself(tmp_path: Path) -> None:
+    result, log = deploy(tmp_path, "--skip-pull", "--backend-only", "--yes", TEST_CONFIG_STATUS="1")
+    assert result.returncode != 0
+    assert "无法解析 compose 镜像名" in result.stderr
+    assert "build scripts/" not in log
+
+
+def test_unreadable_running_version_fails_verification_with_a_message(tmp_path: Path) -> None:
+    result, _ = deploy(tmp_path, "--skip-pull", "--backend-only", "--yes", TEST_VERSION_STATUS="1")
+    assert result.returncode != 0
+    assert "无法读取运行版本" in result.stdout
+    assert "版本核对未通过" in result.stderr

@@ -31,6 +31,19 @@ describe("BackendStatusBanner", () => {
     wrapper.unmount();
   });
 
+  it("keeps the per-second countdown outside the alert live region", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 500 })));
+    const wrapper = mount(BackendStatusBanner, { global: { plugins: [ElementPlus] } });
+    markBackendUnreachable("Failed to fetch");
+    await flushPromises();
+
+    const alert = wrapper.get('[role="alert"]');
+    expect(alert.text()).toContain("无法连接后端服务");
+    expect(alert.text()).not.toContain("秒后自动重试");
+    expect(wrapper.get(".banner-meta").text()).toContain("秒后自动重试");
+    wrapper.unmount();
+  });
+
   it("retries with backoff while offline and announces the reconnection", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("", { status: 500 }));
     vi.stubGlobal("fetch", fetchMock);

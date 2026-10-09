@@ -152,6 +152,9 @@ class GatewayRepository:
                                        AS support_active_index_id,
                                    ri.status AS rag_index_status,
                                    ri.embedding_model_name, ri.embedding_model_id, ri.build_models,
+                                   emb.provider AS linked_embedding_provider,
+                                   (emb.api_key_ciphertext IS NOT NULL)
+                                       AS linked_embedding_key_configured,
                                    """
                             + legacy_embedding_unchanged_sql("ri")
                             + """,
@@ -191,6 +194,7 @@ class GatewayRepository:
                             LEFT JOIN knowledge_index si ON si.id = COALESCE(
                                 kb.rag_active_index_id, kb.active_index_id
                             )
+                            LEFT JOIN model_config emb ON emb.id = ri.embedding_model_id
                             WHERE kb.id = :kb_id
                             """
                         ),
@@ -273,6 +277,41 @@ class GatewayRepository:
             )
             if embedding_resolution.kind == "NOT_CONFIGURED":
                 rag_blockers.add("MODELS", "Embedding API Key 未配置")
+        # Queries and card generation take their credentials from the Embedding row
+        # linked to the Active Index, even if it was later disabled. The identity
+        # check below deliberately judges the *enabled* row (a changed config keeps
+        # the knowledge base not-ready until it is rebuilt), but the linked row must
+        # also be able to authenticate; otherwise readiness would be green while
+        # queries silently degrade to keyword-only retrieval.
+        linked = (
+            {
+                "id": kb["embedding_model_id"],
+                "provider": kb["linked_embedding_provider"],
+                "stored_key_configured": bool(kb.get("linked_embedding_key_configured")),
+            }
+            if kb.get("linked_embedding_provider") is not None
+            else None
+        )
+        if (
+            kb["rag_active_index_id"] is not None
+            and linked is not None
+            and (embedding is None or embedding.get("id") != linked["id"])
+            and resolve_provider_kind(
+                self.settings,
+                "EMBEDDING",
+                str(linked["provider"]),
+                has_key=bool(linked["stored_key_configured"])
+                or self.settings.has_secret(
+                    environment_api_key(self.settings, "EMBEDDING", str(linked["provider"]))
+                ),
+            ).kind
+            == "NOT_CONFIGURED"
+        ):
+            rag_blockers.add(
+                "MODELS",
+                "Active Index 关联的 Embedding 配置（已停用）API Key 未配置，"
+                "查询会降级为仅关键词检索；请补充密钥或重建索引",
+            )
         if kb["rag_active_index_id"] is not None and embedding is not None:
             identity = configured_embedding_identity(
                 self.settings,

@@ -144,6 +144,9 @@ const attentionItems = computed(() => {
     if (quality.document_rerank_degraded >= QUALITY_ALERT_MIN_COUNT && quality.document_rerank_degraded_rate >= QUALITY_ALERT_RATE) {
       items.push({ key: "rerank-degraded", label: "文档重排调用失败后降级", value: percent(quality.document_rerank_degraded_rate, 1), tone: "warning", icon: WarningFilled, action: openQualityDiagnostics });
     }
+    if ((quality.query_embedding_degraded ?? 0) >= QUALITY_ALERT_MIN_COUNT && (quality.query_embedding_degraded_rate ?? 0) >= QUALITY_ALERT_RATE) {
+      items.push({ key: "embedding-degraded", label: "查询向量化失败，检索仅用关键词召回", value: percent(quality.query_embedding_degraded_rate ?? 0, 1), tone: "warning", icon: WarningFilled, action: openQualityDiagnostics });
+    }
     if (quality.query_interpreter_degraded >= QUALITY_ALERT_MIN_COUNT && quality.query_interpreter_degraded_rate >= QUALITY_ALERT_RATE) {
       items.push({ key: "query-degraded", label: "查询理解失败后使用兜底", value: percent(quality.query_interpreter_degraded_rate, 1), tone: "warning", icon: WarningFilled, action: openQualityDiagnostics });
     }
@@ -223,8 +226,20 @@ function startOfDay(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
-function isFutureDate(date: Date): boolean {
-  return date.getTime() > Date.now();
+/*
+ * Picked dates are read as the server's calendar days (see resolveTrendWindow), so
+ * "today" and "future" must be judged on the server's calendar as well. With the
+ * browser ahead of the database time zone (e.g. UTC+8 against a UTC database, before
+ * 08:00 local) the browser's today has not started on the server yet; offering it
+ * would select a window that begins after "now" and silently leave the old chart up.
+ */
+function serverToday(): Date {
+  const shifted = new Date(Date.now() + serverOffsetMinutes.value * 60_000);
+  return new Date(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate());
+}
+
+function isAfterServerToday(date: Date): boolean {
+  return startOfDay(date).getTime() > serverToday().getTime();
 }
 
 /*
@@ -325,7 +340,14 @@ async function loadMetrics() {
 async function loadTrend(): Promise<"ok" | "failed" | "stale"> {
   if (!active || !store.hasServiceCredential) return "stale";
   const window = resolveTrendWindow();
-  if (!window) return "stale";
+  if (!window) {
+    const [start, end] = trendRange.value === "custom" ? customRange.value ?? [] : [];
+    if (!start || !end) return "stale";
+    // A complete selection that starts after the server's "now" would otherwise be
+    // dropped without any sign, leaving the previous chart under the new dates.
+    trendError.value = `所选日期在服务端时区（${formatOffset(serverOffsetMinutes.value)}）尚未开始，图表仍为上次的范围，请选择更早的日期。`;
+    return "failed";
+  }
   const generation = ++trendGeneration;
   const knowledgeId = store.selectedKnowledgeId;
   const isCurrent = () => active && generation === trendGeneration && store.selectedKnowledgeId === knowledgeId;
@@ -362,8 +384,8 @@ async function loadTrend(): Promise<"ok" | "failed" | "stale"> {
 function onTrendRangeChange() {
   if (trendRange.value === "custom") {
     if (!customRange.value) {
-      const today = startOfDay(new Date());
-      customRange.value = [new Date(today.getTime() - 6 * DAY_MS), today];
+      const today = serverToday();
+      customRange.value = [new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6), today];
     }
     appliedCustomRange = customRange.value;
   } else trendGranularity.value = trendRange.value === "24h" ? "hour" : "day";
@@ -574,7 +596,7 @@ watch(() => store.hasServiceCredential, (available) => {
             start-placeholder="开始日期"
             end-placeholder="结束日期"
             :clearable="false"
-            :disabled-date="isFutureDate"
+            :disabled-date="isAfterServerToday"
             @change="onCustomRangeChange"
           />
           <el-radio-group
@@ -674,6 +696,7 @@ watch(() => store.hasServiceCredential, (available) => {
           <div v-if="overview.v2_quality" class="detail-grid">
             <div><span>查询理解降级率</span><b>{{ percent(overview.v2_quality.query_interpreter_degraded_rate, overview.v2_quality.query_interpreter_total) }}</b><small>{{ overview.v2_quality.query_interpreter_degraded }} / {{ overview.v2_quality.query_interpreter_total }} · 有查询理解记录的轮次</small></div>
             <div><span>文档重排降级率</span><b>{{ percent(overview.v2_quality.document_rerank_degraded_rate, overview.v2_quality.document_rerank_attempted) }}</b><small>{{ overview.v2_quality.document_rerank_degraded }} / {{ overview.v2_quality.document_rerank_attempted }} · 实际调用重排的检索</small></div>
+            <div v-if="overview.v2_quality.query_embedding_attempted !== undefined"><span>查询向量化降级率</span><b>{{ percent(overview.v2_quality.query_embedding_degraded_rate ?? 0, overview.v2_quality.query_embedding_attempted) }}</b><small>{{ overview.v2_quality.query_embedding_degraded ?? 0 }} / {{ overview.v2_quality.query_embedding_attempted }} · 已执行检索的轮次；失败时只用关键词召回，回答仍会返回</small></div>
             <div :class="{ 'is-danger': overview.v2_quality.document_rerank_unconfigured > 0 }"><span>未执行重排（模型不可用）</span><b>{{ overview.v2_quality.document_rerank_unconfigured }}</b><small>候选 ≥2 但没有可用 Rerank 模型的检索次数</small></div>
           </div>
           <p v-else class="muted">当前后端版本未提供阶段质量统计，请更新后端后查看。</p>

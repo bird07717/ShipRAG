@@ -100,9 +100,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-if="offline" class="system-banner tone-danger" role="alert">
+  <div v-if="offline" class="system-banner tone-danger">
     <el-icon class="banner-icon"><WarningFilled /></el-icon>
-    <div class="banner-text">
+    <!-- Only this static text is the live region; the per-second countdown below
+         must not be re-announced every tick. -->
+    <div class="banner-text" role="alert">
       <strong>无法连接后端服务</strong>
       <span>请求未能到达后端（{{ backendTarget }}），自 {{ offlineSinceLabel }} 起。页面上的数据可能已过期，提交的操作不会生效。</span>
     </div>

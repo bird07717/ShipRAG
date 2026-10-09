@@ -157,12 +157,25 @@ async def test_v2_quality_reads_stage_outcomes_from_runtime_snapshot() -> None:
     if not url:
         pytest.skip("SUPPORT_TEST_DATABASE_URL is not configured")
 
-    def snapshot(query: str | None, rerank: dict[str, str] | None) -> dict[str, object]:
+    def snapshot(
+        query: str | None,
+        rerank: dict[str, str] | None,
+        *,
+        embedding: dict[str, str] | None = None,
+        degradations: list[str] | None = None,
+    ) -> dict[str, object]:
         generation: dict[str, object] = {"pipeline": "V2"}
         if query is not None:
             generation["query_interpreter"] = {"status": query, "reason": None}
         if rerank is not None:
-            generation["retrieval"] = {"document_rerank": rerank, "degradations": []}
+            retrieval: dict[str, object] = {
+                "query_count": 1,
+                "document_rerank": rerank,
+                "degradations": degradations or [],
+            }
+            if embedding is not None:
+                retrieval["query_embedding"] = embedding
+            generation["retrieval"] = retrieval
         return {"generation": generation}
 
     engine = create_async_engine(url, pool_pre_ping=True)
@@ -178,13 +191,33 @@ async def test_v2_quality_reads_stage_outcomes_from_runtime_snapshot() -> None:
                 {"id": conversation_id, "kb_id": kb_id},
             )
             rows = [
-                snapshot("PASSED", {"status": "PASSED", "provider": "dashscope"}),
-                snapshot("PASSED", {"status": "DEGRADED", "reason": "UPSTREAM_TIMEOUT"}),
-                snapshot("DEGRADED", {"status": "PASSED"}),
-                snapshot("PASSED", {"status": "SKIPPED", "reason": "MODEL_NOT_CONFIGURED"}),
+                # New trace shape: explicit query-embedding status.
+                snapshot(
+                    "PASSED",
+                    {"status": "PASSED", "provider": "dashscope"},
+                    embedding={"status": "PASSED"},
+                ),
+                snapshot(
+                    "PASSED",
+                    {"status": "DEGRADED", "reason": "UPSTREAM_TIMEOUT"},
+                    embedding={"status": "DEGRADED", "reason": "TimeoutError"},
+                    degradations=["TimeoutError"],
+                ),
+                # Older traces: only the failure code inside retrieval.degradations.
+                snapshot("DEGRADED", {"status": "PASSED"}, degradations=["EmbeddingError"]),
+                # A retrieval degradation that is not about the query vector.
+                snapshot(
+                    "PASSED",
+                    {"status": "SKIPPED", "reason": "MODEL_NOT_CONFIGURED"},
+                    degradations=["PARADEDB_UNSUPPORTED_QUERY_SHAPE"],
+                ),
                 # What production actually records for a Rerank row without a
                 # key: the factory raises inside the try-block → DEGRADED.
-                snapshot("PASSED", {"status": "DEGRADED", "reason": "MODEL_NOT_CONFIGURED"}),
+                snapshot(
+                    "PASSED",
+                    {"status": "DEGRADED", "reason": "MODEL_NOT_CONFIGURED"},
+                    degradations=["TimeoutError"],
+                ),
                 snapshot("PASSED", {"status": "SKIPPED", "reason": "NOT_ENOUGH_CANDIDATES"}),
                 snapshot("PASSED", None),  # conversation path: no retrieval
                 {},  # legacy trace without a V2 snapshot
@@ -227,6 +260,12 @@ async def test_v2_quality_reads_stage_outcomes_from_runtime_snapshot() -> None:
             "document_rerank_degraded": 1,
             "document_rerank_degraded_rate": round(1 / 3, 4),
             "document_rerank_unconfigured": 2,
+            # Six turns ran retrieval (the conversation path and the legacy trace
+            # did not). Degraded: explicit status, plus two older traces matched
+            # through retrieval.degradations; an unrelated degradation is not counted.
+            "query_embedding_attempted": 6,
+            "query_embedding_degraded": 3,
+            "query_embedding_degraded_rate": 0.5,
         }
         # The legacy fields stay at zero for V2 traffic; the console must not show them.
         assert overview["rerank_degraded_rate"] == 0.0

@@ -21,7 +21,7 @@
 
 管理端 `GET /conversations` 可选 `activity_from` / `activity_to` 按会话 `updated_at`（最近活动时间）范围筛选，再按最近活动倒序（同时间按 `id`）和 `limit`/`offset` 返回；这不改变 Assistant 外部会话 API。数据库未新增列或迁移，查询复用既有会话活动时间索引。
 
-### 管理列表服务端分页（2026-10-09，本地，待部署，ADR-0038）
+### 管理列表服务端分页（2026-10-09，已随 `4ccf19a` 部署到生产，ADR-0038）
 
 - 契约：`GET /traces`、`GET /tasks`、`GET /knowledge-bases/{id}/documents` 的响应体仍是原 JSON 数组，新增 `offset`（0–1,000,000）与响应头 `X-Total-Count`（满足筛选条件的总行数）；`app.main` 的 CORS `expose_headers` 已包含该头。管理 `GET /conversations` 本就是 `{items}` 信封，新增 `offset` 与 `total`。不传 `offset` 时行为与原来一致；首页且返回行数小于 `limit`（或不限条数）时直接以行数为总数，不再执行计数查询。共享实现：`app/api/pagination.py`（`OffsetQuery`、`paged_total`、`set_total_count`）。所有分页排序都带唯一次级键（Trace/任务 `created_at DESC, id DESC`，会话 `updated_at DESC, id DESC`，文档 `<排序列>, id`），同一时间戳的行跨页不会重复或遗漏。
 - `/traces` 新增 `q`：按 `question` 做大小写不敏感子串匹配（`ILIKE`，`%`/`_`/`\` 经 `common.text.escape_like` 转义后按字面匹配）。列表与计数共用 `RagRepository._trace_filters`。
@@ -29,7 +29,7 @@
 - 文档列表新增可选 `q`（显示名/文件名子串）、`build_status`（最近一次构建的 `index_document.status`）、`card_index_id` + `card_state`（该索引 RAG 理解状态：`MISSING`/`GENERATING`/`FAILED`/`PENDING_REVIEW`/`REJECTED`/`CONFIRMED`，与管理台标签一一对应；`card_state` 缺少 `card_index_id` 返回 422）、`sort`（`created_at`/`display_name`/`file_size`，白名单）与 `order`、`limit`（1–200，可选）。不传 `limit` 时仍返回全部文档（原行为，`LIMIT ALL`），但会遵守单独传入的 `offset`；带 `card_index_id` 时每行附 `card_state`。查询为 `_document_query` 子查询，计数与列表同源。
 - 已在本地开发库只读执行验证：文档 44 份、卡片状态分组之和等于总数、`q`/`build_status`/分页与排序结果一致；Trace 2,468 条分页与 `q` 计数一致。
 
-### 按知识库回收的保留范围（2026-10-09，本地，待部署）
+### 按知识库回收的保留范围（2026-10-09，已随 `4ccf19a` 部署到生产）
 
 `POST /knowledge-bases/{id}/indexes/gc` 调用 `collect_garbage(kb_id)` 时，过期会话清理、Trace 脱敏/删除（`retain_traces(kb_id=...)`）与终态任务记录修剪（`prune_terminal_tasks(kb_id=...)`）都只作用于该知识库；没有知识库的全局任务不会被按库回收删除。全局 `POST /gc` 与维护 Worker 的周期 GC 仍以 `kb_id=None` 处理全部数据，行为不变。此前按库回收会顺带执行全局 Trace 与任务记录清理。
 
@@ -70,7 +70,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 外部服务包括 PostgreSQL、Redis、MinIO，以及可配置的模型服务。代码支持 SiliconFlow 嵌入/重排/OCR、智谱 LLM/视觉，以及阿里云百炼 DashScope；2026-09-15 起 DashScope 注册为全部五类模型类型（LLM/EMBEDDING/RERANK/OCR/VISION）的 Provider：LLM、Embedding、OCR、Vision 走 OpenAI 兼容 `chat/completions` / `embeddings`，Rerank 使用 DashScope 专有 `/api/v1/services/rerank/text-rerank/text-rerank` 端点（`model_providers.dashscope_rerank_base_url` 把管理台保存的 compatible-mode 地址映射到原生 API 根），Embedding 仅文本输入且沿用 1024 维契约。`auto` 模式会按环境或数据库模型快照中的凭据选择。Embedding、LLM、Rerank 在 staging/production 中禁止显式或隐式回退到 fake，缺少凭据时失败关闭；fake 仅用于开发/测试的受控场景。实际模型、超时和阈值来自 Settings、模型快照及环境变量，不能仅根据本文推断部署值。
 
-## 管理模型配置与 Assistant 生效边界（2026-10-09 一致性修复，已部署到生产 `e07165d`）
+## 管理模型配置与 Assistant 生效边界（2026-10-09 一致性修复，已部署到生产，`e07165d` 起）
 
 两类凭据区分 API 权限，不区分模型配置。管理台 `PATCH /models/{id}` 保存到共享 `model_config`；Assistant 经 `AssistantFacade → ChatGatewayService → RagService` 使用同一套问答实现。前提是管理台和业务 Assistant 请求连接的是同一套后端及数据库，不是不同部署。
 
@@ -86,15 +86,19 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - DB 密钥优先于对应 Provider 环境密钥；DB 无密钥时才用环境兜底。网页模型配置不要求容器重启；修改 `.env`/Settings 则须重建相应容器。历史消息与幂等重放读取保存的终态，不按新模型重生成。
 - `ingestion/model_identity.py` 统一生成实际身份、复用指纹及查询/就绪/卡片一致性判断。密钥、超时、批大小和未消费的参数 JSON 不进入指纹；单纯密钥轮换不会让解析缓存失效（现有配置写路径仍可能标记待重建）。端点仅归一化格式，不假设同名跨供应商/端点等价。任务开始前的配置变化以 Worker 实际身份为准，覆盖排队时的索引模型标签/关联 ID，逐文档再校验复用计划。
 - `0048` 不回填历史身份。`build_models={}` 的索引仅在同名、原关联模型行且创建之后的审计无 Provider/模型/Base URL 修改时兼容；无效或未知版本的非空快照不得退回只比名字。保存表单重复提交未变身份不记为身份修改。无法追溯旧环境或绕过审计的修改，不能宣称历史向量空间已证明一致，首次重建建立可信快照。
+- 索引必须绑定实际生成向量的 Embedding 行：构建启动时若 Embedding 来源为 `ENV`（无启用行）或 `ENV_FALLBACK`（提供方不受支持），`IndexPipeline._record_build_models` 在任何解析/向量计算/数据库写入之前抛 `EmbeddingModelUnavailableError`，索引走既有失败流程并重新置位 `rebuild_required`。原先会用环境默认模型构建，却因 `knowledge_index.embedding_model_id`（NOT NULL）保留入队时的旧行，查询侧按该行判定身份而误报 409。OCR/Vision 的环境回退不变（它们不绑定模型行）。
+- 就绪检查额外要求“Active Index 关联的 Embedding 行”能鉴权：查询与卡片生成读取该行的凭据，即使它之后被停用；若它不是当前启用行且既无库内密钥也无环境密钥，就绪出现 `MODELS` 阻断（否则就绪为绿而查询静默降级为仅 BM25）。身份判定仍按当前启用行：配置变化保持“未就绪，待重建”的既有语义，不改为按关联行判定。
 - 证据入口：`api/rag.py:update_model`、`rag/repository.py:begin_turn`、`services/rag.py:_select_query_embedding_provider`、`ingestion/model_config.py:load_build_models`、`ingestion/repository.py:_create_build_locked`、`gateway/repository.py:get_readiness`。
 
 ## 模型实际运行判定与管理侧可见性（2026-10-08）
 
 - `rag/model_providers.py:resolve_provider_kind(settings, model_type, provider, has_key)` 是“真实 / 模拟 / 不可用”的唯一判定表，LLM、Embedding、Rerank、OCR、Vision 五个工厂（`create_*_provider`）都调用它，异常类型与消息保持原样。`kind` 为 `REAL`/`FAKE`/`NOT_CONFIGURED`/`DISABLED`/`UNAVAILABLE`，`reason` 为 `CONFIGURED`/`EXPLICIT_PROVIDER`/`FAKE_MODE`/`AUTO_NO_KEY`/`FAKE_FORBIDDEN`/`NO_API_KEY`/`MODE_DISABLED`/`UNSUPPORTED_PROVIDER`。新增模型类型或改回退规则时只改这张表。
 - 规则（ADR-0034，2026-10-08 起禁止静默模拟）：五类模型 `auto` 无 Key 时仅 `APP_ENV=test` 返回 `FAKE/AUTO_NO_KEY`，其他环境 LLM/Embedding/Rerank 为 `NOT_CONFIGURED/NO_API_KEY`（工厂抛错，文案含“未配置 API Key，禁止回退到 fake”），OCR/Vision 为 `UNAVAILABLE/NO_API_KEY`（逐图 `FAILED`，构建继续，不再写入模拟识别文本）。显式 `fake` 在 development/test 为 `FAKE/FAKE_MODE`，在 staging/production 为 `FAKE_FORBIDDEN`，且配置校验对五类 `fake` 均拒绝启动。`gateway/repository.py:get_readiness` 的 Embedding 判断也改用该表：缺 Key 时新增就绪阻塞“Embedding API Key 未配置”，不再假设按模拟向量对齐。
-- `GET /api/v1/system/model-runtime`（管理认证，`rag/model_runtime.py`）按启用的 `model_config` 行（无行时按工厂的环境默认提供方；Embedding/OCR/Vision 行的提供方不受支持时与 `load_build_models` 一致忽略该行，`source=ENV_FALLBACK`；LLM/Rerank 不受支持时报 `UNAVAILABLE/UNSUPPORTED_PROVIDER`）逐类型返回实际判定，Key 只报告“数据库已存/环境已配”的存在性、不解密；另统计 `embedding_model_name = deterministic-shake256` 的 ACTIVE 索引数。与 `/system/info` 分开，数据库故障不影响版本标识显示。
+- `GET /api/v1/system/model-runtime`（管理认证，`rag/model_runtime.py`）按启用的 `model_config` 行（无行时按工厂的环境默认提供方；Embedding/OCR/Vision 行的提供方不受支持时与 `load_build_models` 一致忽略该行，`source=ENV_FALLBACK`（该视图只描述解析结果：实际构建时 Embedding 来源不是 `DATABASE` 会被 `IndexPipeline._record_build_models` 直接拒绝，见下；OCR/Vision 仍按环境提供方继续）；LLM/Rerank 不受支持时报 `UNAVAILABLE/UNSUPPORTED_PROVIDER`）逐类型返回实际判定，Key 只报告“数据库已存/环境已配”的存在性、不解密；另统计 `embedding_model_name = deterministic-shake256` 的 ACTIVE 索引数。与 `/system/info` 分开，数据库故障不影响版本标识显示。
 - `GET /api/v1/conversations`（管理端，非 Assistant 外部接口）新增可选 `source`（`ASSISTANT_API`/`INTERNAL_CHAT`/`PLAYGROUND`，非法值 422）与列表项 `last_source`。会话表本身没有渠道列：`last_source` 取该会话最近一轮 `rag_trace.source`，`source` 过滤保留“任一轮来自该渠道”的会话，使用既有 `ix_rag_trace_conversation_created`；无链路的会话 `last_source=null`。其他参数（`user_id` 精确匹配、`limit≤200`）不变。外部 Assistant 的 `/assistant/v1/conversations` 是另一套凭据和契约，管理台不调用。
 - `/metrics/overview` 新增 `v2_quality`：查询理解（`runtime_snapshot.generation.query_interpreter.status`）总数/降级数/降级率、文档级重排（`generation.retrieval.document_rerank.status`）实际调用数/调用失败降级数/降级率，以及未执行重排次数。注意：`Turn.rerank` 总有快照（无启用行时 `begin_turn` 直接 503），缺 Key 时是真实工厂在检索 try 块内抛 `MODEL_NOT_CONFIGURED`，记录为 `DEGRADED` + `reason=MODEL_NOT_CONFIGURED`（`test_v2_rerank_without_key_is_recorded_as_unconfigured_degradation` 固定此形态）；因此“未执行重排”统计 `SKIPPED` 或 `DEGRADED` 且原因为 `MODEL_NOT_CONFIGURED`，并从调用数与降级数中排除，降级率只反映真实调用失败；随 overview 的知识库/时间/引擎/来源过滤。旧 `citation_missing_rate`、`rerank_degraded_rate` 读取 V2 不写入的旧列，对 V2 流量恒为 0，保留字段兼容但不应展示。
+
+- 查询向量化降级可见性（2026-10-09，本地，未部署）：`retrieve_documents` 在检索 Trace 新增 `query_embedding={status: PASSED|DEGRADED, reason}`；Embedding 失败（超时、上游错误、返回维度/数量无效）时回答仍会返回，但只剩 BM25 与卡片关键词通道的证据。`/metrics/overview` 的 `v2_quality` 新增 `query_embedding_attempted`（检索实际执行的轮次，以 `retrieval.query_count` 非空判定，对话路径与范围外短路不计）、`query_embedding_degraded` 与 `query_embedding_degraded_rate`。降级判定为 `query_embedding.status='DEGRADED'`，或旧 Trace（没有该字段）的 `retrieval.degradations` 含 `EmbeddingError`、`TimeoutError`、`QUERY_EMBEDDING_INVALID`：`EmbeddingError` 没有 `code` 属性，上游失败只会以类名记录，因此旧 Trace 里的 `TimeoutError` 是近似匹配（不能排除其他超时来源）；新 Trace 以显式状态为准。没有新增迁移。
 
 ## 已删除的 RAG legacy 约束（历史记录）
 
@@ -174,6 +178,8 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 - ADR-0019 已停止原 P3 六策略和 P4 `rag_case` 的继续实施。V0～V5 已交付 `app.rag.v2`：最小 Query Interpreter 输出独立请求、范围、会话关系、当前任务和二值 `response_path`，不输出检索补充查询或用户约束，不生成答案、不决定回答篇幅。知识库名称和公开说明是可信产品档案；询问产品身份、用途、组成、原理、操作、维护或故障不因缺少直接文档变成范围外。技术 LLM 2 的范围与证据收口仍沿用既有规则。LLM 1 只接收按轮次组织的最近成功技术历史；`FOLLOW_UP/CORRECTION` 任务从最近完整轮次的用户请求继承，旧助手回答仅用于理解指代。LLM 1 单次时限 25 秒，完整超时不重试，429/5xx/连接类即时失败最多快速重试一次；失败时只对有完整历史的省略对象短追问确定性继承任务，其余保守走 Knowledge。Trace 记录超时、历史兜底及检索结果。V2 不调用旧 Query Rewrite、首轮标题召回、焦点路由或 P2/P3 Planner。
 - Query Interpreter 对“产品技术任务 + 无关创作/娱乐/闲聊”的混合输入只保留产品技术子任务用于独立问题和检索；Answer Generator 再次明确只回答该技术部分，不执行、复述或评价无关要求。纯无关任务仍由 LLM 1 判为范围外；这里不维护诗句或问题文本词表。
 - V2 复用文档卡片、Chunk/卡片文档级融合、Rerank 和 `get_document_blocks()`。`RagService.prepare()` 只创建冻结轮次，不运行 legacy 预检索；原问题、独立请求和可选任务锚点去重后批量 Embedding 一次，再以 RRF 聚合及文档级 Rerank 排序。`FOLLOW_UP/CORRECTION` 的最近实际使用文档可作为零初始分软候选，但不保证进入最终上下文；`NEW_TASK` 不继承。前 1～3 份有序文档送入技术 LLM 2。技术 LLM 2 应给最小充分回答，不能把任务特定条件泛化为全产品规则；询问文档有无规定时，未见规定不能推断可自行操作、无需授权或安全。文档是产品专有事实的优先证据但不是回答许可证；零候选时范围内问题仍可用通用知识有界推进。后端继续校验文档/图片白名单并映射公开结构，`references=[]`，不交付完整原文。
+- 管线收口（ADR-0039，2026-10-09 本地，未部署）：① LLM 1 判 `scope=OUT_OF_SCOPE` 时 `RagV2Pipeline.run()` 在检索前调用 `_run_out_of_scope_path` 直接返回范围外终态，不执行 Embedding、Rerank、文档加载和 LLM 2；结果仍为 `response_path=KNOWLEDGE` 并写 `citation_result.shortcut=OUT_OF_SCOPE`，检索 Trace 为 `{"status":"SKIPPED","reason":"OUT_OF_SCOPE"}`。指标 `_TECHNICAL_SAMPLE` 只排除 `GREETING/META_ACK` 与 `CONVERSATION`，所以仍计入范围外请求率；`_LATENCY_SAMPLE` 要求 `shortcut IS NULL`，所以不进入技术延迟样本。`apply_scope_authority` 的 `OUT_OF_SCOPE` 分支保留，但管线不再走到它。② 文档级 Rerank 为 `DEGRADED`、最终上限 ≥ 2、候选超出上限且前 N 没有继承文档时，最近一份追问继承文档占用最后一个名额；Rerank 成功不受影响，Trace 为 `previous_evidence.reserved_after_rerank_degradation`。③ `run()` 不再用外层 `except` 把 LLM 工厂失败伪装成 LLM 1 降级；工厂错误（如缺凭据）按原错误码终止，LLM 1 的上游失败仍由 `interpret_query` 内部降级处理。
+- `next_suggestions` 恒为空（ADR-0040，2026-10-09 本地，未部署）：`RagV2Pipeline.run()` 的知识路径返回 `next_suggestions=[]`，丢弃模型写入的建议并在 Trace 的 `generation.answer.next_suggestions_discarded` 记录条数；字段仍在对外响应中（`public_complete` 对缺失值补 `[]`），Prompt 与输出 Schema 未改，所以模型仍会生成并浪费少量输出 Token。历史消息和幂等重放返回当时保存的快照，旧记录可能仍有非空值。Support 冻结链路不产生该字段。
 - `M3_RAG_ANSWER_THINKING_ENABLED=false` 是上线默认值：LLM 1、LLM 2 及合规修复均不请求内部思考。需要定向对照实验时可显式开启，此时仅 LLM 2 初次生成及其一次合规修复请求思考；DashScope 发送 `enable_thinking=true` 及默认 2048 的 `thinking_budget`，智谱发送 `thinking.enabled` 但当前不发送跨供应商预算字段。不支持的 Provider 保持关闭，始终思考模型不发送控制字段。Qwen 思考调用不同时发送不稳定的 JSON Mode，仍由 Prompt Schema、本地结构校验和既有一次修复保护；关闭思考的结构化调用继续使用 JSON Mode。推理正文不会进入最终答案或 Trace；Trace 只记录请求状态、配置预算和供应商用量。
 - LLM 2 在回答操作前后、下一步或失败追问时，必须检查所有与当前任务直接相关的候选；主任务文档定义必需动作，补充文档只能展开某一步，不能替代主任务文档中的其他并列动作。实际采用事实的文档全部写入内部证据键。图片输出兼容单个或成组 `[IMG:...]` 标记，只按正文标记顺序映射白名单图片；模型仅在 `used_image_keys` 声明但未在正文定位的图片不会追加到回答末尾，公开 `image_count` 以实际图片块为准。句末标点必须位于关联文字末尾、图片之前，模型误把标点放到标记后时由公开组装层确定性前移。未声明、无效或异常图片标记只被清除，不产生图片，也不会泄漏到公开文本。该兼容不增加模型调用。
 - `document_source.status='STORED'` 已统一应用于向量、BM25 和按 Chunk ID 读取，避免已软删除文档成为 V2 全文候选；全文加载还会再次校验知识库归属。V2 准备 Trace 不保存 legacy Chunk Prompt，`selected_context` 只记录候选标识与内容 SHA-256；生成 Trace 记录全文包/答案 SHA-256、数量、预算和耗时，不复制正文。

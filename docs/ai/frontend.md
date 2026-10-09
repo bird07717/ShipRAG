@@ -40,7 +40,7 @@
 
 模型编辑弹窗按编辑代次、模型 ID 和凭证绑定异步提交；关闭、重新打开、凭证变化或卸载使旧回调失效。清密钥/保存期间锁定草稿并防止重复提交；Embedding 等待确认后再次校验弹窗身份才提交。已发出的写请求不取消，关闭弹窗不等于撤回服务端操作。“测试已保存配置”仅调用既有模型 ID 探测，不测试草稿；草稿变化清除连通徽标，并使旧探测结果失效，连通性不代表结构化回答质量通过。
 
-模型保存/清密钥返回本次 `ModelActionResult`，弹窗据此关闭或显示错误，不再用共享 `store.error` 判断成功。仅模型写操作使用 `runModelAction`：保留原 `run()` 的加载计数，但按模型操作序号与凭证保护全局错误/成功提示，不让较早的模型操作覆盖较新操作的状态；其他管理操作的 `run()` 行为未改。模型列表首次加载、保存与密钥写入/清除统一调用 `loadModels()`，按列表请求序号和凭证提交；过期成功/失败忽略，最新失败保留现有列表并返回错误，不以旧响应补填，不新增轮询或取消服务端写操作。
+模型保存/清密钥返回本次 `ModelActionResult`，弹窗据此关闭或显示错误，不再用共享 `store.error` 判断成功。仅模型写操作使用 `runModelAction`：保留原 `run()` 的加载计数，但按模型操作序号与凭证保护全局错误/成功提示，不让较早的模型操作覆盖较新操作的状态；其他管理操作的 `run()` 行为未改。模型列表首次加载、保存与密钥写入/清除统一调用 `loadModels()`，按列表请求序号和凭证提交；过期成功/失败忽略，不以旧响应补填，不新增轮询或取消服务端写操作。最新的列表加载失败：首次加载仍抛错并显示错误；但保存/写入/清除密钥在服务端已成功后经 `refreshModelsAfterWrite()` 刷新，刷新失败只把成功提示降级为 `warning`（文案附“刷新模型列表失败（原因），页面可能仍显示旧配置，请手动刷新”，Embedding 重建提交数仍保留在文案中），结果为 `{ ok: true, listStale: true }` 而不是失败：保存弹窗照常关闭，清除密钥弹窗也关闭（避免显示过期的密钥状态），不留 `store.error`，管理员不会因此重复提交并再次触发全量重建确认。
 
 索引模型提示按类型区分：Embedding 同时用于查询和构建，身份切换须通过 1024 维校验并为启用且有有效文档的库提交重建，切换可能影响 Assistant 就绪；新索引记录实际 Provider/模型/端点/维度，查询及卡片生成拒绝身份不匹配，需核对活动索引、文档理解审核并用新会话验收，不承诺无中断。OCR/Vision 使用 Worker 开始时的快照，下一次构建按实际模型指纹控制缓存失效；身份不变才可复用，旧文档无指纹首次重建重新解析。停用数据库配置仍可能回退环境模型，生效看实际身份而非表单标签。保存提示不将提交重建写成重建完成。
 
@@ -83,6 +83,7 @@
 
 - `EngineRoutingView` 默认策略为 `RAG_ONLY`，`SUPPORT_WITH_RAG_FALLBACK` 选项与 Support 就绪卡片标注"已冻结（ADR-0021）"但保留可用（后端网关仍可执行该策略，前端不单独禁用）。
 - `RagConfigurationView` 只保留 `vector_top_k`、`bm25_top_k`、`fusion_top_k` 三个 V2 实际消费的参数；`rerank_top_n`、`context_max_chunks` 已从界面移除（后端 PATCH 为部分更新，兼容缺省）。提示首先说明保存后下一轮对应策略的检索请求生效，无需重启或重建；每查询片段召回/融合上限不同于最终文档数，文档上限和全文预算由后端运行配置控制。已有会话使用新召回参数，但固定创建时的索引；切换索引后的验收需新会话。寒暄/非文档对话不受检索参数影响。
+- `DemoChat` 与回答复核的 `next_suggestions` 渲染保留，但新回答恒为空（ADR-0040），都用“为空则不显示”处理；旧会话/旧复核记录仍可能显示历史快照里的建议。
 - `DemoChat` 的模式标签收敛为 V2 五种 `answer_mode`；legacy 模式（`DOCUMENT_EXPLANATION`、`STEP_GUIDANCE` 等）与 `DOC_DELIVERED` 专用渲染分支已删除，未知值仍按原文兜底显示。
 - `PlaygroundView` 结果面板按 V2 文档级语义展示：`selected_context` 渲染为"隐藏上下文候选文档"（document_key + 内容 SHA-256 前缀），不再按 chunk 分数/正文渲染；`SourceCitation`、`RetrievalChunk` 组件因此删除。`playgroundOptions` 已移除 `rerank_top_n`。
 - `TracesView` 时间线包含 V2 各阶段耗时（`v2_query_interpreter_ms` 等）并保留 legacy 键（标注"遗留"，按存在与否自过滤）；详情的"RAG V2 生成详情"展示 Knowledge/Conversation 回答路径、查询理解、文档级重排或对话路径跳过状态、检索降级、隐藏上下文与合规修复。V2 重排折叠面板读取 `runtime_snapshot.generation.retrieval.document_rerank`（对话路径读取检索跳过状态），仅非 V2 Trace 读取旧 `rerank_result`；Support 决策段标注"遗留"，Prompt 折叠面板仅在存在时显示。
@@ -115,12 +116,12 @@
 - **后端连接横幅**：`BackendStatusBanner.vue`（`App.vue` 全局，含问答测试页）在不可达时显示目标地址、离线起始时间和倒计时，并持有唯一的探测循环：按 3/5/10/20/30 秒退避请求 `/health/live`；任一请求（探测或页面请求）成功即停止，并显示“已重新连接”，`App.vue` 随后用 `store.run(refreshAll)` 重载外壳数据。卸载即停止探测。
 - **运行环境与模型可信度**：`adminStore.loadModelRuntime()` 读取 `/system/model-runtime`（`refreshAll` 与每次模型写操作成功后加载；请求序号 + 凭证保护；失败或凭证失效置为 `null`，不保留旧结论）。`ModelRuntimeBanner.vue` 仅在后端报告模拟（红）或不可用（黄，含 `EXPLICIT_PROVIDER` 无 Key）时显示，可展开原因并跳转 `configuration?tab=models`；状态未知时不显示，横幅缺席只表示“未报告问题”。`DISABLED` 为显式配置，不提示。2026-10-08 起后端禁止静默模拟（ADR-0034），开发环境缺 Key 也会显示为“不可用”而非“模拟”；“模拟”只会来自显式 `*_PROVIDER=fake`（开发/测试）或自动化测试环境。环境徽标（`utils/modelRuntime.ts:environmentBadge`）来自 `systemInfo.environment`（回退 `modelRuntime.environment`），仅有凭证时显示于侧栏品牌区、移动顶栏，收起侧栏时作为品牌标识的悬停提示。
 - **会话浏览**：视图键 `conversations`（“运维”分组，`ConversationsView.vue`），读取管理端 `GET /conversations`，默认只看“外部 Assistant”，可切换全部/内部问答测试与试问/调试台，用户 ID 精确查询，按会话 `updated_at` 最近活动时间范围筛选（服务端先筛选，再按最近活动倒序服务端分页（默认每页 50 条，显示总数，2026-10-09 起））。来源取最近一轮链路，过滤为“任一轮来自该渠道”。行点击复用 `store.openConversation` 的只读会话回放抽屉；换库、改条件、卸载均使旧请求失效并中止。回放显示对话、错误提示和 Trace 入口，不再展示 Support 专属的工作流/升级详情。深链 `#/conversations?source=ALL|ASSISTANT_API|INTERNAL_CHAT|PLAYGROUND&user=<ID>`。开发库中的会话多为内部测试，默认外部筛选可能为空，属正常。
-- **质量预警**：Dashboard 读取 overview 的 `v2_quality`（与概览同为外部 Assistant · RAG · 近 7 天）。待办规则：未执行重排（模型不可用，含缺 Key 时记录为 DEGRADED/MODEL_NOT_CONFIGURED 的情况）≥1 次即列为红色；重排降级或查询理解降级需同时满足 ≥3 次且 ≥5%（`QUALITY_ALERT_MIN_COUNT`/`QUALITY_ALERT_RATE`）才列为黄色。点击待办展开“更多指标与诊断”并滚动到“阶段质量（RAG V2）”。后端未提供 `v2_quality` 时明确提示，不显示 0。旧的引用缺失率/Rerank 降级率字段对 V2 恒为 0，不得展示。
+- **质量预警**：Dashboard 读取 overview 的 `v2_quality`（与概览同为外部 Assistant · RAG · 近 7 天）。待办规则：未执行重排（模型不可用，含缺 Key 时记录为 DEGRADED/MODEL_NOT_CONFIGURED 的情况）≥1 次即列为红色；重排降级或查询理解降级需同时满足 ≥3 次且 ≥5%（`QUALITY_ALERT_MIN_COUNT`/`QUALITY_ALERT_RATE`）才列为黄色。点击待办展开“更多指标与诊断”并滚动到“阶段质量（RAG V2）”。后端未提供 `v2_quality` 时明确提示，不显示 0。旧的引用缺失率/Rerank 降级率字段对 V2 恒为 0，不得展示。查询向量化失败（`query_embedding_*`，2026-10-09 本地，未部署）使用同一阈值（≥3 次且 ≥5%）列为黄色待办“查询向量化失败，检索仅用关键词召回”，明细格显示降级轮次/已执行检索轮次；这三个字段在类型中为可选，后端未提供时不显示该行、不显示 0。
 - **运行容量**：`RuntimeCapacityPanel.vue` 位于 Dashboard 底部“基础服务与运行容量”折叠区，挂载时读取一次、手动刷新、不轮询。`/metrics/runtime` 明确标注为“当前响应进程快照”（多进程下不可当合计），连接池按 `size + overflow` 换算已建立连接、正值才显示“超出常驻池”；任务积压来自 `taskCenterStore`（全服务、数据库口径）。
 - **全局后台任务**：`composables/taskCenterStore.ts` 用 `adminApi.listTaskRecords`（与 `listTasks` 同一 `GET /tasks`，完整 `TaskRecord` 类型；`listTasks` 保持原类型供日志页使用）分别读取 RUNNING、QUEUED（各 200 条上限，满额标注为下限）与抽屉打开时最近 24 小时结束的任务。“疑似停滞”只指 RUNNING 且 30 分钟无进度更新（管理台提示，不是后端判定：`tasks/recovery.py` 只按 RQ 任务状态回收索引构建、仅对两类维护任务结合时间判断），不计入徽标；QUEUED 始终计入积压，超过 10 分钟只标注“已排队较久”（可能在等待长任务）。`TaskCenter.vue` 在 `App.vue` 根部只挂载一次并持有唯一轮询（30 秒；抽屉打开 5 秒；页面隐藏或无凭证时暂停；本浏览器提交新任务时立即刷新；多个触发重叠时只有最新一次调用能排定下一次轮询，避免产生多条轮询链）；`TaskCenterButton.vue` 只是触发器（侧栏、移动顶栏）。任务所属知识库不在当前列表时显示“知识库已删除或不在当前列表”且不提供跳转；可跳转时先切换全局选中知识库再导航。
 - 测试约定：App 外壳测试需桩掉 `TaskCenter`（挂载即请求）；测试只设置 Store 凭证而不写 `sessionStorage` 时，任何真实请求都会触发“凭证缺失”广播并卸载页面。
 
-## 加载、轮询与 URL 状态（2026-10-09，本地已实施，待部署）
+## 加载、轮询与 URL 状态（2026-10-09，已随 `4ccf19a` 部署到生产，浏览器验收待确认）
 
 - **按需注册与分包**：`main.ts` 调用 `installElementPlus()`，只注册 `src/elementPlus.ts` 列出的组件（父组件 install 同时注册子组件，如 ElTable→ElTableColumn）及 `v-loading` 指令；`ElMessage/ElMessageBox/ElNotification/ElImageViewer` 在使用处直接导入。新增模板中的 `<el-*>` 组件必须加入该列表，否则生产构建会把它渲染成原样标签且不报错；`tests/elementPlusRegistry.spec.ts` 扫描全部 `.vue` 模板防护。组件测试仍用整包 `ElementPlus` 插件，不能代替该扫描。`vite.config.ts` 的 `manualChunks` 拆出 `vendor-element-plus`、`vendor-markdown`、`vendor`；Element Plus 样式仍整包引入。
 - **异步视图与测试**：`AdminStudio` 视图映射和 `App.vue` 的 `DemoChat` 是异步组件。挂载这两个外壳的测试需 `beforeAll(preloadLazyViews)`（`tests/helpers/lazyViews.ts`）预热模块；不要放进全局 `tests/setup.ts`，否则会先于各文件 `vi.mock` 加载真实模块。
@@ -130,7 +131,7 @@
 - **共享文案**：`utils/statusLabels.ts` 统一状态徽标（`StatusBadge` 读取）、筛选下拉中文名、Trace 来源名称/标签色（`TRACE_SOURCE_LABELS`、`isTraceSource`）与响应类型标签（中文 · 原始码）；Traces、Logs、会话浏览不再各自定义来源文案。
 - **页面行为**：「回收旧索引」与知识库列表「重建索引」有确认；索引表“状态”列标出“当前 RAG / 非当前 RAG”，详情抽屉按 ID 实时读取 `store.indexes`；文档表的搜索、最近构建状态与 RAG 理解筛选、名称/大小/上传时间排序及分页均在服务端执行（见下节），另有无匹配空态及“详情”按钮；Trace 折叠面板与文档元素/切片页签只在展开时渲染，JSON 按记录缓存；INDEX_BUILD 与 RAG 卡片任务完成通知带跳转下一步按钮并常驻至关闭；≤720px 时右侧抽屉全宽、对话框不超过视口；DemoChat 仅在用户停留底部附近时跟随流式滚动，已完成消息的 Markdown 结果缓存，消息区为 `role="log"`；下载文档的 Blob URL 延迟 1 秒释放。`adminStore` 中与 `ragAdminStore` 重复且无页面调用的 `ragConfig/loadRagConfig/saveRagConfig` 已删除；Support/Release 相关 Store 代码按冻结约定保留。
 
-## 服务端分页与页面布局（2026-10-09，本地，待部署，ADR-0038）
+## 服务端分页与页面布局（2026-10-09，已随 `4ccf19a` 部署到生产，浏览器验收待确认，ADR-0038）
 
 - **API 适配**：`api/admin.ts` 拆出 `apiFetch`（凭证、错误、401 广播），`apiRequest` 解析 JSON，`apiRequestPage` 另读 `X-Total-Count` 返回 `Page<T> = { items, total }`；缺少该头（旧后端）时以本页行数作为总数。分页函数：`listTracesPage`（新增 `question` → `q`、`offset`）、`listTasksPage`、`listDocumentsPage(knowledgeId, DocumentListQuery)`；`listConversations` 增加 `offset` 并读取可选 `total`。原数组函数 `listTraces`/`listTasks`/`listDocuments` 保留给 Dashboard 等不分页的调用方。
 - **视图**：TracesView、LogsView（失败轮次、失败任务）、ConversationsView、DocumentsView 均用 `components/ui/ListPagination.vue`（每页 20/50/100，默认 50，`utils/paging.ts` 的 `PAGE_SIZES`；共享样式 `.list-pagination`）；它在“总数超过最小页”或“不在第 1 页”时显示，保证列表变短后仍能翻回。加载结果为空但总数大于 0 且不在第 1 页（删除或筛选使当前页越界）时，用 `clampedPage` 跳到最后一页重新加载。筛选、排序、换库及每页条数变化回到第 1 页（`applyFilters`/`load*`），翻页只改 `offset`（`load*Page`）。Trace 问题搜索改为服务端 `q`，输入 400ms 防抖，覆盖全部记录；与上次请求的搜索词相同时（包括“重置”后清空）不再重复请求。分页条放在空态 `v-if/v-else` 链之外，避免打断空态判断。

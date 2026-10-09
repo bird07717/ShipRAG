@@ -30,6 +30,12 @@ _PENDING_REQUEST_ERROR_TASKS: set[asyncio.Task[None]] = set()
 _SKIPPED_PATH_PREFIXES = ("/health",)
 
 
+# Rejected credentials are not diagnostic failures of the service. A single stale
+# browser tab polling the dashboard produced ~96% of all rows (thousands per day) and
+# drowned the real errors, so these are never persisted (the access log still has them).
+_UNSTORED_ERROR_CODES = frozenset({"AUTHENTICATION_REQUIRED"})
+
+
 def _should_skip(path: str) -> bool:
     return any(path == prefix or path.startswith(prefix + "/") for prefix in _SKIPPED_PATH_PREFIXES)
 
@@ -48,7 +54,7 @@ async def record_request_error(
     detail: dict[str, Any] | None = None,
 ) -> None:
     path = request.url.path
-    if _should_skip(path):
+    if error_code in _UNSTORED_ERROR_CODES or _should_skip(path):
         return
     engine = _engine(request)
     if engine is None:

@@ -3,7 +3,9 @@
 Index builds snapshot the enabled EMBEDDING / OCR / VISION rows once at build
 start, so later admin edits never leak into a running build. Rows whose
 provider is unsupported fall back to env settings (source=ENV_FALLBACK) so
-builds keep working while the misconfiguration stays visible in task metadata.
+OCR/Vision builds keep working while the misconfiguration stays visible in task
+metadata. EMBEDDING never builds on env settings: the index must stay bound to the
+config row that produced its vectors, so the pipeline fails the build instead.
 """
 
 from __future__ import annotations

@@ -8,6 +8,7 @@ import ListSkeleton from "@/components/ui/ListSkeleton.vue";
 import { useAdminStore } from "@/composables/adminStore";
 import type { ConversationListItem, TraceSource } from "@/types/admin";
 import { isTraceSource, TRACE_SOURCE_LABELS, TRACE_SOURCE_TAG } from "@/utils/statusLabels";
+import { rangeDefaultTime } from "@/utils/dateRange";
 import { clampedPage } from "@/utils/paging";
 import ListPagination from "@/components/ui/ListPagination.vue";
 
@@ -181,6 +182,7 @@ onBeforeUnmount(() => {
         <el-date-picker
           v-model="activityRange"
           type="datetimerange"
+          :default-time="rangeDefaultTime"
           range-separator="至"
           start-placeholder="开始日期时间"
           end-placeholder="结束日期时间"

@@ -26,6 +26,14 @@ const points: TrendPoint[] = [
 ];
 
 describe("TrendChart", () => {
+  it("does not mark the chart as an image, which would hide the focusable bars", () => {
+    const wrapper = mount(TrendChart, { props: { points } });
+    const svg = wrapper.get("svg.chart-svg");
+    expect(svg.attributes("role")).toBe("group");
+    expect(svg.attributes("aria-label")).toBeTruthy();
+    expect(wrapper.find("rect.bar-hit").attributes("role")).toBe("button");
+  });
+
   it("renders one hit area per bucket and emits select only for buckets with traffic", async () => {
     const wrapper = mount(TrendChart, { props: { points } });
     const hits = wrapper.findAll("rect.bar-hit");

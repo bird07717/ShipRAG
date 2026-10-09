@@ -284,6 +284,25 @@ class TestRecorder:
         )
         assert engine.connection.executed == []
 
+    async def test_never_stores_rejected_credentials(self) -> None:
+        engine = _FakeEngine([])
+        request = _FakeRequest("/api/v1/metrics/overview", engine=engine)
+        await record_request_error(
+            request,
+            status_code=401,
+            error_code="AUTHENTICATION_REQUIRED",
+            message="需要服务访问凭据",
+        )
+        assert engine.connection.executed == []
+
+    async def test_other_client_errors_are_still_stored(self) -> None:
+        engine = _FakeEngine([])
+        request = _FakeRequest("/api/v1/knowledge-bases", method="POST", engine=engine)
+        await record_request_error(
+            request, status_code=409, error_code="DUPLICATE_DOCUMENT", message="重复文档"
+        )
+        assert len(engine.connection.executed) == 1
+
     async def test_skips_when_resources_missing(self) -> None:
         request = _FakeRequest("/api/v1/support/chat")
         request.app = type("App", (), {"state": type("State", (), {})()})()
@@ -327,6 +346,22 @@ class TestErrorResponsesAndCapture:
         response = client.get("/api/v1/system/info")
         assert response.status_code == 401
         assert response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
+
+    def test_rejected_credentials_are_not_persisted(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored: list[dict[str, Any]] = []
+
+        async def spy(self: ObservabilityRepository, **kwargs: Any) -> None:
+            stored.append(kwargs)
+
+        monkeypatch.setattr(ObservabilityRepository, "insert_request_error", spy)
+        response = client.get("/api/v1/metrics/overview")
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
+        bad = client.get("/api/v1/metrics/overview", headers={"Authorization": "Bearer wrong"})
+        assert bad.status_code == 401
+        assert stored == []
 
     def test_validation_error_is_captured(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

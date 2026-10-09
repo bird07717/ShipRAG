@@ -9,7 +9,14 @@ from typing import Any
 from app.core.config import Settings
 from app.rag.llm import LlmError, LlmProvider
 from app.rag.models import ModelSnapshot, PreparedRag
-from app.rag.response import OUT_OF_SCOPE_MESSAGE, ChatResult, TraceDiagnosticReason
+from app.rag.response import (
+    OUT_OF_SCOPE_MESSAGE,
+    AnswerMode,
+    ChatResult,
+    ContentBlock,
+    ResponseType,
+    TraceDiagnosticReason,
+)
 from app.rag.v2.answer_generator import (
     apply_scope_authority,
     build_answer_prompt,
@@ -24,11 +31,7 @@ from app.rag.v2.conversation_answer import (
 )
 from app.rag.v2.document_context import build_document_context
 from app.rag.v2.document_retrieval import EmbeddingSelector, RerankFactory, retrieve_documents
-from app.rag.v2.query_interpreter import (
-    QueryInterpretationOutcome,
-    fallback_interpretation,
-    interpret_query,
-)
+from app.rag.v2.query_interpreter import interpret_query
 from app.rag.v2.validation import (
     evidence_violations,
     normalize_evidence_bindings,
@@ -217,6 +220,80 @@ class RagV2Pipeline:
             next_suggestions=[],
         )
 
+    @staticmethod
+    def _run_out_of_scope_path(
+        *,
+        query_usage: dict[str, Any],
+        query_trace: dict[str, Any],
+        timings: dict[str, int],
+    ) -> RagV2Result:
+        """Finish a KNOWLEDGE-routed turn that LLM 1 already placed out of scope.
+
+        The interpreter owns the scope decision (see ``apply_scope_authority``), so
+        retrieval, document loading and LLM 2 could only be thrown away. The turn
+        keeps ``response_path=KNOWLEDGE`` so it still counts as an out-of-scope
+        request; ``shortcut`` keeps its near-zero latency out of the technical
+        latency samples.
+        """
+
+        retrieval_trace = {"status": "SKIPPED", "reason": "OUT_OF_SCOPE"}
+        context_trace = {
+            "document_ids": [],
+            "document_count": 0,
+            "image_count": 0,
+            "estimated_tokens": 0,
+            "mode": "NONE",
+            "content_sha256": hashlib.sha256(b"").hexdigest(),
+        }
+        result = ChatResult(
+            response_type=ResponseType.OUT_OF_SCOPE,
+            answer_mode=AnswerMode.OUT_OF_SCOPE,
+            answer=OUT_OF_SCOPE_MESSAGE,
+            content=[ContentBlock(type="text", text=OUT_OF_SCOPE_MESSAGE)],
+            disclaimer=None,
+            valid_sources=[],
+            citation_result={
+                "status": "NOT_REQUIRED",
+                "pipeline": "V2",
+                "response_path": "KNOWLEDGE",
+                "shortcut": "OUT_OF_SCOPE",
+            },
+        )
+        timings["v2_answer_generator_ms"] = 0
+        return RagV2Result(
+            result=result,
+            usage={
+                "pipeline": "V2",
+                "response_path": "KNOWLEDGE",
+                "query_interpreter": query_usage,
+            },
+            trace={
+                "pipeline": "V2",
+                "response_path": "KNOWLEDGE",
+                "query_interpreter": query_trace,
+                "retrieval": retrieval_trace,
+                "context": context_trace,
+                "answer": {
+                    "status": "PASSED",
+                    "response_kind": "OUT_OF_SCOPE",
+                    "basis": "NONE",
+                    "scope_authority": {
+                        "interpreted_scope": "OUT_OF_SCOPE",
+                        "model_response_kind": None,
+                        "final_response_kind": "OUT_OF_SCOPE",
+                        "conflict_resolved": False,
+                    },
+                    "used_document_count": 0,
+                    "used_document_ids": [],
+                    "used_image_count": 0,
+                    "answer_sha256": hashlib.sha256(result.answer.encode("utf-8")).hexdigest(),
+                    "fallback_applied": False,
+                },
+            },
+            timings=timings,
+            next_suggestions=[],
+        )
+
     async def run(
         self,
         prepared: PreparedRag,
@@ -230,9 +307,13 @@ class RagV2Pipeline:
         timings = dict(prepared.timings)
 
         query_started = time.perf_counter()
-        query_provider: LlmProvider | None = None
+        # A factory failure (e.g. no usable LLM credential) is deterministic and
+        # would fail the answer stage identically, so it must surface here rather
+        # than being masked as an LLM 1 degradation that still spends retrieval.
+        # `interpret_query` itself converts upstream failures into the degraded
+        # history-fallback interpretation.
+        query_provider = self.llm_factory(self.settings, turn.llm)
         try:
-            query_provider = self.llm_factory(self.settings, turn.llm)
             query_outcome = await interpret_query(
                 query_provider,
                 question=question,
@@ -244,25 +325,8 @@ class RagV2Pipeline:
                 timeout_seconds=self.settings.m3_rag_query_interpreter_timeout_seconds,
             )
             query_usage = dict(query_provider.usage)
-        except Exception as exc:
-            fallback, fallback_status, fallback_reason = fallback_interpretation(
-                question,
-                history=turn.history,
-                knowledge_name=turn.knowledge_name or product_name,
-                max_rounds=self.settings.m3_rag_history_max_rounds,
-            )
-            query_outcome = QueryInterpretationOutcome(
-                "DEGRADED",
-                fallback,
-                round((time.perf_counter() - query_started) * 1000),
-                reason=str(getattr(exc, "code", type(exc).__name__))[:100],
-                history_fallback=fallback_status,
-                history_fallback_reason=fallback_reason,
-            )
-            query_usage = {}
         finally:
-            if query_provider is not None:
-                await query_provider.aclose()
+            await query_provider.aclose()
         timings["v2_query_interpreter_ms"] = round((time.perf_counter() - query_started) * 1000)
 
         response_path = query_outcome.interpretation.response_path
@@ -277,6 +341,13 @@ class RagV2Pipeline:
                 interpreted_scope=query_outcome.interpretation.scope,
                 product_name=product_name,
                 scope_description=scope_description,
+                query_usage=query_usage,
+                query_trace=query_trace,
+                timings=timings,
+            )
+
+        if query_outcome.interpretation.scope == "OUT_OF_SCOPE":
+            return self._run_out_of_scope_path(
                 query_usage=query_usage,
                 query_trace=query_trace,
                 timings=timings,
@@ -494,6 +565,7 @@ class RagV2Pipeline:
                 "used_image_count": len(generated.used_image_keys),
                 "public_leak_repair_count": repair_count,
                 "document_key_scrub_count": key_scrub_count,
+                "next_suggestions_discarded": len(generated.next_suggestions),
                 "parameter_observations": observed_parameters,
                 "unsupported_parameter_count": sum(
                     item["status"] == "UNSUPPORTED" for item in observed_parameters
@@ -514,5 +586,8 @@ class RagV2Pipeline:
             },
             trace=generation_trace,
             timings=timings,
-            next_suggestions=generated.next_suggestions,
+            # The field stays in the public contract but is always empty (ADR-0040): the
+            # model-written suggestions were unreliable (see suggestions-review.md), so
+            # they are dropped here instead of changing the generation prompt.
+            next_suggestions=[],
         )

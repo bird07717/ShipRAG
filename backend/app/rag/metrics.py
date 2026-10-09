@@ -48,6 +48,25 @@ _V2_RERANK_REASON = "runtime_snapshot #>> '{generation,retrieval,document_rerank
 # DEGRADED. That is a configuration problem, not a failed call, so it is
 # counted as "unconfigured" and kept out of the call-failure rate.
 _V2_RERANK_CALL_FAILURE = f"COALESCE({_V2_RERANK_REASON}, '') <> 'MODEL_NOT_CONFIGURED'"
+# Knowledge turns whose retrieval actually ran (the conversation / out-of-scope
+# paths record a SKIPPED retrieval without ``query_count``).
+_V2_RETRIEVAL_RAN = "runtime_snapshot #>> '{generation,retrieval,query_count}' IS NOT NULL"
+_V2_EMBEDDING_STATUS = "runtime_snapshot #>> '{generation,retrieval,query_embedding,status}'"
+# Traces written before ``query_embedding`` existed only carry the failure code in
+# ``retrieval.degradations``: EmbeddingError has no ``code`` attribute, so an
+# upstream failure is recorded under its class name and a query-vector timeout as
+# ``TimeoutError``. ``TimeoutError`` is therefore an approximation for those older
+# traces; new traces are matched through the explicit status.
+_LEGACY_EMBEDDING_DEGRADATIONS = "'EmbeddingError', 'TimeoutError', 'QUERY_EMBEDDING_INVALID'"
+_V2_DEGRADATIONS_ARRAY = (
+    "CASE WHEN jsonb_typeof(runtime_snapshot #> '{generation,retrieval,degradations}') = 'array' "
+    "THEN runtime_snapshot #> '{generation,retrieval,degradations}' ELSE '[]'::jsonb END"
+)
+_V2_EMBEDDING_DEGRADED = (
+    f"({_V2_RETRIEVAL_RAN}) AND ({_V2_EMBEDDING_STATUS} = 'DEGRADED' OR EXISTS ("
+    f"SELECT 1 FROM jsonb_array_elements_text({_V2_DEGRADATIONS_ARRAY}) AS d(value) "
+    f"WHERE d.value IN ({_LEGACY_EMBEDDING_DEGRADATIONS})))"
+)
 _TECHNICAL_SAMPLE = (
     "COALESCE(citation_result ->> 'shortcut', '') NOT IN ('GREETING', 'META_ACK') "
     "AND COALESCE(citation_result ->> 'response_path', 'KNOWLEDGE') <> 'CONVERSATION'"
@@ -204,6 +223,8 @@ class MetricsRepository:
                     WHERE {_V2_RERANK_STATUS} IN ('SKIPPED', 'DEGRADED')
                       AND {_V2_RERANK_REASON} = 'MODEL_NOT_CONFIGURED'
                 ) AS v2_rerank_unconfigured,
+                count(*) FILTER (WHERE {_V2_RETRIEVAL_RAN}) AS v2_embedding_attempted,
+                count(*) FILTER (WHERE {_V2_EMBEDDING_DEGRADED}) AS v2_embedding_degraded,
                 {_total_latency_select()},
                 COALESCE(sum((model_usage ->> 'prompt_tokens')::bigint), 0) AS llm_prompt_tokens,
                 COALESCE(sum((model_usage ->> 'completion_tokens')::bigint), 0)
@@ -277,6 +298,11 @@ class MetricsRepository:
                     int(row["v2_rerank_degraded"]), int(row["v2_rerank_attempted"])
                 ),
                 "document_rerank_unconfigured": int(row["v2_rerank_unconfigured"]),
+                "query_embedding_attempted": int(row["v2_embedding_attempted"]),
+                "query_embedding_degraded": int(row["v2_embedding_degraded"]),
+                "query_embedding_degraded_rate": _rate(
+                    int(row["v2_embedding_degraded"]), int(row["v2_embedding_attempted"])
+                ),
             },
             "unique_users": int(row["unique_users"]),
             "latency": _latency_summary(row, samples=row["latency_samples"]),
