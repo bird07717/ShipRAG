@@ -8,7 +8,7 @@
 
 ## 核心数据模型
 
-`0048` 新增 `knowledge_index.build_models jsonb NOT NULL DEFAULT '{}'` 并限制为 JSON 对象。新构建写入版本号及实际 EMBEDDING/OCR/VISION 非密钥身份，READY/ACTIVE 后不随模型配置保存变动；文档 `metadata.model_fingerprint` 约束缓存复用。迁移保留旧索引空对象，不用今天的配置伪造历史；不更新向量、文档或卡片。关联 `embedding_model_id` 仍供读取可轮换凭据，身份校验独立于该可修改行。降级只删除新增列，已在独立测试 Schema 验证升级/降级，不在开发业务表执行降级。
+`0048` 新增 `knowledge_index.build_models jsonb NOT NULL DEFAULT '{}'` 并限制为 JSON 对象。新构建写入版本号及实际 EMBEDDING/OCR/VISION 非密钥身份，READY/ACTIVE 后不随模型配置保存变动；文档 `metadata.model_fingerprint` 约束缓存复用。迁移保留旧索引空对象，不用今天的配置伪造历史；不更新向量、文档或卡片。关联 `embedding_model_id` 仍供读取可轮换凭据，新索引的身份校验以 `build_models` 为准，不依赖该可修改行；旧索引（空对象）则依赖该行的当前模型名及 `model_config_history` 中无晚于索引创建的 provider/model_name/base_url 变更（该历史只存字段名、不存新旧值，`0048` 之前的旧行无法追溯判定，宁可失败关闭）。降级只删除新增列，已在独立测试 Schema 验证升级/降级，不在开发业务表执行降级。
 
 | 领域 | 主要表 | 关系与作用 |
 | --- | --- | --- |

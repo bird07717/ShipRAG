@@ -70,7 +70,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 外部服务包括 PostgreSQL、Redis、MinIO，以及可配置的模型服务。代码支持 SiliconFlow 嵌入/重排/OCR、智谱 LLM/视觉，以及阿里云百炼 DashScope；2026-09-15 起 DashScope 注册为全部五类模型类型（LLM/EMBEDDING/RERANK/OCR/VISION）的 Provider：LLM、Embedding、OCR、Vision 走 OpenAI 兼容 `chat/completions` / `embeddings`，Rerank 使用 DashScope 专有 `/api/v1/services/rerank/text-rerank/text-rerank` 端点（`model_providers.dashscope_rerank_base_url` 把管理台保存的 compatible-mode 地址映射到原生 API 根），Embedding 仅文本输入且沿用 1024 维契约。`auto` 模式会按环境或数据库模型快照中的凭据选择。Embedding、LLM、Rerank 在 staging/production 中禁止显式或隐式回退到 fake，缺少凭据时失败关闭；fake 仅用于开发/测试的受控场景。实际模型、超时和阈值来自 Settings、模型快照及环境变量，不能仅根据本文推断部署值。
 
-## 管理模型配置与 Assistant 生效边界（2026-10-09 一致性修复，本地待部署）
+## 管理模型配置与 Assistant 生效边界（2026-10-09 一致性修复，已部署到生产 `e07165d`）
 
 两类凭据区分 API 权限，不区分模型配置。管理台 `PATCH /models/{id}` 保存到共享 `model_config`；Assistant 经 `AssistantFacade → ChatGatewayService → RagService` 使用同一套问答实现。前提是管理台和业务 Assistant 请求连接的是同一套后端及数据库，不是不同部署。
 

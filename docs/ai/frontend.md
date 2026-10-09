@@ -12,9 +12,9 @@
 | --- | --- |
 | `src/App.vue` | 应用壳、侧边菜单与基于 URL hash 的导航兼容层。 |
 | `src/components/AdminStudio.vue` | 分发除 `support-chat` 外的管理视图组件。 |
-| `src/views/` | 管理页面：概览、知识库、文档、索引、引擎路由、问答测试、Profile 审核、日志、配置与调试台。 |
+| `src/views/` | 管理页面：概览、知识库、文档、索引、引擎路由、问答测试、会话浏览、Profile 审核、日志、回答复核（日志内页签）、配置与调试台。 |
 | `src/components/` | `DemoChat`、`HealthPanel`、管理容器及可复用 UI 组件。 |
-| `src/composables/` | 模块级响应式状态：`adminStore`、`ragAdminStore`、`engineRoutingStore`。 |
+| `src/composables/` | 模块级响应式状态：`adminStore`、`ragAdminStore`、`engineRoutingStore`、`taskCenterStore`（全局后台任务）。 |
 | `src/api/` | Fetch 封装及管理、聊天、健康检查的请求协议。 |
 | `src/types/` | 前端接口类型。 |
 | `src/utils/markdown.ts` | Markdown 渲染辅助；`styles/` 保存全局 token 和基础样式。 |
@@ -26,7 +26,7 @@
 
 - `dashboard`、`knowledge`、`documents`、`indexes`
 - `engine-routing`、`support-chat`、`support-review`
-- `logs`、`configuration`、`playground`
+- `conversations`（运维分组的会话浏览）、`logs`、`configuration`、`playground`
 
 `support-chat` 是例外：`App.vue` 直接渲染 `DemoChat.vue`，不经过 `AdminStudio`。其余管理视图的精确分发以 `components/AdminStudio.vue` 为准。修改链接、深链或新增页面时，应更新 `App.vue` 的菜单/允许键；新增管理视图还应更新 `AdminStudio` 映射和相关测试，新增聊天类特例则应在 `App.vue` 明确处理。
 

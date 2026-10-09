@@ -5,8 +5,23 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project_name="enterprise-rag-m7-smoke"
 http_port="${M7_PRODUCTION_SMOKE_PORT:-18008}"
 compose_file="${project_root}/compose.production.yaml"
-backend_image="${BACKEND_IMAGE:-enterprise-rag-backend:1.0.1}"
 dns_blocker="${project_name}-dns-ip-blocker"
+
+# compose.production.yaml takes image names from BACKEND_IMAGE/FRONTEND_IMAGE and
+# `up --build` retags them, independent of --project-name. Smoke therefore must
+# build into dedicated tags; the caller's BACKEND_IMAGE/FRONTEND_IMAGE (and the
+# production default tags) are deliberately ignored so a smoke run on the
+# production host can never overwrite the live images.
+backend_image="${SMOKE_BACKEND_IMAGE:-enterprise-rag-backend:m7-smoke}"
+frontend_image="${SMOKE_FRONTEND_IMAGE:-enterprise-rag-frontend:m7-smoke}"
+for image in "${backend_image}" "${frontend_image}"; do
+  if [[ "${image##*:}" != *smoke* ]]; then
+    echo "refusing smoke image '${image}': its tag must contain 'smoke' so it cannot replace a production image" >&2
+    exit 1
+  fi
+done
+export BACKEND_IMAGE="${backend_image}"
+export FRONTEND_IMAGE="${frontend_image}"
 
 cleanup() {
   docker rm --force "${dns_blocker}" >/dev/null 2>&1 || true
