@@ -919,8 +919,8 @@ LLM 1 的改写错误不再能被 LLM 2 纠正，且自由文本形式的形式�
 ## ADR-0040：`next_suggestions` 保留在契约中但恒为空，服务端丢弃模型写入的建议
 
 - 日期：2026-10-09
-- 状态：已接受；本地实施，未部署
-- 影响范围：`backend/app/rag/v2/pipeline.py`、对外 Assistant 响应、管理台 DemoChat/回答复核、`rag-acceptance/cases.jsonl`；不改数据库、不改生成 Prompt。
+- 状态：已接受；服务端丢弃已部署（`613ca69`）；Prompt 层移除为后续决定，本地实施、未部署
+- 影响范围：`backend/app/rag/v2/pipeline.py`、对外 Assistant 响应、管理台 DemoChat/回答复核、`rag-acceptance/cases.jsonl`；不改数据库；2026-10-09 后续决定另改了生成 Prompt 的输出 Schema 与示例（见“后续决定”）。
 
 ### 背景
 
@@ -928,7 +928,7 @@ LLM 1 的改写错误不再能被 LLM 2 纠正，且自由文本形式的形式�
 
 ### 决策
 
-在服务端丢弃模型写入的建议：管线返回 `next_suggestions=[]`，字段仍存在于响应里（契约中本就“必有、可能为空”），Trace 的 `generation.answer.next_suggestions_discarded` 记录被丢弃的条数。**不修改生成 Prompt**，因此模型的生成过程不变，主回答不受影响；代价是模型仍会生成这些建议并占用少量输出 Token，待有需要时再单独评估在 Prompt 中要求其返回空列表（EMPTY 臂的 32 个样本显示主回答不变，但样本小、非盲评）。
+在服务端丢弃模型写入的建议：管线返回 `next_suggestions=[]`，字段仍存在于响应里（契约中本就“必有、可能为空”），Trace 的 `generation.answer.next_suggestions_discarded` 记录被丢弃的条数。服务端丢弃本身**不改生成 Prompt**，模型的生成过程不变；代价是模型仍会生成这些建议并占用少量输出 Token。把字段从 Prompt 里移除作为单独的后续步骤评估，并已被采纳，见下面的“后续验证”和“后续决定”。
 
 ### 影响
 
@@ -937,4 +937,6 @@ LLM 1 的改写错误不再能被 LLM 2 纠正，且自由文本形式的形式�
 - 外部业务后台的实现不在仓库内，是否把它当作固定的快捷提问区未经确认；对外契约文档已更新为“新回答恒为空”，快捷提问应使用欢迎语接口的推荐问题。
 - Golden 用例 `rag_xdoc_005` 原先允许把建议文本当作命中文档，建议清空后该路径不再产生命中，已移除其 `allow_suggested_documents`；评测器的 `include_suggestions` 能力保留。
 - 恢复方式：把管线返回值改回 `generated.next_suggestions` 即可，无需迁移。
-- 后续验证（2026-10-09）：曾想进一步把字段从 Schema 与输出示例中移除以省输出 Token（约 10.8%）。预先登记三个关卡的 64 次对照中，第 3 关未通过（MU 主回答指示用户打开机箱 3/8 → 6/8，合计超出允许的 +2；p≈0.3，不显著）。结论：不改 Prompt，继续“让模型照常生成、服务端丢弃”。假设（未证实）：该字段起到“出口”作用，去掉后越界倾向可能转移到主回答。详见 [字段实验记录第二轮](../../rag-acceptance/suggestions-review.md)。
+- 后续验证（2026-10-09）：想进一步把字段从 Schema 与输出示例中移除以省输出 Token（约 10.8%，但只占总 Token 的约 0.7%、成本约 1.4%–2.1%）。预先登记三个关卡的 64 次对照中，第 3 关未通过（MU 主回答指示用户打开机箱 3/8 → 6/8，合计超出允许的 +2；Fisher p≈0.3，不显著）。假设（未证实）：该字段起到“出口”作用，去掉后越界倾向可能转移到主回答。详见 [字段实验记录第二轮](../../rag-acceptance/suggestions-review.md)。
+- **后续决定（2026-10-09，用户）**：在上述第 3 关未通过、证据不显著的情况下，用户明确选择采纳移除，理由是风险不能证实、改动随时可撤回、收益虽小但没有读者承担任何成本，且他们已接受适用性问题的现状。落地：`build_answer_prompt` 的 `output_schema` 改用 `answer_output_schema()`（`GeneratedAnswer` 去掉 `next_suggestions`），`output_example` 去掉该键，管理台运行时 Prompt 展示同步；`GeneratedAnswer` 仍接受该字段，模型自行写入时被接受并由服务端丢弃。上线的 Prompt 与 64 次实验里的 `NO_FIELD` 臂逐字节一致（四个场景哈希相同）。**这是对一道未通过的预设关卡的有意识推翻，不是证据变化**。
+- 上线后的观察与恢复：生产量很小（保留期内知识路径回答 16 条），没有自动指标能发现“主回答指示用户打开机箱”这类越界；建议部署后用 `run_suggestions_review.py` 对 MU 做更大样本复测（每臂至少 24 次，判读口径在采集前写定）。`generation.answer.next_suggestions_discarded` 应接近 0。若复测显示越界上升，恢复方式是把 `build_answer_prompt` 改回 `GeneratedAnswer.model_json_schema()` 并在示例里加回该键，无需迁移。

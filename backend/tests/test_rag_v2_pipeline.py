@@ -23,9 +23,14 @@ from app.rag.models import (
     RetrievalCandidate,
     Turn,
 )
+from app.rag.prompt import runtime_prompt_entries
 from app.rag.repository import RagRepository, SearchQueryUnsupportedError
 from app.rag.rerank import RerankError, create_rerank_provider
-from app.rag.v2.answer_generator import GeneratedAnswer, apply_scope_authority
+from app.rag.v2.answer_generator import (
+    GeneratedAnswer,
+    apply_scope_authority,
+    build_answer_prompt,
+)
 from app.rag.v2.document_context import DocumentContext, ImageBinding, build_document_context
 from app.rag.v2.document_retrieval import DocumentCandidate, retrieve_documents
 from app.rag.v2.query_interpreter import QueryInterpretation
@@ -2025,3 +2030,66 @@ async def test_v2_discards_model_written_next_suggestions() -> None:
     answer_trace = repository.completed["doc_routing"]["generation"]["answer"]
     # The model still wrote two; the trace says how many were dropped.
     assert answer_trace["next_suggestions_discarded"] == 2
+
+
+def _empty_context() -> DocumentContext:
+    return DocumentContext(
+        prompt_context="",
+        document_keys=(),
+        image_bindings=(),
+        title_aliases=(),
+        document_ids=(),
+        estimated_tokens=0,
+        context_mode="FULL_DOCUMENT",
+    )
+
+
+def test_v2_answer_prompt_does_not_ask_for_next_suggestions() -> None:
+    """The server discards the field (ADR-0040), so neither the schema shown to the model nor
+    the example may request it. This is exactly the NO_FIELD arm of the 64-call experiment."""
+
+    prompt_text = build_answer_prompt(
+        history=[],
+        interpretation=QueryInterpretation(
+            resolved_question="如何配置 VAU 图像",
+            scope="IN_SCOPE",
+            response_path="KNOWLEDGE",
+        ),
+        context=_empty_context(),
+        product_name="VDR600",
+        scope_description="VDR600 技术支持",
+        max_rounds=4,
+    )
+    prompt = json.loads(prompt_text)
+
+    assert "next_suggestions" not in prompt_text
+    assert set(prompt["output_schema"]["properties"]) == {
+        "response_kind",
+        "basis",
+        "answer",
+        "used_document_keys",
+        "used_image_keys",
+    }
+    assert "next_suggestions" not in prompt["output_example"]
+    # nothing else changed: the example still carries every requested key
+    assert set(prompt["output_example"]) == set(prompt["output_schema"]["properties"])
+
+
+def test_v2_generated_answer_accepts_the_field_when_it_is_present_or_absent() -> None:
+    payload = {
+        "response_kind": "ANSWER",
+        "basis": "GENERAL",
+        "answer": "先检查供电。",
+    }
+    assert GeneratedAnswer.model_validate(payload).next_suggestions == []
+    written_anyway = GeneratedAnswer.model_validate({**payload, "next_suggestions": ["如何更换？"]})
+    assert written_anyway.next_suggestions == [
+        "如何更换？"
+    ]  # accepted, then discarded by the server
+
+
+def test_runtime_prompt_listing_matches_the_requested_output() -> None:
+    entry = next(
+        item for item in runtime_prompt_entries() if item["name"] == "runtime-v2-answer-generator"
+    )
+    assert "next_suggestions" not in entry["content"]

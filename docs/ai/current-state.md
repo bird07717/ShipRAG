@@ -4,11 +4,12 @@
 >
 > **最后一次已记录生产快照（2026-10-09 14:36 北京时间只读核验）**：生产 HEAD `4ccf19a`（PR #3 合并 `feat/admin-console-paging`），数据库 `0048`（本次无新迁移），backend/frontend/两个 Worker 于 06:33 UTC 重建，backend/frontend healthy，`/health/ready` 为 200。已包含：模型/索引一致性（`b113ae2`）、会话筛选与复核降噪（`85faaa3`）、部署工具（`396bc12`）、历史预算 4,000 Token（`01c09c4`，容器内有效值 4,000）、管理台前端优化（ADR-0037）、管理列表服务端分页与按库回收范围修正（ADR-0038，含后端改动）及冒烟脚本专用镜像标签（`3cf5580`）。上一快照为 2026-10-09 03:23 UTC 的 `e07165d`，更早为 2026-10-08 `ed0038d`/`0047`；五类模型均为 DashScope。核验仅为只读：未做浏览器、分页功能及真实模型验收，“已部署”不等于功能验收完成。9 月 29 日及更早记录均为历史状态。
 
-## `next_suggestions` 从 Prompt 中移除的实验（2026-10-09，结论：不采用）
+## `next_suggestions` 从 Prompt 中移除（2026-10-09，实验未过关卡，用户决定采纳；本地，未部署）
 
 - 目的：服务端已丢弃该字段，Schema 与输出示例仍要求模型生成它，想把它从模型被要求写的内容里删掉以省输出。
 - 结果：`BASELINE` 对 `NO_FIELD`，四场景每格 8 次共 64 次真实调用，判读规则采集前写定。第 1 关（有效性）、第 2 关（FFC/PSU 对照）通过；**第 3 关未通过**：MU+PDC 主回答指示用户越界的数量 +3（MU 3/8 → 6/8，PDC 均 8/8），超过允许的 +2。差异在统计上不显著（p≈0.3）。输出 Token 约少 10.8%，延迟方向不一致。
-- 决定：生产 Prompt/Schema 未改，保留服务端丢弃（ADR-0040）。放弃约 11% 的输出 Token。记录与复现见 `rag-acceptance/suggestions-review.md` 第二轮；工具 `run_suggestions_review.py` 新增 `NO_FIELD` 臂与 `--arms`。
+- 预设规则下的结论是不放行；**用户随后明确选择采纳**（有意推翻关卡，不是证据变化）：`build_answer_prompt` 的输出 Schema 与示例不再要求该字段，管理台运行时 Prompt 展示同步，校验仍接受模型自行写入。上线 Prompt 与实验的 `NO_FIELD` 臂逐字节一致。收益只占总 Token 约 0.7%、成本约 1.4%–2.1%。验证：后端全量 **941 passed / 125 skipped**（DB 集成变量置空），Ruff、Mypy 通过；新增 3 项测试，旧行为下 Prompt 测试失败。记录与复现见 `rag-acceptance/suggestions-review.md` 第二轮。
+- 部署后建议：对 MU 做每臂 ≥24 次复测（见 ADR-0040）。实验工具的 BASELINE 校验对照的是上线前的 Prompt，改动后需检出 `613ca69` 才能复现。
 - 未证实的假设：该字段像“出口”，去掉后越界倾向可能转移到主回答。需要更大样本（例如 MU 每臂至少 24 次）才能确认。
 
 ## RAG V2 管线三处收口（2026-10-09，已提交于分支 `feat/rag-pipeline-closure`，未合并、未部署，ADR-0039）
@@ -23,7 +24,7 @@
 - **查询向量化降级可见（已实现）**：检索 Trace 新增 `query_embedding={status, reason}`，`/metrics/overview` 的 `v2_quality` 新增 `query_embedding_attempted/degraded/degraded_rate`，Dashboard 超过 5% 且不少于 3 次时列待办，明细格显示比例。SQL 同时兼容旧 Trace 的 `degradations`（`TimeoutError` 为近似匹配）。本地开发库只读核验：近 30 天检索 46 轮、6 轮降级，全部是 2026-10-08 实验日的 `TimeoutError`。**生产比例未查**（本机无生产 SSH 别名与密钥），只读 SQL 在 `environment.md`，需有权限者在服务器运行。
 - **验证**：Ruff、Mypy（145 源文件）通过；管线、指标与真实 PostgreSQL 指标用例共 101 项通过（PG 用例实际执行）；前端 lint、`vue-tsc -b`、**44 文件 / 388 项**、生产构建通过。全量后端 Pytest 一次出现 2 项失败，均在 `test_deploy_production_script.py`，当时 `scripts/deploy-production.sh` 正被他人修改（改动量在会话中从 26 行涨到 118 行）；事后单独复跑该文件 29 项全部通过，与本次改动无关。
 - **`next_suggestions` 实验（结论：不采用）**：该字段 Prompt 未定义，历史上 MU/PDC 回答 20/20 带越界建议。预先写定判读规则后对 BASELINE/DEFINED/EMPTY 三臂、4 题、每格 8 次共 96 次真实调用对比：MU+PDC 越界建议 14/16 → 14/16，未达到减半标准；DEFINED 让对照题也总是给相邻流程建议；EMPTY 臂主回答不变。**生产 Prompt 未改**。局限：评阅人为同一开发代理、非盲评、仅 4 个场景（MU/PDC 为刻意挑选的难题）。机械正则筛查曾显示改善、逐条阅读后证伪。新增工具 `rag-acceptance/run_suggestions_review.py` 与记录 `suggestions-review.md`，原始结果在 Git 忽略的 `reports/suggestions-20261009/`。是否对外保留该字段属产品决策，未实施。
-- **`next_suggestions` 已丢弃（ADR-0040，本节之后的提交）**：用户决定丢掉该字段。服务端管线返回 `next_suggestions=[]`（字段保留、恒为空），Trace 记录 `next_suggestions_discarded`，不改 Prompt；对外契约文档、`cases.jsonl` 的 `rag_xdoc_005`（移除 `allow_suggested_documents`）同步。仓库内无代码依赖非空；外部业务后台的使用方式未确认，历史消息可能仍有旧值。
+- **`next_suggestions` 已丢弃（ADR-0040）**：用户决定丢掉该字段。服务端管线返回 `next_suggestions=[]`（字段保留、恒为空），Trace 记录 `next_suggestions_discarded`（当时未改 Prompt，Prompt 层移除见上一节）；对外契约文档、`cases.jsonl` 的 `rag_xdoc_005`（移除 `allow_suggested_documents`）同步。仓库内无代码依赖非空；外部业务后台的使用方式未确认，历史消息可能仍有旧值。
 
 ## 两轮管理台改动的代码 Review 修复（2026-10-09，已提交 `0ae9f18`/`f3d7689`，已随 `4ccf19a` 部署到生产）
 

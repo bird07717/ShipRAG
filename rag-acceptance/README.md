@@ -134,7 +134,7 @@ V2 不要求公开引用，评测器使用同一轮内部 Trace 的 `used_docume
 
 同日继续测试“全文＋人工条件—动作—阶段说明”：七题、原版/候选各三次，共 42 次同期真实 LLM2，未证明稳定整体收益，不接入业务。LRU 错误前提仍未纠正、PDC 仍泛化氧化处理，MU 仍有未请求的网络隔离建议；条件成立对照能作答、PSU 核心保留不等于新增收益或安全验收。`run_condition_stage_review.py` 只采集，`condition-stage-annotations.json` 是原文引用可核验的人工诊断输入，不是自动提取器或正式卡片变更。详见 [`condition-stage-review.md`](condition-stage-review.md)。
 
-2026-10-09 另测 `next_suggestions` 字段：该字段在 Prompt 中从未定义，而 MU/PDC 回答 20/20 带越界建议。`run_suggestions_review.py` 对 4 题做 BASELINE/DEFINED/EMPTY 三臂单因素对比，共 96 次真实调用，判读规则采集前写定。MU+PDC 越界建议 14/16 → 14/16，未达到减半标准，且 DEFINED 让对照题也总是给出相邻流程建议；EMPTY 臂主回答不变，说明建议字段不是主回答越界的原因。不修改生产 Prompt；随后用户决定在服务端丢弃该字段（恒为空，ADR-0040）。第二轮（`--arms BASELINE,NO_FIELD`，64 次调用）检验把字段从 Schema/示例中移除：输出少约 11%，但 MU 主回答指示用户打开机箱的数量 3/8 → 6/8（p≈0.3，未过预先写定的第 3 关），故未采用。详见 [`suggestions-review.md`](suggestions-review.md)。
+2026-10-09 另测 `next_suggestions` 字段：该字段在 Prompt 中从未定义，而 MU/PDC 回答 20/20 带越界建议。`run_suggestions_review.py` 对 4 题做 BASELINE/DEFINED/EMPTY 三臂单因素对比，共 96 次真实调用，判读规则采集前写定。MU+PDC 越界建议 14/16 → 14/16，未达到减半标准，且 DEFINED 让对照题也总是给出相邻流程建议；EMPTY 臂主回答不变，说明建议字段不是主回答越界的原因。不修改生产 Prompt；随后用户决定在服务端丢弃该字段（恒为空，ADR-0040）。第二轮（`--arms BASELINE,NO_FIELD`，64 次调用）检验把字段从 Schema/示例中移除：输出少约 11%，但 MU 主回答指示用户打开机箱的数量 3/8 → 6/8（p≈0.3，未过预先写定的第 3 关）；用户仍决定采纳，已作为有意推翻关卡记录（ADR-0040）。详见 [`suggestions-review.md`](suggestions-review.md)。
 
 | 类别 | 数量 | 考什么 |
 | --- | --- | --- |

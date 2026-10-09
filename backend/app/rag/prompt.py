@@ -99,7 +99,6 @@ _RUNTIME_PROMPTS = (
                 "answer",
                 "used_document_keys",
                 "used_image_keys",
-                "next_suggestions",
             ],
             "rules": [
                 "直接解决问题，不介绍检索过程或枚举候选文档。",

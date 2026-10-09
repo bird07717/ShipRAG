@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -18,6 +18,8 @@ class GeneratedAnswer(BaseModel):
     answer: str = Field(max_length=60_000)
     used_document_keys: list[str] = Field(default_factory=list, max_length=3)
     used_image_keys: list[str] = Field(default_factory=list, max_length=20)
+    # Still accepted when a model writes it anyway, but no longer requested: the prompt's schema
+    # and example do not mention it and the pipeline discards it (ADR-0040).
     next_suggestions: list[str] = Field(default_factory=list, max_length=3)
 
     @model_validator(mode="after")
@@ -89,6 +91,18 @@ def apply_scope_authority(
     )
 
 
+def answer_output_schema() -> dict[str, Any]:
+    """The JSON schema shown to LLM 2: GeneratedAnswer without ``next_suggestions``.
+
+    The server drops that field (ADR-0040), so asking for it only costs output tokens. Validation
+    keeps the field so an answer that still contains it is accepted rather than retried.
+    """
+
+    schema = GeneratedAnswer.model_json_schema()
+    schema["properties"].pop("next_suggestions")
+    return schema
+
+
 def build_answer_prompt(
     *,
     history: list[dict[str, str]],
@@ -112,14 +126,13 @@ def build_answer_prompt(
             "hidden_document_context": context.prompt_context,
             "available_document_keys": list(context.document_keys),
             "available_image_keys": [binding.key for binding in context.image_bindings],
-            "output_schema": GeneratedAnswer.model_json_schema(),
+            "output_schema": answer_output_schema(),
             "output_example": {
                 "response_kind": "ANSWER",
                 "basis": "DOCUMENT",
                 "answer": "先设置电脑网络参数，再按界面完成配置。[IMG:I1]",
                 "used_document_keys": ["D1"],
                 "used_image_keys": ["I1"],
-                "next_suggestions": [],
             },
             "decision_policy": [
                 (
