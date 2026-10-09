@@ -290,7 +290,10 @@ async function loadMetrics() {
   const trendResult = loadTrend();
   const results = await Promise.allSettled([
     adminApi.getMetricsOverview(qualityParams),
-    adminApi.listUnconfirmedTraces(knowledgeId || undefined, qualityParams),
+    adminApi.listUnconfirmedTraces(knowledgeId || undefined, {
+      ...qualityParams,
+      excludeLowInformation: true,
+    }),
     adminApi.getAssistantMetrics({ knowledgeId: knowledgeId || undefined, days: QUALITY_WINDOW_DAYS }),
     knowledgeId ? adminApi.getKnowledgeAssistant(knowledgeId) : Promise.resolve(null),
   ]);
@@ -627,7 +630,7 @@ watch(() => store.hasServiceCredential, (available) => {
     </section>
 
     <details class="panel advanced-details review-details">
-      <summary>值得人工复核的问题<span>近期待补充条件的回答 · 展开查看</span></summary>
+      <summary>值得人工复核的问题<span>近期待补充条件的有效问题 · 已排除明显无效输入 · 展开查看</span></summary>
       <header class="panel-header"><span class="sub">以下回答需要用户补充条件，不直接等同于知识库缺口或错误答案。</span><el-button text @click="store.navigate('logs', 'tab=assistant-answers')">进入回答复核 →</el-button></header>
       <el-table
         v-if="unconfirmedTraces.length"
@@ -649,7 +652,7 @@ watch(() => store.hasServiceCredential, (available) => {
         v-else-if="overview && !metricsError"
         :icon="ChatDotRound"
         title="当前没有待补充信息的问题"
-        description="仅展示近 7 天外部 Assistant 的技术回答。仍可进入回答复核查看其他问题。"
+        description="仅展示近 7 天外部 Assistant 中需要补充关键条件的问题；明显无效输入不列入此处。仍可进入回答复核查看其他问题。"
       />
       <p v-else class="empty-note">{{ metricsLoading ? '正在加载问题记录…' : '问题记录暂不可确认，请刷新后查看。' }}</p>
     </details>

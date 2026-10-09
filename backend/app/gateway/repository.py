@@ -525,6 +525,8 @@ class GatewayRepository:
         user_id: str | None,
         limit: int,
         source: str | None = None,
+        activity_from: datetime | None = None,
+        activity_to: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """List conversations for platform-side history, newest activity first.
 
@@ -553,6 +555,10 @@ class GatewayRepository:
                     FROM conversation
                     WHERE knowledge_id = :knowledge_id
                       AND (CAST(:user_id AS varchar) IS NULL OR user_id = :user_id)
+                      AND (CAST(:activity_from AS timestamptz) IS NULL
+                           OR updated_at >= :activity_from)
+                      AND (CAST(:activity_to AS timestamptz) IS NULL
+                           OR updated_at <= :activity_to)
                       AND (
                           CAST(:source AS varchar) IS NULL
                           OR EXISTS (
@@ -570,6 +576,8 @@ class GatewayRepository:
                     "user_id": user_id,
                     "limit": limit,
                     "source": source,
+                    "activity_from": activity_from,
+                    "activity_to": activity_to,
                 },
             )
             return [dict(row) for row in result.mappings()]

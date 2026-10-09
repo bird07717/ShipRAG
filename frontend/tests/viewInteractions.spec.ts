@@ -1050,8 +1050,19 @@ describe("view interactions", () => {
     await flushPromises();
     expect(adminStore.conversationDrawerOpen).toBe(true);
     expect(wrapper.text()).toContain("会话回放");
-    expect(wrapper.text()).toContain("请先检查第一步");
-    expect(wrapper.text()).toContain("当前步骤 3");
+    const timeline = wrapper.get(".conversation-timeline");
+    expect(timeline.text()).toContain("为什么升级失败？");
+    expect(timeline.text()).toContain("请先检查第一步");
+    expect(timeline.text()).toContain("本轮失败：INVALID_EVIDENCE");
+    expect(timeline.text()).toContain("模型引用了当前文档之外的证据");
+    expect(timeline.text()).not.toContain("当前步骤 3");
+    expect(timeline.text()).not.toContain("工作流状态与升级详情");
+    expect(timeline.text()).not.toContain("本轮触发升级人工");
+    await timeline.get(".turn-actions button").trigger("click");
+    await flushPromises();
+    expect(adminStore.traceDrawerOpen).toBe(true);
+    expect(adminStore.selectedTrace?.trace_id).toBe(failedTraceDetail.trace_id);
+    expect(wrapper.text()).toContain("原始 JSON（Raw JSON）");
   });
 
   it("logs: reviews failed tasks without the removed escalation tab", async () => {

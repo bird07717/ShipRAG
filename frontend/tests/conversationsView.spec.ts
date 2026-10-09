@@ -59,7 +59,13 @@ describe("ConversationsView", () => {
 
     expect(list).toHaveBeenCalledWith(
       "kb-1",
-      { source: "ASSISTANT_API", userId: undefined, limit: 200 },
+      {
+        source: "ASSISTANT_API",
+        userId: undefined,
+        limit: 200,
+        activityFrom: undefined,
+        activityTo: undefined,
+      },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(wrapper.text()).toContain("如何更换保险丝？");
@@ -92,7 +98,13 @@ describe("ConversationsView", () => {
     const list = vi.spyOn(adminApi, "listConversations").mockResolvedValue({ items: many });
     const wrapper = mountView("source=INTERNAL_CHAT&user=tester");
     await flushPromises();
-    expect(list.mock.lastCall![1]).toEqual({ source: "INTERNAL_CHAT", userId: "tester", limit: 200 });
+    expect(list.mock.lastCall![1]).toEqual({
+      source: "INTERNAL_CHAT",
+      userId: "tester",
+      limit: 200,
+      activityFrom: undefined,
+      activityTo: undefined,
+    });
     expect(wrapper.text()).toContain("仅显示最近活动的 200 个");
   });
 
@@ -109,6 +121,26 @@ describe("ConversationsView", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("备件会话");
     expect(wrapper.text()).not.toContain("旧知识库会话");
+  });
+
+  it("filters conversations by recent activity date and time on submit", async () => {
+    const list = vi.spyOn(adminApi, "listConversations").mockResolvedValue({ items: [] });
+    const wrapper = mountView();
+    await flushPromises();
+
+    const rangePicker = wrapper.findComponent({ name: "ElDatePicker" });
+    expect(rangePicker.exists()).toBe(true);
+    rangePicker.vm.$emit("update:modelValue", [
+      new Date("2026-10-07T09:00:00.000Z"),
+      new Date("2026-10-07T11:00:00.000Z"),
+    ]);
+    await wrapper.findAll("button").find((button) => button.text() === "查询")!.trigger("click");
+    await flushPromises();
+
+    expect(list.mock.lastCall![1]).toMatchObject({
+      activityFrom: "2026-10-07T09:00:00.000Z",
+      activityTo: "2026-10-07T11:00:00.000Z",
+    });
   });
 
   it("shows errors and empty states without fabricating rows", async () => {

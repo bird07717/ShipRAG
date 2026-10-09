@@ -6,13 +6,12 @@ import { useAdminStore } from "@/composables/adminStore";
 import { renderMarkdown } from "@/utils/markdown";
 import type { RagTrace, SupportMessage, TraceSummary } from "@/types/admin";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
-import CodeBlock from "@/components/ui/CodeBlock.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 
 /*
  * Conversation replay: full multi-turn review of one conversation.
- * Messages provide content / response_type / support_mode; the matching
- * traces provide workflow before/after snapshots and escalation details.
+ * Messages provide the user-visible conversation; traces link to technical
+ * detail when needed.
  */
 const props = defineProps<{ conversationId: string }>();
 
@@ -173,47 +172,6 @@ const turns = computed<Turn[]>(() => {
   return result;
 });
 
-type SupportTrace = {
-  focus_document_id?: string;
-  support_mode?: string;
-  workflow_before?: Record<string, unknown>;
-  workflow_after?: {
-    current_step?: number | null;
-    completed_steps?: number[];
-    observations?: Array<Record<string, unknown>>;
-    pending_options?: Array<Record<string, unknown>>;
-    missing_information?: string[];
-    escalation?: { required?: boolean; reason?: string | null };
-  };
-  escalation?: { required?: boolean; reason?: string | null };
-  failure?: { code?: string };
-};
-
-function supportTraceOf(trace: RagTrace | null): SupportTrace | null {
-  if (!trace) return null;
-  return (trace.retrieval_result as SupportTrace | undefined) ?? null;
-}
-
-function workflowSummary(trace: RagTrace | null): string {
-  const workflow = supportTraceOf(trace)?.workflow_after;
-  if (!workflow) return "";
-  const parts: string[] = [];
-  if (workflow.current_step != null) parts.push(`当前步骤 ${workflow.current_step}`);
-  if (workflow.completed_steps?.length) parts.push(`已完成 ${workflow.completed_steps.length} 步`);
-  if (workflow.observations?.length) parts.push(`观察 ${workflow.observations.length} 条`);
-  if (workflow.pending_options?.length) parts.push(`待确认选项 ${workflow.pending_options.length} 个`);
-  if (workflow.missing_information?.length)
-    parts.push(`缺少信息 ${workflow.missing_information.length} 项`);
-  if (workflow.escalation?.required) parts.push("已升级人工");
-  return parts.join(" · ");
-}
-
-function escalationOf(trace: RagTrace | null): SupportTrace["escalation"] | null {
-  const support = supportTraceOf(trace);
-  if (!support?.escalation?.required) return null;
-  return support.escalation;
-}
-
 function traceError(trace: RagTrace | null): { code?: string; message?: string } | null {
   const error = trace?.error as { code?: string; message?: string } | undefined;
   return error?.code ? error : null;
@@ -282,18 +240,6 @@ function traceError(trace: RagTrace | null): { code?: string; message?: string }
             show-icon
             class="turn-alert"
           />
-          <el-alert
-            v-if="escalationOf(turn.trace)"
-            title="本轮触发升级人工"
-            :description="escalationOf(turn.trace)?.reason ?? ''"
-            type="warning"
-            :closable="false"
-            show-icon
-            class="turn-alert"
-          />
-          <div v-if="workflowSummary(turn.trace)" class="workflow-line muted">
-            {{ workflowSummary(turn.trace) }}
-          </div>
           <div v-if="turn.trace" class="turn-actions">
             <el-button
               text
@@ -303,20 +249,6 @@ function traceError(trace: RagTrace | null): { code?: string; message?: string }
               查看完整 Trace
             </el-button>
           </div>
-          <el-collapse v-if="turn.trace" class="turn-collapse">
-            <el-collapse-item title="工作流状态与升级详情" name="workflow">
-              <CodeBlock
-                :code="store.formatJson({
-                  focus_document_id: supportTraceOf(turn.trace)?.focus_document_id,
-                  workflow_before: supportTraceOf(turn.trace)?.workflow_before,
-                  workflow_after: supportTraceOf(turn.trace)?.workflow_after,
-                  escalation: supportTraceOf(turn.trace)?.escalation,
-                  failure: supportTraceOf(turn.trace)?.failure,
-                })"
-                max-height="260px"
-              />
-            </el-collapse-item>
-          </el-collapse>
           <div class="bubble-time muted">{{ store.formatDate(turn.assistant.created_at) }}</div>
         </div>
       </div>

@@ -562,7 +562,8 @@ class TestTraceFilters:
         try:
             response = client.get(
                 "/api/v1/traces?response_type=UNCONFIRMED&user_id=mobile-user-1"
-                "&from=2026-08-20T00:00:00&to=2026-08-21T00:00:00",
+                "&from=2026-08-20T00:00:00&to=2026-08-21T00:00:00"
+                "&exclude_low_information=true",
                 headers=AUTH,
             )
             assert response.status_code == 200
@@ -574,6 +575,7 @@ class TestTraceFilters:
             assert call["user_id"] == "mobile-user-1"
             assert call["created_from"] == datetime(2026, 8, 20, 0, 0)
             assert call["created_to"] == datetime(2026, 8, 21, 0, 0)
+            assert call["exclude_low_information"] is True
         finally:
             client.app.dependency_overrides.clear()
 

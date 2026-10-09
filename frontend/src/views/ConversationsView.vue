@@ -36,6 +36,8 @@ const loaded = ref(false);
 const source = ref<TraceSource | "">("ASSISTANT_API");
 const userInput = ref("");
 const appliedUser = ref("");
+const activityRange = ref<[Date, Date] | null>(null);
+const appliedActivityRange = ref<[Date, Date] | null>(null);
 let generation = 0;
 let controller: AbortController | undefined;
 
@@ -70,7 +72,13 @@ async function load(): Promise<void> {
   try {
     const response = await adminApi.listConversations(
       knowledgeId,
-      { source: source.value || undefined, userId: appliedUser.value || undefined, limit: LIST_LIMIT },
+      {
+        source: source.value || undefined,
+        userId: appliedUser.value || undefined,
+        limit: LIST_LIMIT,
+        activityFrom: appliedActivityRange.value?.[0].toISOString(),
+        activityTo: appliedActivityRange.value?.[1].toISOString(),
+      },
       { signal: controller.signal },
     );
     if (current !== generation || store.selectedKnowledgeId !== knowledgeId) return;
@@ -86,8 +94,11 @@ async function load(): Promise<void> {
   }
 }
 
-function applyUser(): void {
+function applyFilters(): void {
   appliedUser.value = userInput.value.trim();
+  appliedActivityRange.value = activityRange.value
+    ? [new Date(activityRange.value[0]), new Date(activityRange.value[1])]
+    : null;
   void load();
 }
 
@@ -144,17 +155,27 @@ onBeforeUnmount(() => {
           clearable
           :prefix-icon="Search"
           aria-label="用户 ID"
-          @keyup.enter="applyUser"
-          @clear="applyUser"
+          @keyup.enter="applyFilters"
+          @clear="applyFilters"
         />
-        <el-button @click="applyUser">查询</el-button>
+        <el-date-picker
+          v-model="activityRange"
+          type="datetimerange"
+          range-separator="至"
+          start-placeholder="开始日期时间"
+          end-placeholder="结束日期时间"
+          format="YYYY-MM-DD HH:mm"
+          aria-label="最近活动时间范围"
+          class="activity-range"
+        />
+        <el-button @click="applyFilters">查询</el-button>
         <div class="spacer" />
         <span class="muted result-count">
           {{ loaded ? `${items.length} 个会话${truncated ? `（仅显示最近活动的 ${LIST_LIMIT} 个）` : ""}` : "" }}
         </span>
       </div>
       <p class="scope-note muted">
-        来源取自会话最近一轮的链路记录；按来源筛选时，只要会话中有一轮来自该来源即会显示。用户 ID 为精确匹配，内部问答测试通常没有用户 ID。点击行查看完整对话。
+        时间范围按会话最近活动时间筛选；来源取自最近一轮链路记录，按来源筛选时只要会话中有一轮来自该来源即会显示。用户 ID 为精确匹配。点击行查看完整对话。
       </p>
 
       <el-alert
@@ -230,6 +251,10 @@ onBeforeUnmount(() => {
 
 .source-select {
   width: 190px;
+}
+
+.activity-range {
+  width: 360px;
 }
 
 .scope-note {

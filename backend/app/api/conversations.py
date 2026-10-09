@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -40,8 +41,17 @@ async def list_conversations(
     source: Annotated[
         Literal["ASSISTANT_API", "INTERNAL_CHAT", "PLAYGROUND"] | None, Query()
     ] = None,
+    activity_from: Annotated[datetime | None, Query()] = None,
+    activity_to: Annotated[datetime | None, Query()] = None,
 ) -> dict[str, Any]:
-    rows = await repository.list_conversations(knowledge_id, user_id, limit, source=source)
+    rows = await repository.list_conversations(
+        knowledge_id,
+        user_id,
+        limit,
+        source=source,
+        activity_from=activity_from,
+        activity_to=activity_to,
+    )
     return {"items": rows}
 
 

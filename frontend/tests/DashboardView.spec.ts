@@ -113,7 +113,11 @@ describe("DashboardView metrics", () => {
     );
     expect(adminApi.listUnconfirmedTraces).toHaveBeenCalledWith(
       "kb-1",
-      expect.objectContaining({ engine: "RAG", source: "ASSISTANT_API" }),
+      expect.objectContaining({
+        engine: "RAG",
+        source: "ASSISTANT_API",
+        excludeLowInformation: true,
+      }),
     );
     expect(wrapper.text()).toContain("120"); // total queries
     expect(wrapper.text()).toContain("61.9%"); // direct-answer rate

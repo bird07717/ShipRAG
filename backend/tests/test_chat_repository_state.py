@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import uuid4
 
@@ -85,6 +86,28 @@ def _gateway_repository(results: list[Any]) -> tuple[GatewayRepository, _FakeCon
     engine = _FakeEngine(results)
     repo = GatewayRepository(cast(AsyncEngine, engine), Settings(_env_file=None, app_env="test"))
     return repo, engine.connection
+
+
+async def test_conversation_list_filters_recent_activity_range_in_sql() -> None:
+    repo, connection = _gateway_repository([[]])
+    knowledge_id = uuid4()
+    activity_from = datetime(2026, 10, 7, 9, tzinfo=UTC)
+    activity_to = datetime(2026, 10, 7, 11, tzinfo=UTC)
+
+    await repo.list_conversations(
+        knowledge_id,
+        None,
+        200,
+        activity_from=activity_from,
+        activity_to=activity_to,
+    )
+
+    sql, params = connection.executed[0]
+    assert "updated_at >= :activity_from" in sql
+    assert "updated_at <= :activity_to" in sql
+    assert params is not None
+    assert params["activity_from"] == activity_from
+    assert params["activity_to"] == activity_to
 
 
 async def test_assistant_turn_context_prefers_explicit_rag_user_link() -> None:
@@ -405,6 +428,17 @@ async def test_list_traces_filters_by_error_code_and_conversation() -> None:
     assert params is not None
     assert params["error_code"] == "INVALID_EVIDENCE"
     assert params["conversation_id"] == conversation_id
+
+
+async def test_list_traces_can_exclude_low_information_outcomes() -> None:
+    repo, connection = _repository([])
+
+    await repo.list_traces(response_type="UNCONFIRMED", exclude_low_information=True)
+
+    sql, _ = connection.executed[0]
+    assert "{doc_routing,generation,diagnostic_reason}" in sql
+    assert "'LOW_INFORMATION'" in sql
+    assert "'REPEATED_CHARACTER'" in sql
 
 
 async def test_gateway_message_replay_exposes_support_columns() -> None:

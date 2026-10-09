@@ -324,6 +324,7 @@ describe("metrics API", () => {
       engine: "RAG",
       source: "ASSISTANT_API",
       limit: 25,
+      excludeLowInformation: true,
     });
 
     const url = String(fetchMock.mock.calls[0]?.[0]);
@@ -335,6 +336,7 @@ describe("metrics API", () => {
     expect(url).toContain("from=2026-09-13T00%3A00%3A00Z");
     expect(url).toContain("to=2026-09-20T00%3A00%3A00Z");
     expect(url).toContain("limit=25");
+    expect(url).toContain("exclude_low_information=true");
   });
 
   it("fetches latency metrics with granularity passthrough", async () => {
@@ -427,6 +429,10 @@ describe("admin API: runtime, conversations and tasks", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await adminApi.listConversations("kb-1", { source: "ASSISTANT_API", userId: "u 1", limit: 200 });
+    await adminApi.listConversations("kb-1", {
+      activityFrom: "2026-10-07T09:00:00.000Z",
+      activityTo: "2026-10-07T11:00:00.000Z",
+    });
     await adminApi.listConversations("kb-2");
     await adminApi.listTaskRecords({ status: "QUEUED", limit: 200 });
     await adminApi.listTasks({ status: "FAILED", knowledgeId: "kb-1" });
@@ -435,6 +441,7 @@ describe("admin API: runtime, conversations and tasks", () => {
 
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
       "/api/v1/conversations?knowledge_id=kb-1&user_id=u+1&source=ASSISTANT_API&limit=200",
+      "/api/v1/conversations?knowledge_id=kb-1&activity_from=2026-10-07T09%3A00%3A00.000Z&activity_to=2026-10-07T11%3A00%3A00.000Z",
       "/api/v1/conversations?knowledge_id=kb-2",
       "/api/v1/tasks?status=QUEUED&limit=200",
       "/api/v1/tasks?status=FAILED&knowledge_id=kb-1",

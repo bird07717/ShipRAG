@@ -328,6 +328,7 @@ export const adminApi = {
       engine?: "SUPPORT" | "RAG";
       source?: "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND";
       limit?: number;
+      excludeLowInformation?: boolean;
     } = {},
   ) => {
     const search = new URLSearchParams({
@@ -341,6 +342,7 @@ export const adminApi = {
     if (filters.to) search.set("to", filters.to);
     if (filters.engine) search.set("engine", filters.engine);
     if (filters.source) search.set("source", filters.source);
+    if (filters.excludeLowInformation) search.set("exclude_low_information", "true");
     return apiRequest<TraceSummary[]>(`/traces?${search.toString()}`);
   },
   getMetricsOverview: (
@@ -408,13 +410,21 @@ export const adminApi = {
     apiRequest<TaskRecord[]>(`/tasks${taskListQuery(filters)}`),
   listConversations: (
     knowledgeId: string,
-    filters: { userId?: string; source?: TraceSource; limit?: number } = {},
+    filters: {
+      userId?: string;
+      source?: TraceSource;
+      limit?: number;
+      activityFrom?: string;
+      activityTo?: string;
+    } = {},
     init: RequestInit = {},
   ) => {
     const search = new URLSearchParams({ knowledge_id: knowledgeId });
     if (filters.userId) search.set("user_id", filters.userId);
     if (filters.source) search.set("source", filters.source);
     if (filters.limit) search.set("limit", String(filters.limit));
+    if (filters.activityFrom) search.set("activity_from", filters.activityFrom);
+    if (filters.activityTo) search.set("activity_to", filters.activityTo);
     return apiRequest<{ items: ConversationListItem[] }>(`/conversations?${search.toString()}`, init);
   },
   getModelRuntime: () => apiRequest<ModelRuntimeStatus>("/system/model-runtime"),

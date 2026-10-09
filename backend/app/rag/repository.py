@@ -1376,6 +1376,7 @@ class RagRepository:
         error_code: str | None = None,
         conversation_id: UUID | None = None,
         request_id: str | None = None,
+        exclude_low_information: bool = False,
         created_from: datetime | None = None,
         created_to: datetime | None = None,
         limit: int = 50,
@@ -1412,6 +1413,16 @@ class RagRepository:
         if request_id is not None:
             clauses.append("request_id = :request_id")
             parameters["request_id"] = request_id
+        if exclude_low_information:
+            clauses.append(
+                "COALESCE(retrieval_result #>> "
+                "'{doc_routing,generation,diagnostic_reason}', '') <> 'LOW_INFORMATION'"
+            )
+            clauses.append(
+                "COALESCE(citation_result ->> 'shortcut', '') NOT IN "
+                "('EMPTY', 'SYMBOL_ONLY', 'SINGLE_CHARACTER', "
+                "'REPEATED_CHARACTER', 'KEYBOARD_SEQUENCE')"
+            )
         if created_from is not None:
             clauses.append("created_at >= :created_from")
             parameters["created_from"] = created_from
