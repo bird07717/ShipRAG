@@ -1,10 +1,41 @@
-"""Read-only administration snapshots for the active RAG V2 model stages."""
+"""Read-only administration snapshots for the active RAG V2 model stages.
+
+Every field is derived from the constants and builders the model calls actually use
+(``app.rag.v2``), so the listing cannot drift from the real prompts. Do not hand-write rules here.
+"""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 from uuid import UUID
+
+from app.rag.v2.answer_generator import (
+    ANSWER_DECISION_POLICY,
+    ANSWER_OUTPUT_CONTRACT,
+    ANSWER_OUTPUT_EXAMPLE,
+    ANSWER_SYSTEM_PROMPT,
+    REPAIR_INSTRUCTION,
+    REPAIR_SYSTEM_PROMPT,
+    REPAIR_TASK,
+    answer_output_schema,
+    build_answer_prompt,
+)
+from app.rag.v2.conversation_answer import (
+    CONVERSATION_RULES,
+    CONVERSATION_SYSTEM_PROMPT,
+    ConversationAnswer,
+    build_conversation_prompt,
+)
+from app.rag.v2.document_context import DocumentContext
+from app.rag.v2.query_interpreter import (
+    INTERPRETER_OUTPUT_EXAMPLE,
+    INTERPRETER_ROUTE_EXAMPLES,
+    INTERPRETER_RULES,
+    INTERPRETER_SYSTEM_PROMPT,
+    QueryInterpretation,
+    build_interpreter_prompt,
+)
 
 # Historical migrations 0007 and 0012 import this symbol while Alembic builds
 # the revision graph. It is not used by the V2 runtime or its readiness check.
@@ -50,68 +81,89 @@ DEFAULT_RAG_PROMPT = """# 任务
 {{question}}
 </current_question>"""
 
-_RUNTIME_PROMPTS = (
+# Prompt sections that carry instructions or the output contract; every other key of a built
+# prompt is data the stage receives and is listed as an input.
+_STATIC_PROMPT_KEYS = frozenset(
     {
-        "id": "00000000-0000-0000-0000-000000000011",
-        "name": "runtime-v2-query-interpreter",
-        "version": 1,
-        "description": "LLM 1：结合最近完整轮次还原问题、任务关系与有界检索查询。",
-        "content": {
-            "stage": "QUERY_INTERPRETER",
-            "input": [
-                "current_question",
-                "recent_completed_history",
-                "immediate_previous_round",
-                "knowledge_base",
-            ],
-            "output": [
-                "resolved_question",
-                "search_queries",
-                "key_constraints",
-                "scope",
-                "relation",
-                "active_task",
-            ],
-            "rules": [
-                "历史助手回答只用于理解指代，不作为产品事实。",
-                "短追问从最近用户请求继承设备、部件和操作目标。",
-                "原始问题始终由服务器参与检索。",
-                "不决定回答篇幅或公开形式。",
-            ],
-        },
-    },
-    {
-        "id": "00000000-0000-0000-0000-000000000012",
-        "name": "runtime-v2-answer-generator",
-        "version": 1,
-        "description": "LLM 2：基于隐藏完整文档上下文生成公开答案并选择结构化图片。",
-        "content": {
-            "stage": "ANSWER_GENERATOR",
-            "input": [
-                "current_question",
-                "query_interpretation",
-                "recent_completed_history",
-                "hidden_document_context",
-            ],
-            "output": [
-                "response_kind",
-                "basis",
-                "answer",
-                "used_document_keys",
-                "used_image_keys",
-            ],
-            "rules": [
-                "直接解决问题，不介绍检索过程或枚举候选文档。",
-                "文档证据优先；产品范围内允许有界通用工程分析。",
-                "采用足以完成当前目标但不扩展无关内容的最小充分回答。",
-                "操作问题即使未写“完整”也应覆盖完成任务所需步骤；局部问题只答当前环节。",
-                "图片只在正文明确放置白名单标记时以结构化内容块公开。",
-                "不因上下文存在图片而全部使用；图片选择取决于能否帮助当前回答。",
-                "句末标点写在图片标记前，图片显示在完整句子之后。",
-            ],
-        },
-    },
+        "output_schema",
+        "output_example",
+        "route_examples",
+        "rules",
+        "decision_policy",
+        "output_contract",
+    }
 )
+
+
+def _inputs(prompt: str) -> list[str]:
+    return [key for key in json.loads(prompt) if key not in _STATIC_PROMPT_KEYS]
+
+
+def _runtime_prompts() -> tuple[dict[str, Any], ...]:
+    interpreter_prompt = build_interpreter_prompt(
+        question="", history=[], knowledge_name="", scope_description="", max_rounds=1
+    )
+    answer_prompt = build_answer_prompt(
+        history=[],
+        interpretation=QueryInterpretation(resolved_question="-", response_path="KNOWLEDGE"),
+        context=DocumentContext("", (), (), (), (), 0, "FULL_DOCUMENT"),
+        product_name="",
+        scope_description="",
+        max_rounds=1,
+    )
+    conversation_prompt = build_conversation_prompt(
+        question="", resolved_question="", history=[], product_name="", scope_description=""
+    )
+    return (
+        {
+            "id": "00000000-0000-0000-0000-000000000011",
+            "name": "runtime-v2-query-interpreter",
+            "version": 2,
+            "description": "LLM 1：结合最近完整轮次还原独立问题、任务关系、范围与回答路径。",
+            "content": {
+                "stage": "QUERY_INTERPRETER",
+                "system": INTERPRETER_SYSTEM_PROMPT,
+                "input": _inputs(interpreter_prompt),
+                "output": list(QueryInterpretation.model_json_schema()["properties"]),
+                "rules": list(INTERPRETER_RULES),
+                "route_examples": list(INTERPRETER_ROUTE_EXAMPLES),
+                "output_example": INTERPRETER_OUTPUT_EXAMPLE,
+            },
+        },
+        {
+            "id": "00000000-0000-0000-0000-000000000012",
+            "name": "runtime-v2-answer-generator",
+            "version": 2,
+            "description": "LLM 2：基于隐藏完整文档上下文生成公开答案并选择结构化图片。",
+            "content": {
+                "stage": "ANSWER_GENERATOR",
+                "system": ANSWER_SYSTEM_PROMPT,
+                "input": _inputs(answer_prompt),
+                "output": list(answer_output_schema()["properties"]),
+                "rules": list(ANSWER_DECISION_POLICY),
+                "output_contract": list(ANSWER_OUTPUT_CONTRACT),
+                "output_example": ANSWER_OUTPUT_EXAMPLE,
+                "repair": {
+                    "system": REPAIR_SYSTEM_PROMPT,
+                    "task": REPAIR_TASK,
+                    "instruction": REPAIR_INSTRUCTION,
+                },
+            },
+        },
+        {
+            "id": "00000000-0000-0000-0000-000000000013",
+            "name": "runtime-v2-conversation-answer",
+            "version": 1,
+            "description": "非文档回答路径：寒暄、确认、能力介绍、改写既有回答，不检索。",
+            "content": {
+                "stage": "CONVERSATION_ANSWER",
+                "system": CONVERSATION_SYSTEM_PROMPT,
+                "input": _inputs(conversation_prompt),
+                "output": list(ConversationAnswer.model_json_schema()["properties"]),
+                "rules": list(CONVERSATION_RULES),
+            },
+        },
+    )
 
 
 def runtime_prompt_entries() -> list[dict[str, Any]]:
@@ -125,5 +177,5 @@ def runtime_prompt_entries() -> list[dict[str, Any]]:
             "source": "RUNTIME",
             "description": str(entry["description"]),
         }
-        for entry in _RUNTIME_PROMPTS
+        for entry in _runtime_prompts()
     ]

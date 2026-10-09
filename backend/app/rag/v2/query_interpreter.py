@@ -184,6 +184,143 @@ def _completed_rounds(history: list[dict[str, str]], max_rounds: int) -> list[di
     return rounds
 
 
+# The prompt text is kept in module constants so that the admin listing (rag/prompt.py) is generated
+# from exactly what the model receives instead of from a hand-written paraphrase that drifts.
+INTERPRETER_SYSTEM_PROMPT = "你是企业技术知识库的检索问题解释器，不直接回答用户问题。"
+
+INTERPRETER_OUTPUT_EXAMPLE: dict[str, str] = {
+    "resolved_question": "配置 VAU 图像时电脑网卡应设置什么 IP",
+    "scope": "IN_SCOPE",
+    "relation": "FOLLOW_UP",
+    "active_task": "配置 VAU 图像",
+    "response_path": "KNOWLEDGE",
+}
+
+INTERPRETER_ROUTE_EXAMPLES: tuple[dict[str, str], ...] = (
+    {
+        "current_question": "你能帮我做什么",
+        "response_path": "CONVERSATION",
+        "reason": "只需概括助手能力，不需要列举或核实具体文档覆盖",
+    },
+    {
+        "current_question": "好的，我同意联系海兰信进行专业检查",
+        "response_path": "CONVERSATION",
+        "reason": "只确认既有建议，没有请求新判断",
+    },
+    {
+        "current_question": "我需要联系海兰信专业人员吗",
+        "response_path": "CONVERSATION",
+        "reason": "询问是否寻求人工协助，不要求从文档确认技术事实或官方规定",
+    },
+    {
+        "current_question": "文档是否规定 LRU 故障必须联系工作人员",
+        "response_path": "KNOWLEDGE",
+        "reason": "需要核实文档中的具体规定",
+    },
+    {
+        "current_question": "上面的内容我看不懂，请简单解释",
+        "response_path": "CONVERSATION",
+        "reason": "只改写最近回答，不请求新事实",
+    },
+)
+
+INTERPRETER_RULES: tuple[str, ...] = (
+    "把当前问题还原为可独立理解的请求，不决定回答篇幅或公开形式。",
+    (
+        "knowledge_base.name 和 knowledge_base.scope 是管理员维护的可信产品"
+        "档案。询问该产品本身是什么、厂商、类别、适用标准或认证、规格参数、"
+        "用途、组成、原理、使用、维护或故障时，即使档案没有列出对应文档，"
+        "也属于产品范围。"
+    ),
+    (
+        "用户写的设备、单元或部件名与 knowledge_base.scope 中列出的名称明显相近"
+        "（仅大小写不同、错一个字母、字母顺序颠倒或同音错字，如 FCC 对应 FFC）时，"
+        "在 resolved_question 中按档案里的名称还原；档案中没有相近名称或可能"
+        "对应多个名称时保持原文，不得凭空改写成其他设备。"
+    ),
+    (
+        "先判断 current_question 能否脱离历史独立确定设备、部件、任务和阶段。"
+        "不能独立确定且最近用户请求提供了这些信息时，必须是 FOLLOW_UP；"
+        "修正最近任务的对象或条件时是 CORRECTION。"
+    ),
+    (
+        "例如“断电后等多久”“下一步呢”“为什么”“用哪个端口”等省略任务对象"
+        "的追问，必须继承最近一轮 user_request；历史助手回答只可帮助理解指代，"
+        "不得成为产品事实或新增任务来源。"
+    ),
+    (
+        "只有 current_question 自身已明确给出可独立理解的新对象或新目标时才是"
+        " NEW_TASK；不要因为追问很短或出现通用工程词就误判为新任务。"
+    ),
+    (
+        "FOLLOW_UP/CORRECTION 必须输出简短 active_task，并让 resolved_question "
+        "同时包含继承任务和当前所问属性；NEW_TASK 不得携带旧任务。"
+    ),
+    "必须保留当前所问属性的技术含义，不得把地址、目录、路径或参数互相替换。",
+    (
+        "只有请求目标明显与知识库产品及其技术原理无关时才输出 OUT_OF_SCOPE；"
+        "仅把产品名称当作无关创作或闲聊素材，不会让无关任务变成产品问题。"
+    ),
+    (
+        "如果 current_question 同时包含产品技术任务和写作、娱乐、闲聊等无关"
+        "附加任务，只保留产品技术任务写入 resolved_question，"
+        "忽略无关部分，并按产品技术任务判断 scope。"
+    ),
+    (
+        "resolved_question 是回答阶段唯一看到的问题：只去掉无关附加任务，"
+        "用户给出的现场条件、数值、否定、纠正和回答形式要求（如简短、分点、"
+        "表格、使用英文）必须原样保留。"
+    ),
+    (
+        "response_path 是是否检索的唯一决定，依据是回答是否需要文档提供产品专有"
+        "事实或技术依据，而不是是否需要作出新判断。确认/同意、致谢、概括助手"
+        "能提供哪类帮助、"
+        "改写既有回答，以及一般性的沟通和人工协助建议，无需文档时输出 "
+        "CONVERSATION；该路径可以给谨慎的通用建议，但不得声称文档或官方要求。"
+    ),
+    (
+        "产品参数、操作步骤、故障原因或下一步技术处置，以及官方服务能力、"
+        "联系方式、服务条款或文档是否规定某事等需要核实的事实，输出 "
+        "KNOWLEDGE；同时包含一般建议和技术任务时也输出 KNOWLEDGE。"
+        "无法判断能否脱离文档安全回答时，保守输出 KNOWLEDGE。"
+    ),
+    (
+        "不要因为消息出现产品名、厂商名或历史技术内容，就把无需文档的请求判为"
+        " KNOWLEDGE；也不得为了走 CONVERSATION 删除消息中真实存在的技术任务。"
+    ),
+    "scope 只能是 IN_SCOPE、OUT_OF_SCOPE 或 UNCERTAIN。",
+    "relation 只能是 NEW_TASK、FOLLOW_UP 或 CORRECTION。",
+    "response_path 只能是 KNOWLEDGE 或 CONVERSATION。",
+    "只返回符合 Schema 的 JSON。",
+)
+
+
+def build_interpreter_prompt(
+    *,
+    question: str,
+    history: list[dict[str, str]],
+    knowledge_name: str,
+    scope_description: str,
+    max_rounds: int,
+) -> str:
+    return json.dumps(
+        {
+            "current_question": question,
+            "recent_completed_rounds": _completed_rounds(history, max_rounds),
+            "knowledge_base": {
+                "name": knowledge_name,
+                "scope": scope_description,
+            },
+            "output_schema": QueryInterpretation.model_json_schema(),
+            "output_example": INTERPRETER_OUTPUT_EXAMPLE,
+            "route_examples": list(INTERPRETER_ROUTE_EXAMPLES),
+            "rules": list(INTERPRETER_RULES),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 async def interpret_query(
     provider: LlmProvider,
     *,
@@ -196,121 +333,12 @@ async def interpret_query(
     timeout_seconds: float,
 ) -> QueryInterpretationOutcome:
     started_at = time.perf_counter()
-    prompt = json.dumps(
-        {
-            "current_question": question,
-            "recent_completed_rounds": _completed_rounds(history, max_rounds),
-            "knowledge_base": {
-                "name": knowledge_name,
-                "scope": scope_description,
-            },
-            "output_schema": QueryInterpretation.model_json_schema(),
-            "output_example": {
-                "resolved_question": "配置 VAU 图像时电脑网卡应设置什么 IP",
-                "scope": "IN_SCOPE",
-                "relation": "FOLLOW_UP",
-                "active_task": "配置 VAU 图像",
-                "response_path": "KNOWLEDGE",
-            },
-            "route_examples": [
-                {
-                    "current_question": "你能帮我做什么",
-                    "response_path": "CONVERSATION",
-                    "reason": "只需概括助手能力，不需要列举或核实具体文档覆盖",
-                },
-                {
-                    "current_question": "好的，我同意联系海兰信进行专业检查",
-                    "response_path": "CONVERSATION",
-                    "reason": "只确认既有建议，没有请求新判断",
-                },
-                {
-                    "current_question": "我需要联系海兰信专业人员吗",
-                    "response_path": "CONVERSATION",
-                    "reason": "询问是否寻求人工协助，不要求从文档确认技术事实或官方规定",
-                },
-                {
-                    "current_question": "文档是否规定 LRU 故障必须联系工作人员",
-                    "response_path": "KNOWLEDGE",
-                    "reason": "需要核实文档中的具体规定",
-                },
-                {
-                    "current_question": "上面的内容我看不懂，请简单解释",
-                    "response_path": "CONVERSATION",
-                    "reason": "只改写最近回答，不请求新事实",
-                },
-            ],
-            "rules": [
-                "把当前问题还原为可独立理解的请求，不决定回答篇幅或公开形式。",
-                (
-                    "knowledge_base.name 和 knowledge_base.scope 是管理员维护的可信产品"
-                    "档案。询问该产品本身是什么、厂商、类别、适用标准或认证、规格参数、"
-                    "用途、组成、原理、使用、维护或故障时，即使档案没有列出对应文档，"
-                    "也属于产品范围。"
-                ),
-                (
-                    "用户写的设备、单元或部件名与 knowledge_base.scope 中列出的名称明显相近"
-                    "（仅大小写不同、错一个字母、字母顺序颠倒或同音错字，如 FCC 对应 FFC）时，"
-                    "在 resolved_question 中按档案里的名称还原；档案中没有相近名称或可能"
-                    "对应多个名称时保持原文，不得凭空改写成其他设备。"
-                ),
-                (
-                    "先判断 current_question 能否脱离历史独立确定设备、部件、任务和阶段。"
-                    "不能独立确定且最近用户请求提供了这些信息时，必须是 FOLLOW_UP；"
-                    "修正最近任务的对象或条件时是 CORRECTION。"
-                ),
-                (
-                    "例如“断电后等多久”“下一步呢”“为什么”“用哪个端口”等省略任务对象"
-                    "的追问，必须继承最近一轮 user_request；历史助手回答只可帮助理解指代，"
-                    "不得成为产品事实或新增任务来源。"
-                ),
-                (
-                    "只有 current_question 自身已明确给出可独立理解的新对象或新目标时才是"
-                    " NEW_TASK；不要因为追问很短或出现通用工程词就误判为新任务。"
-                ),
-                (
-                    "FOLLOW_UP/CORRECTION 必须输出简短 active_task，并让 resolved_question "
-                    "同时包含继承任务和当前所问属性；NEW_TASK 不得携带旧任务。"
-                ),
-                "必须保留当前所问属性的技术含义，不得把地址、目录、路径或参数互相替换。",
-                (
-                    "只有请求目标明显与知识库产品及其技术原理无关时才输出 OUT_OF_SCOPE；"
-                    "仅把产品名称当作无关创作或闲聊素材，不会让无关任务变成产品问题。"
-                ),
-                (
-                    "如果 current_question 同时包含产品技术任务和写作、娱乐、闲聊等无关"
-                    "附加任务，只保留产品技术任务写入 resolved_question，"
-                    "忽略无关部分，并按产品技术任务判断 scope。"
-                ),
-                (
-                    "resolved_question 是回答阶段唯一看到的问题：只去掉无关附加任务，"
-                    "用户给出的现场条件、数值、否定、纠正和回答形式要求（如简短、分点、"
-                    "表格、使用英文）必须原样保留。"
-                ),
-                (
-                    "response_path 是是否检索的唯一决定，依据是回答是否需要文档提供产品专有"
-                    "事实或技术依据，而不是是否需要作出新判断。确认/同意、致谢、概括助手"
-                    "能提供哪类帮助、"
-                    "改写既有回答，以及一般性的沟通和人工协助建议，无需文档时输出 "
-                    "CONVERSATION；该路径可以给谨慎的通用建议，但不得声称文档或官方要求。"
-                ),
-                (
-                    "产品参数、操作步骤、故障原因或下一步技术处置，以及官方服务能力、"
-                    "联系方式、服务条款或文档是否规定某事等需要核实的事实，输出 "
-                    "KNOWLEDGE；同时包含一般建议和技术任务时也输出 KNOWLEDGE。"
-                    "无法判断能否脱离文档安全回答时，保守输出 KNOWLEDGE。"
-                ),
-                (
-                    "不要因为消息出现产品名、厂商名或历史技术内容，就把无需文档的请求判为"
-                    " KNOWLEDGE；也不得为了走 CONVERSATION 删除消息中真实存在的技术任务。"
-                ),
-                "scope 只能是 IN_SCOPE、OUT_OF_SCOPE 或 UNCERTAIN。",
-                "relation 只能是 NEW_TASK、FOLLOW_UP 或 CORRECTION。",
-                "response_path 只能是 KNOWLEDGE 或 CONVERSATION。",
-                "只返回符合 Schema 的 JSON。",
-            ],
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
+    prompt = build_interpreter_prompt(
+        question=question,
+        history=history,
+        knowledge_name=knowledge_name,
+        scope_description=scope_description,
+        max_rounds=max_rounds,
     )
     attempts = 0
     try:
@@ -319,7 +347,7 @@ async def interpret_query(
             try:
                 result = await provider.complete_structured(
                     prompt,
-                    system="你是企业技术知识库的检索问题解释器，不直接回答用户问题。",
+                    system=INTERPRETER_SYSTEM_PROMPT,
                     schema=QueryInterpretation,
                     max_tokens=max_tokens,
                     temperature=0.0,

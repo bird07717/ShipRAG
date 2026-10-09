@@ -23,7 +23,6 @@ from app.rag.models import (
     RetrievalCandidate,
     Turn,
 )
-from app.rag.prompt import runtime_prompt_entries
 from app.rag.repository import RagRepository, SearchQueryUnsupportedError
 from app.rag.rerank import RerankError, create_rerank_provider
 from app.rag.v2.answer_generator import (
@@ -2086,10 +2085,3 @@ def test_v2_generated_answer_accepts_the_field_when_it_is_present_or_absent() ->
     assert written_anyway.next_suggestions == [
         "如何更换？"
     ]  # accepted, then discarded by the server
-
-
-def test_runtime_prompt_listing_matches_the_requested_output() -> None:
-    entry = next(
-        item for item in runtime_prompt_entries() if item["name"] == "runtime-v2-answer-generator"
-    )
-    assert "next_suggestions" not in entry["content"]
