@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 
 from app.api.engine_dependencies import get_gateway_repository
+from app.api.pagination import OffsetQuery, paged_total
 from app.api.schemas import (
     ConversationDeleteResponse,
     ConversationDetailResponse,
@@ -43,16 +44,23 @@ async def list_conversations(
     ] = None,
     activity_from: Annotated[datetime | None, Query()] = None,
     activity_to: Annotated[datetime | None, Query()] = None,
+    offset: OffsetQuery = 0,
 ) -> dict[str, Any]:
+    filters: dict[str, Any] = {
+        "source": source,
+        "activity_from": activity_from,
+        "activity_to": activity_to,
+    }
     rows = await repository.list_conversations(
-        knowledge_id,
-        user_id,
-        limit,
-        source=source,
-        activity_from=activity_from,
-        activity_to=activity_to,
+        knowledge_id, user_id, limit, offset=offset, **filters
     )
-    return {"items": rows}
+    total = await paged_total(
+        rows,
+        limit=limit,
+        offset=offset,
+        count=lambda: repository.count_conversations(knowledge_id, user_id, **filters),
+    )
+    return {"items": rows, "total": total}
 
 
 @router.get(

@@ -198,15 +198,30 @@ class TaskRecordRepository:
             )
             return (result.rowcount or 0) > 0
 
-    async def prune_terminal_tasks(self, retention_days: int, *, per_kb_floor: int = 10) -> int:
+    async def prune_terminal_tasks(
+        self,
+        retention_days: int,
+        *,
+        per_kb_floor: int = 10,
+        kb_id: UUID | None = None,
+    ) -> int:
         """Delete terminal task records past the retention window.
 
         SUCCEEDED/FAILED/CANCELLED rows older than ``retention_days`` are
         pruned by the periodic GC sweep; the newest ``per_kb_floor`` terminal
         rows of every knowledge base survive the window so recent history
         stays inspectable even for dormant KBs.  Active (QUEUED/RUNNING) rows
-        are never touched.  Returns the number of deleted rows.
+        are never touched.  ``kb_id`` limits the prune to one knowledge base
+        (per-knowledge GC); global tasks without a knowledge base are then
+        left alone.  Returns the number of deleted rows.
         """
+        scope = " AND kb_id = :kb_id" if kb_id is not None else ""
+        parameters: dict[str, Any] = {
+            "retention_days": retention_days,
+            "per_kb_floor": per_kb_floor,
+        }
+        if kb_id is not None:
+            parameters["kb_id"] = kb_id
         async with self.engine.begin() as connection:
             result = await connection.execute(
                 text(
@@ -226,8 +241,9 @@ class TaskRecordRepository:
                           WHERE ranked.rn <= :per_kb_floor
                       )
                     """
+                    + scope
                 ),
-                {"retention_days": retention_days, "per_kb_floor": per_kb_floor},
+                parameters,
             )
             return int(result.rowcount or 0)
 

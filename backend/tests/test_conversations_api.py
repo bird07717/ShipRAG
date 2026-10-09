@@ -18,6 +18,8 @@ class _ConversationRepositoryStub:
         self.conversations: dict[UUID, dict[str, Any]] = {}
         self.deleted: list[UUID] = []
         self.messages: dict[UUID, list[dict[str, Any]]] = {}
+        self.offsets: list[int] = []
+        self.count_calls = 0
         self.list_filters: list[
             tuple[UUID, str | None, int, str | None, datetime | None, datetime | None]
         ] = []
@@ -40,8 +42,32 @@ class _ConversationRepositoryStub:
         source: str | None = None,
         activity_from: datetime | None = None,
         activity_to: datetime | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         self.list_filters.append((knowledge_id, user_id, limit, source, activity_from, activity_to))
+        self.offsets.append(offset)
+        rows = self._matching(knowledge_id, user_id, source, activity_from, activity_to)
+        return rows[offset : offset + limit]
+
+    async def count_conversations(
+        self,
+        knowledge_id: UUID,
+        user_id: str | None,
+        source: str | None = None,
+        activity_from: datetime | None = None,
+        activity_to: datetime | None = None,
+    ) -> int:
+        self.count_calls += 1
+        return len(self._matching(knowledge_id, user_id, source, activity_from, activity_to))
+
+    def _matching(
+        self,
+        knowledge_id: UUID,
+        user_id: str | None,
+        source: str | None,
+        activity_from: datetime | None,
+        activity_to: datetime | None,
+    ) -> list[dict[str, Any]]:
         return [
             row
             for row in self.conversations.values()

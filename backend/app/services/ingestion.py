@@ -385,15 +385,18 @@ class IngestionService:
             if self.settings.conversation_retention_days > 0
             else []
         )
+        # Retention below follows the same scope as the call: the per-knowledge
+        # GC button touches only that knowledge base's traces and task records.
         trace_retention = await self.repository.retain_traces(
             self.settings.trace_full_retention_days,
             self.settings.trace_summary_retention_days,
+            kb_id=kb_id,
         )
         pruned_task_count = 0
         if self.settings.task_record_retention_days > 0:
             pruned_task_count = await TaskRecordRepository(
                 self.repository.engine
-            ).prune_terminal_tasks(self.settings.task_record_retention_days)
+            ).prune_terminal_tasks(self.settings.task_record_retention_days, kb_id=kb_id)
         stuck = await self.repository.find_deleting_indexes()
         deletable = await self.repository.find_deletable_indexes(retention_count, retention_days)
         if kb_id is not None:

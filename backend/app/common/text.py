@@ -94,3 +94,8 @@ def emphasize_document_title_mentions(text: str, titles: list[str]) -> str:
             result,
         )
     return result
+
+
+def escape_like(value: str) -> str:
+    """Escape LIKE/ILIKE wildcards so user search text matches literally (ESCAPE '\\')."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
