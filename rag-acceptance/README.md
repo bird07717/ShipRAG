@@ -116,6 +116,24 @@ V2 不要求公开引用，评测器使用同一轮内部 Trace 的 `used_docume
 
 ## 用例设计
 
+### 无断言的回答体验对照
+
+五个体验采集工具（`run_context_review.py`、`run_fixed_context_review.py`、`run_evidence_input_review.py`、`run_thinking_card_review.py`、`run_condition_stage_review.py`）启动时均拒绝已存在的 `--output` 路径；每次实验使用新文件名，保留历史原始答案用于对照。同一输出路径不要并发运行；该保护不改变评分方式，也不代表回答质量提高。
+
+部分相关文档的体验实验使用 `context-applicability-questions.jsonl` 与
+`run_context_review.py`：只采集真实 Assistant 完整回答与诊断，不评分、不调用模型评委。
+同问题/同库/同模型前后分别采集后，逐条阅读正文并核对原文的设备、条件和阶段。
+2026-10-08 两版提示词试验未证明稳定改善，业务修改已撤回，结果及运行方法见
+[`context-applicability-review.md`](context-applicability-review.md)。Golden 的机械断言继续作为回归工具，不能替代回答体验或事实适用性评阅。
+
+同日进一步进行任务/证据规则合并重组实验：有效固定输入 48 次 LLM2 对照（每版每题 3 次），另保留误选操作文档的 6 次，以及完整 Assistant 14 轮。未观察到足够的整体体验收益，未接入业务代码。报告、输入误选说明及命令见 [`context-reorganization-review.md`](context-reorganization-review.md)；新增 `run_fixed_context_review.py` 只采集原始回答，`context_prompt_candidate.py` 仅供隔离实验，不用于生产部署。
+
+同日证据输入 A/B/C 实验见 [`evidence-input-review.md`](evidence-input-review.md)：五题每组重复三次，共 45 次真实 LLM2，只改变实际多份全文/人工核对单份全文/任务原文元素。PDC 片段有重复可见的局部收益，但 LRU 九次仍跨阶段套用五分钟，MU 空输入也出现未要求的断网干预，不能宣称整体改善。`run_evidence_input_review.py` 不评分、不运行 Golden，C 为人工诊断输入而非自动筛选器；PSU 完整操作 B=C，复现前须核对本地源采集与冻结索引。
+
+2026-10-09 复用上述历史结果，独立测试思考模式与“全文＋已有卡片五字段”：六组全文输入每方向各三次，新增 36 个样本/40 次供应商请求。思考 16/18 返回有效结构、卡片 18/18，但均未证明稳定整体收益，未接入业务代码；正确 LRU 仍答错阶段、卡片仍泛化 PDC 条件。新工具 `run_thinking_card_review.py` 不评分、不改卡片，不重跑旧基线；逐题判断、历史指纹核验、结构失败及跨日比较限制见 [`thinking-card-review.md`](thinking-card-review.md)。
+
+同日继续测试“全文＋人工条件—动作—阶段说明”：七题、原版/候选各三次，共 42 次同期真实 LLM2，未证明稳定整体收益，不接入业务。LRU 错误前提仍未纠正、PDC 仍泛化氧化处理，MU 仍有未请求的网络隔离建议；条件成立对照能作答、PSU 核心保留不等于新增收益或安全验收。`run_condition_stage_review.py` 只采集，`condition-stage-annotations.json` 是原文引用可核验的人工诊断输入，不是自动提取器或正式卡片变更。详见 [`condition-stage-review.md`](condition-stage-review.md)。
+
 | 类别 | 数量 | 考什么 |
 | --- | --- | --- |
 | standard | 10 | 标准问法直达（文档标题直译） |

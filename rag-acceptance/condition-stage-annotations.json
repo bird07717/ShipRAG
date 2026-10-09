@@ -1,0 +1,162 @@
+{
+  "method": "人工核对的文档关系说明；独立于问题，不添加许可、禁令或预期答案；null 表示本条说明未提取明确条件，不代表无条件适用。原文全文及图片保持不变。",
+  "documents": [
+    {
+      "document_id": "f8e02bcc-4118-47ee-82e1-36682390542f",
+      "relations": [
+        {
+          "object": "MU 主机内的 3359 板卡",
+          "condition": "OPU 出现 MU 报警，进行硬件自查",
+          "action": "打开 MU 主机箱及六螺丝盖板，随后检查内部线缆和板卡通讯灯",
+          "stage": "开盖之后进行内部硬件检查",
+          "evidence": [
+            {"element_id": "c2fd4c83-15da-4cb0-9e80-57da63aa2119", "quote": "当OPU出现 MU报警,检查硬件进行如下自查:"},
+            {"element_id": "318e846a-decb-4615-abfc-05543f717e37", "quote": "打开VDR600 MU 主机箱,把保护MU主板的盖板打开(有6颗螺丝),位置如下图所示:"},
+            {"element_id": "28f09897-fdc9-46c7-8cd3-fb28f8b6e543", "quote": "检查1处通讯线缆是否有松动;"}
+          ]
+        }
+      ]
+    },
+    {
+      "document_id": "5d284392-1e8c-4e38-8155-77241f5c1cba",
+      "relations": [
+        {
+          "object": "PDC 接线盒内部",
+          "condition": null,
+          "action": "检查线缆、松动、水渍及 24V 电",
+          "stage": "打开接线盒后的检查",
+          "evidence": [{"element_id": "c102408d-43ff-4532-9c23-4d8d7a483993", "quote": "打开接线盒,检查内部通讯&电源线缆是否正常,有无松动。检查接线盒内是否有水渍,测试24V电是否正常。"}]
+        },
+        {
+          "object": "PDC 接线板",
+          "condition": "检查接线盒内有水渍",
+          "action": "拆下接线板吹干，观察能否恢复正常功能",
+          "stage": "检查发现水渍之后",
+          "evidence": [{"element_id": "eff70bca-777c-40b6-900d-bb257fc2429a", "quote": "如检查下来接线盒内有水渍,则拆下接线板,吹干看是否能恢复正常功能。"}]
+        },
+        {
+          "object": "PDC 接线盒端子排",
+          "condition": "腐蚀严重",
+          "action": "临时对接电源与通讯线路，注意极性及同色通讯线",
+          "stage": "严重腐蚀情况下的临时处理",
+          "evidence": [
+            {"element_id": "4bec462e-acc0-45f0-a341-a1ef5ba38113", "quote": "如腐蚀严重,则可以临时在端子排上将电源&电源对接,通讯&通讯对接。"},
+            {"element_id": "3b1dc191-77b8-49f3-adb4-0a232a53a836", "quote": "注意电源正负级不要接反,通讯线相同颜色接到一起。"}
+          ]
+        },
+        {
+          "object": "PDC 报警及接线盒",
+          "condition": null,
+          "action": "等待五分钟检查报警，做好防水并申请新接线盒更换",
+          "stage": "文档中接线处理段落之后的报警检查及后续处置",
+          "evidence": [
+            {"element_id": "d517178a-7494-4f58-bf8c-b86899e194b5", "quote": "等待5分钟后,检查PDC报警是否已消除。"},
+            {"element_id": "66e59af5-b44e-4b17-af94-f2326e38cbfa", "quote": "将目前的接线盒做好水密防水,并申请新的接线盒更换。"}
+          ]
+        }
+      ]
+    },
+    {
+      "document_id": "8eba030c-3d55-4d50-83af-331c98bd56e3",
+      "relations": [
+        {
+          "object": "LRU 通讯与电源线缆、DAU 报警",
+          "condition": null,
+          "action": "重新插拔线缆并插回，等待五分钟后检查 DAU 报警",
+          "stage": "线缆重新插回之后、检查报警之前的恢复观察",
+          "evidence": [
+            {"element_id": "539446b9-fba6-421e-9494-597633fb0f82", "quote": "另外可以重新插拔一下LRU上的通讯和电源线缆,再插回,看是否可以恢复。"},
+            {"element_id": "8fd7b276-142a-49fc-b35f-5172cd4f5210", "quote": "等待5分钟后,检查DAU报警是否已消除。"}
+          ]
+        },
+        {
+          "object": "LRU",
+          "condition": "故障依旧",
+          "action": "申请备件更换 LRU",
+          "stage": "恢复观察仍有故障之后",
+          "evidence": [{"element_id": "60a42935-c044-475d-a2fc-1a6513d2968c", "quote": "如故障依旧,则申请备件更换LRU备件。"}]
+        }
+      ]
+    },
+    {
+      "document_id": "aad2f45a-2fdc-482c-af93-7b5a7833ee58",
+      "relations": [
+        {
+          "object": "PSU 电源板",
+          "condition": "文档所述电压或 charger 状态检查不正常",
+          "action": "申请更换 PSU 电源",
+          "stage": "检查之后、申请更换之前",
+          "evidence": [{"element_id": "07919653-e7ed-4a9d-9884-e1b103308f8c", "quote": "如果检查PSU电源板上给battery蓄电池组的充电电压是否正常(或者AC 或者DC输入电压是否正常),同时可以观察charger灯是否闪烁,如果不正常,申请更换PSU电源。"}]
+        },
+        {
+          "object": "PSU 电源板与原 3359 核心板、底板",
+          "condition": "断电后",
+          "action": "拆下 3359 核心板与底板，更换新的 PSU 板，装回 3359 板卡；拍照标记线缆，开机检查",
+          "stage": "PSU 更换期间拆装 3359 板卡，随后开机",
+          "evidence": [{"element_id": "5fe844b0-b243-4cdd-be30-eebd4d7436dd", "quote": "断电后拆下3359核心板&3359底板,更换新的PSU板,并装回3359核心板&底板。注意线缆比较多,建议拍照做标记,以防止线缆接错位,开机检查。"}]
+        },
+        {
+          "object": "PSU 更换后的报警",
+          "condition": null,
+          "action": "等待五分钟检查报警是否消除",
+          "stage": "装回板卡、开机检查之后",
+          "evidence": [{"element_id": "bdf4261c-b845-469b-96b8-3ac79ddc2ffa", "quote": "等待5分钟后,检查报警是否已消除。"}]
+        }
+      ]
+    },
+    {
+      "document_id": "2dee5723-c301-429d-92a4-d074443c5a60",
+      "relations": [
+        {
+          "object": "3359 核心板",
+          "condition": "更换 3359 核心板",
+          "action": "服务前获取对应船舶历史 APT 数据，更换完成后导入",
+          "stage": "核心板更换的服务准备和更换之后",
+          "evidence": [{"element_id": "378586e6-d5dd-4e58-8a1c-387a33b6f1aa", "quote": "更换3359核心板,需要拆下另外4颗螺丝,同时update程序和配置文件都存在3359核心板内,服务前需要找海兰信公司要到相应船舶的历史APT数据,更换完成后导入即可。"}]
+        },
+        {
+          "object": "3359 核心板与底板更换操作",
+          "condition": "本篇板卡更换操作",
+          "action": "由授权工程师进行服务",
+          "stage": "执行本篇操作时",
+          "evidence": [{"element_id": "5acd1111-3141-4e7c-a22b-2392baf17163", "quote": "以上操作需要授权工程师进行服务。"}]
+        }
+      ]
+    },
+    {
+      "document_id": "58eaed48-2d22-4082-b0c0-92f0fe68a47f",
+      "relations": [
+        {
+          "object": "更换后的存储体 PDC、FFC、LRU",
+          "condition": "更换单个存储体之后",
+          "action": "对更换的存储体进行 update 升级",
+          "stage": "存储体更换之后",
+          "evidence": [{"element_id": "7c03d7e7-09a5-47dc-80d2-fb9274c33867", "quote": "更换单个存储体(PDC,FFC,LRU)之后,需要对更换的存储体进行update 升级。"}]
+        },
+        {
+          "object": "连接 VDR 主机箱的电脑",
+          "condition": null,
+          "action": "电脑 IP 推荐 172.16.8.175，掩码 255.255.255.0",
+          "stage": "电脑连接及网络配置",
+          "evidence": [{"element_id": "642478b8-5f3c-47f9-96ac-c3ddec1e5b6b", "quote": "用网线连上电脑和VDR主机箱。将电脑IP设置成VDR的同一网段,推荐网址:172.16.8.175, 子网掩码:255.255.255.0"}]
+        }
+      ]
+    },
+    {
+      "document_id": "cc1d9333-e3b1-49e1-8e0b-7ee2bd90b6db",
+      "relations": [
+        {
+          "object": "FFC 在线状态",
+          "condition": "无法 ping 通 172.16.8.100",
+          "action": "原文判断 FFC 不在线，后续申请相同型号备件更换",
+          "stage": "电脑网络连通性检查及后续更换",
+          "evidence": [
+            {"element_id": "cd638429-4811-4eae-b3f2-66e37daa21a9", "quote": "打开电脑的运行功能,输入指令:ping 172.16.8.100"},
+            {"element_id": "da16b57d-e2a2-42fd-b345-a77cc29fd9db", "quote": "如无法ping通,则证明FFC不在线(目前海兰信有几款FFC,但IP地址都是相同的,172.16.8.100)。"},
+            {"element_id": "70878a81-8ac6-415e-84e7-99c79c0adae9", "quote": "申请更换相同型号的FFC单元,待到货后安装回去。另外更换新的FFC后要对新的FFC单元做update以及刷新配置,具体见相应文件说明。"}
+          ]
+        }
+      ]
+    }
+  ]
+}
