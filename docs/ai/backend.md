@@ -100,6 +100,9 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 - 查询向量化降级可见性（2026-10-09，本地，未部署）：`retrieve_documents` 在检索 Trace 新增 `query_embedding={status: PASSED|DEGRADED, reason}`；Embedding 失败（超时、上游错误、返回维度/数量无效）时回答仍会返回，但只剩 BM25 与卡片关键词通道的证据。`/metrics/overview` 的 `v2_quality` 新增 `query_embedding_attempted`（检索实际执行的轮次，以 `retrieval.query_count` 非空判定，对话路径与范围外短路不计）、`query_embedding_degraded` 与 `query_embedding_degraded_rate`。降级判定为 `query_embedding.status='DEGRADED'`，或旧 Trace（没有该字段）的 `retrieval.degradations` 含 `EmbeddingError`、`TimeoutError`、`QUERY_EMBEDDING_INVALID`：`EmbeddingError` 没有 `code` 属性，上游失败只会以类名记录，因此旧 Trace 里的 `TimeoutError` 是近似匹配（不能排除其他超时来源）；新 Trace 以显式状态为准。没有新增迁移。
 
+- 管理台运行时 Prompt 清单由真实常量生成（2026-10-09，本地，未部署，ADR-0041）：`GET /api/v1/prompts` 里的 `runtime-v2-*` 条目原先是手写转述，已漂移（LLM 1 条目还列着已删除的 `search_queries`/`key_constraints`，只有 4 条规则，LLM 2 条目写“不因上下文存在图片而全部使用”，与真实第 12 条相反）。现在系统提示、规则、示例、输出契约和修复提示都是 `answer_generator`/`query_interpreter`/`conversation_answer` 的模块常量，构建函数与 `rag/prompt.py` 的清单共用它们；输入字段取自实际构建出的提示词，输出字段取自 Schema。新增对话阶段条目（`...0013`），条目 ID 与名称不变。改动逐字节不变：十个真实提示词字符串（含系统提示与修复提示）的 sha256 重构前后一致。新规则只写进这些常量，不要在清单里手写。
+- 文档卡片提示词 v2（2026-10-09，本地，未部署）：`DOCUMENT_CARD_PROMPT_VERSION=rag-document-card-v2`，系统提示新增三条规则（带条件的操作必须连同条件写进 `tasks`/`summary`；`prerequisites` 只写适用前提，不写工具、备件、准备工作；缩写与部件名按原文，不展开不猜测），`tasks`/`prerequisites` 的字段描述同步写入 JSON Schema。13 份文档的 52 次对照：条件保留 14% → 50%、工具类前提 11 → 2、凭空展开缩写 2 → 0。版本号只写入生成元数据，没有逻辑据此判断过期，已确认卡片不受影响；只有新生成或显式重新生成的卡片使用 v2，显式替换会让卡片回到待确认并使已上线知识库暂时 `ready=false`。卡片不进入 LLM 2，只影响召回与 Rerank 输入。已知副作用：新卡片会自行加“（注：……）”类说明（2/26，均在 MU 板卡文档上）。
+
 ## 已删除的 RAG legacy 约束（历史记录）
 
 本节到“通用实现约束”之前仅解释历史 Trace 和旧验收资料，V5 后不再对应运行时代码；当前 RAG 以“RAG V2 边界与当前实现”为准。

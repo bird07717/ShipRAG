@@ -940,3 +940,26 @@ LLM 1 的改写错误不再能被 LLM 2 纠正，且自由文本形式的形式�
 - 后续验证（2026-10-09）：想进一步把字段从 Schema 与输出示例中移除以省输出 Token（约 10.8%，但只占总 Token 的约 0.7%、成本约 1.4%–2.1%）。预先登记三个关卡的 64 次对照中，第 3 关未通过（MU 主回答指示用户打开机箱 3/8 → 6/8，合计超出允许的 +2；Fisher p≈0.3，不显著）。假设（未证实）：该字段起到“出口”作用，去掉后越界倾向可能转移到主回答。详见 [字段实验记录第二轮](../../rag-acceptance/suggestions-review.md)。
 - **后续决定（2026-10-09，用户）**：在上述第 3 关未通过、证据不显著的情况下，用户明确选择采纳移除，理由是风险不能证实、改动随时可撤回、收益虽小但没有读者承担任何成本，且他们已接受适用性问题的现状。落地：`build_answer_prompt` 的 `output_schema` 改用 `answer_output_schema()`（`GeneratedAnswer` 去掉 `next_suggestions`），`output_example` 去掉该键，管理台运行时 Prompt 展示同步；`GeneratedAnswer` 仍接受该字段，模型自行写入时被接受并由服务端丢弃。上线的 Prompt 与 64 次实验里的 `NO_FIELD` 臂逐字节一致（四个场景哈希相同）。**这是对一道未通过的预设关卡的有意识推翻，不是证据变化**。
 - 上线后的观察与恢复：生产量很小（保留期内知识路径回答 16 条），没有自动指标能发现“主回答指示用户打开机箱”这类越界；建议部署后用 `run_suggestions_review.py` 对 MU 做更大样本复测（每臂至少 24 次，判读口径在采集前写定）。`generation.answer.next_suggestions_discarded` 应接近 0。若复测显示越界上升，恢复方式是把 `build_answer_prompt` 改回 `GeneratedAnswer.model_json_schema()` 并在示例里加回该键，无需迁移。
+
+## ADR-0041：提示词文本以模块常量为单一来源，管理台清单只读生成
+
+- 日期：2026-10-09
+- 状态：已接受；本地实施，未部署
+- 影响范围：`backend/app/rag/v2/{answer_generator,query_interpreter,conversation_answer}.py`、`backend/app/rag/prompt.py`、`GET /api/v1/prompts` 的 `runtime-v2-*` 条目；不改模型实际收到的文本、不改数据库。
+
+### 背景
+
+管理台“运行时 Prompt”清单是 `rag/prompt.py` 里手写的转述，与真实提示词脱节：LLM 1 条目还列着已删除的 `search_queries`、`key_constraints` 输出和不存在的输入，只展示 18 条规则里的 4 条；LLM 2 条目写“不因上下文存在图片而全部使用”，而真实第 12 条要求完整操作把所写步骤的图片全部放入。管理员看到的不是模型收到的，且每次改提示词都要靠人记得同步。
+
+### 决策
+
+- 系统提示、规则、示例、输出契约和修复提示都写成模块常量，构建函数和清单共用同一份。LLM 1 的提示词构建提成纯函数 `build_interpreter_prompt()`。
+- `rag/prompt.py` 的清单只读生成：规则和示例直接取常量，输入字段取自实际构建出的提示词（除去指令类段落），输出字段取自 Schema。清单里不再手写任何规则。条目 ID 与名称保持不变，新增对话阶段条目。
+- 重构的正确性用哈希证明：十个真实提示词字符串在重构前后的 sha256 完全一致。
+
+### 取舍与影响
+
+- 代价：提示词文本从函数体挪到模块顶部，代码 diff 较大；好处是改一处即可，清单不会再漂移。五项漂移测试在有人重新手写规则时失败。
+- 清单现在展示完整的规则、示例和修复提示，比之前长；它仍是只读的，不是可编辑的提示词配置。
+- 同批改动的文档卡片提示词 v2（保留触发条件、定义 `prerequisites`、不展开缩写）见 `rag-acceptance/card-prompt-review.md`，它只影响新生成的卡片，不进入 LLM 2。
+

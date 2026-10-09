@@ -136,6 +136,8 @@ V2 不要求公开引用，评测器使用同一轮内部 Trace 的 `used_docume
 
 2026-10-09 另测 `next_suggestions` 字段：该字段在 Prompt 中从未定义，而 MU/PDC 回答 20/20 带越界建议。`run_suggestions_review.py` 对 4 题做 BASELINE/DEFINED/EMPTY 三臂单因素对比，共 96 次真实调用，判读规则采集前写定。MU+PDC 越界建议 14/16 → 14/16，未达到减半标准，且 DEFINED 让对照题也总是给出相邻流程建议；EMPTY 臂主回答不变，说明建议字段不是主回答越界的原因。不修改生产 Prompt；随后用户决定在服务端丢弃该字段（恒为空，ADR-0040）。第二轮（`--arms BASELINE,NO_FIELD`，64 次调用）检验把字段从 Schema/示例中移除：输出少约 11%，但 MU 主回答指示用户打开机箱的数量 3/8 → 6/8（p≈0.3，未过预先写定的第 3 关）；用户仍决定采纳，已作为有意推翻关卡记录（ADR-0040）。详见 [`suggestions-review.md`](suggestions-review.md)。
 
+2026-10-09 另测文档卡片提示词 v1 → v2（`run_card_prompt_review.py`，13 份文档 × 2 种提示词 × 2 次共 52 次真实调用，只生成不写库，判读规则采集前写定）：条件丢失 4/29 → 15/30、工具类前提 11 → 2、凭空展开缩写 2 → 0，四个关卡全部通过；副作用是新卡片会自行加“注：……”（2/26）。卡片不进入 LLM 2，只影响召回与排序。详见 [`card-prompt-review.md`](card-prompt-review.md)。
+
 | 类别 | 数量 | 考什么 |
 | --- | --- | --- |
 | standard | 10 | 标准问法直达（文档标题直译） |
