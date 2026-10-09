@@ -33,6 +33,11 @@ git() {
 }
 bash() {
   printf 'build %s\n' "$*" >> "$TEST_LOG"
+  # containerd image store: re-pointing the deploy tag drops the old, now nameless image
+  # even though a container still runs it.
+  if [[ "${TEST_BUILD_STATUS:-0}" == 0 && "${TEST_BUILD_EVICTS:-0}" == 1 ]]; then
+    : > "$TEST_EVICTED"
+  fi
   return "${TEST_BUILD_STATUS:-0}"
 }
 docker() {
@@ -91,7 +96,10 @@ docker() {
       ;;
     image)
       [[ "$2" == inspect ]] || return 90
-      [[ " $TEST_AVAILABLE " == *" $3 "* ]]
+      ref="${@: -1}"
+      if [[ -f "$TEST_EVICTED" && "$ref" == sha256:live-* ]]; then return 1; fi
+      [[ " $TEST_AVAILABLE " == *" $ref "* ]] || return 1
+      if [[ "$3" == --format ]]; then printf '%s\n' "${TEST_RUNNING_REPOTAGS:-[]}"; fi
       ;;
     inspect)
       [[ "${TEST_INSPECT_STATUS:-0}" == 0 ]] || return 1
@@ -119,13 +127,17 @@ def deploy(
         "TEST_LOG": str(log),
         "DEPLOY_LOCK_FILE": str(tmp_path / "deploy.lock"),
         "TEST_COUNT_FILE": str(tmp_path / "task-check-count"),
+        "TEST_EVICTED": str(tmp_path / "evicted-images"),
         "TEST_CONFIG": json.dumps(
             {"services": {"backend": {"image": BACKEND}, "frontend": {"image": FRONTEND}}}
         ),
         "TEST_TASK_COUNTS": "0",
         "TEST_BACKEND_TAGS": OLD,
         "TEST_FRONTEND_TAGS": OLD,
-        "TEST_AVAILABLE": f"{BACKEND.rsplit(':', 1)[0]}:{OLD} {FRONTEND.rsplit(':', 1)[0]}:{OLD}",
+        "TEST_AVAILABLE": (
+            f"{BACKEND.rsplit(':', 1)[0]}:{OLD} {FRONTEND.rsplit(':', 1)[0]}:{OLD}"
+            " sha256:live-backend-container sha256:live-frontend-container"
+        ),
         **overrides,
     }
     command = (
@@ -361,20 +373,33 @@ def tag_lines(log: str) -> list[str]:
     return [line for line in log.splitlines() if line.startswith("docker tag ")]
 
 
-def test_backup_happens_only_after_build_migration_and_task_recheck(tmp_path: Path) -> None:
-    result, log = deploy(tmp_path, "--skip-pull", "--backend-only", "--yes")
+def test_backup_is_tagged_before_the_build_and_pruned_only_after_success(tmp_path: Path) -> None:
+    tags = "\n".join(f"rollback-2026100{day}010000" for day in range(1, 5))
+    result, log = deploy(tmp_path, "--skip-pull", "--backend-only", "--yes", TEST_BACKEND_TAGS=tags)
     assert result.returncode == 0, result.stdout + result.stderr
+    # naming the running image has to happen while it still exists
+    assert position(log, "docker tag ") < position(log, "build scripts/")
+    # pruning waits for the build, the migration and the final task re-check
     assert position(log, "build scripts/") < position(log, "run --rm -T migrate")
-    assert position(log, "run --rm -T migrate") < position(log, "docker tag ")
-    assert position(log, "docker tag ") < position(log, "up -d --no-deps --force-recreate")
-    # one task check before the build, one right before the replacement (and the backup)
+    assert position(log, "run --rm -T migrate") < position(log, "docker rmi ")
+    assert position(log, "docker rmi ") < position(log, "up -d --no-deps --force-recreate")
+    # one task check before the build, one right before the replacement
     assert log.count("exec -T postgres") == 2
 
 
+def test_backup_survives_a_build_that_evicts_the_nameless_running_image(tmp_path: Path) -> None:
+    """Regression for the failed 2026-10-09 production deploy: the build re-pointed the
+    deploy tag, the containerd store dropped the old image, and tagging it afterwards failed
+    with "No such image" — after the build and the migration had already run."""
+    result, log = deploy(tmp_path, "--skip-pull", "--backend-only", "--yes", TEST_BUILD_EVICTS="1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "docker tag sha256:live-backend-container " in log
+    assert position(log, "docker tag ") < position(log, "build scripts/")
+    assert "up -d --no-deps --force-recreate" in log
+
+
 @pytest.mark.parametrize("failure", ["TEST_BUILD_STATUS", "TEST_MIGRATE_STATUS"])
-def test_failed_build_or_migration_never_creates_or_prunes_backups(
-    tmp_path: Path, failure: str
-) -> None:
+def test_failed_build_or_migration_never_prunes_backups(tmp_path: Path, failure: str) -> None:
     """Repeated failed deploys must not push the last good backups out of retention."""
     tags = "\n".join(f"rollback-2026100{day}010000" for day in range(1, 5))
     result, log = deploy(
@@ -386,8 +411,8 @@ def test_failed_build_or_migration_never_creates_or_prunes_backups(
         **{failure: "1"},
     )
     assert result.returncode != 0
-    assert "docker tag " not in log
-    assert "docker rmi " not in log
+    assert "docker tag " in log  # the backup is taken up front, so it exists ...
+    assert "docker rmi " not in log  # ... but nothing may be pruned before a success
     assert "up -d" not in log
 
 
@@ -505,3 +530,87 @@ def test_unreadable_running_version_fails_verification_with_a_message(tmp_path: 
     assert result.returncode != 0
     assert "无法读取运行版本" in result.stdout
     assert "版本核对未通过" in result.stderr
+
+
+def test_missing_running_image_stops_before_the_build_without_explicit_consent(
+    tmp_path: Path,
+) -> None:
+    result, log = deploy(
+        tmp_path, "--skip-pull", "--backend-only", "--yes", TEST_AVAILABLE=f"{BACKEND} {FRONTEND}"
+    )
+    assert result.returncode != 0
+    assert "已不在本机镜像库" in result.stdout
+    assert "--allow-missing-backup" in result.stderr
+    assert "build scripts/" not in log
+    assert "run --rm" not in log
+    assert "docker tag " not in log
+    assert "up -d" not in log
+
+
+def test_allow_missing_backup_deploys_without_a_rollback_point(tmp_path: Path) -> None:
+    result, log = deploy(
+        tmp_path,
+        "--skip-pull",
+        "--backend-only",
+        "--yes",
+        "--allow-missing-backup",
+        TEST_AVAILABLE=f"{BACKEND} {FRONTEND}",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "没有 backend 当前版本的回滚备份" in result.stdout
+    assert "docker tag " not in log
+    assert "build scripts/" in log
+    assert "up -d --no-deps --force-recreate" in log
+
+
+def test_missing_running_image_can_be_confirmed_interactively(tmp_path: Path) -> None:
+    missing = {"TEST_AVAILABLE": f"{BACKEND} {FRONTEND}"}
+    accepted, log = deploy(
+        tmp_path, "--skip-pull", "--backend-only", stdin_text="y\ny\n", **missing
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert "up -d --no-deps --force-recreate" in log
+
+    (tmp_path / "declined").mkdir()
+    declined, log = deploy(
+        tmp_path / "declined", "--skip-pull", "--backend-only", stdin_text="y\nn\n", **missing
+    )
+    assert declined.returncode != 0
+    assert "已取消" in declined.stderr
+    assert "build scripts/" not in log
+    assert "up -d" not in log
+
+
+def test_an_existing_rollback_tag_on_the_running_image_is_reused(tmp_path: Path) -> None:
+    """A failed earlier run already named the image: a new tag would only crowd out
+    older, distinct backups when the next successful run prunes."""
+    repo = BACKEND.rsplit(":", 1)[0]
+    result, log = deploy(
+        tmp_path,
+        "--skip-pull",
+        "--backend-only",
+        "--yes",
+        TEST_RUNNING_REPOTAGS=json.dumps([BACKEND, f"{repo}:{OLD}"]),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"已有回滚备份 {repo}:{OLD}" in result.stdout
+    assert "docker tag " not in log
+    assert "up -d --no-deps --force-recreate" in log
+
+
+def test_pruning_never_removes_the_backup_just_relied_on(tmp_path: Path) -> None:
+    """A reused backup older than the retention window must survive this run's pruning."""
+    repo = BACKEND.rsplit(":", 1)[0]
+    tags = "\n".join(f"rollback-2026100{day}010000" for day in range(1, 6))
+    result, log = deploy(
+        tmp_path,
+        "--skip-pull",
+        "--backend-only",
+        "--yes",
+        TEST_BACKEND_TAGS=tags,
+        TEST_RUNNING_REPOTAGS=json.dumps([BACKEND, f"{repo}:rollback-20261001010000"]),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    removed = [line for line in log.splitlines() if line.startswith("docker rmi ")]
+    assert f"docker rmi {repo}:rollback-20261001010000" not in removed
+    assert f"docker rmi {repo}:rollback-20261002010000" in removed

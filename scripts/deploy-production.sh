@@ -10,11 +10,16 @@
 #   --force             replace workers even if background tasks are running
 #   --yes               do not ask for confirmation
 #   --dry-run           run read-only checks and print the mutating commands
+#   --allow-missing-backup
+#                       deploy even when a running image is no longer in the local image
+#                       store and cannot be backed up (no rollback point for that service)
 #   --rollback [TAG]    re-deploy a backup made by an earlier run (default:
 #                       the newest tag shared by target images); no migration
 #
 # A failed step stops the script; containers are only replaced after a
-# successful build and migration, so the previous version keeps running.
+# successful build and migration, so the previous version keeps running. The
+# rollback backup of the running images is taken BEFORE the build (the build moves
+# the deploy tag and the old image may then be dropped from the image store).
 set -euo pipefail
 
 project_root="${DEPLOY_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -26,6 +31,7 @@ target="all"
 skip_pull=false
 force=false
 assume_yes=false
+allow_missing_backup=false
 dry_run=false
 rollback=false
 rollback_tag=""
@@ -41,6 +47,7 @@ while [[ $# -gt 0 ]]; do
     --env-file) env_args=(--env-file "${2:?--env-file needs a path}"); shift ;;
     --force) force=true ;;
     --yes|-y) assume_yes=true ;;
+    --allow-missing-backup) allow_missing_backup=true ;;
     --dry-run) dry_run=true ;;
     --rollback)
       rollback=true
@@ -211,16 +218,34 @@ if [[ -n "${upstream}" ]]; then
   run git merge --ff-only "${upstream}"
 fi
 
-# ---------------------------------------------------------------- backup plan
-# Read-only: find the image each service is really running now. The backup tags are
-# only created after the build and migration succeeded (see "backup"), so a string of
-# failed builds can never push the last good backups out of the retention window.
-step "检查当前运行镜像（备份在构建与迁移成功后执行）"
-backup_services=()
-backup_images=()
-backup_sources=()
+# ---------------------------------------------------------------- backup (before the build)
+# The backup tag is created BEFORE the build. A running image usually has no name other
+# than the deploy tag (<repo>:<version>): the build re-points that tag and the containerd
+# image store then drops the nameless old image although containers still run it, so a
+# later `docker tag` fails with "No such image" (seen on Docker 29). Only the retention
+# pruning waits until the deploy succeeded (see "prune"), so a string of failed builds
+# cannot push the last good backups out of the retention window.
+step "备份当前运行镜像（构建之前执行，用于 --rollback）"
+stamp="rollback-$(date +%Y%m%d%H%M%S)"
+backup_repos=()
+backup_tags=()
+
+missing_backup() {
+  local service="$1" running_image="$2"
+  info "${service} 运行镜像 ${running_image} 已不在本机镜像库，无法生成回滚备份"
+  info "（常见原因：此前的构建把部署标签挪到新镜像后，失去名字的旧镜像被清理；整体 --rollback 将使用两个镜像共有的最近备份）"
+  if [[ "${allow_missing_backup}" == true ]]; then
+    info "--allow-missing-backup 已启用：继续部署，本次没有 ${service} 当前版本的回滚备份"
+    return 0
+  fi
+  [[ "${assume_yes}" != true ]] \
+    || fail "${service} 没有可备份的运行镜像；构建尚未开始。确认接受没有回滚点后加 --allow-missing-backup 重试"
+  confirm "继续部署且没有 ${service} 当前版本的回滚备份？"
+}
+
 for service in "${build_services[@]}"; do
   image="$(image_for "${service}")" || fail "无法解析 ${service} 镜像名"
+  repo="$(image_repo "${image}")"
   containers="$(compose ps --status running -q "$service")" || fail "无法读取 ${service} 运行容器"
   if [[ -z "${containers}" ]]; then
     info "${service} 无运行容器，跳过备份（本次不生成该服务回滚备份）"
@@ -234,10 +259,23 @@ for service in "${build_services[@]}"; do
       || fail "${service} 运行容器使用不同镜像，无法生成单一回滚备份"
     running_image="${container_image}"
   done <<< "${containers}"
-  backup_services+=("${service}")
-  backup_images+=("${image}")
-  backup_sources+=("${running_image}")
-  info "${service} 运行镜像 ${running_image}"
+  if ! repo_tags="$(docker image inspect --format '{{json .RepoTags}}' "${running_image}" 2>/dev/null)"; then
+    missing_backup "${service}" "${running_image}"
+    continue
+  fi
+  # An earlier (possibly failed) run may already have named this exact image; reuse
+  # that tag instead of adding a duplicate that would crowd out older, distinct backups.
+  tag="$(printf '%s' "${repo_tags}" | python3 -c 'import json,sys; repo=sys.argv[1]; tags=json.loads(sys.stdin.read().strip() or "[]") or []; prefix=repo+":rollback-"; print(next((t[len(repo)+1:] for t in tags if t.startswith(prefix)), ""))' "${repo}")" \
+    || fail "无法解析 ${service} 运行镜像的标签"
+  if [[ -n "${tag}" ]]; then
+    info "${service} 运行镜像已有回滚备份 ${repo}:${tag}，复用"
+  else
+    tag="${stamp}"
+    run docker tag "${running_image}" "${repo}:${tag}"
+    info "${service} 运行镜像 ${running_image} → ${repo}:${tag}"
+  fi
+  backup_repos+=("${repo}")
+  backup_tags+=("${tag}")
 done
 
 # ---------------------------------------------------------------- build
@@ -256,18 +294,17 @@ fi
 # ---------------------------------------------------------------- replace
 check_background_tasks
 
-# ---------------------------------------------------------------- backup
-step "备份当前镜像（用于 --rollback）"
-stamp="rollback-$(date +%Y%m%d%H%M%S)"
-for index in "${!backup_services[@]}"; do
-  image="${backup_images[$index]}"
-  repo="$(image_repo "${image}")"
-  run docker tag "${backup_sources[$index]}" "${repo}:${stamp}"
-  info "${backup_services[$index]} 运行镜像 ${backup_sources[$index]} → ${repo}:${stamp}"
-  # Keep only the most recent backups to bound disk usage.
+# ---------------------------------------------------------------- prune
+step "整理旧备份（保留最近 ${keep_backups} 个）"
+for index in "${!backup_repos[@]}"; do
+  repo="${backup_repos[$index]}"
+  keep_tag="${backup_tags[$index]}"
+  # Keep only the most recent backups to bound disk usage; never the tag just relied on.
   mapfile -t old_tags < <(docker images --format '{{.Tag}}' "${repo}" | grep '^rollback-' | sort -r | tail -n +"$((keep_backups + 1))" || true)
   for old in "${old_tags[@]}"; do
-    [[ -n "${old}" ]] && run docker rmi "${repo}:${old}" >/dev/null
+    if [[ -n "${old}" && "${old}" != "${keep_tag}" ]]; then
+      run docker rmi "${repo}:${old}" >/dev/null
+    fi
   done
 done
 
