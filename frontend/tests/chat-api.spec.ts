@@ -360,9 +360,17 @@ describe("chat API", () => {
       }),
     );
 
-    await downloadDocument("doc-1", "文档.docx");
+    vi.useFakeTimers();
+    try {
+      await downloadDocument("doc-1", "文档.docx");
 
-    expect(click).toHaveBeenCalled();
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:doc-url");
+      expect(click).toHaveBeenCalled();
+      // Released after the download has been handed off, not synchronously.
+      expect(revokeObjectURL).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1_000);
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:doc-url");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

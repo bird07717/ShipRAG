@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from app.core.config import Settings
 from app.rag.llm import FakeLlmProvider, LlmError
 from app.rag.v2.answer_generator import build_answer_prompt
 from app.rag.v2.conversation_answer import build_conversation_prompt
@@ -240,6 +241,38 @@ def test_does_not_skip_an_oversized_recent_complete_round() -> None:
     assert history == []
     assert diagnostics["boundary"] == "TOKEN_BUDGET"
     assert diagnostics["excluded"] == [{"message_id": "a2", "reason": "TOKEN_BUDGET"}]
+
+
+@pytest.mark.parametrize("answer_length", [3_000, 3_966, 3_967])
+def test_default_history_budget_preserves_long_rounds_without_truncation(
+    answer_length: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("M3_HISTORY_TOKEN_BUDGET", raising=False)
+    settings = Settings(_env_file=None, app_env="test")
+    latest = _round(2, answer="字" * answer_length)
+    latest["question"] = "问题"
+    latest["used_document_ids"] = ["document-2"]
+    history, diagnostics = select_complete_round_history(
+        [latest, _round(1, answer="字" * 1_000)],
+        max_rounds=4,
+        max_messages=10,
+        token_budget=settings.m3_history_token_budget,
+    )
+
+    # Two Chinese question characters and 32 tokens reserved for the pair.
+    if answer_length + 34 <= 4_000:
+        assert history == [
+            {"role": "USER", "content": "问题"},
+            {"role": "ASSISTANT", "content": "字" * answer_length},
+        ]
+        assert diagnostics["round_count"] == 1
+        assert diagnostics["estimated_tokens"] == answer_length + 34
+        assert diagnostics["previous_document_ids"] == ["document-2"]
+    else:
+        assert history == []
+        assert diagnostics["round_count"] == 0
+        assert diagnostics["previous_document_ids"] == []
+    assert diagnostics["boundary"] == "TOKEN_BUDGET"
 
 
 def test_answer_prompt_keeps_corrections_and_marks_history_as_non_evidence() -> None:

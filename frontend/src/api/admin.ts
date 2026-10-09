@@ -52,6 +52,8 @@ import type {
   RuntimeMetrics,
   TaskSubmission,
   TraceSummary,
+  DocumentListQuery,
+  Page,
 } from "@/types/admin";
 import { randomUUID } from "@/utils/uuid";
 import {
@@ -85,6 +87,7 @@ interface TaskListFilters {
   from?: string;
   to?: string;
   limit?: number;
+  offset?: number;
 }
 
 function taskListQuery(filters: TaskListFilters): string {
@@ -94,11 +97,12 @@ function taskListQuery(filters: TaskListFilters): string {
   if (filters.from) search.set("from", filters.from);
   if (filters.to) search.set("to", filters.to);
   if (filters.limit) search.set("limit", String(filters.limit));
+  if (filters.offset) search.set("offset", String(filters.offset));
   const query = search.toString();
   return query ? `?${query}` : "";
 }
 
-export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const token = readServiceCredential();
   if (!token) {
     announceServiceCredentialRejected("missing");
@@ -124,7 +128,75 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
       body?.error?.details ?? {},
     );
   }
-  return (await response.json()) as T;
+  return response;
+}
+
+export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return (await (await apiFetch(path, init)).json()) as T;
+}
+
+/**
+ * Array endpoints that page on the server return the total number of matching
+ * rows in X-Total-Count (body unchanged). Without the header (older backend)
+ * the page itself is reported as the whole result.
+ */
+export async function apiRequestPage<T>(path: string, init: RequestInit = {}): Promise<Page<T>> {
+  const response = await apiFetch(path, init);
+  const items = (await response.json()) as T[];
+  const header = response.headers?.get?.("X-Total-Count");
+  const total = header === null || header === undefined || header === "" ? Number.NaN : Number(header);
+  return { items, total: Number.isFinite(total) ? total : items.length };
+}
+
+interface TraceListFilters {
+  status?: string;
+  responseType?: string;
+  userId?: string;
+  errorCode?: string;
+  conversationId?: string;
+  engine?: "SUPPORT" | "RAG";
+  source?: "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND";
+  requestId?: string;
+  /** Case-insensitive substring of the question (server-side). */
+  question?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+
+function traceListQuery(knowledgeId: string | undefined, filters: TraceListFilters): string {
+  const search = new URLSearchParams();
+  if (knowledgeId) search.set("knowledge_id", knowledgeId);
+  if (filters.status) search.set("status", filters.status);
+  if (filters.responseType) search.set("response_type", filters.responseType);
+  if (filters.userId) search.set("user_id", filters.userId);
+  if (filters.errorCode) search.set("error_code", filters.errorCode);
+  if (filters.conversationId) search.set("conversation_id", filters.conversationId);
+  if (filters.engine) search.set("engine", filters.engine);
+  if (filters.source) search.set("source", filters.source);
+  if (filters.requestId) search.set("request_id", filters.requestId);
+  if (filters.question) search.set("q", filters.question);
+  if (filters.from) search.set("from", filters.from);
+  if (filters.to) search.set("to", filters.to);
+  if (filters.limit) search.set("limit", String(filters.limit));
+  if (filters.offset) search.set("offset", String(filters.offset));
+  const query = search.toString();
+  return query ? `?${query}` : "";
+}
+
+function documentListQuery(query: DocumentListQuery): string {
+  const search = new URLSearchParams();
+  if (query.search) search.set("q", query.search);
+  if (query.buildStatus) search.set("build_status", query.buildStatus);
+  if (query.cardIndexId) search.set("card_index_id", query.cardIndexId);
+  if (query.cardState) search.set("card_state", query.cardState);
+  if (query.sort) search.set("sort", query.sort);
+  if (query.order) search.set("order", query.order);
+  if (query.limit) search.set("limit", String(query.limit));
+  if (query.offset) search.set("offset", String(query.offset));
+  const value = search.toString();
+  return value ? `?${value}` : "";
 }
 
 export const adminApi = {
@@ -159,6 +231,9 @@ export const adminApi = {
     ),
   listDocuments: (knowledgeId: string) =>
     apiRequest<DocumentItem[]>(`/knowledge-bases/${knowledgeId}/documents`),
+  /** Server-side filtered/sorted/paged documents of one knowledge base. */
+  listDocumentsPage: (knowledgeId: string, query: DocumentListQuery = {}, init: RequestInit = {}) =>
+    apiRequestPage<DocumentItem>(`/knowledge-bases/${knowledgeId}/documents${documentListQuery(query)}`, init),
   listRagDocumentCards: (knowledgeId: string, indexId?: string) =>
     apiRequest<RagDocumentCardList>(
       `/knowledge-bases/${knowledgeId}/rag-document-cards${indexId ? `?index_id=${indexId}` : ""}`,
@@ -287,39 +362,11 @@ export const adminApi = {
     apiRequest<GarbageCollectionResult>(`/indexes/${indexId}${force ? "?force=true" : ""}`, {
       method: "DELETE",
     }),
-  listTraces: (
-    knowledgeId?: string,
-    filters: {
-      status?: string;
-      responseType?: string;
-      userId?: string;
-      errorCode?: string;
-      conversationId?: string;
-      engine?: "SUPPORT" | "RAG";
-      source?: "ASSISTANT_API" | "INTERNAL_CHAT" | "PLAYGROUND";
-      requestId?: string;
-      from?: string;
-      to?: string;
-      limit?: number;
-    } = {},
-    init: RequestInit = {},
-  ) => {
-    const search = new URLSearchParams();
-    if (knowledgeId) search.set("knowledge_id", knowledgeId);
-    if (filters.status) search.set("status", filters.status);
-    if (filters.responseType) search.set("response_type", filters.responseType);
-    if (filters.userId) search.set("user_id", filters.userId);
-    if (filters.errorCode) search.set("error_code", filters.errorCode);
-    if (filters.conversationId) search.set("conversation_id", filters.conversationId);
-    if (filters.engine) search.set("engine", filters.engine);
-    if (filters.source) search.set("source", filters.source);
-    if (filters.requestId) search.set("request_id", filters.requestId);
-    if (filters.from) search.set("from", filters.from);
-    if (filters.to) search.set("to", filters.to);
-    if (filters.limit) search.set("limit", String(filters.limit));
-    const query = search.toString();
-    return apiRequest<TraceSummary[]>(`/traces${query ? `?${query}` : ""}`, init);
-  },
+  listTraces: (knowledgeId?: string, filters: TraceListFilters = {}, init: RequestInit = {}) =>
+    apiRequest<TraceSummary[]>(`/traces${traceListQuery(knowledgeId, filters)}`, init),
+  /** Server-paged trace list; `total` counts every trace matching the filters. */
+  listTracesPage: (knowledgeId?: string, filters: TraceListFilters = {}, init: RequestInit = {}) =>
+    apiRequestPage<TraceSummary>(`/traces${traceListQuery(knowledgeId, filters)}`, init),
   listUnconfirmedTraces: (
     knowledgeId?: string,
     filters: {
@@ -408,12 +455,16 @@ export const adminApi = {
   /** Same endpoint as listTasks, typed with the full row (kb_id, timestamps) it returns. */
   listTaskRecords: (filters: TaskListFilters = {}) =>
     apiRequest<TaskRecord[]>(`/tasks${taskListQuery(filters)}`),
+  /** Server-paged task list; `total` counts every task matching the filters. */
+  listTasksPage: (filters: TaskListFilters = {}, init: RequestInit = {}) =>
+    apiRequestPage<TaskRecord>(`/tasks${taskListQuery(filters)}`, init),
   listConversations: (
     knowledgeId: string,
     filters: {
       userId?: string;
       source?: TraceSource;
       limit?: number;
+      offset?: number;
       activityFrom?: string;
       activityTo?: string;
     } = {},
@@ -423,9 +474,14 @@ export const adminApi = {
     if (filters.userId) search.set("user_id", filters.userId);
     if (filters.source) search.set("source", filters.source);
     if (filters.limit) search.set("limit", String(filters.limit));
+    if (filters.offset) search.set("offset", String(filters.offset));
     if (filters.activityFrom) search.set("activity_from", filters.activityFrom);
     if (filters.activityTo) search.set("activity_to", filters.activityTo);
-    return apiRequest<{ items: ConversationListItem[] }>(`/conversations?${search.toString()}`, init);
+    // `total` is reported by servers that page conversations (absent on older ones).
+    return apiRequest<{ items: ConversationListItem[]; total?: number | null }>(
+      `/conversations?${search.toString()}`,
+      init,
+    );
   },
   getModelRuntime: () => apiRequest<ModelRuntimeStatus>("/system/model-runtime"),
   getRuntimeMetrics: () => apiRequest<RuntimeMetrics>("/metrics/runtime"),

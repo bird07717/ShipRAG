@@ -45,7 +45,7 @@
 
 1. 校验知识库和 Conversation。
 2. 为 Conversation 绑定 RAG Index 版本。
-3. 读取最近最多 10 条、约 2,000 token 的历史消息。
+3. 读取最近最多 10 条、约 4,000 token（`M3_HISTORY_TOKEN_BUDGET`，默认 4,000，`01c09c4` 起）的历史消息。
 4. 读取生效的 LLM、Embedding、Rerank、Prompt 和检索参数。
 5. 必要时进行 Query Rewrite。
 6. 并行执行向量检索、BM25 检索和同义词扩展。

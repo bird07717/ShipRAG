@@ -10,6 +10,7 @@ import EmptyState from "@/components/ui/EmptyState.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
 import RagConfigurationView from "@/views/RagConfigurationView.vue";
 import SettingsView from "@/views/SettingsView.vue";
+import { replaceViewQuery } from "@/utils/viewQuery";
 
 const props = defineProps<{ navigationQuery?: string }>();
 const store = useAdminStore();
@@ -28,6 +29,7 @@ watch(
     activeTab.value = tabFromQuery(query);
   },
 );
+watch(activeTab, (tab) => replaceViewQuery("configuration", { tab }));
 const selectedPrompt = ref<PromptTemplate | null>(null);
 const TYPE_LABELS: Record<string, string> = {
   LLM: "LLM",

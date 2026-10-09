@@ -1,7 +1,8 @@
-import { reactive } from "vue";
-import { ElMessageBox, ElNotification } from "element-plus";
+import { h, reactive } from "vue";
+import { ElButton, ElMessageBox, ElNotification } from "element-plus";
 
 import { adminApi, ApiRequestError } from "@/api/admin";
+import { clampedPage } from "@/utils/paging";
 import {
   clearServiceCredential,
   readServiceCredential,
@@ -9,7 +10,10 @@ import {
 } from "@/api/serviceCredential";
 import type { ServiceCredentialRejectionReason } from "@/api/serviceCredential";
 import type {
+  DocumentCardState,
   DocumentItem,
+  DocumentListQuery,
+  Page,
   DocumentProfileContext,
   KnowledgeProfileSummary,
   ProfilePublishCheck,
@@ -25,8 +29,6 @@ import type {
   ProfileDraftPatch,
   ProfileFeedback,
   PromptTemplate,
-  RagConfig,
-  RagConfigUpdatePayload,
   RagDocumentCard,
   RagDocumentCardPayload,
   RagDocumentCardReadiness,
@@ -45,6 +47,15 @@ let systemInfoLoadGeneration = 0;
 let modelListLoadGeneration = 0;
 let modelRuntimeLoadGeneration = 0;
 let modelActionGeneration = 0;
+/* pollTrackedTasks is reached from the poller, task submissions and view
+ * actions; overlapping callers share one in-flight run so a finished task is
+ * announced and refreshed exactly once. */
+let trackedTaskPoll: Promise<void> | null = null;
+/* Bumped whenever the document list query (filters/sort/page/knowledge base)
+ * changes, so a slower response for an older query never replaces the page. */
+let documentQueryGeneration = 0;
+/** Skipped documents listed in the alert; the total is shown when there are more. */
+const SKIPPED_ALERT_LIMIT = 50;
 
 export type ModelActionResult = { ok: true } | { ok: false; error: string };
 /**
@@ -54,6 +65,11 @@ export type ModelActionResult = { ok: true } | { ok: false; error: string };
  */
 export type NoticeLevel = "success" | "caveat" | "warning";
 type ModelActionNotice = string | { message: string; level: NoticeLevel };
+
+const TASK_FOLLOW_UPS: Record<string, { view: string; label: string } | undefined> = {
+  INDEX_BUILD: { view: "indexes", label: "前往索引管理（检查后设为当前 RAG）" },
+  RAG_DOCUMENT_CARD_GENERATE: { view: "documents", label: "前往文档管理确认 RAG 理解" },
+};
 
 type TrackedTask = {
   taskId: string;
@@ -114,17 +130,29 @@ function writeTrackedTasks(tasks: TrackedTask[]): void {
 export const adminStore = reactive({
   /* data */
   knowledgeBases: [] as KnowledgeBase[],
+  /** Current server page of the document list (see documentFilters). */
   documents: [] as DocumentItem[],
+  documentTotal: 0,
+  documentPage: 1,
+  documentPageSize: 50,
+  documentFilters: {
+    buildStatus: "",
+    cardState: "" as DocumentCardState | "",
+    sort: "created_at" as NonNullable<DocumentListQuery["sort"]>,
+    order: "desc" as NonNullable<DocumentListQuery["order"]>,
+  },
+  documentsLoading: false,
+  /** Documents skipped by the latest build (ADR-0022 alert), independent of paging. */
+  skippedDocuments: [] as DocumentItem[],
+  skippedDocumentTotal: 0,
   indexes: [] as KnowledgeIndex[],
   traces: [] as TraceSummary[],
   models: [] as ModelConfig[],
-  ragConfig: null as RagConfig | null,
   prompts: [] as PromptTemplate[],
   elements: [] as Array<Record<string, unknown>>,
   chunks: [] as Array<Record<string, unknown>>,
   documentProfileContext: null as DocumentProfileContext | null,
   knowledgeProfileSummary: null as KnowledgeProfileSummary | null,
-  ragDocumentCards: [] as RagDocumentCard[],
   ragDocumentCardReadiness: null as RagDocumentCardReadiness | null,
   ragDocumentCard: null as RagDocumentCard | null,
   documentInspectionIndexId: "",
@@ -236,15 +264,7 @@ export const adminStore = reactive({
       return matchKeyword && matchStatus;
     });
   },
-  get filteredDocuments(): DocumentItem[] {
-    const keyword = this.documentSearch.trim().toLowerCase();
-    if (!keyword) return this.documents;
-    return this.documents.filter(
-      (doc) =>
-        doc.display_name.toLowerCase().includes(keyword) ||
-        doc.filename.toLowerCase().includes(keyword),
-    );
-  },
+
 
   /* ---------- helpers ---------- */
   formatDate(value: string | null | undefined): string {
@@ -301,6 +321,15 @@ export const adminStore = reactive({
     }
   },
 
+  async openTaskFollowUp(trackedTask: TrackedTask, view: string): Promise<void> {
+    if (trackedTask.knowledgeId && this.selectedKnowledgeId !== trackedTask.knowledgeId) {
+      if (!this.knowledgeBases.some((kb) => kb.id === trackedTask.knowledgeId)) return;
+      this.selectedKnowledgeId = trackedTask.knowledgeId;
+      await this.selectKnowledge();
+    }
+    this.navigate(view);
+  },
+
   restoreTrackedTasks(): void {
     if (!this.trackedTasks.length) this.trackedTasks = readTrackedTasks();
   },
@@ -316,7 +345,16 @@ export const adminStore = reactive({
     }
   },
 
-  async pollTrackedTasks(): Promise<void> {
+  pollTrackedTasks(): Promise<void> {
+    if (!trackedTaskPoll) {
+      trackedTaskPoll = this.pollTrackedTasksOnce().finally(() => {
+        trackedTaskPoll = null;
+      });
+    }
+    return trackedTaskPoll;
+  },
+
+  async pollTrackedTasksOnce(): Promise<void> {
     if (!this.hasServiceCredential) return;
     const tracked = [...this.trackedTasks];
     if (!tracked.length) return;
@@ -344,7 +382,10 @@ export const adminStore = reactive({
             : task.error_message || "后台任务执行失败，请在任务中心查看详情";
       // Task completion is announced once, as a notification; it is not
       // duplicated into the transient success notice.
-      ElNotification({
+      // A finished build or card batch leads to a manual next step on another
+      // page; offer it from the notification instead of only describing it.
+      const followUp = succeeded || completedWithFailures ? TASK_FOLLOW_UPS[trackedTask.taskType] : undefined;
+      const notification = ElNotification({
         title: cancelled
           ? "任务已停止"
           : completedWithFailures
@@ -352,9 +393,27 @@ export const adminStore = reactive({
             : succeeded
               ? "任务已完成"
               : "任务执行失败",
-        message,
+        message: followUp
+          ? h("div", { class: "task-follow-up" }, [
+              h("p", message),
+              h(
+                ElButton,
+                {
+                  type: "primary",
+                  size: "small",
+                  link: true,
+                  onClick: () => {
+                    notification.close();
+                    void this.openTaskFollowUp(trackedTask, followUp.view);
+                  },
+                },
+                () => followUp.label,
+              ),
+            ])
+          : message,
         type: cancelled || completedWithFailures ? "warning" : succeeded ? "success" : "error",
-        duration: (succeeded && !completedWithFailures) || cancelled ? 5_000 : 0,
+        // Keep actionable success notices until the operator acts or closes them.
+        duration: followUp ? 0 : (succeeded && !completedWithFailures) || cancelled ? 5_000 : 0,
       });
       if (succeeded) {
         this.trackChainedProfileTask(task, trackedTask);
@@ -567,9 +626,85 @@ export const adminStore = reactive({
     }
   },
 
+  /** Server query for the current document page; the card filter needs the active index. */
+  /**
+   * Server query for the current document page. The active index is always
+   * attached so every row carries its RAG card state (rendered by the table);
+   * the card filter can only apply when such an index exists.
+   */
+  documentListQuery(activeIndexId: string | null | undefined): DocumentListQuery {
+    return {
+      search: this.documentSearch.trim() || undefined,
+      buildStatus: this.documentFilters.buildStatus || undefined,
+      cardState: activeIndexId ? this.documentFilters.cardState || undefined : undefined,
+      cardIndexId: activeIndexId ?? undefined,
+      sort: this.documentFilters.sort,
+      order: this.documentFilters.order,
+      limit: this.documentPageSize,
+      offset: (this.documentPage - 1) * this.documentPageSize,
+    };
+  },
+
+  activeIndexIdFor(knowledgeId: string): string | null {
+    const knowledge = this.knowledgeBases.find((item) => item.id === knowledgeId);
+    return knowledge?.rag_active_index_id ?? knowledge?.active_index_id ?? null;
+  },
+
+  /** Filters or sort changed: reload the document list from the first page. */
+  async reloadDocuments(): Promise<void> {
+    this.documentPage = 1;
+    await this.loadDocumentPage();
+  },
+
+  /** Load the current document page (page/size changes keep the filters). */
+  async loadDocumentPage(): Promise<void> {
+    const knowledgeId = this.selectedKnowledgeId;
+    if (!knowledgeId) return;
+    const generation = ++documentQueryGeneration;
+    this.documentsLoading = true;
+    try {
+      const page = await adminApi.listDocumentsPage(
+        knowledgeId,
+        this.documentListQuery(this.activeIndexIdFor(knowledgeId)),
+      );
+      if (this.selectedKnowledgeId === knowledgeId) this.commitDocumentPage(generation, page);
+    } catch (cause) {
+      if (generation === documentQueryGeneration) {
+        this.error = cause instanceof Error ? cause.message : "文档列表加载失败";
+      }
+    } finally {
+      this.settleDocumentLoad(generation);
+    }
+  },
+
+  /**
+   * Write a fetched page if it still belongs to the latest document query.
+   * A page beyond the end (rows deleted or filtered away meanwhile) moves
+   * to the last valid page instead of showing an empty list without a pager.
+   */
+  commitDocumentPage(generation: number, page: Page<DocumentItem>): void {
+    if (generation !== documentQueryGeneration) return;
+    const target = clampedPage(this.documentPage, this.documentPageSize, page.items.length, page.total);
+    if (target !== null) {
+      this.documentPage = target;
+      void this.loadDocumentPage();
+      return;
+    }
+    this.documents = page.items;
+    this.documentTotal = page.total;
+  },
+
+  /** Every document load path clears the overlay for the query that is still current. */
+  settleDocumentLoad(generation: number): void {
+    if (generation === documentQueryGeneration) this.documentsLoading = false;
+  },
+
   async loadKnowledgeDetails(): Promise<void> {
     if (!this.selectedKnowledgeId) {
       this.documents = [];
+      this.documentTotal = 0;
+      this.skippedDocuments = [];
+      this.skippedDocumentTotal = 0;
       this.indexes = [];
       this.releases = [];
       this.releaseDetails = {};
@@ -579,34 +714,44 @@ export const adminStore = reactive({
       this.latestDocumentProfileTasks = {};
       this.latestRagDocumentCardTasks = {};
       this.knowledgeProfileSummary = null;
-      this.ragDocumentCards = [];
       this.ragDocumentCardReadiness = null;
       this.ragDocumentCard = null;
       return;
     }
     const knowledgeId = this.selectedKnowledgeId;
-    const [documents, indexes, profileSummary] = await Promise.all([
-      adminApi.listDocuments(knowledgeId),
-      adminApi.listIndexes(knowledgeId),
-      adminApi.getKnowledgeProfiles(knowledgeId).catch(() => null),
-    ]);
-    if (this.selectedKnowledgeId !== knowledgeId) return;
-    const activeIndexId = this.knowledgeBases.find((item) => item.id === knowledgeId)
-      ?.rag_active_index_id
-      ?? this.knowledgeBases.find((item) => item.id === knowledgeId)?.active_index_id;
-    const cardList = activeIndexId
-      ? await adminApi.listRagDocumentCards(knowledgeId, activeIndexId).catch(() => null)
-      : null;
-    if (this.selectedKnowledgeId !== knowledgeId) return;
-    this.documents = documents;
-    this.indexes = indexes;
-    this.releases = [];
-    this.profileFeedback = [];
-    this.knowledgeProfileSummary = profileSummary;
-    this.ragDocumentCards = cardList?.cards ?? [];
-    this.ragDocumentCardReadiness = cardList?.readiness ?? null;
-    this.releaseDetails = {};
-    await this.loadIndexTasks(indexes, knowledgeId);
+    const activeIndexId = this.activeIndexIdFor(knowledgeId);
+    // A card filter cannot apply without an active index; clear it instead of
+    // keeping a filter the request would silently ignore.
+    if (!activeIndexId) this.documentFilters.cardState = "";
+    const documentGeneration = ++documentQueryGeneration;
+    try {
+      const [documentPage, skipped, indexes, profileSummary, readiness] = await Promise.all([
+        adminApi.listDocumentsPage(knowledgeId, this.documentListQuery(activeIndexId)),
+        adminApi
+          .listDocumentsPage(knowledgeId, { buildStatus: "SKIPPED", limit: SKIPPED_ALERT_LIMIT })
+          .catch(() => null),
+        adminApi.listIndexes(knowledgeId),
+        adminApi.getKnowledgeProfiles(knowledgeId).catch(() => null),
+        activeIndexId
+          ? adminApi.getRagDocumentCardReadiness(knowledgeId, activeIndexId).catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      if (this.selectedKnowledgeId !== knowledgeId) return;
+      this.commitDocumentPage(documentGeneration, documentPage);
+      // Only this knowledge base's result may fill the alert; a failed query
+      // leaves it empty rather than showing another knowledge base's rows.
+      this.skippedDocuments = skipped?.items ?? [];
+      this.skippedDocumentTotal = skipped?.total ?? 0;
+      this.indexes = indexes;
+      this.releases = [];
+      this.profileFeedback = [];
+      this.knowledgeProfileSummary = profileSummary;
+      this.ragDocumentCardReadiness = readiness;
+      this.releaseDetails = {};
+      await this.loadIndexTasks(indexes, knowledgeId);
+    } finally {
+      this.settleDocumentLoad(documentGeneration);
+    }
   },
 
   async loadReleaseForIndex(indexId: string): Promise<KnowledgeRelease | null> {
@@ -684,6 +829,9 @@ export const adminStore = reactive({
   async selectKnowledge(): Promise<void> {
     const knowledgeId = this.selectedKnowledgeId;
     writeSelectedKnowledgeId(knowledgeId);
+    this.documentPage = 1;
+    this.skippedDocuments = [];
+    this.skippedDocumentTotal = 0;
     this.selectedDocument = null;
     this.documentProfileContext = null;
     this.ragDocumentCard = null;
@@ -884,10 +1032,11 @@ export const adminStore = reactive({
       this.ragDocumentCard = await adminApi.updateRagDocumentCard(
         knowledgeId, document.id, card.index_id, card.revision, payload,
       );
-      const index = this.ragDocumentCards.findIndex((item) => item.document_id === document.id);
-      if (index >= 0) this.ragDocumentCards[index] = this.ragDocumentCard;
     });
-    if (!this.error) this.announce("卡片已保存，请确认后用于后续上线检查", "caveat");
+    if (!this.error) {
+      this.announce("卡片已保存，请确认后用于后续上线检查", "caveat");
+      await this.loadDocumentPage();
+    }
   },
 
   async reviewRagDocumentCard(reviewStatus: "CONFIRMED" | "REJECTED"): Promise<void> {
@@ -899,15 +1048,17 @@ export const adminStore = reactive({
       this.ragDocumentCard = await adminApi.reviewRagDocumentCard(
         knowledgeId, document.id, card.index_id, card.revision, reviewStatus,
       );
-      const index = this.ragDocumentCards.findIndex((item) => item.document_id === document.id);
-      if (index >= 0) this.ragDocumentCards[index] = this.ragDocumentCard;
       if (this.activeIndex?.id === card.index_id) {
         this.ragDocumentCardReadiness = await adminApi.getRagDocumentCardReadiness(
           knowledgeId, card.index_id,
         );
       }
     });
-    if (!this.error) this.announce(reviewStatus === "CONFIRMED" ? "卡片已确认" : "卡片已拒绝");
+    if (!this.error) {
+      this.announce(reviewStatus === "CONFIRMED" ? "卡片已确认" : "卡片已拒绝");
+      // Row card states (and a card-state filter) change with the review.
+      await this.loadDocumentPage();
+    }
   },
 
   async confirmRagDocumentCards(): Promise<void> {
@@ -927,12 +1078,11 @@ export const adminStore = reactive({
     await this.runAction(`rag-document-card-confirm-batch:${indexId}`, async () => {
       const result = await adminApi.confirmRagDocumentCards(knowledgeId, indexId);
       if (this.activeIndex?.id === indexId) this.ragDocumentCardReadiness = result.readiness;
-      const cardList = await adminApi
-        .listRagDocumentCards(knowledgeId, indexId)
-        .catch(() => null);
-      this.ragDocumentCards = cardList?.cards ?? this.ragDocumentCards;
     });
-    if (!this.error) this.announce(`已确认 ${autoCount} 份 RAG 理解卡片`);
+    if (!this.error) {
+      this.announce(`已确认 ${autoCount} 份 RAG 理解卡片`);
+      await this.loadDocumentPage();
+    }
   },
 
   goToCandidateReview(indexId: string): void {
@@ -1037,8 +1187,21 @@ export const adminStore = reactive({
     });
   },
 
-  async buildIndex(): Promise<void> {
+  async buildIndex(options: { confirm?: boolean } = {}): Promise<void> {
     if (!this.selectedKnowledgeId) return;
+    if (options.confirm) {
+      const name = this.selectedKnowledge?.name ?? "当前知识库";
+      try {
+        await ElMessageBox.confirm(
+          `将为「${name}」提交一次 RAG 候选索引构建。变更或缺少模型指纹的文档会重新解析，`
+            + "可能产生模型调用费用；构建完成后需明确设为当前索引才会生效。",
+          "构建索引",
+          { type: "warning", confirmButtonText: "提交构建", cancelButtonText: "取消" },
+        );
+      } catch {
+        return;
+      }
+    }
     await this.run(async () => {
       const build = await adminApi.buildIndex(this.selectedKnowledgeId);
       if (build.task_id) {
@@ -1206,6 +1369,17 @@ export const adminStore = reactive({
 
   async gcIndexes(): Promise<void> {
     if (!this.selectedKnowledgeId) return;
+    try {
+      await ElMessageBox.confirm(
+        "将按保留策略物理删除当前知识库中可回收的旧索引（含 chunk、embedding 和图片），"
+          + "并对当前知识库执行会话、Trace 与任务记录的保留期清理；其他知识库不受影响。"
+          + "当前 RAG 索引和仍被会话引用的索引不会删除。该操作不可恢复。",
+        "回收旧索引",
+        { type: "warning", confirmButtonText: "回收", cancelButtonText: "取消" },
+      );
+    } catch {
+      return;
+    }
     await this.run(async () => {
       const result = await adminApi.gcIndexes(this.selectedKnowledgeId);
       const parts = [`已回收 ${result.deleted_count} 个旧索引`];
@@ -1269,23 +1443,63 @@ export const adminStore = reactive({
     });
   },
 
-  async loadRagConfig(): Promise<void> {
-    this.ragConfig = await adminApi.getRagConfig();
-  },
-
-  async saveRagConfig(payload: RagConfigUpdatePayload): Promise<void> {
-    await this.run(async () => {
-      await adminApi.updateRagConfig(payload);
-      this.ragConfig = await adminApi.getRagConfig();
-  }, "RAG 检索配置已保存，下一轮对话生效");
-  },
-
   async refreshOperationalState(): Promise<void> {
     if (!this.selectedKnowledgeId) return;
-    await Promise.allSettled([
-      this.loadKnowledgeBases(),
-      this.loadKnowledgeDetails(),
-    ]);
+    // Sequential on purpose: loadKnowledgeDetails derives the active index
+    // from knowledgeBases, so it must see the freshly loaded list.
+    try {
+      await this.loadKnowledgeBases();
+    } catch {
+      // Keep going with the previous list; details can still refresh.
+    }
+    await this.loadKnowledgeDetails().catch(() => undefined);
+  },
+
+  /**
+   * Lightweight refresh while an index is BUILDING: knowledge list, documents,
+   * indexes and the tasks of building indexes only. Profiles, RAG cards and
+   * the per-index task history of finished indexes are left alone until a
+   * build settles, which triggers one full refresh.
+   */
+  async refreshBuildingState(): Promise<void> {
+    const knowledgeId = this.selectedKnowledgeId;
+    if (!knowledgeId) return;
+    const wasBuilding = new Set(
+      this.indexes.filter((index) => index.status === "BUILDING").map((index) => index.id),
+    );
+    await this.loadKnowledgeBases().catch(() => undefined);
+    if (this.selectedKnowledgeId !== knowledgeId) return;
+    const documentGeneration = ++documentQueryGeneration;
+    let documentPage: Page<DocumentItem>;
+    let indexes: KnowledgeIndex[];
+    try {
+      [documentPage, indexes] = await Promise.all([
+        adminApi.listDocumentsPage(knowledgeId, this.documentListQuery(this.activeIndexIdFor(knowledgeId))),
+        adminApi.listIndexes(knowledgeId),
+      ]);
+      if (this.selectedKnowledgeId !== knowledgeId) return;
+      if (indexes.some((index) => wasBuilding.has(index.id) && index.status !== "BUILDING")) {
+        await this.loadKnowledgeDetails();
+        return;
+      }
+      this.commitDocumentPage(documentGeneration, documentPage);
+    } finally {
+      this.settleDocumentLoad(documentGeneration);
+    }
+    this.indexes = indexes;
+    const building = indexes.filter((index) => index.status === "BUILDING");
+    const results = await Promise.allSettled(
+      building.map(async (index) => [index.id, await adminApi.listIndexTasks(index.id)] as const),
+    );
+    if (this.selectedKnowledgeId !== knowledgeId) return;
+    for (const result of results) {
+      if (result.status !== "fulfilled") continue;
+      const [indexId, tasks] = result.value;
+      this.latestIndexTasks[indexId] = tasks.find((task) => (task.task_type ?? "INDEX_BUILD") === "INDEX_BUILD");
+      this.latestRagDocumentCardTasks[indexId] = tasks.find(
+        (task) => task.task_type === "RAG_DOCUMENT_CARD_GENERATE",
+      );
+    }
   },
 
   async runModelAction(action: () => Promise<ModelActionNotice>): Promise<ModelActionResult> {

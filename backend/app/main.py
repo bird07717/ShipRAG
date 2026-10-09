@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.health import router as health_router
+from app.api.pagination import TOTAL_COUNT_HEADER
 from app.api.router import assistant_api_router
 from app.api.router import router as api_router
 from app.common.errors import SERVER_BUSY_MESSAGE, ApiError, user_safe_chat_message
@@ -81,7 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Idempotency-Key",
             "X-External-User-ID",
         ],
-        expose_headers=["X-Request-ID"],
+        expose_headers=["X-Request-ID", TOTAL_COUNT_HEADER],
     )
     app.include_router(health_router)
     app.include_router(api_router, prefix=resolved_settings.api_prefix)

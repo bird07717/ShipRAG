@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, Header, Query, Response, UploadFile, status
 
 from app.api.dependencies import get_app_settings, get_resources
+from app.api.pagination import OffsetQuery, paged_total, set_total_count
 from app.api.schemas import (
     DocumentDeleteResponse,
     DocumentProfileContextResponse,
@@ -188,8 +189,64 @@ async def upload_document(
 async def list_documents(
     knowledge_id: UUID,
     repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
+    response: Response,
+    search: Annotated[str | None, Query(alias="q", max_length=200)] = None,
+    build_status: Annotated[
+        Literal[
+            "QUEUED",
+            "PARSING",
+            "PROCESSING_IMAGES",
+            "CHUNKING",
+            "EMBEDDING",
+            "READY",
+            "FAILED",
+            "SKIPPED",
+            "CANCELLED",
+        ]
+        | None,
+        Query(),
+    ] = None,
+    card_index_id: Annotated[UUID | None, Query()] = None,
+    card_state: Annotated[
+        Literal["MISSING", "GENERATING", "FAILED", "PENDING_REVIEW", "REJECTED", "CONFIRMED"]
+        | None,
+        Query(),
+    ] = None,
+    sort: Annotated[Literal["created_at", "display_name", "file_size"], Query()] = "created_at",
+    order: Annotated[Literal["asc", "desc"], Query()] = "desc",
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    offset: OffsetQuery = 0,
 ) -> list[dict[str, Any]]:
-    return await repository.list_documents(knowledge_id)
+    """Stored documents with their latest build state.
+
+    Without ``limit`` every matching document is returned (original
+    behaviour). ``card_state`` needs ``card_index_id`` (normally the active
+    index); the total matching count is returned in X-Total-Count.
+    """
+    if card_state is not None and card_index_id is None:
+        raise ApiError("VALIDATION_ERROR", "按 RAG 理解状态筛选时必须提供 card_index_id", 422)
+    filters: dict[str, Any] = {
+        "search": search.strip() if search else None,
+        "build_status": build_status,
+        "card_state": card_state,
+        "card_index_id": card_index_id,
+    }
+    rows = await repository.list_documents(
+        knowledge_id,
+        limit=limit,
+        offset=offset,
+        sort=sort,
+        descending=order == "desc",
+        **filters,
+    )
+    total = await paged_total(
+        rows,
+        limit=limit,
+        offset=offset,
+        count=lambda: repository.count_documents(knowledge_id, **filters),
+    )
+    set_total_count(response, total)
+    return rows
 
 
 @router.get("/documents/{document_id}", response_model=DocumentResponse, tags=["documents"])
@@ -469,6 +526,7 @@ async def list_index_tasks(
 )
 async def list_tasks(
     repository: Annotated[IngestionRepository, Depends(get_ingestion_repository)],
+    response: Response,
     task_status: Annotated[
         Literal["QUEUED", "RUNNING", "SUCCEEDED", "FAILED"] | None,
         Query(alias="status"),
@@ -477,16 +535,23 @@ async def list_tasks(
     created_from: Annotated[datetime | None, Query(alias="from")] = None,
     created_to: Annotated[datetime | None, Query(alias="to")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: OffsetQuery = 0,
 ) -> list[dict[str, Any]]:
     """Global task list across indexes; `status=FAILED` is the failure-review
-    entry point that previously required knowing the index_id first."""
-    return await repository.list_tasks(
-        status=task_status,
-        knowledge_id=knowledge_id,
-        created_from=created_from,
-        created_to=created_to,
-        limit=limit,
+    entry point that previously required knowing the index_id first.
+    The total matching row count is returned in X-Total-Count."""
+    filters: dict[str, Any] = {
+        "status": task_status,
+        "knowledge_id": knowledge_id,
+        "created_from": created_from,
+        "created_to": created_to,
+    }
+    rows = await repository.list_tasks(limit=limit, offset=offset, **filters)
+    total = await paged_total(
+        rows, limit=limit, offset=offset, count=lambda: repository.count_tasks(**filters)
     )
+    set_total_count(response, total)
+    return rows
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse, tags=["tasks"])

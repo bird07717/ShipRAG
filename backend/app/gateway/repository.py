@@ -540,6 +540,23 @@ class GatewayRepository:
                 },
             )
 
+    _CONVERSATION_FILTER_SQL = """
+        knowledge_id = :knowledge_id
+        AND (CAST(:user_id AS varchar) IS NULL OR user_id = :user_id)
+        AND (CAST(:activity_from AS timestamptz) IS NULL
+             OR updated_at >= :activity_from)
+        AND (CAST(:activity_to AS timestamptz) IS NULL
+             OR updated_at <= :activity_to)
+        AND (
+            CAST(:source AS varchar) IS NULL
+            OR EXISTS (
+                SELECT 1 FROM rag_trace t
+                WHERE t.conversation_id = conversation.id
+                  AND t.source = :source
+            )
+        )
+    """
+
     async def list_conversations(
         self,
         knowledge_id: UUID,
@@ -548,6 +565,7 @@ class GatewayRepository:
         source: str | None = None,
         activity_from: datetime | None = None,
         activity_to: datetime | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """List conversations for platform-side history, newest activity first.
 
@@ -563,7 +581,7 @@ class GatewayRepository:
         async with self.engine.connect() as connection:
             result = await connection.execute(
                 text(
-                    """
+                    f"""
                     SELECT id, knowledge_id, user_id, title, last_execution_engine,
                            conversation_mode, created_at, updated_at,
                            (SELECT count(*) FROM message m
@@ -574,34 +592,44 @@ class GatewayRepository:
                             ORDER BY t.created_at DESC
                             LIMIT 1) AS last_source
                     FROM conversation
-                    WHERE knowledge_id = :knowledge_id
-                      AND (CAST(:user_id AS varchar) IS NULL OR user_id = :user_id)
-                      AND (CAST(:activity_from AS timestamptz) IS NULL
-                           OR updated_at >= :activity_from)
-                      AND (CAST(:activity_to AS timestamptz) IS NULL
-                           OR updated_at <= :activity_to)
-                      AND (
-                          CAST(:source AS varchar) IS NULL
-                          OR EXISTS (
-                              SELECT 1 FROM rag_trace t
-                              WHERE t.conversation_id = conversation.id
-                                AND t.source = :source
-                          )
-                      )
-                    ORDER BY updated_at DESC
-                    LIMIT :limit
+                    WHERE {self._CONVERSATION_FILTER_SQL}
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT :limit OFFSET :offset
                     """
                 ),
                 {
                     "knowledge_id": knowledge_id,
                     "user_id": user_id,
                     "limit": limit,
+                    "offset": offset,
                     "source": source,
                     "activity_from": activity_from,
                     "activity_to": activity_to,
                 },
             )
             return [dict(row) for row in result.mappings()]
+
+    async def count_conversations(
+        self,
+        knowledge_id: UUID,
+        user_id: str | None,
+        source: str | None = None,
+        activity_from: datetime | None = None,
+        activity_to: datetime | None = None,
+    ) -> int:
+        """Total rows matching ``list_conversations`` filters (for paging)."""
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(f"SELECT count(*) FROM conversation WHERE {self._CONVERSATION_FILTER_SQL}"),
+                {
+                    "knowledge_id": knowledge_id,
+                    "user_id": user_id,
+                    "source": source,
+                    "activity_from": activity_from,
+                    "activity_to": activity_to,
+                },
+            )
+            return int(result.scalar_one())
 
     async def get_conversation(self, conversation_id: UUID) -> dict[str, Any] | None:
         """Fetch one conversation row for ownership checks and detail views."""

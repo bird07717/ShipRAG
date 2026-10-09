@@ -188,6 +188,7 @@ describe("RAG index operations workspace", () => {
     const loadDetails = vi.spyOn(adminApi, "listIndexes").mockResolvedValue([]);
     vi.spyOn(adminApi, "listKnowledgeBases").mockResolvedValue([]);
     vi.spyOn(adminApi, "listDocuments").mockResolvedValue([]);
+    vi.spyOn(adminApi, "listDocumentsPage").mockResolvedValue({ items: [], total: 0 });
 
     const wrapper = mount(IndexBuildView, { global: { plugins: [ElementPlus] } });
     await flushPromises();
@@ -302,9 +303,9 @@ describe("RAG document card one-click confirm", () => {
       confirmed_count: 1,
       readiness: { ...readiness, confirmed_count: 3, auto_count: 0, ready: true, blockers: [] },
     });
-    const listCards = vi
-      .spyOn(adminApi, "listRagDocumentCards")
-      .mockResolvedValue({ knowledge_id: "kb-1", index_id: "idx-1", index_version: 3, cards: [], readiness });
+    // The document page (and a card-state filter on it) reloads after confirming.
+    adminStore.documentFilters.cardState = "PENDING_REVIEW";
+    const listPage = vi.spyOn(adminApi, "listDocumentsPage").mockResolvedValue({ items: [], total: 0 });
 
     const wrapper = mount(DocumentsView, { global: { plugins: [ElementPlus] } });
     await flushPromises();
@@ -321,7 +322,11 @@ describe("RAG document card one-click confirm", () => {
       expect.objectContaining({ confirmButtonText: "确认" }),
     );
     expect(confirmBatch).toHaveBeenCalledWith("kb-1", "idx-1");
-    expect(listCards).toHaveBeenCalledWith("kb-1", "idx-1");
+    expect(listPage).toHaveBeenLastCalledWith(
+      "kb-1",
+      expect.objectContaining({ cardState: "PENDING_REVIEW", cardIndexId: "idx-1", offset: 0 }),
+    );
+    adminStore.documentFilters.cardState = "";
     expect(adminStore.ragDocumentCardReadiness?.confirmed_count).toBe(3);
     expect(adminStore.ragDocumentCardReadiness?.auto_count).toBe(0);
   });

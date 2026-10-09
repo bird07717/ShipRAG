@@ -11,6 +11,7 @@ from pydantic import SecretStr
 from app.api.dependencies import get_app_settings, get_resources
 from app.api.engine_dependencies import get_rag_repository, get_rag_service
 from app.api.ingestion import get_ingestion_service
+from app.api.pagination import OffsetQuery, paged_total, set_total_count
 from app.api.schemas import (
     ApiKeyUpdate,
     ChatRequest,
@@ -369,6 +370,7 @@ async def run_playground(
 @router.get("/traces", response_model=list[TraceSummaryResponse], tags=["traces"])
 async def list_traces(
     repository: Annotated[RagRepository, Depends(get_rag_repository)],
+    response: Response,
     knowledge_id: Annotated[UUID | None, Query()] = None,
     trace_status: Annotated[
         Literal["RUNNING", "COMPLETED", "FAILED", "CANCELLED"] | None,
@@ -401,24 +403,33 @@ async def list_traces(
     exclude_low_information: Annotated[bool, Query()] = False,
     created_from: Annotated[datetime | None, Query(alias="from")] = None,
     created_to: Annotated[datetime | None, Query(alias="to")] = None,
+    question: Annotated[str | None, Query(alias="q", max_length=200)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: OffsetQuery = 0,
 ) -> list[dict[str, Any]]:
-    return await repository.list_traces(
-        knowledge_id=knowledge_id,
-        status=trace_status,
-        mode=mode,
-        user_id=user_id,
-        response_type=response_type,
-        engine=engine,
-        source=source,
-        error_code=error_code,
-        conversation_id=conversation_id,
-        request_id=request_id,
-        exclude_low_information=exclude_low_information,
-        created_from=created_from,
-        created_to=created_to,
-        limit=limit,
+    filters: dict[str, Any] = {
+        "knowledge_id": knowledge_id,
+        "status": trace_status,
+        "mode": mode,
+        "user_id": user_id,
+        "response_type": response_type,
+        "engine": engine,
+        "source": source,
+        "error_code": error_code,
+        "conversation_id": conversation_id,
+        "request_id": request_id,
+        "question": question.strip() if question else None,
+        "exclude_low_information": exclude_low_information,
+        "created_from": created_from,
+        "created_to": created_to,
+    }
+    rows = await repository.list_traces(limit=limit, offset=offset, **filters)
+    # A short first page already is the whole result; skip the count query.
+    total = await paged_total(
+        rows, limit=limit, offset=offset, count=lambda: repository.count_traces(**filters)
     )
+    set_total_count(response, total)
+    return rows
 
 
 @router.get("/traces/{trace_id}", response_model=RagTraceResponse, tags=["traces"])

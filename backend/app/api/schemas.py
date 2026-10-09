@@ -319,6 +319,9 @@ class DocumentResponse(BaseModel):
     last_build_status: str | None = None
     last_build_error: str | None = None
     last_build_version: int | None = None
+    # Only present when the list was requested with card_index_id:
+    # MISSING / GENERATING / FAILED / PENDING_REVIEW / REJECTED / CONFIRMED.
+    card_state: str | None = None
 
 
 class DocumentUpdate(BaseModel):
@@ -528,6 +531,8 @@ class ConversationListItem(BaseModel):
 
 class ConversationListResponse(BaseModel):
     items: list[ConversationListItem]
+    # Rows matching the filters across all pages (admin console paging).
+    total: int | None = None
 
 
 class ConversationDetailResponse(ConversationListItem):

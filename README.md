@@ -7,7 +7,7 @@
 - 文档上传、DOCX 解析、图像处理、分块、向量化与版本化索引构建。
 - 向量检索、BM25、融合与重排组成的 RAG 问答链路。
 - Support Profile 审核和独立发布；RAG 索引与 Support 发布生命周期互不阻塞。
-- 管理台支持知识库、文档及其显示名称、索引、模型、运行策略、链路追踪与问答测试。
+- 管理台支持知识库、文档及其显示名称、索引、模型、运行策略、链路追踪与问答测试，以及会话浏览、Assistant 回答复核和全局后台任务中心。
 - 对外 Assistant API 支持会话隔离、SSE 流式输出、幂等请求和受限的图片读取；文档只作为回答内容与来源展示，不提供原文下载。
 
 ## 架构概览
@@ -80,8 +80,8 @@ bash scripts/check-m7.sh
 | 当前状态、已知问题、技术决策 | [current-state.md](docs/ai/current-state.md)、[known-issues.md](docs/ai/known-issues.md)、[decisions.md](docs/ai/decisions.md) |
 | 对外 Assistant API 完整契约 | [assistant-api-integration-guide.md](docs/integration/assistant-api-integration-guide.md) |
 | 业务后台对接实施指南 | [assistant-api-business-backend-guide.md](docs/integration/assistant-api-business-backend-guide.md) |
-| 小体量 RAG 技术助手优化执行方案（本地已实现，默认关闭） | [rag-technical-assistant-optimization-plan.md](docs/technical/rag-technical-assistant-optimization-plan.md) |
-| RAG 隐藏全文双 LLM V2 执行计划（V0/V1 本地已完成；生产保持 legacy） | [rag-full-document-generation-v2-execution-plan.md](docs/technical/rag-full-document-generation-v2-execution-plan.md) |
+| 小体量 RAG 技术助手旧优化方案（历史归档，已被 V2 取代） | [rag-technical-assistant-optimization-plan.md](docs/technical/rag-technical-assistant-optimization-plan.md) |
+| RAG 隐藏全文双 LLM V2 执行计划（V0～V5 已部署；当前唯一 RAG 路径） | [rag-full-document-generation-v2-execution-plan.md](docs/technical/rag-full-document-generation-v2-execution-plan.md) |
 | 已被 V2 取代的 RAG 语义编排历史计划 | [rag-semantic-orchestration-execution-plan.md](docs/technical/rag-semantic-orchestration-execution-plan.md) |
 | 运维与 RAG 回归 | [ops-runbook.md](docs/ops-runbook.md)、[rag-acceptance/README.md](rag-acceptance/README.md) |
 

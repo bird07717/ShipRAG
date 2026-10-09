@@ -34,6 +34,7 @@ import {
   type TrendGranularity,
 } from "@/utils/metricsBuckets";
 import type { AssistantMetrics, KnowledgeAssistantCheck, MetricsOverview, MetricsTimeseriesPoint, TraceSummary } from "@/types/admin";
+import { createPoller } from "@/utils/poller";
 
 type TrendRangeKey = "24h" | "7d" | "14d" | "30d" | "90d" | "custom";
 interface TrendWindow { from: string; to: string; granularity: TrendGranularity; offsetMinutes: number }
@@ -85,7 +86,11 @@ const trendLineMetric = ref<TrendLineMetric>("needsInformationRate");
 const trendWindow = ref<TrendWindow | null>(null);
 const trendLoading = ref(false);
 const trendError = ref("");
-let autoRefreshTimer: ReturnType<typeof setInterval> | undefined;
+// 60s metrics refresh; pauses while the tab is hidden or the backend is offline.
+const autoRefreshPoller = createPoller(() => loadMetrics(), {
+  intervalMs: 60_000,
+  enabled: () => store.hasServiceCredential && !metricsLoading.value,
+});
 let active = true;
 let loadGeneration = 0;
 let drilldownGeneration = 0;
@@ -376,7 +381,6 @@ function onCustomRangeChange() {
   if (!canUseHourly.value) trendGranularity.value = "day";
   void loadTrend();
 }
-function autoRefresh() { if (store.hasServiceCredential && !metricsLoading.value) void loadMetrics(); }
 async function refreshDashboard() {
   if (!store.hasServiceCredential || refreshing.value) return;
   refreshing.value = true;
@@ -400,8 +404,8 @@ async function openBucketDrilldown(point: TrendPoint) {
   } catch (cause) { if (active && generation === drilldownGeneration) drilldownError.value = cause instanceof Error ? cause.message : "链路加载失败"; }
   finally { if (active && generation === drilldownGeneration) drilldownLoading.value = false; }
 }
-onMounted(() => { void loadMetrics(); autoRefreshTimer = setInterval(autoRefresh, 60_000); });
-onUnmounted(() => { active = false; loadGeneration++; drilldownGeneration++; trendGeneration++; clearInterval(autoRefreshTimer); });
+onMounted(() => { void loadMetrics(); autoRefreshPoller.start(); });
+onUnmounted(() => { active = false; loadGeneration++; drilldownGeneration++; trendGeneration++; autoRefreshPoller.stop(); });
 watch(() => store.selectedKnowledgeId, () => void loadMetrics());
 watch(() => store.hasServiceCredential, (available) => {
   if (available) void loadMetrics();

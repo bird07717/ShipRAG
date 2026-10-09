@@ -15,7 +15,7 @@ import {
   Stamp,
   Tickets,
 } from "@element-plus/icons-vue";
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from "vue";
 
 import AdminStudio from "@/components/AdminStudio.vue";
 import AppNavigation, { type NavigationGroup } from "@/components/AppNavigation.vue";
@@ -24,7 +24,6 @@ import ModelRuntimeBanner from "@/components/ModelRuntimeBanner.vue";
 import RuntimeCapacityPanel from "@/components/RuntimeCapacityPanel.vue";
 import TaskCenter from "@/components/TaskCenter.vue";
 import TaskCenterButton from "@/components/TaskCenterButton.vue";
-import DemoChat from "@/components/DemoChat.vue";
 import HealthPanel from "@/components/HealthPanel.vue";
 import RuntimeVersion from "@/components/RuntimeVersion.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
@@ -32,6 +31,10 @@ import PageHeader from "@/components/ui/PageHeader.vue";
 import { SERVICE_CREDENTIAL_REJECTED_EVENT } from "@/api/serviceCredential";
 import { useAdminStore } from "@/composables/adminStore";
 import { environmentBadge } from "@/utils/modelRuntime";
+import { VIEW_QUERY_REPLACED_EVENT } from "@/utils/viewQuery";
+
+// The chat page pulls in the streaming client and Markdown renderer; load it on demand.
+const DemoChat = defineAsyncComponent(() => import("@/components/DemoChat.vue"));
 
 interface NavigationLocation {
   view: string;
@@ -214,6 +217,9 @@ watch(
 onMounted(() => {
   watchViewport();
   window.addEventListener("hashchange", syncHash);
+  // Views write their tab/selection back with replaceState (no hashchange);
+  // keep navigationQuery equal to the URL so re-following a link still works.
+  window.addEventListener(VIEW_QUERY_REPLACED_EVENT, syncHash);
   syncHash();
   if (isDemoChat.value && store.hasServiceCredential && !store.knowledgeBases.length) {
     void store.run(() => store.refreshAll());
@@ -223,6 +229,7 @@ onUnmounted(() => {
   narrowQuery?.removeEventListener?.("change", updateViewport);
   mobileQuery?.removeEventListener?.("change", updateViewport);
   window.removeEventListener("hashchange", syncHash);
+  window.removeEventListener(VIEW_QUERY_REPLACED_EVENT, syncHash);
   window.removeEventListener(SERVICE_CREDENTIAL_REJECTED_EVENT, handleCredentialRejected);
 });
 

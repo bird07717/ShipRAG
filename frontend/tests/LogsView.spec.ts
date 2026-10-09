@@ -5,13 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { adminApi } from "@/api/admin";
 import { adminStore } from "@/composables/adminStore";
 import LogsView from "@/views/LogsView.vue";
-import type { TraceSummary } from "@/types/admin";
+import type { Page, TraceSummary } from "@/types/admin";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: Error) => void;
   const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
   return { promise, resolve, reject };
+}
+function page<T>(...items: T[]): Page<T> {
+  return { items, total: items.length };
 }
 function record(question: string): TraceSummary {
   return { trace_id: question, mode: "CHAT", kb_id: "kb-1", index_id: "idx-1", question,
@@ -52,8 +55,8 @@ describe("failed trace request consistency", () => {
     ["deep-link", "success"], ["deep-link", "failure"],
     ["knowledge-base", "success"], ["knowledge-base", "failure"],
   ])("ignores an old %s request's late %s after the new scope loads", async (scope, outcome) => {
-    const older = deferred<TraceSummary[]>();
-    const list = vi.spyOn(adminApi, "listTraces").mockReturnValueOnce(older.promise).mockResolvedValue([record("新范围记录")]);
+    const older = deferred<Page<TraceSummary>>();
+    const list = vi.spyOn(adminApi, "listTracesPage").mockReturnValueOnce(older.promise).mockResolvedValue(page(record("新范围记录")));
     const wrapper = editor();
     await flushPromises();
     if (scope === "deep-link") await wrapper.setProps({ navigationQuery: "tab=failed-turns&engine=SUPPORT&from=2026-10-04T00%3A00%3A00Z" });
@@ -61,7 +64,7 @@ describe("failed trace request consistency", () => {
     await flushPromises();
     expect(list).toHaveBeenLastCalledWith(scope === "deep-link" ? "kb-1" : "kb-2", expect.objectContaining({ status: "FAILED" }));
     expect(wrapper.text()).toContain("新范围记录");
-    if (outcome === "success") older.resolve([record("旧范围记录")]);
+    if (outcome === "success") older.resolve(page(record("旧范围记录")));
     else older.reject(new Error("旧请求失败"));
     await flushPromises();
     expect(wrapper.text()).toContain("新范围记录");
@@ -70,31 +73,31 @@ describe("failed trace request consistency", () => {
   });
 
   it.each(["success", "failure"])("does not finish the latest loading state when an older request ends with %s", async (outcome) => {
-    const older = deferred<TraceSummary[]>();
-    const newer = deferred<TraceSummary[]>();
-    vi.spyOn(adminApi, "listTraces").mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+    const older = deferred<Page<TraceSummary>>();
+    const newer = deferred<Page<TraceSummary>>();
+    vi.spyOn(adminApi, "listTracesPage").mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
     const wrapper = editor();
     await flushPromises();
     await wrapper.setProps({ navigationQuery: "tab=failed-turns&engine=SUPPORT" });
-    if (outcome === "success") older.resolve([record("旧范围记录")]);
+    if (outcome === "success") older.resolve(page(record("旧范围记录")));
     else older.reject(new Error("旧请求失败"));
     await flushPromises();
     expect(refreshButton(wrapper).props("loading")).toBe(true);
     expect(wrapper.text()).not.toContain("旧范围记录");
     expect(wrapper.text()).not.toContain("旧请求失败");
-    newer.resolve([record("最新记录")]);
+    newer.resolve(page(record("最新记录")));
     await flushPromises();
     expect(refreshButton(wrapper).props("loading")).toBe(false);
     expect(wrapper.text()).toContain("最新记录");
   });
 
   it.each(["success", "failure"])("ignores a late %s after leaving the failed-turn tab", async (outcome) => {
-    const older = deferred<TraceSummary[]>();
-    const list = vi.spyOn(adminApi, "listTraces").mockReturnValueOnce(older.promise).mockResolvedValue([record("返回后的记录")]);
+    const older = deferred<Page<TraceSummary>>();
+    const list = vi.spyOn(adminApi, "listTracesPage").mockReturnValueOnce(older.promise).mockResolvedValue(page(record("返回后的记录")));
     const wrapper = editor();
     await flushPromises();
     await wrapper.setProps({ navigationQuery: "tab=request-errors" });
-    if (outcome === "success") older.resolve([record("旧范围记录")]);
+    if (outcome === "success") older.resolve(page(record("旧范围记录")));
     else older.reject(new Error("旧请求失败"));
     await flushPromises();
     expect(wrapper.text()).not.toContain("旧请求失败");
@@ -106,7 +109,7 @@ describe("failed trace request consistency", () => {
   });
 
   it("reports the latest failure and stops loading", async () => {
-    vi.spyOn(adminApi, "listTraces").mockResolvedValueOnce([record("已有记录")]).mockRejectedValueOnce(new Error("最新请求失败"));
+    vi.spyOn(adminApi, "listTracesPage").mockResolvedValueOnce(page(record("已有记录"))).mockRejectedValueOnce(new Error("最新请求失败"));
     const wrapper = editor();
     await flushPromises();
     expect(wrapper.text()).toContain("已有记录");
@@ -118,7 +121,7 @@ describe("failed trace request consistency", () => {
   });
 
   it("falls back from a removed escalation deep-link without loading escalation records", async () => {
-    const list = vi.spyOn(adminApi, "listTraces").mockResolvedValue([]);
+    const list = vi.spyOn(adminApi, "listTracesPage").mockResolvedValue(page());
     const wrapper = editor("tab=escalations");
     await flushPromises();
     expect(wrapper.findComponent({ name: "ElTabs" }).props("modelValue")).toBe("request-errors");

@@ -289,5 +289,7 @@ export async function downloadDocument(
   a.href = url;
   a.download = filename;
   a.click();
-  URL.revokeObjectURL(url);
+  // Revoking synchronously can cancel the download in some browsers; release
+  // the blob once the click has been handed to the download manager.
+  setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }

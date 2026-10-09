@@ -118,7 +118,7 @@ class TestListTasksRepository:
 
         sql, params = engine.connection.executed[0]
         assert "WHERE 1 = 1" in sql
-        assert params is not None and set(params) == {"limit"}
+        assert params is not None and set(params) == {"limit", "offset"}
 
 
 class _StubIngestionRepository:

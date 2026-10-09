@@ -9,6 +9,8 @@ import KnowledgeAssistantSettings from "@/components/KnowledgeAssistantSettings.
 import EmptyState from "@/components/ui/EmptyState.vue";
 import ListSkeleton from "@/components/ui/ListSkeleton.vue";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
+import { statusLabel } from "@/utils/statusLabels";
+import { replaceViewQuery } from "@/utils/viewQuery";
 
 const store = useAdminStore();
 const props = defineProps<{ navigationQuery?: string }>();
@@ -19,7 +21,7 @@ const descriptionDraft = ref("");
 
 const statusOptions = computed(() => {
   const states = [...new Set(store.knowledgeBases.map((kb) => kb.runtime_state))];
-  return states.map((state) => ({ label: state, value: state }));
+  return states.map((state) => ({ label: statusLabel(state), value: state }));
 });
 
 function openDetail(kb: KnowledgeBase): void {
@@ -71,6 +73,17 @@ watch(
   { immediate: true },
 );
 
+// Reflect the open detail drawer in the URL (#/knowledge?id=…) so it survives
+// refresh and can be shared; closing the drawer clears it.
+watch(
+  () => (detailOpen.value ? detailTarget.value?.id ?? "" : ""),
+  (id) => {
+    // Mark it handled first: the write-back returns through navigationQuery.
+    if (id) openedFromQuery = id;
+    replaceViewQuery("knowledge", { id });
+  },
+);
+
 function assistantChanged(config: KnowledgeAssistantConfig): void {
   store.applyKnowledgeAssistantConfig(config);
   if (detailTarget.value?.id === config.knowledge_id && config.revision >= (detailTarget.value.assistant_config_revision ?? 0)) {
@@ -88,15 +101,23 @@ async function deleteKnowledge(kb: KnowledgeBase): Promise<void> {
 
 function handleCommand(command: string, kb: KnowledgeBase): void {
   if (command === "detail") void selectAndOpen(kb);
-  if (command === "rebuild") {
-    store.selectedKnowledgeId = kb.id;
-    rebuild();
-  }
+  if (command === "rebuild") void rebuildKnowledge(kb);
   if (command === "delete") void deleteKnowledge(kb);
 }
 
+async function rebuildKnowledge(kb: KnowledgeBase): Promise<void> {
+  // Go through selectKnowledge so the choice is persisted and per-knowledge
+  // state is reset before the build is submitted against it.
+  if (store.selectedKnowledgeId !== kb.id) {
+    store.selectedKnowledgeId = kb.id;
+    await store.selectKnowledge();
+    if (store.selectedKnowledgeId !== kb.id) return;
+  }
+  await store.buildIndex({ confirm: true });
+}
+
 function rebuild(): void {
-  void store.buildIndex();
+  if (detailTarget.value) void rebuildKnowledge(detailTarget.value);
 }
 
 function regenerateProfiles(): void {
@@ -150,7 +171,7 @@ function isDeleting(kb: KnowledgeBase): boolean {
         v-else-if="store.filteredKnowledgeBases.length"
         :data="store.filteredKnowledgeBases"
         :show-header="true"
-        @row-click="(row: any) => selectAndOpen(row)"
+        @row-click="(row: KnowledgeBase) => selectAndOpen(row)"
       >
         <el-table-column label="名称" min-width="240">
           <template #default="scope">

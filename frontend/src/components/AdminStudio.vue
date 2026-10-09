@@ -1,39 +1,33 @@
 <script setup lang="ts">
 import { ElMessage, ElNotification } from "element-plus";
-import { computed, onMounted, onUnmounted, watch, type Component } from "vue";
+import { computed, defineAsyncComponent, onMounted, onUnmounted, watch, type Component } from "vue";
 
 import { useAdminStore } from "@/composables/adminStore";
+import { createPoller } from "@/utils/poller";
 import { renderMarkdown } from "@/utils/markdown";
 import StatusBadge from "@/components/ui/StatusBadge.vue";
 import CodeBlock from "@/components/ui/CodeBlock.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import DashboardView from "@/views/DashboardView.vue";
-import KnowledgeView from "@/views/KnowledgeView.vue";
-import DocumentsView from "@/views/DocumentsView.vue";
-import IndexBuildView from "@/views/IndexBuildView.vue";
-import LogsView from "@/views/LogsView.vue";
-import PlaygroundView from "@/views/PlaygroundView.vue";
-import ConfigurationView from "@/views/ConfigurationView.vue";
-import EngineRoutingView from "@/views/EngineRoutingView.vue";
-import SupportReviewView from "@/views/SupportReviewView.vue";
-import ConversationsView from "@/views/ConversationsView.vue";
 import ConversationTimeline from "@/components/ConversationTimeline.vue";
 
 const props = defineProps<{ view: string; navigationQuery?: string }>();
 
 const store = useAdminStore();
 
+// The landing Dashboard ships in the entry chunk; every other view is a
+// separate chunk fetched on first visit.
 const views: Record<string, Component> = {
   dashboard: DashboardView,
-  knowledge: KnowledgeView,
-  documents: DocumentsView,
-  indexes: IndexBuildView,
-  logs: LogsView,
-  playground: PlaygroundView,
-  configuration: ConfigurationView,
-  "engine-routing": EngineRoutingView,
-  "support-review": SupportReviewView,
-  conversations: ConversationsView,
+  knowledge: defineAsyncComponent(() => import("@/views/KnowledgeView.vue")),
+  documents: defineAsyncComponent(() => import("@/views/DocumentsView.vue")),
+  indexes: defineAsyncComponent(() => import("@/views/IndexBuildView.vue")),
+  logs: defineAsyncComponent(() => import("@/views/LogsView.vue")),
+  playground: defineAsyncComponent(() => import("@/views/PlaygroundView.vue")),
+  configuration: defineAsyncComponent(() => import("@/views/ConfigurationView.vue")),
+  "engine-routing": defineAsyncComponent(() => import("@/views/EngineRoutingView.vue")),
+  "support-review": defineAsyncComponent(() => import("@/views/SupportReviewView.vue")),
+  conversations: defineAsyncComponent(() => import("@/views/ConversationsView.vue")),
 };
 
 const viewProps = computed(() =>
@@ -42,28 +36,29 @@ const viewProps = computed(() =>
     : {},
 );
 
-let indexPollTimer: ReturnType<typeof setInterval> | undefined;
-let taskPollTimer: ReturnType<typeof setInterval> | undefined;
+// Building indexes are watched every 5s and browser-submitted tasks every 3s.
+// Both pollers run serially and pause while the tab is hidden or the backend
+// is unreachable (see utils/poller.ts).
+const indexPoller = createPoller(() => store.refreshBuildingState(), {
+  intervalMs: 5_000,
+  enabled: () => store.hasServiceCredential && store.indexes.some((index) => index.status === "BUILDING"),
+});
+const taskPoller = createPoller(() => store.pollTrackedTasks(), {
+  intervalMs: 3_000,
+  enabled: () => store.hasServiceCredential && store.trackedTasks.length > 0,
+});
 
 function stopAutomaticRequests(): void {
-  clearInterval(indexPollTimer);
-  clearInterval(taskPollTimer);
-  indexPollTimer = undefined;
-  taskPollTimer = undefined;
+  indexPoller.stop();
+  taskPoller.stop();
 }
 
 function startAutomaticRequests(): void {
-  if (!store.hasServiceCredential || indexPollTimer || taskPollTimer) return;
+  if (!store.hasServiceCredential || indexPoller.running || taskPoller.running) return;
   store.restoreTrackedTasks();
-  indexPollTimer = setInterval(() => {
-    if (store.hasServiceCredential && store.indexes.some((index) => index.status === "BUILDING")) {
-      void store.refreshOperationalState();
-    }
-  }, 5_000);
-  taskPollTimer = setInterval(() => {
-    if (store.hasServiceCredential) void store.pollTrackedTasks();
-  }, 3_000);
-  void store.pollTrackedTasks();
+  indexPoller.start();
+  taskPoller.start();
+  taskPoller.trigger();
 }
 
 // Notices are graded by store.noticeLevel (see ADR-0032): a plain success is a

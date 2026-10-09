@@ -17,9 +17,21 @@
 
 路由模块位于 `app/api/`；请求/响应模型集中在 `schemas.py`。应用统一输出携带 `request_id` 的错误体，且会收敛用户聊天路径上的服务端错误信息。流式聊天使用 SSE，而非 WebSocket。
 
-管理指标 `/metrics/overview` 与 `/metrics/timeseries` 支持按 `engine`、`source`、知识库及时间范围过滤。RAG 回答结果口径为：直接回答率=`(ANSWERED + 遗留 DOC_DELIVERED) / 产品范围内已分类轮次`，待补充信息率=`UNCONFIRMED / 产品范围内已分类轮次`，范围外请求率=`OUT_OF_SCOPE / 全部已分类轮次`；`OUT_OF_SCOPE` 不再计作无答案，失败率独立计算。Overview 另按 `answer_mode` 聚合 `PRODUCT_KNOWLEDGE`、`PRODUCT_EXPLAINED`、`PRODUCT_GENERAL`，三者之和是回答依据分布的独立分母，不混入欢迎语、遗留文档交付或未分类历史。Dashboard 固定使用外部 `ASSISTANT_API`、`RAG` 和同一个近 7 天窗口，趋势、待补充列表和趋势柱形下钻使用相同过滤条件；待补充指标保留所有 `UNCONFIRMED`，Dashboard 人工复核列表可额外通过 `/traces?exclude_low_information=true` 排除 RAG V2 `diagnostic_reason=LOW_INFORMATION` 及历史确定性低信息门禁。失败待办将已显示 Overview 的准确 from/to 和来源/引擎传给 `LogsView` 的 Trace 列表请求（2026-10-05 本地修复，未改后端契约）。失败列表最多 200 条，上方失败概览仍是独立汇总，不随列表筛选变化。`UNCONFIRMED` 只说明需要更多条件或输入信息不足，不能单独证明知识库覆盖缺口。
+管理指标 `/metrics/overview` 与 `/metrics/timeseries` 支持按 `engine`、`source`、知识库及时间范围过滤。RAG 回答结果口径为：直接回答率=`(ANSWERED + 遗留 DOC_DELIVERED) / 产品范围内已分类轮次`，待补充信息率=`UNCONFIRMED / 产品范围内已分类轮次`，范围外请求率=`OUT_OF_SCOPE / 全部已分类轮次`；`OUT_OF_SCOPE` 不再计作无答案，失败率独立计算。Overview 另按 `answer_mode` 聚合 `PRODUCT_KNOWLEDGE`、`PRODUCT_EXPLAINED`、`PRODUCT_GENERAL`，三者之和是回答依据分布的独立分母，不混入欢迎语、遗留文档交付或未分类历史。Dashboard 固定使用外部 `ASSISTANT_API`、`RAG` 和同一个近 7 天窗口，趋势、待补充列表和趋势柱形下钻使用相同过滤条件；待补充指标保留所有 `UNCONFIRMED`，Dashboard 人工复核列表可额外通过 `/traces?exclude_low_information=true` 排除 RAG V2 `diagnostic_reason=LOW_INFORMATION` 及历史确定性低信息门禁。失败待办将已显示 Overview 的准确 from/to 和来源/引擎传给 `LogsView` 的 Trace 列表请求（2026-10-05 本地修复，未改后端契约）。失败列表已改为服务端分页（见下文“管理列表服务端分页”），上方失败概览仍是独立汇总，不随列表筛选变化。`UNCONFIRMED` 只说明需要更多条件或输入信息不足，不能单独证明知识库覆盖缺口。
 
-管理端 `GET /conversations` 可选 `activity_from` / `activity_to` 按会话 `updated_at`（最近活动时间）范围筛选，再按最近活动倒序和 `limit` 返回；这不改变 Assistant 外部会话 API。数据库未新增列或迁移，查询复用既有会话活动时间索引。
+管理端 `GET /conversations` 可选 `activity_from` / `activity_to` 按会话 `updated_at`（最近活动时间）范围筛选，再按最近活动倒序（同时间按 `id`）和 `limit`/`offset` 返回；这不改变 Assistant 外部会话 API。数据库未新增列或迁移，查询复用既有会话活动时间索引。
+
+### 管理列表服务端分页（2026-10-09，本地，待部署，ADR-0038）
+
+- 契约：`GET /traces`、`GET /tasks`、`GET /knowledge-bases/{id}/documents` 的响应体仍是原 JSON 数组，新增 `offset`（0–1,000,000）与响应头 `X-Total-Count`（满足筛选条件的总行数）；`app.main` 的 CORS `expose_headers` 已包含该头。管理 `GET /conversations` 本就是 `{items}` 信封，新增 `offset` 与 `total`。不传 `offset` 时行为与原来一致；首页且返回行数小于 `limit`（或不限条数）时直接以行数为总数，不再执行计数查询。共享实现：`app/api/pagination.py`（`OffsetQuery`、`paged_total`、`set_total_count`）。所有分页排序都带唯一次级键（Trace/任务 `created_at DESC, id DESC`，会话 `updated_at DESC, id DESC`，文档 `<排序列>, id`），同一时间戳的行跨页不会重复或遗漏。
+- `/traces` 新增 `q`：按 `question` 做大小写不敏感子串匹配（`ILIKE`，`%`/`_`/`\` 经 `common.text.escape_like` 转义后按字面匹配）。列表与计数共用 `RagRepository._trace_filters`。
+- `/tasks` 列表与计数共用 `IngestionRepository._task_filters`。
+- 文档列表新增可选 `q`（显示名/文件名子串）、`build_status`（最近一次构建的 `index_document.status`）、`card_index_id` + `card_state`（该索引 RAG 理解状态：`MISSING`/`GENERATING`/`FAILED`/`PENDING_REVIEW`/`REJECTED`/`CONFIRMED`，与管理台标签一一对应；`card_state` 缺少 `card_index_id` 返回 422）、`sort`（`created_at`/`display_name`/`file_size`，白名单）与 `order`、`limit`（1–200，可选）。不传 `limit` 时仍返回全部文档（原行为，`LIMIT ALL`），但会遵守单独传入的 `offset`；带 `card_index_id` 时每行附 `card_state`。查询为 `_document_query` 子查询，计数与列表同源。
+- 已在本地开发库只读执行验证：文档 44 份、卡片状态分组之和等于总数、`q`/`build_status`/分页与排序结果一致；Trace 2,468 条分页与 `q` 计数一致。
+
+### 按知识库回收的保留范围（2026-10-09，本地，待部署）
+
+`POST /knowledge-bases/{id}/indexes/gc` 调用 `collect_garbage(kb_id)` 时，过期会话清理、Trace 脱敏/删除（`retain_traces(kb_id=...)`）与终态任务记录修剪（`prune_terminal_tasks(kb_id=...)`）都只作用于该知识库；没有知识库的全局任务不会被按库回收删除。全局 `POST /gc` 与维护 Worker 的周期 GC 仍以 `kb_id=None` 处理全部数据，行为不变。此前按库回收会顺带执行全局 Trace 与任务记录清理。
 
 ## 模块关系
 
@@ -46,7 +58,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 索引构建的文档级熔断（ADR-0022）：文档处理失败时按（同 KB + 同 `document_id` + 同 `error_code`）统计历史 FAILED 的 `index_document` 行数，达到 2 次后该文档在当轮构建中标为 `SKIPPED`（错误信息带文件名），其余文档继续、构建可成功；跳过清单写入任务 `metadata.skipped_documents`。`_finalize_index` 容忍 SKIPPED 但要求至少 1 份 READY，`knowledge_index.document_count` 只计 READY。`list_documents` 以 LATERAL join 附带每份文档最近一次构建的 `last_build_status/last_build_error/last_build_version` 供前端告警。注意 `_mark_failed` 仍会把未轮到的文档批量标为同一错误——判断"哪份文档失败"必须看任务 `metadata.current_document` 或 SKIPPED/首个 FAILED 行，不能读批量标记的 error_message。
 
-构建重试与中止的人工决策（ADR-0024，2026-09-17 实施）：构建失败、worker 崩溃回收（`mark_abandoned_index_build_failed`，含取消后 worker 死亡的 CANCELLED 分支——按取消语义结算索引，任务终态不改写）和协作取消都不再自动排 followup——`create_followup_build_if_needed` 已删除，`rebuild_required` 在失败/取消时重新置位并由管理台"待重建"徽标提示，重试由管理员经 `POST /indexes/{id}/retry` 触发（白名单 FAILED/CANCELLED），熔断计数由手动重试推进。INDEX_BUILD 接入协作取消：`POST /tasks/{id}/cancel` 白名单含 INDEX_BUILD，取消是任务行终态转换，构建循环在文档边界轮询（`_update_task` 带 `status IN ('QUEUED','RUNNING')` 守卫防进度心跳覆盖终态），排队期取消在管线入口短路零模型消耗，激活事务开始后不中断；索引与未处理文档落 `CANCELLED` 终态（迁移 `0047` 同时补上 `index_document` 的 `SKIPPED` 约束值），CANCELLED 与 FAILED 同权可删可重试，且不进失败计数。单索引删除与 GC 在数据库行物理删除成功之后按 `indexes/{index_id}/` 前缀整清 MinIO 对象（指针恢复路径的对象完整性优先，孤儿留给未来桶级对账）；文档原件与 `document_source` 不受索引删除影响。任务记录保留：`task_record_retention_days=90`（0=永久）由周期 GC 修剪终态超期记录，每库保底最新 10 条。RAG 理解卡片跨版本复用（ADR-0025，2026-09-18 实施）：构建成功后把 REUSE 文档的卡片行（含向量与 review_status）从 `IndexBuildResult.prev_index_id` 复制到新索引，生成任务的指纹跳过逻辑只为新增/变更文档调 LLM；`content_fingerprint` 已去除 `index_id`（内容指纹不含索引身份，存量卡自愈重生成）；一键确认端点 `POST .../rag-document-cards/confirm-batch` 单事务把 READY/AUTO 全部置 CONFIRMED。
+构建重试与中止的人工决策（ADR-0024，2026-09-17 实施）：构建失败、worker 崩溃回收（`mark_abandoned_index_build_failed`，含取消后 worker 死亡的 CANCELLED 分支——按取消语义结算索引，任务终态不改写）和协作取消都不再自动排 followup——`create_followup_build_if_needed` 已删除，`rebuild_required` 在失败/取消时重新置位并由管理台"待重建"徽标提示，重试由管理员经 `POST /indexes/{id}/retry` 触发（白名单 FAILED/CANCELLED），熔断计数由手动重试推进。INDEX_BUILD 接入协作取消：`POST /tasks/{id}/cancel` 白名单含 INDEX_BUILD，取消是任务行终态转换，构建循环在文档边界轮询（`_update_task` 带 `status IN ('QUEUED','RUNNING')` 守卫防进度心跳覆盖终态），排队期取消在管线入口短路零模型消耗，激活事务开始后不中断；索引与未处理文档落 `CANCELLED` 终态（迁移 `0047` 同时补上 `index_document` 的 `SKIPPED` 约束值），CANCELLED 与 FAILED 同权可删可重试，且不进失败计数。单索引删除与 GC 在数据库行物理删除成功之后按 `indexes/{index_id}/` 前缀整清 MinIO 对象（指针恢复路径的对象完整性优先，孤儿留给未来桶级对账）；文档原件与 `document_source` 不受索引删除影响。任务记录保留：`task_record_retention_days=90`（0=永久）由周期 GC 修剪终态超期记录，每库保底最新 10 条；按知识库回收只修剪该库记录（见上文“按知识库回收的保留范围”）。RAG 理解卡片跨版本复用（ADR-0025，2026-09-18 实施）：构建成功后把 REUSE 文档的卡片行（含向量与 review_status）从 `IndexBuildResult.prev_index_id` 复制到新索引，生成任务的指纹跳过逻辑只为新增/变更文档调 LLM；`content_fingerprint` 已去除 `index_id`（内容指纹不含索引身份，存量卡自愈重生成）；一键确认端点 `POST .../rag-document-cards/confirm-batch` 单事务把 READY/AUTO 全部置 CONFIRMED。
 
 维护 Worker 启动时及每 15 分钟还会执行陈旧轮次自动恢复（`app/tasks/assistant_recovery.py`）：超过 `ASSISTANT_REQUEST_STALE_SECONDS`（默认 600，必须大于轮次时限，0 禁用）仍 `RUNNING` 的 `assistant_request` 及关联消息/Trace 用与手动 `app.assistant.recovery` 相同的单语句收口为失败，被 `CONVERSATION_BUSY` 锁死的会话因此自愈；额外扫描的 `ASSISTANT_API` Trace 只允许回收没有 RUNNING 请求引用的孤儿，或请求本身已进入同批 stale 集合的关联 Trace，不能仅因 Trace 创建时间较早而回收仍被活跃请求持有的 Message/Trace。同一语句还回收没有 `assistant_request` 行的内部轮次（`rag_trace.source` 为 `INTERNAL_CHAT`/`PLAYGROUND`），它们以 `ABANDONED_CHAT_TURN` 单独计数和标记，避免终态冲突回滚后 Message 永远停在 `STREAMING`；内部 Trace 不并入 `stale_trace_ids`，因为同一语句里两个 CTE 更新同一行时只有第一个生效。Redis 哨兵键防止多 Worker 重复注册周期链。保留期任务仍不删除 `RUNNING`。
 
@@ -58,7 +70,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 外部服务包括 PostgreSQL、Redis、MinIO，以及可配置的模型服务。代码支持 SiliconFlow 嵌入/重排/OCR、智谱 LLM/视觉，以及阿里云百炼 DashScope；2026-09-15 起 DashScope 注册为全部五类模型类型（LLM/EMBEDDING/RERANK/OCR/VISION）的 Provider：LLM、Embedding、OCR、Vision 走 OpenAI 兼容 `chat/completions` / `embeddings`，Rerank 使用 DashScope 专有 `/api/v1/services/rerank/text-rerank/text-rerank` 端点（`model_providers.dashscope_rerank_base_url` 把管理台保存的 compatible-mode 地址映射到原生 API 根），Embedding 仅文本输入且沿用 1024 维契约。`auto` 模式会按环境或数据库模型快照中的凭据选择。Embedding、LLM、Rerank 在 staging/production 中禁止显式或隐式回退到 fake，缺少凭据时失败关闭；fake 仅用于开发/测试的受控场景。实际模型、超时和阈值来自 Settings、模型快照及环境变量，不能仅根据本文推断部署值。
 
-## 管理模型配置与 Assistant 生效边界（2026-10-09 一致性修复，本地待部署）
+## 管理模型配置与 Assistant 生效边界（2026-10-09 一致性修复，已部署到生产 `e07165d`）
 
 两类凭据区分 API 权限，不区分模型配置。管理台 `PATCH /models/{id}` 保存到共享 `model_config`；Assistant 经 `AssistantFacade → ChatGatewayService → RagService` 使用同一套问答实现。前提是管理台和业务 Assistant 请求连接的是同一套后端及数据库，不是不同部署。
 
@@ -156,7 +168,7 @@ RQ 队列逻辑名为 `ingestion`、`index_build`、`maintenance`。开发/生�
 
 - 文档理解卡片的消费边界（2026-10-09 源码核对）：`build_routing_text()` 包含摘要、任务、适用问题、前提、主题及排除，用于卡片向量/BM25 召回，不是确定性前提过滤器；`DocumentCardCandidate`/文档重排输入只保留类型、摘要、任务及相关片段。`build_document_context()` 从所选文档加载正文/图片描述，不把完整卡片的前提/排除作为单独生成输入。隔离实验附加已有卡片五字段未证明整体收益（见 `current-state.md`），线上仍沿用现状，不新增路由判断或硬过滤。
 
-- 历史默认窗口为最近最多 4 个完整技术轮次、10 条消息、估算 2,000 Token；来自 `core/config.py`，部署可覆盖。选择器从最新往前按整对消息选取，最新有效轮次超预算时直接停止，不截断答案或跳过去拼更旧历史；因此可能得到空窗口。只在同一 `conversation_id` 读取，不使用长期记忆、LLM 摘要或 30 分钟自动分段。
+- 历史默认窗口为最近最多 4 个完整技术轮次、10 条消息、估算 4,000 Token；来自 `core/config.py`，开发/生产示例与 Production Compose 默认一致，`M3_HISTORY_TOKEN_BUDGET` 显式环境值优先。管理 Chat 与 Assistant 共用选择器，选中历史进入两层 LLM；冻结 Support 也消费该预算。选择器从最新往前按整对消息选取，最新有效轮次超预算时直接停止，不截断答案或跳过去拼更旧历史；因此仍可能得到空窗口。只在同一 `conversation_id` 读取，不使用长期记忆、LLM 摘要或 30 分钟自动分段。
 - 按 ADR-0030，技术 `build_answer_prompt()` 只接收标准化问题 `resolved_question`、`relation/active_task`、最近所选历史和本轮隐藏文档；本轮原话仍参与检索和服务端参数来源检查，不直接进入技术 LLM 2 Prompt。非文档 `build_conversation_prompt()` 则仍接收本轮原话及最近一个所选技术轮次，不能将“LLM 2 不看原话”推广到所有路径。改写丢失语言、否定或条件时，下游缺少直接纠正本轮改写的输入；已有英文作答失败记录见 ADR-0030。
 - ADR-0026 的保守二路由由 ADR-0027 修订：`KNOWLEDGE` 完整保留检索与技术 LLM 2；`CONVERSATION` 是无需文档依据的非检索 LLM 2，跳过 Embedding、检索、Rerank 和文档加载。是否需要作出新判断不再自动决定检索；一般性人工协助建议可不检索，但产品专有事实、操作/诊断、官方服务事实及明确询问文档规定必须检索。非检索 LLM 2 不得把统一免责声明或历史回答冒充文档依据，不得编造服务承诺。路由字段缺失/无效时保守降级 Knowledge；对话 LLM 2 失败使用固定兜底，不回跳 RAG；对外 Assistant/SSE 结构不变。
 - ADR-0019 已停止原 P3 六策略和 P4 `rag_case` 的继续实施。V0～V5 已交付 `app.rag.v2`：最小 Query Interpreter 输出独立请求、范围、会话关系、当前任务和二值 `response_path`，不输出检索补充查询或用户约束，不生成答案、不决定回答篇幅。知识库名称和公开说明是可信产品档案；询问产品身份、用途、组成、原理、操作、维护或故障不因缺少直接文档变成范围外。技术 LLM 2 的范围与证据收口仍沿用既有规则。LLM 1 只接收按轮次组织的最近成功技术历史；`FOLLOW_UP/CORRECTION` 任务从最近完整轮次的用户请求继承，旧助手回答仅用于理解指代。LLM 1 单次时限 25 秒，完整超时不重试，429/5xx/连接类即时失败最多快速重试一次；失败时只对有完整历史的省略对象短追问确定性继承任务，其余保守走 Knowledge。Trace 记录超时、历史兜底及检索结果。V2 不调用旧 Query Rewrite、首轮标题召回、焦点路由或 P2/P3 Planner。

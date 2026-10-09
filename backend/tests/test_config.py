@@ -24,6 +24,7 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
         "M3_RAG_ANSWER_THINKING_ENABLED",
         "M3_RAG_ANSWER_THINKING_BUDGET",
         "M3_RAG_HISTORY_MAX_ROUNDS",
+        "M3_HISTORY_TOKEN_BUDGET",
         "M3_RAG_ANSWER_REPAIR_ATTEMPTS",
         "M3_RAG_QUERY_INTERPRETER_MAX_TOKENS",
         "M3_RAG_QUERY_INTERPRETER_TIMEOUT_SECONDS",
@@ -49,6 +50,7 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
     assert settings.m3_rag_answer_thinking_enabled is False
     assert settings.m3_rag_answer_thinking_budget == 2_048
     assert settings.m3_rag_history_max_rounds == 4
+    assert settings.m3_history_token_budget == 4_000
     assert settings.m3_rag_answer_repair_attempts == 1
     assert settings.m3_rag_query_interpreter_max_tokens == 512
     assert settings.m3_rag_query_interpreter_timeout_seconds == 25.0
@@ -59,6 +61,34 @@ def test_development_env_example_is_loadable_with_safe_rag_defaults(
     assert settings.m3_query_embedding_timeout_seconds == 10.0
     assert settings.m3_query_embedding_retries == 1
     assert settings.m3_rerank_timeout_seconds == 15.0
+
+
+def test_default_history_budget_is_4000_and_keeps_the_round_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("M3_HISTORY_TOKEN_BUDGET", raising=False)
+    monkeypatch.delenv("M3_RAG_HISTORY_MAX_ROUNDS", raising=False)
+    settings = Settings(_env_file=None, app_env="test")
+
+    assert settings.m3_history_token_budget == 4_000
+    assert settings.m3_rag_history_max_rounds == 4
+
+
+def test_history_budget_environment_override_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("M3_HISTORY_TOKEN_BUDGET", "3000")
+
+    assert Settings(_env_file=None, app_env="test").m3_history_token_budget == 3_000
+
+
+def test_production_env_example_uses_the_same_history_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("M3_HISTORY_TOKEN_BUDGET", raising=False)
+    settings = Settings(_env_file=PROJECT_ROOT / ".env.production.example", app_env="test")
+
+    assert settings.m3_history_token_budget == 4_000
 
 
 @pytest.mark.parametrize(

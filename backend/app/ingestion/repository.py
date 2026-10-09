@@ -4,13 +4,14 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.common.errors import ApiError
+from app.common.text import escape_like
 from app.core.config import Settings
 from app.ingestion.models import content_revision_for_mime
 from app.tasks.repository import TaskRecordRepository
@@ -1264,37 +1265,127 @@ class IngestionRepository:
             )
             return result.scalar_one_or_none()
 
-    async def list_documents(self, knowledge_id: UUID) -> list[dict[str, Any]]:
+    # RAG card review state of a document for one index, mirroring the admin
+    # console labels (未生成 / 生成中 / 生成失败 / 已确认 / 已拒绝 / 待确认).
+    _DOCUMENT_CARD_STATE_SQL = """
+        CASE
+            WHEN c.id IS NULL THEN 'MISSING'
+            WHEN c.generation_status = 'FAILED' THEN 'FAILED'
+            WHEN c.generation_status <> 'READY' THEN 'GENERATING'
+            WHEN c.review_status = 'CONFIRMED' THEN 'CONFIRMED'
+            WHEN c.review_status = 'REJECTED' THEN 'REJECTED'
+            ELSE 'PENDING_REVIEW'
+        END
+    """
+    _DOCUMENT_SORT_COLUMNS: ClassVar[dict[str, str]] = {
+        "created_at": "created_at",
+        "display_name": "display_name",
+        "file_size": "file_size",
+    }
+
+    def _document_query(
+        self,
+        knowledge_id: UUID,
+        *,
+        search: str | None = None,
+        build_status: str | None = None,
+        card_state: str | None = None,
+        card_index_id: UUID | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Stored documents of one knowledge base with their latest build state.
+
+        Returns a sub-select (``docs``) plus its WHERE clause on the outer
+        level, shared by the page query and its total count.
+        """
+        parameters: dict[str, Any] = {"kb_id": knowledge_id}
+        inner_clauses = ["d.kb_id = :kb_id", "d.status = 'STORED'"]
+        if search:
+            inner_clauses.append(
+                "(d.display_name ILIKE :search ESCAPE '\\' OR d.filename ILIKE :search ESCAPE '\\')"
+            )
+            parameters["search"] = f"%{escape_like(search)}%"
+        card_join = ""
+        card_state_column = "NULL::text AS card_state"
+        if card_index_id is not None:
+            card_join = (
+                "LEFT JOIN rag_document_card c "
+                "ON c.index_id = :card_index_id AND c.document_id = d.id"
+            )
+            card_state_column = f"{self._DOCUMENT_CARD_STATE_SQL} AS card_state"
+            parameters["card_index_id"] = card_index_id
+        outer_clauses = ["1 = 1"]
+        if build_status is not None:
+            outer_clauses.append("last_build_status = :build_status")
+            parameters["build_status"] = build_status
+        if card_state is not None:
+            outer_clauses.append("card_state = :card_state")
+            parameters["card_state"] = card_state
+        subquery = f"""
+            SELECT d.*, last_idoc.status AS last_build_status,
+                   last_idoc.error_message AS last_build_error,
+                   last_idx.index_version AS last_build_version,
+                   {card_state_column}
+            FROM document_source d
+            LEFT JOIN LATERAL (
+                SELECT i.id AS index_id, i.version AS index_version
+                FROM knowledge_index i
+                WHERE i.kb_id = d.kb_id
+                ORDER BY i.created_at DESC, i.version DESC
+                LIMIT 1
+            ) last_idx ON true
+            LEFT JOIN LATERAL (
+                SELECT idoc.status, idoc.error_message
+                FROM index_document idoc
+                WHERE idoc.index_id = last_idx.index_id
+                  AND idoc.document_id = d.id
+                LIMIT 1
+            ) last_idoc ON true
+            {card_join}
+            WHERE {" AND ".join(inner_clauses)}
+        """
+        return f"({subquery}) docs WHERE {' AND '.join(outer_clauses)}", parameters
+
+    async def list_documents(
+        self,
+        knowledge_id: UUID,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        sort: str = "created_at",
+        descending: bool = True,
+        **filters: Any,
+    ) -> list[dict[str, Any]]:
+        """Stored documents, newest first by default; ``limit=None`` returns all.
+
+        ``filters`` are those of ``_document_query`` (name search, latest build
+        status, RAG card state for ``card_index_id``).
+        """
         await self.get_knowledge_base(knowledge_id)
+        source, parameters = self._document_query(knowledge_id, **filters)
+        column = self._DOCUMENT_SORT_COLUMNS.get(sort)
+        if column is None:
+            raise ApiError("VALIDATION_ERROR", "不支持的排序字段", 422)
+        direction = "DESC" if descending else "ASC"
+        # LIMIT ALL keeps the original "every document" response while still
+        # honouring an offset sent without a limit.
+        page = "LIMIT :limit OFFSET :offset" if limit is not None else "LIMIT ALL OFFSET :offset"
+        parameters = {**parameters, "offset": offset}
+        if limit is not None:
+            parameters["limit"] = limit
         async with self.engine.connect() as connection:
             result = await connection.execute(
                 text(
-                    """
-                    SELECT d.*, last_idoc.status AS last_build_status,
-                           last_idoc.error_message AS last_build_error,
-                           last_idx.index_version AS last_build_version
-                    FROM document_source d
-                    LEFT JOIN LATERAL (
-                        SELECT i.id AS index_id, i.version AS index_version
-                        FROM knowledge_index i
-                        WHERE i.kb_id = d.kb_id
-                        ORDER BY i.created_at DESC, i.version DESC
-                        LIMIT 1
-                    ) last_idx ON true
-                    LEFT JOIN LATERAL (
-                        SELECT idoc.status, idoc.error_message
-                        FROM index_document idoc
-                        WHERE idoc.index_id = last_idx.index_id
-                          AND idoc.document_id = d.id
-                        LIMIT 1
-                    ) last_idoc ON true
-                    WHERE d.kb_id = :kb_id AND d.status = 'STORED'
-                    ORDER BY d.created_at DESC
-                    """
+                    f"SELECT * FROM {source} ORDER BY {column} {direction}, id {direction} {page}"
                 ),
-                {"kb_id": knowledge_id},
+                parameters,
             )
             return [self._document_response(dict(row)) for row in result.mappings()]
+
+    async def count_documents(self, knowledge_id: UUID, **filters: Any) -> int:
+        source, parameters = self._document_query(knowledge_id, **filters)
+        async with self.engine.connect() as connection:
+            result = await connection.execute(text(f"SELECT count(*) FROM {source}"), parameters)
+            return int(result.scalar_one())
 
     async def count_document_build_failures(
         self, knowledge_id: UUID, document_id: UUID, error_code: str
@@ -1427,19 +1518,16 @@ class IngestionRepository:
             )
             return [dict(row) for row in result.mappings()]
 
-    async def list_tasks(
-        self,
+    @staticmethod
+    def _task_filters(
         *,
         status: str | None = None,
         knowledge_id: UUID | None = None,
         created_from: datetime | None = None,
         created_to: datetime | None = None,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Cross-index task listing for failure review (worker builds, GC,
-        recovery); backed by ix_task_record_status_created."""
+    ) -> tuple[str, dict[str, Any]]:
         clauses = ["1 = 1"]
-        parameters: dict[str, Any] = {"limit": limit}
+        parameters: dict[str, Any] = {}
         if status is not None:
             clauses.append("status = :status")
             parameters["status"] = status
@@ -1452,15 +1540,33 @@ class IngestionRepository:
         if created_to is not None:
             clauses.append("created_at < :created_to")
             parameters["created_to"] = created_to
+        return " AND ".join(clauses), parameters
+
+    async def list_tasks(
+        self, *, limit: int = 50, offset: int = 0, **filters: Any
+    ) -> list[dict[str, Any]]:
+        """Cross-index task listing for failure review (worker builds, GC,
+        recovery); backed by ix_task_record_status_created."""
+        where, parameters = self._task_filters(**filters)
         query = f"""
             SELECT * FROM task_record
-            WHERE {" AND ".join(clauses)}
-            ORDER BY created_at DESC
-            LIMIT :limit
+            WHERE {where}
+            ORDER BY created_at DESC, id DESC
+            LIMIT :limit OFFSET :offset
         """
         async with self.engine.connect() as connection:
-            result = await connection.execute(text(query), parameters)
+            result = await connection.execute(
+                text(query), {**parameters, "limit": limit, "offset": offset}
+            )
             return [dict(row) for row in result.mappings()]
+
+    async def count_tasks(self, **filters: Any) -> int:
+        where, parameters = self._task_filters(**filters)
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(f"SELECT count(*) FROM task_record WHERE {where}"), parameters
+            )
+            return int(result.scalar_one())
 
     async def activate_index(self, index_id: UUID) -> dict[str, Any]:
         """Publish a READY snapshot and retire the prior ACTIVE snapshot atomically."""
@@ -1630,9 +1736,21 @@ class IngestionRepository:
             return [UUID(str(row[0])) for row in result]
 
     async def retain_traces(
-        self, full_retention_days: int, summary_retention_days: int
+        self,
+        full_retention_days: int,
+        summary_retention_days: int,
+        kb_id: UUID | None = None,
     ) -> dict[str, int]:
-        """Redact detailed trace data before deleting its operations summary."""
+        """Redact detailed trace data before deleting its operations summary.
+
+        ``kb_id`` scopes both steps to one knowledge base (the per-knowledge
+        GC button); without it the whole fleet is processed (periodic GC).
+        """
+        scope = ""
+        parameters: dict[str, Any] = {}
+        if kb_id is not None:
+            scope = " AND kb_id = :kb_id"
+            parameters["kb_id"] = kb_id
         async with self.engine.begin() as connection:
             redacted = await connection.execute(
                 text(
@@ -1645,15 +1763,16 @@ class IngestionRepository:
                     WHERE redacted_at IS NULL
                       AND created_at < now() - INTERVAL '1 day' * :full_days
                     """
+                    + scope
                 ),
-                {"full_days": full_retention_days},
+                {"full_days": full_retention_days, **parameters},
             )
             deleted = await connection.execute(
                 text(
                     "DELETE FROM rag_trace WHERE created_at < now() "
-                    "- INTERVAL '1 day' * :summary_days"
+                    "- INTERVAL '1 day' * :summary_days" + scope
                 ),
-                {"summary_days": summary_retention_days},
+                {"summary_days": summary_retention_days, **parameters},
             )
         return {"redacted": int(redacted.rowcount or 0), "deleted": int(deleted.rowcount or 0)}
 
@@ -2404,6 +2523,8 @@ class IngestionRepository:
             "last_build_error": document.get("last_build_error"),
             "last_build_version": document.get("last_build_version"),
         }
+        if document.get("card_state") is not None:
+            response["card_state"] = document["card_state"]
         return response
 
     @staticmethod

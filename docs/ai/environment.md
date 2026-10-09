@@ -19,7 +19,7 @@ bash scripts/bootstrap.sh
 
 千问（阿里云百炼 / DashScope）可在管理台模型配置中用于全部五类模型（LLM、Embedding、Rerank、OCR、Vision），填写模型名称、Base URL 和 API Key；默认 Base URL 为 `https://dashscope.aliyuncs.com/compatible-mode/v1/`。数据库加密密钥优先，也可用 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL` 作为环境兜底。不同地域或业务空间的 Base URL 与 API Key 必须匹配；生产推荐按阿里云百炼实际业务空间配置专属域名。Rerank 不在兼容地址上提供服务：后端会把保存的 compatible-mode 地址自动映射到原生 `/api/v1` 根并调用 `services/rerank/text-rerank/text-rerank`（模型如 `gte-rerank`/`gte-rerank-v2`）；Embedding 走兼容 `/embeddings`（模型如 `text-embedding-v3/v4`，仅文本、必须输出 1024 维，单请求批量上限 10 条，`M2_EMBEDDING_BATCH_SIZE` 默认 8 已在限内、调大需保持 ≤10）；OCR/Vision 使用 qwen-vl 系列模型的兼容 `chat/completions` 多模态调用。`M2_EMBEDDING_PROVIDER`、`M4_OCR_PROVIDER`、`M4_VISION_PROVIDER`、`M5_RERANK_PROVIDER` 均接受 `dashscope` 显式值。
 
-禁止静默使用模拟模型（ADR-0034，2026-10-08）：五类模型（M2 Embedding、M3 LLM、M4 OCR/Vision、M5 Rerank）在 `auto` 下找不到 Key 时，只有自动化测试环境 `APP_ENV=test` 使用模拟实现；development/staging/production 一律明确失败（LLM/Embedding/Rerank 报未配置，OCR/Vision 逐图标记失败、构建继续）。显式 `*_PROVIDER=fake` 仅允许在 development/test 使用（管理台横幅会醒目提示），staging/production 的配置校验拒绝全部五类 `fake`。`auto` 必须能从对应环境变量或可解密的 `model_config` 快照取得有效凭据。本地开发若想离线跑通，应显式设置 `*_PROVIDER=fake`，不要依赖缺 Key 时的自动回退。生产冒烟脚本 `scripts/smoke-production.sh` 五类均使用 `auto`（不发起模型调用）。部署校验还要确认在线查询模型与 Active Index 的 Embedding 模型一致，不能只确认服务进程已启动。
+禁止静默使用模拟模型（ADR-0034，2026-10-08）：五类模型（M2 Embedding、M3 LLM、M4 OCR/Vision、M5 Rerank）在 `auto` 下找不到 Key 时，只有自动化测试环境 `APP_ENV=test` 使用模拟实现；development/staging/production 一律明确失败（LLM/Embedding/Rerank 报未配置，OCR/Vision 逐图标记失败、构建继续）。显式 `*_PROVIDER=fake` 仅允许在 development/test 使用（管理台横幅会醒目提示），staging/production 的配置校验拒绝全部五类 `fake`。`auto` 必须能从对应环境变量或可解密的 `model_config` 快照取得有效凭据。本地开发若想离线跑通，应显式设置 `*_PROVIDER=fake`，不要依赖缺 Key 时的自动回退。生产冒烟脚本 `scripts/smoke-production.sh` 五类均使用 `auto`（不发起模型调用）。部署校验还要确认在线查询模型与 Active Index 的 Embedding 身份（Provider、模型名、端点、维度）一致，不能只确认服务进程已启动。
 
 ## 本地启动
 
@@ -35,7 +35,7 @@ bash scripts/bootstrap.sh
 | `M3_RAG_ANSWER_THINKING_BUDGET` | `2048` | 启用时 DashScope/Qwen 的最大内部思考 Token；关闭时不生效，与 `M3_RAG_ANSWER_MAX_TOKENS` 的最终回答预算分离。其他 Provider 当前不发送该扩展字段。 |
 | `M3_RAG_HISTORY_MAX_ROUNDS` | `4` | 最近完整问答轮次上限。 |
 | `M3_HISTORY_MAX_MESSAGES` | `10` | 技术历史消息上限，用户/助手成对选取；当前 Production Compose 未显式转发此变量。 |
-| `M3_HISTORY_TOKEN_BUDGET` | `2000` | 技术历史估算 Token 预算；最新完整轮次超预算时历史可能为空。当前 Production Compose 未显式转发此变量。 |
+| `M3_HISTORY_TOKEN_BUDGET` | `4000` | RAG 与冻结 Support 共用的历史估算 Token 预算，非 LLM 输出预算；最新完整轮次超预算时历史仍可能为空。Production Compose 显式转发，已有 `.env` 或进程环境值优先；部署前核对为 `4000`，重新构建/创建应用容器后生效。 |
 | `M3_RAG_ANSWER_REPAIR_ATTEMPTS` | `1` | 结构、证据白名单或真实实现信息违规后的最多修复次数。 |
 | `M3_RAG_SCOPE_MAX_TOKENS` | `800` | 每轮知识库名称/公开范围说明的 Prompt 快照估算 Token 上限；只截断运行时副本，不改数据库说明。 |
 | `M3_RAG_QUERY_INTERPRETER_MAX_TOKENS` | `512` | LLM 1 结构化查询理解输出上限。 |
@@ -98,9 +98,13 @@ Docker 构建使用根目录 `.dockerignore` 缩小上下文：本地 `.env` 文
 
 ## 生产核验与待确认
 
-### 生产更新流程（2026-10-09 安全修复仅本地验证，待部署）
+### 生产更新流程（2026-10-09 `0048` 与部署工具已部署；历史预算 4,000 及之后提交待部署）
 
-模型/索引一致性修复新增 `0048`：必须先运行一次性迁移到 head，再替换后端和两个 Worker，不能只更新前端或重启旧镜像。本地已执行 `0047 -> 0048`，本次未连接生产。迁移只加身份列、不调用模型、不重写历史向量。旧索引无完整历史身份，首次重建会重新解析全部缺指纹文档并产生真实模型费用；先处置已知解析问题、确认 OCR/Vision 可用及维护窗口，再构建、核对实际模型身份、确认卡片并用新会话试问。未匹配时失败关闭，不保证切换无中断。回滚旧镜像前核对迁移兼容，不能把删身份列当作常规部署回滚。
+模型/索引一致性修复新增 `0048`：必须先运行一次性迁移到 head，再替换后端和两个 Worker，不能只更新前端或重启旧镜像。本地已执行 `0047 -> 0048`；2026-10-09 已由 `deploy-production.sh` 部署到生产（只读核验见下一段）。迁移只加身份列、不调用模型、不重写历史向量。旧索引无完整历史身份，首次重建会重新解析全部缺指纹文档并产生真实模型费用；先处置已知解析问题、确认 OCR/Vision 可用及维护窗口，再构建、核对实际模型身份、确认卡片并用新会话试问。未匹配时失败关闭，不保证切换无中断。回滚旧镜像前核对迁移兼容，不能把删身份列当作常规部署回滚。
+
+2026-10-09 生产只读核验（ssh 只读命令，未写库、未改容器）：工作树 HEAD `e07165d`（包含 `b113ae2`/`396bc12`，不含 `01c09c4` 及之后提交）；Alembic 为 `0048`；backend/frontend/两个 Worker 容器创建于 2026-10-09 03:23 UTC，存在回滚标签 `rollback-20261009032220`；全部 10 个索引（7 个 ACTIVE）均为 `build_models='{}'` 的旧索引，7 个 ACTIVE 的 `legacy_embedding_unchanged` 全为真（Embedding 行最后修改 2026-09-15，早于全部索引，无晚于索引创建的身份类审计行），因此当前不会因旧审计行被误拦；重建任一知识库后该索引转为有 `build_models` 的新身份记录。
+
+**旧审计行的边界**：`0048` 之前的表单保存会把 `provider/model_name/base_url` 一并记入 `model_config_history.changed_fields`，即使值未变；该表只存字段名、不存新旧值，因此这类旧行无法被代码区分为“真变更”，旧索引一律失败关闭（要求重建）。需要在其他环境部署前预检时，只读执行：`SELECT i.id, h.created_at, h.changed_fields FROM knowledge_index i JOIN model_config_history h ON h.model_config_id = i.embedding_model_id AND h.created_at >= i.created_at AND h.changed_fields ?| ARRAY['provider','model_name','base_url'] WHERE i.build_models = '{}'::jsonb AND i.status IN ('ACTIVE','READY');`，返回行即表示升级后该旧索引会被判为身份已变更。
 
 服务器 `/home/cm/ShipRAG`，使用根目录 `.env`。推荐一键执行 `bash scripts/deploy-production.sh`：依次 `git pull --ff-only`、检查工作区干净、检查后台任务、确认、备份运行中应用容器的实际镜像 ID 为 `rollback-<时间>`（每个镜像仓库保留最近 3 个）、带构建标记构建、`run --rm migrate`、再次检查后台任务、`up --no-deps --force-recreate --wait` 替换应用容器，最后核对后端 `build_info` 与前端静态资源中的提交号等于 `HEAD`。构建/迁移失败或替换前复查未通过时不替换容器；已执行的迁移不会因此撤销。不能以可变镜像标签代替运行镜像备份：它可能已指向上次未发布的构建。没有运行容器时明确跳过该服务备份；容器读取失败或同服务多容器镜像不一致时停止。
 
@@ -134,7 +138,8 @@ docker compose -f compose.production.yaml up -d --no-deps --force-recreate \
 
 - 生产服务器（`/home/cm/ShipRAG`）使用根目录 `.env`，不存在 `.env.production`；命令不要加 `--env-file .env.production`。
 - 构建失败时 `docker compose up --build` 不会替换容器，旧版本继续运行；`git pull` 本身也不会改变运行版本。用 `docker buildx history ls` 查看最近构建是 `Completed` 还是 `Error`，用 `docker buildx history logs <ID>` 看失败原因；用镜像/容器创建时间核对是否真的替换。
-- 前端 `npm ci` 统一从 `NPM_REGISTRY`（构建参数，默认 `https://registry.npmmirror.com`）下载：lockfile 混有 npmmirror 与官方 registry 地址，生产主机到 `registry.npmjs.org` 间歇性重置/停滞（实测单请求 90.7 秒、`EIDLETIMEOUT`），曾导致前端构建反复失败；指定镜像后 `npm ci` 约 9 秒、整个前端镜像约 31 秒。需要官方源时传 `--build-arg NPM_REGISTRY=https://registry.npmjs.org/`。
+- `scripts/smoke-production.sh` 的镜像名取自 `compose.production.yaml`（`BACKEND_IMAGE`/`FRONTEND_IMAGE`，默认 `enterprise-rag-*:1.0.1`），`up --build` 会重打该标签且不随 `--project-name` 变化。修复前在生产主机运行会用工作树、不带 `BUILD_COMMIT` 地覆盖线上标签，之后手动 `--force-recreate` 会悄悄上线冒烟构建。现脚本固定构建到专用标签 `enterprise-rag-{backend,frontend}:m7-smoke`（可用 `SMOKE_BACKEND_IMAGE`/`SMOKE_FRONTEND_IMAGE` 覆盖），忽略调用方的 `BACKEND_IMAGE`/`FRONTEND_IMAGE`，且标签不含 `smoke` 时拒绝运行；冒烟镜像在运行后保留作构建缓存，可按需 `docker image rm`。修复前已执行过冒烟的主机，部署前先用 `docker image ls`/`docker inspect` 核对 `:1.0.1` 是否来自预期构建（页面构建信息显示“未标注”即可疑）。回归见 `backend/tests/test_smoke_production_script.py`。
+- 前端 `npm ci` 统一从 `NPM_REGISTRY`（构建参数，默认 `https://registry.npmmirror.com`）下载：lockfile 混有 npmmirror 与官方 registry 地址，生产主机到 `registry.npmjs.org` 间歇性重置/停滞（实测单请求 90.7 秒、`EIDLETIMEOUT`），曾导致前端构建反复失败；指定镜像后 `npm ci` 约 9 秒、整个前端镜像约 31 秒。该参数只重写 lockfile 中指向 `registry.npmjs.org` 的 63 条；解析到 `registry.npmmirror.com` 的 340 条仍固定从 npmmirror 下载，因此传 `--build-arg NPM_REGISTRY=https://registry.npmjs.org/` 并不能让构建完全摆脱 npmmirror（npmmirror 不可达的主机仍会失败）。
 - 后端 Dockerfile 在 `COPY backend/app` 之后才 `pip install`，任何代码改动都会重新下载 Python 依赖，构建依赖当时 PyPI 网络；2026-10-08 曾出现一次 `Network is unreachable` 失败，重试成功。可选优化（未实施）：依赖安装前置到复制代码之前、为 pip 增加镜像构建参数。
 - 直接 `up -d --build` 不写入构建版本标记（运行版本显示“未标注”），推荐使用下方带版本标记的流程。
 
@@ -177,7 +182,7 @@ RAG V2 不公开交付完整原文，完整候选只进入隐藏模型上下文�
 
 ## RAG 文档卡片部署与验证（0046）
 
-先执行 `cd backend && ../.venv/bin/alembic upgrade head`，再用 `../.venv/bin/alembic current` 确认为当前仓库 head（2026-10-05 为 `0047`，`0046` 是卡片功能首次迁移）；生产 Compose 仍由一次性 `migrate` 服务完成同一升级。迁移本身不调用模型、不回填数据。升级后在管理台“文档”页点击“生成/补齐 RAG 理解”，页面按 3 秒轮询显示 `RAG_DOCUMENT_CARD_GENERATE` 的进度、成功/失败/总数和终态错误；等待任务结束，再逐份进入“RAG 文档理解”检查并确认。活动索引中全部有效文档确认后，Assistant 才允许上线并保持 `ready=true`。整批 0 成功视为任务失败，部分失败保留已成功卡片并明确警告；再次全量补齐只选择缺失/失败/过期项。已确认卡片重新生成需要明确确认，成功后重新变成待确认并令已上线 Assistant 暂时 `ready=false`；失败时保留原已确认卡片。
+先执行 `cd backend && ../.venv/bin/alembic upgrade head`，再用 `../.venv/bin/alembic current` 确认为当前仓库 head（当前为 `0048`，`0046` 是卡片功能首次迁移）；生产 Compose 仍由一次性 `migrate` 服务完成同一升级。迁移本身不调用模型、不回填数据。升级后在管理台“文档”页点击“生成/补齐 RAG 理解”，页面按 3 秒轮询显示 `RAG_DOCUMENT_CARD_GENERATE` 的进度、成功/失败/总数和终态错误；等待任务结束，再逐份进入“RAG 文档理解”检查并确认。活动索引中全部有效文档确认后，Assistant 才允许上线并保持 `ready=true`。整批 0 成功视为任务失败，部分失败保留已成功卡片并明确警告；再次全量补齐只选择缺失/失败/过期项。已确认卡片重新生成需要明确确认，成功后重新变成待确认并令已上线 Assistant 暂时 `ready=false`；失败时保留原已确认卡片。
 
 定向自动化：`cd backend && ../.venv/bin/pytest --no-cov -q tests/test_rag_document_cards.py tests/test_rag_document_cards_postgres.py tests/test_maintenance_jobs.py tests/test_task_recovery.py`；前端：`cd frontend && npx vitest run tests/admin-api.spec.ts tests/viewInteractions.spec.ts`。PostgreSQL 用例必须实际执行，跳过不算通过。RAG V2 会读取当前冻结索引中有效的卡片参与文档召回；卡片缺失时仍可走 Chunk 通道，但不能把“卡片已生成”单独表述为回答质量已经通过。
 
@@ -195,7 +200,7 @@ RAG V2 为唯一主路径，开发与 Production Compose 使用同一执行逻�
 
 V2 配置见上表。Query 与 Answer 两段超时之和必须小于 `M3_TURN_DEADLINE_SECONDS`；开发和生产示例总时限均为 90 秒。
 
-表中默认值来自 Settings，不代表所有值都能只改生产 `.env` 覆盖。当前 Production Compose 显式转发历史轮次上限，但未转发历史消息数/Token 预算；镜像也不带项目 `.env`。若未来调整后两项，须同时为容器声明对应环境变量并重建容器，本次未修改编排或预算。
+表中默认值来自 Settings，不代表所有值都能只改生产 `.env` 覆盖。当前 Production Compose 显式转发历史轮次上限 `M3_RAG_HISTORY_MAX_ROUNDS` 和历史 Token 预算 `M3_HISTORY_TOKEN_BUDGET`（默认 4,000，`01c09c4` 起），但未转发历史消息数 `M3_HISTORY_MAX_MESSAGES`；镜像也不带项目 `.env`。调整未转发的变量须同时为容器声明环境变量并重建容器。注意 `01c09c4` 尚未部署：2026-10-09 只读核验生产 `e07165d` 容器内实际历史 Token 预算仍为 2,000（未转发该变量，取镜像内默认值）。
 
 V4.1 文档级排序复用现有 Rerank Provider、`M3_RERANK_TIMEOUT_SECONDS` 和模型快照，不增加环境变量或第三次 LLM。候选池内部最多取 `max(M3_RAG_FULL_DOCUMENT_LIMIT, M3_RAG_DOCUMENT_CARD_TOP_K)` 份用于排序，最终全文上限仍由 `M3_RAG_FULL_DOCUMENT_LIMIT=3` 控制。当前未调整 Chunk、向量/BM25 Top-K、卡片 Top-K 或 20,000 Token 全文预算；后续只有在多轮 Trace 显示稳定的召回或上下文问题时才单变量调整。
 

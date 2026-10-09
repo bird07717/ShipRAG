@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { ChatLineSquare, Search } from "@element-plus/icons-vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { adminApi } from "@/api/admin";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import ListSkeleton from "@/components/ui/ListSkeleton.vue";
 import { useAdminStore } from "@/composables/adminStore";
 import type { ConversationListItem, TraceSource } from "@/types/admin";
+import { isTraceSource, TRACE_SOURCE_LABELS, TRACE_SOURCE_TAG } from "@/utils/statusLabels";
+import { clampedPage } from "@/utils/paging";
+import ListPagination from "@/components/ui/ListPagination.vue";
 
 /*
  * Read-only conversation browser over the admin GET /conversations list.
@@ -17,17 +20,8 @@ import type { ConversationListItem, TraceSource } from "@/types/admin";
 const props = defineProps<{ navigationQuery?: string }>();
 const store = useAdminStore();
 
-const LIST_LIMIT = 200;
-const SOURCE_LABELS: Record<TraceSource, string> = {
-  ASSISTANT_API: "外部 Assistant",
-  INTERNAL_CHAT: "内部问答测试 / 试问",
-  PLAYGROUND: "调试台",
-};
-const SOURCE_TAG: Record<TraceSource, "success" | "info" | "warning"> = {
-  ASSISTANT_API: "success",
-  INTERNAL_CHAT: "info",
-  PLAYGROUND: "warning",
-};
+const SOURCE_LABELS = TRACE_SOURCE_LABELS;
+const SOURCE_TAG = TRACE_SOURCE_TAG;
 
 const items = ref<ConversationListItem[]>([]);
 const loading = ref(false);
@@ -41,13 +35,15 @@ const appliedActivityRange = ref<[Date, Date] | null>(null);
 let generation = 0;
 let controller: AbortController | undefined;
 
-const truncated = computed(() => items.value.length >= LIST_LIMIT);
+const page = ref(1);
+const pageSize = ref(50);
+const total = ref(0);
 
 function applyNavigationQuery(query: string | undefined): void {
   const params = new URLSearchParams(query ?? "");
   const requested = params.get("source");
   if (requested === "" || requested === "ALL") source.value = "";
-  else if (requested && requested in SOURCE_LABELS) source.value = requested as TraceSource;
+  else if (isTraceSource(requested)) source.value = requested;
   const user = params.get("user");
   if (user !== null) {
     userInput.value = user;
@@ -55,13 +51,20 @@ function applyNavigationQuery(query: string | undefined): void {
   }
 }
 
-async function load(): Promise<void> {
+/** Reload from the first page (filters, scope or deep link changed). */
+function load(): Promise<void> {
+  page.value = 1;
+  return loadPage();
+}
+
+async function loadPage(): Promise<void> {
   const knowledgeId = store.selectedKnowledgeId;
   const current = ++generation;
   controller?.abort();
   controller = undefined;
   if (!knowledgeId || !store.hasServiceCredential) {
     items.value = [];
+    total.value = 0;
     loading.value = false;
     loaded.value = false;
     return;
@@ -75,19 +78,30 @@ async function load(): Promise<void> {
       {
         source: source.value || undefined,
         userId: appliedUser.value || undefined,
-        limit: LIST_LIMIT,
+        limit: pageSize.value,
+        offset: (page.value - 1) * pageSize.value,
         activityFrom: appliedActivityRange.value?.[0].toISOString(),
         activityTo: appliedActivityRange.value?.[1].toISOString(),
       },
       { signal: controller.signal },
     );
     if (current !== generation || store.selectedKnowledgeId !== knowledgeId) return;
-    items.value = Array.isArray(response?.items) ? response.items : [];
+    const rows = Array.isArray(response?.items) ? response.items : [];
+    const count = typeof response?.total === "number" ? response.total : rows.length;
+    const target = clampedPage(page.value, pageSize.value, rows.length, count);
+    if (target !== null) {
+      page.value = target;
+      void loadPage();
+      return;
+    }
+    items.value = rows;
+    total.value = count;
     loaded.value = true;
   } catch (cause) {
     if (current !== generation) return;
     if (cause instanceof DOMException && cause.name === "AbortError") return;
     items.value = [];
+    total.value = 0;
     error.value = cause instanceof Error ? cause.message : "会话列表加载失败";
   } finally {
     if (current === generation) loading.value = false;
@@ -139,7 +153,13 @@ onBeforeUnmount(() => {
             :value="kb.id"
           />
         </el-select>
-        <el-select v-model="source" aria-label="会话来源" class="source-select">
+        <!-- "" (all sources) is a real choice here, not an empty value. -->
+        <el-select
+          v-model="source"
+          aria-label="会话来源"
+          class="source-select"
+          :empty-values="[null, undefined]"
+        >
           <el-option label="全部来源" value="" />
           <el-option
             v-for="(label, key) in SOURCE_LABELS"
@@ -171,7 +191,7 @@ onBeforeUnmount(() => {
         <el-button @click="applyFilters">查询</el-button>
         <div class="spacer" />
         <span class="muted result-count">
-          {{ loaded ? `${items.length} 个会话${truncated ? `（仅显示最近活动的 ${LIST_LIMIT} 个）` : ""}` : "" }}
+          {{ loaded ? `共 ${total} 个会话` : "" }}
         </span>
       </div>
       <p class="scope-note muted">
@@ -238,6 +258,13 @@ onBeforeUnmount(() => {
         :icon="ChatLineSquare"
         title="该条件下没有会话"
         description="可以切换来源为“全部来源”，或清空用户 ID 后重试。"
+      />
+      <ListPagination
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :total="total"
+        @page-change="loadPage"
+        @size-change="load"
       />
     </div>
   </div>

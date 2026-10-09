@@ -12,6 +12,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.common.errors import ApiError
+from app.common.text import escape_like
 from app.core.config import Settings
 from app.core.secrets import ModelSecretBox
 from app.ingestion.model_identity import legacy_embedding_unchanged_sql
@@ -1389,8 +1390,8 @@ class RagRepository:
             raise ApiError("TRACE_NOT_FOUND", "RAG Trace 不存在", 404)
         return dict(row)
 
-    async def list_traces(
-        self,
+    @staticmethod
+    def _trace_filters(
         *,
         knowledge_id: UUID | None = None,
         status: str | None = None,
@@ -1402,13 +1403,14 @@ class RagRepository:
         error_code: str | None = None,
         conversation_id: UUID | None = None,
         request_id: str | None = None,
+        question: str | None = None,
         exclude_low_information: bool = False,
         created_from: datetime | None = None,
         created_to: datetime | None = None,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[str, dict[str, Any]]:
+        """WHERE clause shared by the trace page and its total count."""
         clauses = ["1 = 1"]
-        parameters: dict[str, Any] = {"limit": limit}
+        parameters: dict[str, Any] = {}
         if knowledge_id is not None:
             clauses.append("kb_id = :kb_id")
             parameters["kb_id"] = knowledge_id
@@ -1439,6 +1441,9 @@ class RagRepository:
         if request_id is not None:
             clauses.append("request_id = :request_id")
             parameters["request_id"] = request_id
+        if question:
+            clauses.append("question ILIKE :question ESCAPE '\\'")
+            parameters["question"] = f"%{escape_like(question)}%"
         if exclude_low_information:
             clauses.append(
                 "COALESCE(retrieval_result #>> "
@@ -1455,19 +1460,36 @@ class RagRepository:
         if created_to is not None:
             clauses.append("created_at < :created_to")
             parameters["created_to"] = created_to
+        return " AND ".join(clauses), parameters
+
+    async def list_traces(
+        self, *, limit: int = 50, offset: int = 0, **filters: Any
+    ) -> list[dict[str, Any]]:
+        """Newest-first trace summaries; ``filters`` are those of ``_trace_filters``."""
+        where, parameters = self._trace_filters(**filters)
         query = f"""
             SELECT trace_id, request_id, source, mode, kb_id, index_id, question, status,
                    user_id, response_type, answer_mode, latency, error,
                    created_at, finished_at, engine, stage, parent_trace_id,
                    fallback_from, fallback_reason
             FROM rag_trace
-            WHERE {" AND ".join(clauses)}
-            ORDER BY created_at DESC
-            LIMIT :limit
+            WHERE {where}
+            ORDER BY created_at DESC, id DESC
+            LIMIT :limit OFFSET :offset
         """
         async with self.engine.connect() as connection:
-            result = await connection.execute(text(query), parameters)
+            result = await connection.execute(
+                text(query), {**parameters, "limit": limit, "offset": offset}
+            )
             return [dict(row) for row in result.mappings()]
+
+    async def count_traces(self, **filters: Any) -> int:
+        where, parameters = self._trace_filters(**filters)
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(f"SELECT count(*) FROM rag_trace WHERE {where}"), parameters
+            )
+            return int(result.scalar_one())
 
     def _environment_key_for(self, model_type: str, provider: str) -> Any:
         return environment_api_key(self.settings, model_type, provider)
