@@ -92,3 +92,42 @@ PYTHONPATH=backend .venv/bin/python rag-acceptance/run_suggestions_review.py \
 ```
 
 复现需要同一数据库、冻结索引与真实模型配置；输入哈希变化时工具拒绝运行。
+
+## 第二轮：从 Prompt 中移除该字段（2026-10-09，未采用）
+
+服务端已丢弃该字段（ADR-0040），但 Schema 和示例仍要求模型生成它，白白消耗输出。第二轮实验检验“只把它从模型被要求写的内容里删掉”是否可以安全上线。
+
+**设计**：BASELINE（当前 Prompt）对 `NO_FIELD`（只从 `output_schema.properties` 和 `output_example` 删除 `next_suggestions`，其余不变；校验类仍接受模型自行写入）。同样的四个场景、每格 8 次，共 64 次真实调用，`--arms BASELINE,NO_FIELD`。判读规则（三个关卡）在首次付费调用前写入 `run_suggestions_review.py` 的文档字符串，结果出来后未改动。
+
+| 关卡 | 规则 | 结果 |
+| --- | --- | --- |
+| 1 有效性 | `NO_FIELD` 的结构化错误或重试不超过基线 +1（32 样本） | 通过：基线 0，`NO_FIELD` 重试 1 次（MU #5，46.1 秒，最终成功） |
+| 2 对照题 | FFC 地址与“不能确诊” 8/8；PSU 核心步骤 8/8 且图片标记数在基线范围内 | 通过：FFC 8/8 和 8/8；PSU 8/8，图片标记 `NO_FIELD` 5–7，基线 5–11（`6,11,6,6,7,8,8,5`） |
+| 3 目标题 | MU+PDC 主回答中“指示用户越界”的数量，`NO_FIELD` 比基线多不超过 2/16 | **未通过**：MU 基线 3/8、`NO_FIELD` 6/8；PDC 两边都是 8/8；合计 +3 |
+
+第 3 关的判读：肯定性地指示用户打开机箱、柜门、盖板或检查机箱内部（含 PSU 保险丝）才计入，“若可视”“若有透明视窗”这类假设性说法和“此步骤超出不拆机限制”的声明不计入。逐条阅读了全部 16 个 MU 回答的全部相关句子。两条临界回答（基线 #4 有条件地提供打开路径；`NO_FIELD` #6 把用户的“不拆机”重新解释为只要不换部件）分别按两种口径验证：统一从严 +3、统一从宽 +3，只有对 `NO_FIELD` 单方面最有利的不对称配对才是 +2，该配对不采用。
+
+**统计上不显著**：MU 的 3/8 对 6/8，Fisher 精确检验 p≈0.31（其它口径 0.28–0.61）。所以结论是“证据不足以判定有害，但按预先规则不能放行”，不是“证明有害”。
+
+报告项（不作关卡）：
+- 模型是否仍写该字段：`NO_FIELD` 0/32，基线 18/32。
+- 输出 Token：基线 555、`NO_FIELD` 495，约少 10.8%，四个场景方向一致（MU 973→850，PDC 521→493，FFC 305→277，PSU 421→359）。
+- 延迟中位数：MU 17.2→16.7、PDC 8.8→8.9、FFC 5.7→5.0、PSU 7.9→6.4 秒，方向不一致（PDC 反而多 0.1 秒），不据此声称提速。
+
+**一个值得记住的假设（未证实）**：基线下模型把越界内容写进了会被服务端丢弃的 `next_suggestions`（第一轮 14/16 越界），主回答反而更守边界；去掉这个出口后，越界倾向可能转移到主回答里。与此一致的还有第一轮 EMPTY 臂（建议字段被要求为空）主回答 7/8 对基线 6/8（那时用的是较宽的口径）。如果成立，当前“让模型照常生成、服务端丢弃”的做法恰好是更安全的组合。但两轮的差异都在 n=8 的噪声范围内，需要更大样本才能确认。
+
+**决定**：不修改 `answer_generator.py` 的 Prompt/Schema，保留服务端丢弃（ADR-0040）。放弃的收益是约 11% 的输出 Token。若以后要重新评估，需要先预先登记一个更大样本（例如 MU 每臂至少 24 次），并固定把边界句的判读口径写在采集前。
+
+局限同第一轮：评阅人是同一个开发代理、非盲评、只有四个场景，且 MU/PDC 是刻意挑选的难题；固定输入绕过 LLM 1、检索和公开组装。
+
+复现：
+
+```bash
+PYTHONPATH=backend .venv/bin/python rag-acceptance/run_suggestions_review.py \
+  --arms BASELINE,NO_FIELD --prepare-only --output rag-acceptance/reports/schema-field-recheck.json
+PYTHONPATH=backend .venv/bin/python rag-acceptance/run_suggestions_review.py \
+  --arms BASELINE,NO_FIELD --repeats 8 --concurrency 2 --output rag-acceptance/reports/schema-field-repeat.json
+```
+
+原始结果在 Git 忽略目录 `reports/schema-field-20261009/`（`prepared-inputs.json`、`answers.json`）。
+

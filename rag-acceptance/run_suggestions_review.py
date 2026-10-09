@@ -29,6 +29,27 @@ Protocol fixed BEFORE the first paid call (do not edit after seeing results):
     MU+PDC combined counts as a regression).
 ``--summarize`` prints mechanical screening counts only; they are NOT the primary metric
 because negations such as "无需更换" match the patterns. No model judge, no Golden.
+
+Second experiment: stop asking LLM 2 to write ``next_suggestions``
+------------------------------------------------------------------
+The server already discards the field (ADR-0040), so asking for it only costs output tokens.
+Arms (``--arms BASELINE,NO_FIELD``): NO_FIELD deletes the property from ``output_schema`` and the
+key from ``output_example`` and changes nothing else; the schema class still accepts the field if
+the model writes it anyway. Same four cases, ``--repeats`` 8, all results kept.
+
+Protocol fixed BEFORE the first paid call of this experiment (do not edit after seeing results):
+  * Gate 1, validity: structured-output errors or retries (usage.structured_attempts > 1) in
+    NO_FIELD exceed BASELINE's by at most 1 over the 32 samples.
+  * Gate 2, controls: FFC states 172.16.8.175 and that a port drop alone cannot confirm hardware
+    damage in 8/8 samples; PSU keeps power-off, 3359 board, photographing/marking, replacing the
+    PSU and the five-minute alarm check in 8/8, and its image-marker count stays within
+    BASELINE's min..max.
+  * Gate 3, target cases: main answers in MU+PDC that direct the user beyond the request (MU:
+    opening the chassis or inspecting inside it; PDC: replacing, temporary docking or repair),
+    judged by reading the matched sentences, exceed BASELINE's count by at most 2 of 16.
+  * Reported, not gated: whether the model still writes the field, completion tokens, latency.
+  Ship only if all three gates hold. Any unexpected failure mode (for example a different answer
+  shape) is reported and blocks shipping until it is understood.
 """
 
 from __future__ import annotations
@@ -57,7 +78,8 @@ from app.rag.v2.document_retrieval import DocumentCandidate
 from app.rag.v2.query_interpreter import QueryInterpretation
 
 CASES = ("evidence_mu", "evidence_pdc", "evidence_ffc", "evidence_psu")
-ARMS = ("BASELINE", "DEFINED", "EMPTY")
+DEFAULT_ARMS = ("BASELINE", "DEFINED", "EMPTY")
+ALL_ARMS = (*DEFAULT_ARMS, "NO_FIELD")
 
 DEFINED_RULE = (
     "next_suggestions 是用户可以直接点击追问的问题，最多 3 条，只能写成疑问句；"
@@ -67,6 +89,7 @@ DEFINED_RULE = (
 )
 EMPTY_RULE = "next_suggestions 必须返回空列表。"
 ARM_RULES = {"DEFINED": DEFINED_RULE, "EMPTY": EMPTY_RULE}
+NO_FIELD_NOTE = "NO_FIELD removes next_suggestions from output_schema.properties and output_example only"
 
 # Mechanical screening only; see the module docstring.
 SCREEN = {
@@ -84,6 +107,10 @@ def arm_prompt(base_prompt: str, arm: str) -> str:
     if arm == "BASELINE":
         return base_prompt
     payload = json.loads(base_prompt)
+    if arm == "NO_FIELD":
+        payload["output_schema"]["properties"].pop("next_suggestions")
+        payload["output_example"].pop("next_suggestions")
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     payload["output_contract"] = [*payload["output_contract"], ARM_RULES[arm]]
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -95,7 +122,7 @@ def summarize(path: Path) -> None:
         + " ".join(f"{k}-S/{k}-A" for k in SCREEN)
     )
     for row in report["results"]:
-        for arm in ARMS:
+        for arm in ALL_ARMS:
             responses = [
                 run["variants"][arm]["response"]
                 for run in row["runs"]
@@ -135,6 +162,13 @@ async def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--summarize", type=Path)
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument(
+        "--arms",
+        default=",".join(DEFAULT_ARMS),
+        help="comma separated subset of "
+        + ",".join(ALL_ARMS)
+        + "; BASELINE must come first",
+    )
     parser.add_argument("--repeats", type=int, default=8)
     parser.add_argument("--concurrency", type=int, default=2)
     args = parser.parse_args()
@@ -149,6 +183,9 @@ async def main() -> None:
         )
     if args.repeats < 1 or args.concurrency < 1:
         parser.error("repeats and concurrency must be positive")
+    arms = tuple(item.strip() for item in args.arms.split(",") if item.strip())
+    if not arms or arms[0] != "BASELINE" or not set(arms) <= set(ALL_ARMS):
+        parser.error("--arms must start with BASELINE and use known arm names")
 
     baseline_text = args.baseline.read_text()
     baseline = json.loads(baseline_text)
@@ -171,14 +208,15 @@ async def main() -> None:
     repo = RagRepository(engine, settings)
     report: dict[str, Any] = {
         "started_at": datetime.now(UTC).isoformat(),
-        "method": "single factor on next_suggestions; BASELINE/DEFINED/EMPTY; no quality grading",
+        "method": f"single factor on next_suggestions; arms {','.join(arms)}; no quality grading",
         "baseline": str(args.baseline),
         "baseline_sha256": sha(baseline_text),
         "answer_generator_sha256": sha(Path(answer_generator.__file__).read_text()),
         "prepare_only": args.prepare_only,
         "repeats": args.repeats,
         "generation_settings": generation,
-        "arm_rules": ARM_RULES,
+        "arm_rules": {**ARM_RULES, "NO_FIELD": NO_FIELD_NOTE},
+        "arms": list(arms),
         "knowledge_id": baseline["knowledge_id"],
         "index_id": baseline["index_id"],
         "results": [],
@@ -280,23 +318,30 @@ async def main() -> None:
                 raise ValueError(
                     "Current full context/original prompt differs from the baseline"
                 )
-            prompts = {arm: arm_prompt(prompt, arm) for arm in ARMS}
-            for arm in ("DEFINED", "EMPTY"):
-                stripped = json.loads(prompts[arm])
-                stripped["output_contract"].pop()
-                if (
-                    json.dumps(stripped, ensure_ascii=False, separators=(",", ":"))
-                    != prompt
-                ):
-                    raise ValueError(
-                        f"{arm} arm changed more than the single contract item"
-                    )
+            prompts = {arm: arm_prompt(prompt, arm) for arm in arms}
+            for arm in arms:
+                if arm in ARM_RULES:
+                    stripped = json.loads(prompts[arm])
+                    stripped["output_contract"].pop()
+                    if (
+                        json.dumps(stripped, ensure_ascii=False, separators=(",", ":"))
+                        != prompt
+                    ):
+                        raise ValueError(
+                            f"{arm} arm changed more than the single contract item"
+                        )
+                elif arm == "NO_FIELD":
+                    expected = json.loads(prompt)
+                    expected["output_schema"]["properties"].pop("next_suggestions")
+                    expected["output_example"].pop("next_suggestions")
+                    if expected != json.loads(prompts[arm]):
+                        raise ValueError("NO_FIELD arm changed more than the field")
             row = {
                 "id": original["id"],
                 "question": original["question"],
                 "history": original["history"],
                 "context": old,
-                "prompt_sha256": {arm: sha(prompts[arm]) for arm in ARMS},
+                "prompt_sha256": {arm: sha(prompts[arm]) for arm in arms},
                 "runs": [],
             }
             report["results"].append(row)
@@ -304,7 +349,7 @@ async def main() -> None:
         save()
         if args.prepare_only:
             print(
-                f"Prepared {len(frozen)} fixed inputs x {len(ARMS)} arms; no paid calls"
+                f"Prepared {len(frozen)} fixed inputs x {len(arms)} arms; no paid calls"
             )
             return
 
@@ -313,8 +358,8 @@ async def main() -> None:
         async def capture(
             row: dict[str, Any], prompts: dict[str, str], repeat: int, number: int
         ) -> None:
-            shift = (repeat + number) % len(ARMS)
-            order = [*ARMS[shift:], *ARMS[:shift]]
+            shift = (repeat + number) % len(arms)
+            order = [*arms[shift:], *arms[:shift]]
             run: dict[str, Any] = {"repeat": repeat, "order": order, "variants": {}}
             row["runs"].append(run)
             async with semaphore:
