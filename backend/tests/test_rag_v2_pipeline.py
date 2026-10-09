@@ -1989,3 +1989,39 @@ async def test_v2_retrieval_trace_records_query_embedding_status() -> None:
     }
     # A lost vector still answers from the lexical channels.
     assert invalid["candidate_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_v2_discards_model_written_next_suggestions() -> None:
+    """``next_suggestions`` stays in the contract but is always empty (ADR-0040):
+    whatever the answer model writes there is dropped before the public payload."""
+
+    repository = _Repository(_candidate())
+    completions = [
+        '{"resolved_question":"如何配置 VAU 图像","scope":"IN_SCOPE",'
+        '"relation":"NEW_TASK","response_path":"KNOWLEDGE"}',
+        '{"response_kind":"ANSWER","basis":"DOCUMENT","answer":"先设置电脑 IP 为 172.16.8.175。",'
+        '"used_document_keys":["D1"],"used_image_keys":[],'
+        '"next_suggestions":["如何更换 PDC 接线盒？","更换后需要做哪些防水处理？"]}',
+    ]
+    service = RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: FakeEmbeddingProvider(1024),
+        llm_factory=lambda _settings, _snapshot: FakeLlmProvider(completions=[completions.pop(0)]),
+    )
+
+    payload = await service.generate(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=repository.turn.conversation_id,
+        question="如何配置 VAU 图像？",
+        request_id="v2-discard-next-suggestions",
+    )
+
+    assert completions == []
+    assert payload["response_type"] == "ANSWERED"
+    assert payload["next_suggestions"] == []
+    assert repository.completed is not None
+    answer_trace = repository.completed["doc_routing"]["generation"]["answer"]
+    # The model still wrote two; the trace says how many were dropped.
+    assert answer_trace["next_suggestions_discarded"] == 2

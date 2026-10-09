@@ -565,6 +565,7 @@ class RagV2Pipeline:
                 "used_image_count": len(generated.used_image_keys),
                 "public_leak_repair_count": repair_count,
                 "document_key_scrub_count": key_scrub_count,
+                "next_suggestions_discarded": len(generated.next_suggestions),
                 "parameter_observations": observed_parameters,
                 "unsupported_parameter_count": sum(
                     item["status"] == "UNSUPPORTED" for item in observed_parameters
@@ -585,5 +586,8 @@ class RagV2Pipeline:
             },
             trace=generation_trace,
             timings=timings,
-            next_suggestions=generated.next_suggestions,
+            # The field stays in the public contract but is always empty (ADR-0040): the
+            # model-written suggestions were unreliable (see suggestions-review.md), so
+            # they are dropped here instead of changing the generation prompt.
+            next_suggestions=[],
         )

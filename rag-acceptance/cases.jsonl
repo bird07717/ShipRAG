@@ -26,7 +26,7 @@
 {"id": "rag_xdoc_002", "category": "cross_doc", "question": "通讯线缆怎么检查", "expected": {"document_keys": ["通讯线缆"], "tolerance": "ANY_OF"}}
 {"id": "rag_xdoc_003", "category": "cross_doc", "question": "PSU板上的保险丝怎么更换", "expected": {"document_keys": ["保险丝"], "tolerance": "ANY_OF"}}
 {"id": "rag_xdoc_004", "category": "cross_doc", "question": "MU报警了怎么处理", "expected": {"document_keys": ["MU报警"], "tolerance": "ANY_OF"}}
-{"id": "rag_xdoc_005", "category": "cross_doc", "question": "怎么升级设备固件", "expected": {"document_keys": ["升级"], "tolerance": "ANY_OF", "allow_suggested_documents": true}}
+{"id": "rag_xdoc_005", "category": "cross_doc", "question": "怎么升级设备固件", "expected": {"document_keys": ["升级"], "tolerance": "ANY_OF"}}
 {"id": "rag_xdoc_006", "category": "cross_doc", "question": "电池怎么换", "expected": {"document_keys": ["电池"], "tolerance": "ANY_OF"}}
 {"id": "rag_oos_001", "category": "out_of_scope", "question": "今天天气怎么样", "expected": {"document_keys": [], "tolerance": "NONE"}}
 {"id": "rag_oos_002", "category": "out_of_scope", "question": "帮我写一首关于大海的诗", "expected": {"document_keys": [], "tolerance": "NONE"}}

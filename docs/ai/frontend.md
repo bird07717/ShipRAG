@@ -83,6 +83,7 @@
 
 - `EngineRoutingView` 默认策略为 `RAG_ONLY`，`SUPPORT_WITH_RAG_FALLBACK` 选项与 Support 就绪卡片标注"已冻结（ADR-0021）"但保留可用（后端网关仍可执行该策略，前端不单独禁用）。
 - `RagConfigurationView` 只保留 `vector_top_k`、`bm25_top_k`、`fusion_top_k` 三个 V2 实际消费的参数；`rerank_top_n`、`context_max_chunks` 已从界面移除（后端 PATCH 为部分更新，兼容缺省）。提示首先说明保存后下一轮对应策略的检索请求生效，无需重启或重建；每查询片段召回/融合上限不同于最终文档数，文档上限和全文预算由后端运行配置控制。已有会话使用新召回参数，但固定创建时的索引；切换索引后的验收需新会话。寒暄/非文档对话不受检索参数影响。
+- `DemoChat` 与回答复核的 `next_suggestions` 渲染保留，但新回答恒为空（ADR-0040），都用“为空则不显示”处理；旧会话/旧复核记录仍可能显示历史快照里的建议。
 - `DemoChat` 的模式标签收敛为 V2 五种 `answer_mode`；legacy 模式（`DOCUMENT_EXPLANATION`、`STEP_GUIDANCE` 等）与 `DOC_DELIVERED` 专用渲染分支已删除，未知值仍按原文兜底显示。
 - `PlaygroundView` 结果面板按 V2 文档级语义展示：`selected_context` 渲染为"隐藏上下文候选文档"（document_key + 内容 SHA-256 前缀），不再按 chunk 分数/正文渲染；`SourceCitation`、`RetrievalChunk` 组件因此删除。`playgroundOptions` 已移除 `rerank_top_n`。
 - `TracesView` 时间线包含 V2 各阶段耗时（`v2_query_interpreter_ms` 等）并保留 legacy 键（标注"遗留"，按存在与否自过滤）；详情的"RAG V2 生成详情"展示 Knowledge/Conversation 回答路径、查询理解、文档级重排或对话路径跳过状态、检索降级、隐藏上下文与合规修复。V2 重排折叠面板读取 `runtime_snapshot.generation.retrieval.document_rerank`（对话路径读取检索跳过状态），仅非 V2 Trace 读取旧 `rerank_result`；Support 决策段标注"遗留"，Prompt 折叠面板仅在存在时显示。

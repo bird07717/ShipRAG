@@ -755,7 +755,7 @@ SSE 事件关系：
 | `clarification` | object/null | 否 | 需要用户补充信息时的内容。 | 转换为补充提问交互。 |
 | `escalation` | object/null | 否 | 转人工或升级处理信息。 | 对接业务侧人工流程。 |
 | `disclaimer` | string/null | 否 | 附加提示；当前 RAG 正常技术响应统一使用一行短提醒。 | 非空时在回答附近展示；保持对省略或 `null` 的兼容。 |
-| `next_suggestions` | string[] | 是 | 下一步建议问题，可能为空。 | 可渲染为快捷提问。 |
+| `next_suggestions` | string[] | 是 | 保留字段，**新回答恒为空数组**（服务端不再生成建议问题）。历史消息和幂等重放返回当时保存的快照，旧记录里可能仍有非空值。 | 不要依赖其非空；快捷提问请使用欢迎语接口返回的推荐问题。渲染时按“为空则不显示”处理。 |
 | `created_at` | datetime string | 是 | 服务端生成终态的时间。 | 记录并按业务时区展示。 |
 
 `error` 字段：
