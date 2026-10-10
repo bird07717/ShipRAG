@@ -4,6 +4,16 @@
 >
 > **最后一次已记录生产快照（2026-10-09 14:36 北京时间只读核验）**：生产 HEAD `4ccf19a`（PR #3 合并 `feat/admin-console-paging`），数据库 `0048`（本次无新迁移），backend/frontend/两个 Worker 于 06:33 UTC 重建，backend/frontend healthy，`/health/ready` 为 200。已包含：模型/索引一致性（`b113ae2`）、会话筛选与复核降噪（`85faaa3`）、部署工具（`396bc12`）、历史预算 4,000 Token（`01c09c4`，容器内有效值 4,000）、管理台前端优化（ADR-0037）、管理列表服务端分页与按库回收范围修正（ADR-0038，含后端改动）及冒烟脚本专用镜像标签（`3cf5580`）。上一快照为 2026-10-09 03:23 UTC 的 `e07165d`，更早为 2026-10-08 `ed0038d`/`0047`；五类模型均为 DashScope。核验仅为只读：未做浏览器、分页功能及真实模型验收，“已部署”不等于功能验收完成。9 月 29 日及更早记录均为历史状态。
 
+## LLM 2 提示词排布与图片规则实验（2026-10-10，分支 `exp/image-rule-and-prompt-cache`，基于 `feat/prompt-listing-and-card-prompt`，本地，未合并、未部署，ADR-0042）
+
+- **采纳（用户决定）**：`build_answer_prompt` 的 JSON 改为静态规则（Schema、示例、12 条规则、输出契约）在前，逐请求数据在后，让供应商隐式前缀缓存能跨请求命中。内容逐键不变。缓存探针（28 次真实调用）：静态在前后稳定命中 1024 Token，现状为 0，保留时间在分钟级且不稳定（间隔 3.5 分钟命中、10 分钟未命中、15 分钟 LLM 1 命中而 LLM 2 未命中）；但 LLM 2 提示词约 1.95 万 Token，命中只占约 5%、约省输入费用的 4%，生产流量也太小，所以眼下收益很小，用户的理由是正式版上线后流量会上来。
+- **未过的关卡（有意接受）**：60 次不退化筛查里关卡 4(c) 未通过（借用其他文档的图片 4.33 对 3.00，上限 +1，p≈0.23，不显著），其余关卡通过。
+- **LLM 1 不改**：同样的排布放到 LLM 1 会丢用户的排除条件（10 个问题 × 3 次：丢 6 对 0），而它只有约 1.4k Token、缓存收益可忽略。LLM 1 提示词与改动前逐字节一致，`test_prompt_layout.py` 固定“问题在前”。
+- **图片规则 12 / 图片分组对照：不采纳**。60 个样本，预设规则会选 RULE，但证据太弱（稳定性优势来自一个离群值，FFC 更换没有改善，每格 3 次，基线自己波动与效应一样大）；记录和复现见 `rag-acceptance/image-rule-review.md`。过程中评测脚本漏了生产的 `normalize_evidence_bindings`，误判了 10 个样本，已修复并重算；生产没有这个问题。
+- **新增实验工具**（只读本地库、会调用真实模型，不接入业务）：`frozen_inputs.py`（冻结输入与新旧排布重建）、`run_image_rule_review.py`、`run_prompt_cache_probe.py`、`run_layout_review.py`、`run_interpreter_constraint_check.py`。原始结果在被忽略的 `rag-acceptance/reports/` 下。
+- **验证**：新增 3 项排布测试；相关后端测试 113 passed（`test_prompt_layout`、`test_runtime_prompt_listing`、`test_rag_v2_history`、`test_rag_v2_pipeline`、`test_m3_rag`）；Ruff 通过；LLM 2 的旧排布与改动前 `HEAD` 提示词、LLM 1 的提示词与 `HEAD` 均逐字节核对一致（五个冻结案例）。全量后端测试见最后答复。
+- **部署后观察**：Trace 的 `model_usage.answer.prompt_tokens_details.cached_tokens` 占比；完整操作类回答的送达图片数；提示词的键顺序现在是有意的约束。
+
 ## 提示词清单从真实常量生成与卡片提示词 v2（2026-10-09，分支 `feat/prompt-listing-and-card-prompt`，本地，未合并、未部署，ADR-0041）
 
 - **清单（逐项重构）**：管理台 `runtime-v2-*` 清单原先手写并已漂移；现在三个模块（`answer_generator`、`query_interpreter`、`conversation_answer`）的提示词文本是模块常量，构建函数和 `rag/prompt.py` 的清单共用，新增对话阶段条目。重构前后十个真实提示词字符串（LLM 1/LLM 2/修复/对话的用户与系统消息）的 sha256 完全一致，所以模型看到的文本没有变化。

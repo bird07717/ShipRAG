@@ -232,8 +232,15 @@ def build_answer_prompt(
     scope_description: str,
     max_rounds: int,
 ) -> str:
+    # The static instructions come first and the per-request data last (ADR-0042): the provider's
+    # implicit prefix cache only matches a shared leading part, and the instructions are the only
+    # part that is identical across requests. Do not move per-request data in front of them.
     return json.dumps(
         {
+            "output_schema": answer_output_schema(),
+            "output_example": ANSWER_OUTPUT_EXAMPLE,
+            "decision_policy": list(ANSWER_DECISION_POLICY),
+            "output_contract": list(ANSWER_OUTPUT_CONTRACT),
             "trusted_product_profile": {
                 "name": product_name,
                 "description": scope_description,
@@ -246,10 +253,6 @@ def build_answer_prompt(
             "hidden_document_context": context.prompt_context,
             "available_document_keys": list(context.document_keys),
             "available_image_keys": [binding.key for binding in context.image_bindings],
-            "output_schema": answer_output_schema(),
-            "output_example": ANSWER_OUTPUT_EXAMPLE,
-            "decision_policy": list(ANSWER_DECISION_POLICY),
-            "output_contract": list(ANSWER_OUTPUT_CONTRACT),
         },
         ensure_ascii=False,
         separators=(",", ":"),
