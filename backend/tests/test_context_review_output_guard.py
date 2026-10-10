@@ -13,6 +13,21 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _subprocess_env() -> dict[str, str]:
+    """Environment for a script run in a temporary directory.
+
+    pytest-cov starts coverage in every child process and tells it to discover its config from
+    the working directory (``COV_CORE_CONFIG=":"``). In a temp directory it finds none, records
+    plain statement coverage and the final combine fails with "Can't combine statement coverage
+    data with branch data" (the project sets ``branch = true``). Point it at the real config.
+    """
+
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "backend")}
+    if "COV_CORE_CONFIG" in env:
+        env["COV_CORE_CONFIG"] = str(ROOT / "backend" / "pyproject.toml")
+    return env
+
+
 @pytest.mark.parametrize(
     ("script", "arguments"),
     [
@@ -37,7 +52,7 @@ def test_existing_report_is_rejected_before_reading_input_or_calling_services(
             "--output",
             str(output),
         ],
-        env={**os.environ, "PYTHONPATH": str(ROOT / "backend")},
+        env=_subprocess_env(),
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -84,7 +99,7 @@ def test_import_to_new_report_preserves_complete_answer_and_source(tmp_path: Pat
             "--output",
             str(output),
         ],
-        env={**os.environ, "PYTHONPATH": str(ROOT / "backend")},
+        env=_subprocess_env(),
         cwd=tmp_path,
         capture_output=True,
         text=True,

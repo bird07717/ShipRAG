@@ -137,6 +137,7 @@
 - API 404 的统一错误消息可能提示服务进程仍是旧版本；部署或路由变更后检查后端是否重启、容器镜像是否更新。
 - 构建中/激活中索引、Profile 发布版本与会话冻结版本不同是设计行为；排查回答时同时检查 Trace、会话索引和知识库活动版本。
 - 生产 Docker Smoke 会创建和删除临时容器/卷；不要在不了解目标 Docker 上下文时执行。
+- 全量 `pytest` 结尾出现 `INTERNALERROR ... Can't combine statement coverage data with branch data` 已修复（2026-10-10）：测试里用 `cwd=tmp_path` 起子进程时，pytest-cov 让子进程从工作目录发现覆盖率配置，找不到 `branch = true`，记成语句覆盖而无法合并。`test_context_review_output_guard.py` 的 `_subprocess_env()` 把 `COV_CORE_CONFIG` 指向 `backend/pyproject.toml`；以后新增“在临时目录起 Python 子进程”的测试要沿用。把 DB 集成变量置空跑 `pytest` 时覆盖率只有约 69%，低于默认 70% 门槛，这是跳过 125 项集成测试的预期结果；正式门禁是 `scripts/check.sh`（pytest 本身 `--cov-fail-under=0`，之后追加三项 smoke 再要求累计 ≥80%）。
 - 不要在日志、Issue、认知文档或测试输出中复制 Token、API Key、数据库密码、MinIO 凭据或 `.env` 值。
 
 
