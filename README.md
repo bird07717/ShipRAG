@@ -28,24 +28,6 @@
 
 > 项目已部署到生产环境，有 40 余份架构决策记录（ADR）、49 个 Alembic 迁移、1,000 多个后端测试用例和 53 个真实模型黄金回归用例。
 
-## 界面预览
-
-<table>
-  <tr>
-    <td width="50%"><img src="docs/images/chat.png" alt="问答测试：结构化排查回答与依据提示"></td>
-    <td width="50%"><img src="docs/images/documents.png" alt="文档管理：构建状态与 RAG 文档理解确认"></td>
-  </tr>
-  <tr>
-    <td align="center">问答测试：按步骤给出排查方案，并标明行业通用知识</td>
-    <td align="center">文档管理：DOCX / PDF 构建状态与文档理解卡片确认</td>
-  </tr>
-</table>
-
-<p align="center"><img src="docs/images/dashboard.png" alt="运行概览：上线状态、近 7 天指标与请求趋势" width="85%"></p>
-<p align="center">运行概览：上线状态、待办、近 7 天回答指标与请求趋势</p>
-
-> 截图中的知识库、文档、问答和统计数字均为虚构的演示数据。
-
 ## 核心设计：隐藏全文双 LLM
 
 传统 RAG 把 Top-K 个 Chunk 拼进 Prompt。对**操作手册、故障排查**这类文档来说，这种做法有个硬伤：步骤被切散，前提条件和警告留在另一个 Chunk 里，模型只能补全或者猜。
@@ -75,6 +57,18 @@ flowchart LR
 - **每轮重新检索**：不维护“焦点文档”状态机，换话题不会被上一轮的文档锁住。追问时，上一轮实际用到的文档会以零初始分作为软候选参与 Rerank，减少追问时的检索漂移。
 - **全文只给模型看**：用户看到的是答案和服务器按白名单交付的配图。原文、候选列表、Prompt、文档总数和对象存储位置都不会出现在公开响应里。
 - **降级不跳回旧链路**：Rerank 失败时保留 RRF 顺序，LLM 1 不可用时使用原问题，Embedding 失败时退到 BM25 和卡片通道。所有降级状态都写进 Trace，在 Dashboard 上统计降级率。
+
+### 与常见 RAG 做法的对比
+
+| 维度 | 常见做法 | ShipRAG |
+| --- | --- | --- |
+| 给模型的上下文 | Top-K 个 Chunk 拼接，步骤和前提可能被切散 | 检索到文档级，交给模型 1～3 份完整有序文档 |
+| 是否检索 | 每个问题都检索 | LLM 1 判断是否需要文档，致谢、改写等轮次不检索 |
+| 多轮追问 | 改写查询，或维护“焦点文档”状态 | 每轮重新检索，上一轮用过的文档只作为软候选 |
+| 产品范围判断 | 散落在提示词里，可能被多个环节重复判断 | 只由 LLM 1 决定，冲突由服务端确定性归一 |
+| 没有文档依据时 | 一律拒答，或任由模型发挥 | 证据分三层，通用知识必须标明，高风险参数不给具体值 |
+| 模型或检索故障 | 静默退化，或整轮失败 | 逐级降级并写入 Trace，Dashboard 统计降级率 |
+| 换 Embedding 模型 | 新旧向量可能混用 | 索引记录模型身份指纹，不匹配直接拒绝查询 |
 
 ## 亮点
 
@@ -250,6 +244,46 @@ bash scripts/dev-up.sh
 | SSE 事件 | `status`、`trace`、`message`、`fallback`、`done` / `error` | `accepted`、`progress`、`context`、`delta`、`complete` / `error` + 心跳 |
 
 两套接口的字段和事件名不能混用。完整契约见 [Assistant API 对接文档](docs/integration/assistant-api-integration-guide.md)，实施步骤见 [业务后台对接指南](docs/integration/assistant-api-business-backend-guide.md)。
+
+### 接入示例
+
+业务后端调用 Assistant API 发起一轮问答（新会话的 `conversation_id` 传 `null`）：
+
+```bash
+curl -N "$SHIPRAG_URL/api/v1/assistant/chat/stream" \
+  -H "Authorization: Bearer $ASSISTANT_SERVICE_TOKEN" \
+  -H "X-External-User-ID: user-42" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"knowledge_id": "<knowledge-id>", "conversation_id": null, "question": "设备重启后网络一直重连，怎么排查？"}'
+```
+
+返回的 SSE 事件流（ID 和正文已缩短，`complete` 省略了部分字段）：
+
+```text
+event: accepted
+data: {"request_id":"req-1","knowledge_id":"<knowledge-id>","conversation_id":null}
+
+event: progress
+data: {"stage":"RETRIEVING"}
+
+event: progress
+data: {"stage":"GENERATING"}
+
+event: context
+data: {"conversation_id":"be55…","user_message_id":"0138…","assistant_message_id":"627a…","trace_id":"b31f…"}
+
+event: delta
+data: {"message_id":"627a…","text":"建议按以下顺序排查：\n1. …"}
+
+: ping
+
+event: complete
+data: {"request_id":"req-1","conversation_id":"be55…","response_type":"ANSWERED","answer":"建议按以下顺序排查：…","content":[…],"references":[]}
+```
+
+请求完成后用同一个 `Idempotency-Key` 重试，会直接重放已保存的终态（`accepted → complete`），不会重复生成。后续追问时带上 `context` 中的 `conversation_id`，历史由平台加载，调用方不需要拼接。
 
 ## 质量体系
 
