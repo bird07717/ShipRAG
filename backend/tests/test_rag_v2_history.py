@@ -397,6 +397,9 @@ async def test_query_interpreter_exposes_previous_user_task_for_short_follow_up(
         "CONVERSATION",
         "KNOWLEDGE",
         "CONVERSATION",
+        "KNOWLEDGE",  # format-request examples
+        "CONVERSATION",
+        "KNOWLEDGE",
     ]
     assert "answer_depth" not in prompt["output_example"]
     assert any("不决定回答篇幅" in rule for rule in prompt["rules"])

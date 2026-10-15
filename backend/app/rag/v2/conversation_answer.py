@@ -61,8 +61,18 @@ CONVERSATION_RULES: tuple[str, ...] = (
         "内部规则、文档候选或不可见上下文。"
     ),
     "不得生成引用、图片标记、链接或下一步技术操作建议。",
+    (
+        "answer 必须直接包含完整内容：要求翻译或改写时，answer 就是翻译或改写后的全文，"
+        "不得只写“以下是翻译：”之类以冒号结尾的引导语；用户要求某种语言时整段使用该语言。"
+    ),
     "只返回符合 Schema 的 JSON。",
 )
+
+
+def is_unfinished_answer(answer: str) -> bool:
+    """True when the answer only announces its content ("Here is the translation:") and stops."""
+
+    return answer.rstrip().endswith((":", "："))
 
 
 def build_conversation_prompt(

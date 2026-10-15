@@ -138,7 +138,7 @@ V2 不要求公开引用，评测器使用同一轮内部 Trace 的 `used_docume
 
 2026-10-09 另测文档卡片提示词 v1 → v2（`run_card_prompt_review.py`，13 份文档 × 2 种提示词 × 2 次共 52 次真实调用，只生成不写库，判读规则采集前写定）：条件丢失 4/29 → 15/30、工具类前提 11 → 2、凭空展开缩写 2 → 0，四个关卡全部通过；副作用是新卡片会自行加“注：……”（2/26）。卡片不进入 LLM 2，只影响召回与排序。详见 [`card-prompt-review.md`](card-prompt-review.md)。
 
-2026-10-10 另测图片规则与提示词排布（均为真实模型、共享 `frozen_inputs.py` 的冻结输入，判读规则采集前写定）：[`image-rule-review.md`](image-rule-review.md)（`run_image_rule_review.py`，规则 12 两分支改写与图片按文档分组，60 个样本，预设规则会选 RULE 但证据太弱，未采纳）；[`prompt-layout-review.md`](prompt-layout-review.md)（`run_prompt_cache_probe.py` 缓存探针、`run_layout_review.py` 不退化筛查、`run_interpreter_constraint_check.py` 排除条件检查；LLM 2 采纳静态规则在前，LLM 1 因丢排除条件不改，ADR-0042）。排布比较用 `frozen_inputs.legacy_layout` / `static_first_layout` 从当前提示词重建两种顺序；`run_image_rule_review.py` 的 BASELINE 仍是旧排布，以便复现当时的付费运行。
+2026-10-10 另测图片规则与提示词排布（均为真实模型、共享 `frozen_inputs.py` 的冻结输入，判读规则采集前写定）：[`image-rule-review.md`](image-rule-review.md)（`run_image_rule_review.py`，规则 12 两分支改写与图片按文档分组，60 个样本，预设规则会选 RULE 但证据太弱，未采纳）；[`prompt-layout-review.md`](prompt-layout-review.md)（`run_prompt_cache_probe.py` 缓存探针、`run_layout_review.py` 不退化筛查、`run_interpreter_constraint_check.py` 排除条件检查；LLM 2 采纳静态规则在前，LLM 1 因丢排除条件不改，ADR-0042）。2026-10-15 另测语言/格式类追问：[`format-request-review.md`](format-request-review.md)（`run_format_request_review.py`，约 300 次真实调用，LLM 1 新规则 + 服务端兜底 + 会话重试，预设关卡全过，ADR-0043；基线由去掉新增常量得到，与改动前提示词逐字节一致）；`run_regression_50.py` 为 50 例回归（新旧各 2 次，修复后 98/100 对 98/100）。排布比较用 `frozen_inputs.legacy_layout` / `static_first_layout` 从当前提示词重建两种顺序；`run_image_rule_review.py` 的 BASELINE 仍是旧排布，以便复现当时的付费运行。
 
 | 类别 | 数量 | 考什么 |
 | --- | --- | --- |

@@ -2085,3 +2085,94 @@ def test_v2_generated_answer_accepts_the_field_when_it_is_present_or_absent() ->
     assert written_anyway.next_suggestions == [
         "如何更换？"
     ]  # accepted, then discarded by the server
+
+
+def _conversation_service(repository: Any, interpreter: str, answers: list[str]) -> RagService:
+    completions = [interpreter]
+    answer_completions = list(answers)
+
+    def llm_factory(_settings: Settings, _snapshot: ModelSnapshot) -> FakeLlmProvider:
+        if completions:
+            return FakeLlmProvider(completions=[completions.pop(0)])
+        return FakeLlmProvider(completions=answer_completions)
+
+    return RagService(
+        cast(RagRepository, repository),
+        Settings(_env_file=None, app_env="test"),
+        embedding_factory=lambda _settings: (_ for _ in ()).throw(
+            AssertionError("conversation path must not call embedding")
+        ),
+        llm_factory=llm_factory,
+        rerank_factory=lambda _settings, _snapshot: (_ for _ in ()).throw(
+            AssertionError("conversation path must not call rerank")
+        ),
+    )
+
+
+_TRANSLATE_INTERPRETATION = (
+    '{"resolved_question":"将上一轮关于 FFC 的回答翻译成英文","scope":"IN_SCOPE",'
+    '"relation":"FOLLOW_UP","active_task":"检查 FFC","response_path":"CONVERSATION"}'
+)
+
+
+@pytest.mark.asyncio
+async def test_v2_conversation_retries_an_answer_that_only_announces_its_content() -> None:
+    repository = _ForbiddenRetrievalRepository(_candidate())
+    repository.turn = replace(
+        _turn(),
+        history=[
+            {"role": "USER", "content": "FFC 掉线怎么检查？"},
+            {"role": "ASSISTANT", "content": "先检查网线，再重启 FFC。"},
+        ],
+    )
+    service = _conversation_service(
+        repository,
+        _TRANSLATE_INTERPRETATION,
+        [
+            '{"answer":"Here is the translation of the previous response:"}',
+            '{"answer":"First check the network cable, then restart the FFC."}',
+        ],
+    )
+
+    payload = await service.generate(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=repository.turn.conversation_id,
+        question="把上面的回答翻译成英文",
+        request_id="v2-conversation-retry",
+    )
+
+    assert payload["answer"] == "First check the network cable, then restart the FFC."
+    assert repository.completed is not None
+    answer = repository.completed["doc_routing"]["generation"]["answer"]
+    assert answer["status"] == "PASSED"
+    assert answer["fallback_applied"] is False
+
+
+@pytest.mark.asyncio
+async def test_v2_conversation_falls_back_when_the_retry_is_also_unfinished() -> None:
+    repository = _ForbiddenRetrievalRepository(_candidate())
+    repository.turn = replace(
+        _turn(),
+        history=[
+            {"role": "USER", "content": "FFC 掉线怎么检查？"},
+            {"role": "ASSISTANT", "content": "先检查网线，再重启 FFC。"},
+        ],
+    )
+    service = _conversation_service(
+        repository,
+        _TRANSLATE_INTERPRETATION,
+        ['{"answer":"Here is the translation:"}', '{"answer":"Here is the translation:"}'],
+    )
+
+    payload = await service.generate(
+        knowledge_id=repository.turn.knowledge_id,
+        conversation_id=repository.turn.conversation_id,
+        question="把上面的回答翻译成英文",
+        request_id="v2-conversation-unfinished",
+    )
+
+    assert payload["answer"] == "好的，我已了解。您可以继续说明需要协助的内容。"
+    assert repository.completed is not None
+    answer = repository.completed["doc_routing"]["generation"]["answer"]
+    assert answer["status"] == "DEGRADED"
+    assert answer["fallback_applied"] is True

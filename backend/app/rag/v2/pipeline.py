@@ -28,6 +28,7 @@ from app.rag.v2.conversation_answer import (
     build_conversation_prompt,
     build_conversation_result,
     generate_conversation_answer,
+    is_unfinished_answer,
 )
 from app.rag.v2.document_context import build_document_context
 from app.rag.v2.document_retrieval import EmbeddingSelector, RerankFactory, retrieve_documents
@@ -149,11 +150,15 @@ class RagV2Pipeline:
         fallback_reason: str | None = None
         try:
             answer_provider = self.llm_factory(self.settings, turn.llm)
-            generated = await generate_conversation_answer(
-                answer_provider,
-                prompt=prompt,
-                timeout_seconds=min(20.0, self.settings.m3_rag_answer_timeout_seconds),
-            )
+            # One retry for an answer that only announces its content ("Here is the translation:").
+            for attempt in range(2):
+                generated = await generate_conversation_answer(
+                    answer_provider,
+                    prompt=prompt,
+                    timeout_seconds=min(20.0, self.settings.m3_rag_answer_timeout_seconds),
+                )
+                if attempt == 1 or not is_unfinished_answer(generated.answer):
+                    break
             answer_usage = dict(answer_provider.usage)
             visible_input = "\n".join(
                 [
@@ -170,6 +175,8 @@ class RagV2Pipeline:
                 or "HTTPS://" in generated.answer.upper()
             ):
                 violations.append("conversation_output_contract")
+            if is_unfinished_answer(generated.answer):
+                violations.append("conversation_unfinished_answer")
             if violations:
                 raise LlmError(
                     "V2_CONVERSATION_OUTPUT_INVALID",

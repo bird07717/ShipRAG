@@ -22,6 +22,31 @@ _EXPLICIT_NEW_TASK = re.compile(
 )
 
 
+# A short message made only of a language / format / length request. Used by the OUT_OF_SCOPE guard
+# below, not by the model: the guard must not depend on the behaviour it backstops.
+_FORMAT_ONLY_REQUEST = re.compile(
+    r"(english|英文|英语|中文|汉语|translate|翻译|简短|简洁|简单点|详细|分点|分条|列表|表格|"
+    r"总结|概括|精简|brief|shorter|bullet|in detail|step by step)",
+    re.IGNORECASE,
+)
+_FORMAT_ONLY_MAX_CHARS = 30
+# Quoted text is content the user wants processed ("把 'good morning' 翻译成法语"), so the message
+# is not a pure format request even when it is short (U+2018/U+2019: typographic single quotes).
+_QUOTED_TEXT = re.compile("[\"\u201c\u201d\u300c\u300d\u300a\u300b]|'.+'|\u2018.+\u2019")
+
+
+# An explicit instruction to answer in English. LLM 2 only sees ``resolved_question`` and answers in
+# the language of the Chinese documents unless the requirement is carried into it (measured: a
+# plain English question gets a Chinese answer 5/5), so a dropped instruction is a visible failure.
+_ENGLISH_ANSWER_REQUEST = re.compile(
+    r"(answer|reply|respond|write|explain|describe)\w*\s+(me\s+)?(it\s+)?in\s+english"
+    r"|in\s+english\s*,?\s*please|english\s+please"
+    r"|(用|请用|使用)(英文|英语)(回答|回复|作答|说明|解释|描述)?|英文回答|英语回答",
+    re.IGNORECASE,
+)
+_ENGLISH_MARKER = re.compile(r"english|英文|英语", re.IGNORECASE)
+
+
 class QueryInterpretation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -64,6 +89,8 @@ class QueryInterpretationOutcome:
     attempts: int = 1
     history_fallback: Literal["NOT_NEEDED", "APPLIED", "REJECTED"] = "NOT_NEEDED"
     history_fallback_reason: str | None = None
+    scope_guard: str | None = None
+    language_guard: str | None = None
 
     def trace_dict(self) -> dict[str, object]:
         active_task = self.interpretation.active_task or ""
@@ -76,6 +103,8 @@ class QueryInterpretationOutcome:
             "history_fallback_applied": self.history_fallback == "APPLIED",
             "history_fallback_rejected": self.history_fallback == "REJECTED",
             "history_fallback_reason": self.history_fallback_reason,
+            "scope_guard": self.scope_guard,
+            "language_guard": self.language_guard,
             "scope": self.interpretation.scope,
             "resolved_question_chars": len(self.interpretation.resolved_question),
             "relation": self.interpretation.relation,
@@ -155,6 +184,70 @@ def fallback_interpretation(
     )
 
 
+def guard_format_only_out_of_scope(
+    interpretation: QueryInterpretation,
+    *,
+    question: str,
+    history: list[dict[str, str]],
+    max_rounds: int,
+) -> tuple[QueryInterpretation, str | None]:
+    """Keep a language/format-only request from short-circuiting into the fixed refusal.
+
+    OUT_OF_SCOPE ends the turn without LLM 2, so one wrong LLM 1 decision is final. A short message
+    such as "Answer in English" has no product object, which the model sometimes reads as unrelated
+    even right after a completed product round (production 2026-10-13). History selection only keeps
+    completed knowledge rounds, so the latest round is a real product task to inherit.
+    """
+
+    if interpretation.scope != "OUT_OF_SCOPE":
+        return interpretation, None
+    clean_question = " ".join(question.split())
+    if (
+        len(clean_question) > _FORMAT_ONLY_MAX_CHARS
+        or not _FORMAT_ONLY_REQUEST.search(clean_question)
+        or _QUOTED_TEXT.search(clean_question)
+    ):
+        return interpretation, None
+    rounds = _completed_rounds(history, max_rounds)
+    if not rounds:
+        return interpretation, None
+    active_task = rounds[-1]["user_request"][:1_000]
+    return (
+        QueryInterpretation(
+            resolved_question=f"{active_task}；当前要求：{clean_question}",
+            scope="UNCERTAIN",
+            relation="FOLLOW_UP",
+            active_task=active_task,
+            response_path="KNOWLEDGE",
+        ),
+        "FORMAT_ONLY_OUT_OF_SCOPE_INHERITED",
+    )
+
+
+def guard_english_requirement(
+    interpretation: QueryInterpretation, *, question: str
+) -> tuple[QueryInterpretation, str | None]:
+    """Carry an explicit "answer in English" instruction into ``resolved_question``.
+
+    The rewrite sometimes drops it as redundant (for example when the question is already in
+    English). LLM 2 never sees the original question, so the requirement would be lost.
+    """
+
+    if not _ENGLISH_ANSWER_REQUEST.search(question):
+        return interpretation, None
+    if _ENGLISH_MARKER.search(interpretation.resolved_question):
+        return interpretation, None
+    letters = [c for c in interpretation.resolved_question if c.isalpha()]
+    ascii_question = bool(letters) and sum(c.isascii() for c in letters) / len(letters) >= 0.9
+    suffix = " (Please answer in English.)" if ascii_question else "（请用英文回答）"
+    return (
+        interpretation.model_copy(
+            update={"resolved_question": f"{interpretation.resolved_question}{suffix}"}
+        ),
+        "ENGLISH_REQUIREMENT_RESTORED",
+    )
+
+
 def _history_window(history: list[dict[str, str]], max_rounds: int) -> list[dict[str, str]]:
     return history[-(max_rounds * 2) :]
 
@@ -196,6 +289,43 @@ INTERPRETER_OUTPUT_EXAMPLE: dict[str, str] = {
     "response_path": "KNOWLEDGE",
 }
 
+# Language / format-only requests have no product object of their own, so they used to be judged
+# as an out-of-scope NEW_TASK (production 2026-10-13: "answer in english" -> fixed refusal). They
+# are separate constants so the review tool can rebuild the previous prompt byte for byte.
+FORMAT_REQUEST_RULES: tuple[str, ...] = (
+    (
+        "纯语言、格式或篇幅要求（如 Answer in English、用英文回答、简短一点、分点说明、"
+        "再详细一点、翻译上面的回答）自身没有产品对象，必须结合最近一轮 user_request："
+        "有最近一轮时 relation 是 FOLLOW_UP，active_task 取该轮任务，resolved_question "
+        "写成“继承任务 + 原样保留的语言或格式要求”，scope 沿用该任务的范围，不得因为"
+        "这句话本身没有产品内容就判 OUT_OF_SCOPE；没有最近一轮时 scope 是 UNCERTAIN，"
+        "response_path 是 CONVERSATION。"
+    ),
+    (
+        "要求用某种语言或格式重新作答、补充细节时 response_path 是 KNOWLEDGE，因为重新作答"
+        "才能保留文档依据和图片；只要求把最近回答翻译、压缩或改写、不要求新内容时 "
+        "response_path 是 CONVERSATION。"
+    ),
+)
+
+FORMAT_ROUTE_EXAMPLES: tuple[dict[str, str], ...] = (
+    {
+        "current_question": "Answer in English",
+        "response_path": "KNOWLEDGE",
+        "reason": "只改回答语言，沿用最近任务并保留英文要求重新作答",
+    },
+    {
+        "current_question": "把上面的回答翻译成英文",
+        "response_path": "CONVERSATION",
+        "reason": "只翻译最近回答，不请求新事实",
+    },
+    {
+        "current_question": "再详细一点",
+        "response_path": "KNOWLEDGE",
+        "reason": "要求补充技术细节，需要文档依据",
+    },
+)
+
 INTERPRETER_ROUTE_EXAMPLES: tuple[dict[str, str], ...] = (
     {
         "current_question": "你能帮我做什么",
@@ -222,6 +352,7 @@ INTERPRETER_ROUTE_EXAMPLES: tuple[dict[str, str], ...] = (
         "response_path": "CONVERSATION",
         "reason": "只改写最近回答，不请求新事实",
     },
+    *FORMAT_ROUTE_EXAMPLES,
 )
 
 INTERPRETER_RULES: tuple[str, ...] = (
@@ -256,6 +387,7 @@ INTERPRETER_RULES: tuple[str, ...] = (
         "FOLLOW_UP/CORRECTION 必须输出简短 active_task，并让 resolved_question "
         "同时包含继承任务和当前所问属性；NEW_TASK 不得携带旧任务。"
     ),
+    *FORMAT_REQUEST_RULES,
     "必须保留当前所问属性的技术含义，不得把地址、目录、路径或参数互相替换。",
     (
         "只有请求目标明显与知识库产品及其技术原理无关时才输出 OUT_OF_SCOPE；"
@@ -377,9 +509,15 @@ async def interpret_query(
             history_fallback=fallback_status,
             history_fallback_reason=fallback_reason,
         )
+    result, scope_guard = guard_format_only_out_of_scope(
+        result, question=question, history=history, max_rounds=max_rounds
+    )
+    result, language_guard = guard_english_requirement(result, question=question)
     return QueryInterpretationOutcome(
         "PASSED",
         result,
         round((time.perf_counter() - started_at) * 1000),
         attempts=attempts,
+        scope_guard=scope_guard,
+        language_guard=language_guard,
     )

@@ -967,7 +967,7 @@ LLM 1 的改写错误不再能被 LLM 2 纠正，且自由文本形式的形式�
 ## ADR-0042：LLM 2 提示词静态规则在前、逐请求数据在后；LLM 1 保持原排布
 
 - 日期：2026-10-10
-- 状态：已接受（用户决定）；本地实施，未合并、未部署
+- 状态：已接受（用户决定）；已合并，用户于 2026-10-10 部署（生产 `292bd4c`）
 - 影响范围：`backend/app/rag/v2/answer_generator.py` 的 `build_answer_prompt` 的键顺序；不改提示词文字、不改 Schema、不改数据库。LLM 1（`query_interpreter.py`）、对话阶段提示词不变。
 
 ### 背景
@@ -993,3 +993,31 @@ LLM 2 的用户消息原来以逐请求变化的数据开头，12 条规则、�
 - 实验工具：`run_image_rule_review.py` 的 BASELINE 仍是旧排布（用 `legacy_layout()` 重建，`prompt_sha256` 与付费运行逐一核对一致）；以后比较排布用 `run_layout_review.py` 与 `run_prompt_cache_probe.py`。
 - 部署后观察：Trace 的 `model_usage.answer.prompt_tokens_details.cached_tokens` 占比；完整操作类回答的送达图片数。恢复方式：把 `build_answer_prompt` 的键移回原序（`frozen_inputs.LEGACY_ORDER["LLM2"]`），不需要迁移。
 - 同批的图片规则 12 / 图片分组对照（预设规则会选 RULE，但证据太弱，**未采纳**）见 [`image-rule-review.md`](../../rag-acceptance/image-rule-review.md)，不产生长期取舍，所以只在已知问题里记录。
+
+## ADR-0043：语言/格式类追问必须继承上一轮任务，OUT_OF_SCOPE 短路前加服务端兜底
+
+- 日期：2026-10-15
+- 状态：已接受（用户同意方案）；本地实施，未提交、未部署
+- 影响范围：`backend/app/rag/v2/query_interpreter.py`（提示词常量、`guard_format_only_out_of_scope`、Trace 字段 `scope_guard`）、`conversation_answer.py`、`pipeline.py`；不改 Schema、不改数据库。
+
+### 背景
+
+生产 2026-10-13：上一轮已正常完成，`answer in english` 被 LLM 1 判成 `NEW_TASK` + `OUT_OF_SCOPE`，服务端按 ADR-0039 直接返回固定话术，不调用 LLM 2，没有补救。本地复现：这类请求不稳定，长历史下 BASELINE 只有 45/81 样本继承了任务。
+
+### 决策
+
+- LLM 1 增加两条规则和三个路由示例（常量 `FORMAT_REQUEST_RULES`、`FORMAT_ROUTE_EXAMPLES`，键顺序不变）：纯语言/格式/篇幅请求继承最近一轮任务，不得判 `OUT_OF_SCOPE`；重新作答或补充细节走 `KNOWLEDGE`（保留文档依据和图片），只翻译/压缩/改写上一条回答走 `CONVERSATION`。
+- `OUT_OF_SCOPE` 短路前加确定性兜底：问题 ≤ 30 字、含语言/格式词、存在完整上一轮时，改为继承上一轮任务并走 `KNOWLEDGE`，Trace 记录 `scope_guard`。兜底不依赖被它兜底的模型行为。
+- 会话路径：规则要求直接给出完整内容；以冒号结尾的空引导语重试一次，仍失败回退到固定话术。
+- 50 例回归后追加：兜底遇到带引号的文本不触发（避免把“把 'good morning' 翻译成法语”这类带自有内容的请求改成产品追问）；`guard_english_requirement` 在原问题含明确英文作答指令而 `resolved_question` 没有任何英文要求时补一句，Trace 记录 `language_guard`（LLM 2 对不带要求的英文问题 5/5 用中文回答，丢了指令用户会拿到中文答案）。
+
+### 证据
+
+约 300 次真实调用，关卡采集前写定，G1–G4 全过：FORMAT 正确 81/81（基线 45/81），对照无退化；详见 [`format-request-review.md`](../../rag-acceptance/format-request-review.md)。另有 50 例回归（新旧各 2 次）：修复后 98/100 对 98/100，兜底在所有类别 0 次误触发，F 类英文指令 24/24。未证明的部分：会话路径空引导语在长历史下基线也是 0/24，第三项只是安全网。
+
+### 取舍与影响
+
+- `简短一点` 现在多数被判成继承任务后重新作答（`KNOWLEDGE`），会重新检索，回答可能带图；以前走 `CONVERSATION` 直接改写。保留文档依据，但多一次检索。
+- 兜底是关键词 + 长度判断，短的无关创作请求（如“把这首诗翻译成英文”）在有上一轮时也会被继承，之后只靠 LLM 2 规则 1 约束（未实测）。
+- 部署后观察：Trace 的 `query_interpreter.scope_guard` 出现次数、固定话术（`我只能回答%`）出现在紧随完整产品轮次之后的次数应接近 0。
+- 工具：`run_format_request_review.py` 的 BASELINE 由去掉新增常量得到，与改动前逐字节一致；常量不再保留这一属性后需检出本 ADR 之前的提交复现。
