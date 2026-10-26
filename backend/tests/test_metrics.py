@@ -330,6 +330,7 @@ async def test_assistant_metrics_read_assistant_request_with_knowledge_filter() 
 
     result = await repository.assistant(knowledge_id=knowledge_id)
 
+    assert result["retention"]["retention_days"] == 30
     assert result["idempotency"] == {
         "assistant_protected": 3,
         "assistant_replays": 2,

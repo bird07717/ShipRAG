@@ -47,6 +47,7 @@ function toggle(group: NavigationGroup): void {
       class="nav-group"
       :class="{ 'is-collapsible': group.collapsible }"
     >
+      <slot name="before-group" :group="group" />
       <div
         v-if="group.collapsible && !collapsed"
         class="nav-group-label nav-group-toggle"

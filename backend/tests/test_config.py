@@ -10,6 +10,36 @@ from app.core.config import Settings
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("env_file", [None, ".env.example", ".env.production.example"])
+def test_conversation_retention_is_30_days_independent_of_logs(
+    monkeypatch: pytest.MonkeyPatch, env_file: str | None
+) -> None:
+    for name in (
+        "CONVERSATION_RETENTION_DAYS",
+        "TRACE_FULL_RETENTION_DAYS",
+        "TRACE_SUMMARY_RETENTION_DAYS",
+        "REQUEST_ERROR_LOG_RETENTION_DAYS",
+        "ASSISTANT_REQUEST_RETENTION_DAYS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings(_env_file=PROJECT_ROOT / env_file if env_file else None, app_env="test")
+
+    assert settings.conversation_retention_days == 30
+    assert settings.trace_full_retention_days == 7
+    assert settings.trace_summary_retention_days == 30
+    assert settings.request_error_log_retention_days == 30
+    assert settings.assistant_request_retention_days == 7
+
+
+@pytest.mark.parametrize("days", [0, 7, 90])
+def test_conversation_retention_environment_override_is_preserved(
+    monkeypatch: pytest.MonkeyPatch, days: int
+) -> None:
+    monkeypatch.setenv("CONVERSATION_RETENTION_DAYS", str(days))
+
+    assert Settings(_env_file=None, app_env="test").conversation_retention_days == days
+
+
 def test_development_env_example_is_loadable_with_safe_rag_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

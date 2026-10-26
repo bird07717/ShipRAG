@@ -181,7 +181,7 @@ class Settings(BaseSettings):
     # Frozen conversations keep old indexes alive for GC; conversations idle
     # longer than this window are purged by the auditable GC step.  0 keeps
     # them forever.
-    conversation_retention_days: int = 7
+    conversation_retention_days: int = 30
 
     # Terminal Assistant requests that never became associated with a
     # conversation retain their idempotent result for this window.  Linked

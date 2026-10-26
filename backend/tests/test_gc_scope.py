@@ -101,13 +101,13 @@ class _GcRepository:
         self.calls: dict[str, Any] = {}
 
     async def purge_expired_conversations(self, days: int, kb_id: UUID | None = None) -> list[UUID]:
-        self.calls["purge"] = kb_id
+        self.calls["purge"] = (days, kb_id)
         return []
 
     async def retain_traces(
         self, full_days: int, summary_days: int, kb_id: UUID | None = None
     ) -> dict[str, int]:
-        self.calls["traces"] = kb_id
+        self.calls["traces"] = (full_days, summary_days, kb_id)
         return {"redacted": 0, "deleted": 0}
 
     async def find_deleting_indexes(self) -> list[Any]:
@@ -136,11 +136,18 @@ async def test_collect_garbage_applies_the_call_scope_to_retention(
     service = IngestionService(
         cast(IngestionRepository, repository),
         cast(Minio, object()),
-        Settings(_env_file=None, app_env="test", task_record_retention_days=90),
+        Settings(
+            _env_file=None,
+            app_env="test",
+            conversation_retention_days=30,
+            trace_full_retention_days=7,
+            trace_summary_retention_days=30,
+            task_record_retention_days=90,
+        ),
     )
 
     result = await service.collect_garbage(kb_id=kb_id)
 
     assert result["deleted_count"] == 0
-    assert repository.calls == {"purge": kb_id, "traces": kb_id}
+    assert repository.calls == {"purge": (30, kb_id), "traces": (7, 30, kb_id)}
     assert pruned == {"kb_id": kb_id}

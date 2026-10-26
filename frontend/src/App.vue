@@ -61,7 +61,6 @@ const menuGroups: NavigationGroup[] = [
     label: "问答与调优",
     items: [
       { key: "support-chat", label: "问答测试", subtitle: "通过统一 Gateway 验证 RAG V2 真实对外能力", icon: ChatDotRound },
-      { key: "engine-routing", label: "引擎路由", subtitle: "知识库执行策略与就绪检查（当前仅 RAG_ONLY 在线）", icon: Share },
       { key: "playground", label: "调试台", subtitle: "RAG V2 检索、上下文与答案调试", icon: Monitor },
     ],
   },
@@ -77,6 +76,7 @@ const menuGroups: NavigationGroup[] = [
     label: "遗留能力（Support · 已冻结）",
     collapsible: true,
     items: [
+      { key: "engine-routing", label: "引擎路由", subtitle: "知识库执行策略与就绪检查（当前仅 RAG_ONLY 在线）", icon: Share },
       { key: "support-review", label: "配置审核", subtitle: "Support Profile 草稿审核与发布（已冻结，仅历史兼容）", icon: Stamp },
     ],
   },
@@ -251,9 +251,14 @@ onUnmounted(() => {
         :collapsed="sidebarCollapsed"
         :badges="navigationBadges"
         @navigate="navigateFromMenu"
-      />
-      <TaskCenterButton :compact="sidebarCollapsed" />
-      <RuntimeVersion :compact="sidebarCollapsed" />
+      >
+        <template #before-group="{ group }">
+          <div v-if="group.collapsible" class="navigation-tools">
+            <TaskCenterButton :compact="sidebarCollapsed" />
+            <RuntimeVersion :compact="sidebarCollapsed" />
+          </div>
+        </template>
+      </AppNavigation>
       <button
         v-if="!narrowViewport"
         type="button"
@@ -302,7 +307,14 @@ onUnmounted(() => {
           :active="activeView"
           :badges="navigationBadges"
           @navigate="navigateFromMenu"
-        />
+        >
+          <template #before-group="{ group }">
+            <div v-if="group.collapsible" class="navigation-tools">
+              <TaskCenterButton />
+              <RuntimeVersion />
+            </div>
+          </template>
+        </AppNavigation>
       </div>
     </el-drawer>
 

@@ -71,7 +71,7 @@ describe("App", () => {
     expect(wrapper.text()).not.toContain("RAG V2 知识发布");
     expect(wrapper.text()).toContain("admin-studio");
     expect(wrapper.text()).toContain("health-panel");
-    expect(wrapper.findAll("nav button")).toHaveLength(11);
+    expect(wrapper.findAll(".nav-items button")).toHaveLength(11);
     expect(wrapper.text()).toContain("会话浏览");
     expect(wrapper.find(".management-context").exists()).toBe(false);
 
@@ -91,6 +91,15 @@ describe("App", () => {
     const legacy = wrapper.get(".nav-group.is-collapsible");
     expect(legacy.get(".nav-items").attributes("style")).toContain("display: none");
     expect(legacy.text()).toContain("配置审核"); // still in the DOM for search/tests
+    expect(legacy.get(".nav-items").text()).toContain("引擎路由");
+    expect(wrapper.findAll(".nav-group").find((group) => group.text().includes("问答与调优"))!.text()).not.toContain("引擎路由");
+    // Tools stay above the folded heading, never hidden inside its nav-items.
+    const children = Array.from(legacy.element.children);
+    expect(children.indexOf(legacy.get(".navigation-tools").element)).toBeLessThan(
+      children.indexOf(legacy.get(".nav-group-toggle").element),
+    );
+    expect(legacy.find(".navigation-tools .task-center-button").exists()).toBe(true);
+    expect(legacy.find(".navigation-tools .runtime-version").exists()).toBe(true);
     await legacy.get(".nav-group-toggle").trigger("click");
     expect(legacy.get(".nav-items").attributes("style") ?? "").not.toContain("display: none");
 
@@ -101,6 +110,7 @@ describe("App", () => {
     expect(wrapper.find(".shell").classes()).toContain("is-collapsed");
     expect(localStorage.getItem("shipdemo.sidebarCollapsed")).toBe("1");
     expect(wrapper.get(".sidebar-toggle").attributes("aria-label")).toBe("展开侧栏");
+    expect(legacy.find(".navigation-tools .runtime-version-compact").exists()).toBe(true);
     expect(wrapper.findAll("nav button")[0]!.attributes("aria-label")).toBe("运行概览");
     wrapper.unmount();
 
@@ -110,6 +120,17 @@ describe("App", () => {
     expect(localStorage.getItem("shipdemo.sidebarCollapsed")).toBe("0");
     remounted.unmount();
     localStorage.removeItem("shipdemo.sidebarCollapsed");
+  });
+
+  it("keeps engine routing deep links and opens their legacy group", () => {
+    window.history.replaceState(null, "", "#/engine-routing");
+    const wrapper = mount(App, { global: { stubs: globalStubs } });
+    const legacy = wrapper.get(".nav-group.is-collapsible");
+
+    expect(window.location.hash).toBe("#/engine-routing");
+    expect(legacy.get(".nav-group-toggle").attributes("aria-expanded")).toBe("true");
+    expect(legacy.get('[aria-current="page"]').text()).toContain("引擎路由");
+    wrapper.unmount();
   });
 
   function mockViewport(initialWidth: number) {
@@ -157,6 +178,11 @@ describe("App", () => {
 
     await wrapper.get(".mobile-menu-button").trigger("click");
     const drawer = wrapper.get(".drawer-stub");
+    const legacy = drawer.get(".nav-group.is-collapsible");
+    expect(legacy.find(".navigation-tools .task-center-button").exists()).toBe(true);
+    expect(legacy.find(".navigation-tools .runtime-version").exists()).toBe(true);
+    expect(legacy.get(".nav-items").text()).toContain("引擎路由");
+    expect(legacy.element.firstElementChild).toBe(legacy.get(".navigation-tools").element);
     await drawer.findAll("nav button").find((item) => item.text().includes("文档管理"))!.trigger("click");
     expect(window.location.hash).toBe("#/documents");
     expect(wrapper.find(".drawer-stub").exists()).toBe(false); // closes after navigating

@@ -179,7 +179,7 @@ p {
   opacity: 0.85;
 }
 
-.sidebar nav button {
+.sidebar .nav-items button {
   position: relative;
   display: flex;
   align-items: center;
@@ -200,13 +200,13 @@ p {
     box-shadow var(--transition-fast);
 }
 
-.sidebar nav button:hover {
+.sidebar .nav-items button:hover {
   color: var(--sidebar-text-hover);
   background: rgb(255 255 255 / 7%);
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 4%);
 }
 
-.sidebar nav button.active {
+.sidebar .nav-items button.active {
   color: #ffffff;
   background: var(--sidebar-item-active);
   font-weight: 500;
@@ -215,7 +215,7 @@ p {
     0 4px 12px rgb(4 18 11 / 14%);
 }
 
-.sidebar nav button.active::before {
+.sidebar .nav-items button.active::before {
   position: absolute;
   top: 6px;
   bottom: 6px;
@@ -226,19 +226,19 @@ p {
   content: "";
 }
 
-.sidebar nav button .el-icon {
+.sidebar .nav-items button .el-icon {
   flex-shrink: 0;
   font-size: 16px;
   opacity: 0.72;
   transition: opacity var(--transition-fast);
 }
 
-.sidebar nav button:hover .el-icon,
-.sidebar nav button.active .el-icon {
+.sidebar .nav-items button:hover .el-icon,
+.sidebar .nav-items button.active .el-icon {
   opacity: 1;
 }
 
-.sidebar nav button:focus-visible,
+.sidebar .nav-items button:focus-visible,
 .sidebar-toggle:focus-visible,
 .mobile-menu-button:focus-visible {
   outline: 2px solid var(--brand-strong);
@@ -476,7 +476,7 @@ p {
 }
 
 .is-collapsed .brand,
-.is-collapsed .sidebar nav button,
+.is-collapsed .sidebar .nav-items button,
 .is-collapsed .sidebar-toggle {
   justify-content: center;
 }
@@ -496,7 +496,7 @@ p {
   margin-top: 10px;
 }
 
-.is-collapsed .sidebar nav button {
+.is-collapsed .sidebar .nav-items button {
   padding: 9px 0;
 }
 

@@ -54,7 +54,7 @@ Vue 管理台 / 业务后端
 
 ### 可观测性与保留
 
-请求失败可写入 `request_error_log`，问答写入 `rag_trace`；定时维护清理过期会话、Trace 细节、错误日志，以及没有关联 Conversation 的 Assistant 终态请求。默认保留期由环境配置决定，当前代码默认会话 7 天、Assistant 终态孤儿请求 7 天、完整 Trace 7 天、Trace 摘要 30 天、错误日志 30 天；部署配置可覆盖，`RUNNING` Assistant 请求不由保留期任务删除。
+请求失败可写入 `request_error_log`，问答写入 `rag_trace`；定时维护清理过期会话、Trace 细节、错误日志，以及没有关联 Conversation 的 Assistant 终态请求。默认保留期由环境配置决定，当前代码默认会话连续 30 天未活动后删除，消息及关联 Assistant 请求随会话级联删除；Assistant 终态孤儿请求 7 天、完整 Trace 7 天、Trace 摘要 30 天、错误日志 30 天，独立控制且不因会话保留期延长而改变。部署配置可覆盖，`RUNNING` Assistant 请求不由孤儿请求保留期任务删除。会话新默认值于 2026-10-26 本地调整，生产生效须重新部署并核对实际 Settings。
 
 ## 架构约束
 

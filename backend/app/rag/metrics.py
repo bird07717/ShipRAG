@@ -603,7 +603,7 @@ class MetricsRepository:
         self,
         *,
         days: int = 7,
-        retention_days: int = 7,
+        retention_days: int = 30,
         knowledge_id: Any = None,
         stale_seconds: int = 600,
     ) -> dict[str, Any]:
